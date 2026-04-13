@@ -27,7 +27,7 @@ export function sanitizeWorkspaceKey(identifier: string): string {
  */
 export interface WorkspaceManagerOptions {
   workspaceRoot: string;
-  repoPath?: string;  // Git repository path for worktree
+  projects: Record<string, { github_repo: string; local_path: string }>;
   hooks: {
     after_create: string | null;
     before_run: string | null;
@@ -54,12 +54,12 @@ export interface WorkspaceResult {
  */
 export class WorkspaceManager {
   private workspaceRoot: string;
-  private repoPath: string;
+  private projects: Record<string, { github_repo: string; local_path: string }>;
   private hooks: WorkspaceManagerOptions['hooks'];
 
   constructor(options: WorkspaceManagerOptions) {
     this.workspaceRoot = options.workspaceRoot;
-    this.repoPath = options.repoPath || process.cwd();
+    this.projects = options.projects;
     this.hooks = options.hooks;
   }
 
@@ -133,28 +133,41 @@ export class WorkspaceManager {
   }
 
   /**
-   * Check if git is available and the repo is valid
+   * Check if git is available and the repo is valid for a given project
    */
-  private async checkGitRepo(): Promise<{ valid: boolean; error?: string }> {
+  private async checkGitRepo(repoPath: string): Promise<{ valid: boolean; error?: string }> {
     try {
-      await execAsync(`git -C "${this.repoPath}" rev-parse --git-dir`);
+      await execAsync(`git -C "${repoPath}" rev-parse --git-dir`);
       return { valid: true };
     } catch (err) {
       const execError = err as cp.ExecException;
       return {
         valid: false,
-        error: `Git repository not found at "${this.repoPath}": ${execError.message}`
+        error: `Git repository not found at "${repoPath}": ${execError.message}`
       };
     }
+  }
+
+  private getProjectConfig(projectSlug: string | null | undefined): { github_repo: string; local_path: string } | null {
+    if (!projectSlug || !this.projects[projectSlug]) {
+      // If none or invalid, try to fallback to the first one available or process.cwd()
+      const keys = Object.keys(this.projects);
+      if (keys.length > 0) return this.projects[keys[0]];
+      return null;
+    }
+    return this.projects[projectSlug];
   }
 
   /**
    * Create or reuse a workspace for an issue using git worktree
    * Section 9.3: Workspace Layout and Lifecycle
    */
-  async createForIssue(issue: Pick<Issue, 'identifier'>): Promise<WorkspaceResult> {
+  async createForIssue(issue: Pick<Issue, 'identifier' | 'project_slug'>): Promise<WorkspaceResult> {
+    const projectConfig = this.getProjectConfig(issue.project_slug);
+    const repoPath = projectConfig ? projectConfig.local_path : process.cwd();
+
     // Step 1: Check git repository
-    const gitResult = await this.checkGitRepo();
+    const gitResult = await this.checkGitRepo(repoPath);
     if (!gitResult.valid) {
       return { success: false, error: gitResult.error };
     }
@@ -163,7 +176,7 @@ export class WorkspaceManager {
     const workspaceKey = sanitizeWorkspaceKey(issue.identifier);
 
     // Step 3: Compute workspace path
-    const workspacePath = path.join(this.workspaceRoot, workspaceKey);
+    const workspacePath = this.getWorkspacePath(issue.identifier, issue.project_slug);
 
     // Validate path safety
     const pathValidation = this.validateWorkspacePath(workspacePath);
@@ -180,7 +193,7 @@ export class WorkspaceManager {
     // Step 4: Check if worktree already exists
     let createdNow = false;
     try {
-      const { stdout } = await execAsync(`git -C "${this.repoPath}" worktree list --porcelain`);
+      const { stdout } = await execAsync(`git -C "${repoPath}" worktree list --porcelain`);
       const worktrees = stdout.split('\n').filter(line => line.startsWith('worktree '));
       const existingWorktree = worktrees.find(w => {
         const match = w.match(/^worktree\s+(.+)$/);
@@ -192,7 +205,7 @@ export class WorkspaceManager {
       } else {
         const branchName = `feature/${workspaceKey.toLowerCase()}`;
         await execAsync(
-          `git -C "${this.repoPath}" worktree add -b "${branchName}" "${workspacePath}"`,
+          `git -C "${repoPath}" worktree add -b "${branchName}" "${workspacePath}"`,
           { maxBuffer: 10 * 1024 * 1024 }
         );
         createdNow = true;
@@ -207,10 +220,15 @@ export class WorkspaceManager {
 
     // Step 5: Run after_create hook if newly created
     if (createdNow && this.hooks.after_create) {
-      const hookResult = await this.executeHook('after_create', this.hooks.after_create, workspacePath);
+      const [owner, repo] = projectConfig ? projectConfig.github_repo.split('/') : ['', ''];
+      const hookResult = await this.executeHook('after_create', this.hooks.after_create, workspacePath, {
+        SYMPHONY_GITHUB_OWNER: owner || '',
+        SYMPHONY_GITHUB_REPO: repo || projectConfig?.github_repo || '',
+        SYMPHONY_ISSUE_IDENTIFIER: issue.identifier
+      });
       if (!hookResult.success) {
         try {
-          await execAsync(`git -C "${this.repoPath}" worktree remove "${workspacePath}"`, { maxBuffer: 10 * 1024 * 1024 });
+          await execAsync(`git -C "${repoPath}" worktree remove "${workspacePath}"`, { maxBuffer: 10 * 1024 * 1024 });
         } catch {}
         return { success: false, error: hookResult.error };
       }
@@ -230,7 +248,7 @@ export class WorkspaceManager {
   /**
    * Run before_run hook for a workspace
    */
-  async beforeRun(workspacePath: string, issue?: Pick<Issue, 'identifier' | 'state'>): Promise<{ success: boolean; error?: string }> {
+  async beforeRun(workspacePath: string, issue?: Pick<Issue, 'identifier' | 'state' | 'project_slug'>): Promise<{ success: boolean; error?: string }> {
     if (!this.hooks.before_run) {
       return { success: true };
     }
@@ -238,7 +256,14 @@ export class WorkspaceManager {
     const envOverrides: Record<string, string> = {};
     if (issue) {
       envOverrides['SYMPHONY_ISSUE_IDENTIFIER'] = issue.identifier;
-      envOverrides['SYMPHONY_ISSUE_STATE'] = issue.state;
+      envOverrides['SYMPHONY_ISSUE_STATE'] = issue.state || '';
+      
+      const pConfig = this.getProjectConfig(issue.project_slug);
+      if (pConfig) {
+        const [owner, repo] = pConfig.github_repo.split('/');
+        envOverrides['SYMPHONY_GITHUB_OWNER'] = owner || '';
+        envOverrides['SYMPHONY_GITHUB_REPO'] = repo || pConfig.github_repo || '';
+      }
     }
 
     const result = await this.executeHook('before_run', this.hooks.before_run, workspacePath, envOverrides);
@@ -248,7 +273,7 @@ export class WorkspaceManager {
   /**
    * Run after_run hook for a workspace
    */
-  async afterRun(workspacePath: string, issue?: Pick<Issue, 'identifier' | 'state'>): Promise<void> {
+  async afterRun(workspacePath: string, issue?: Pick<Issue, 'identifier' | 'state' | 'project_slug'>): Promise<void> {
     if (!this.hooks.after_run) {
       return;
     }
@@ -256,7 +281,14 @@ export class WorkspaceManager {
     const envOverrides: Record<string, string> = {};
     if (issue) {
       envOverrides['SYMPHONY_ISSUE_IDENTIFIER'] = issue.identifier;
-      envOverrides['SYMPHONY_ISSUE_STATE'] = issue.state;
+      envOverrides['SYMPHONY_ISSUE_STATE'] = issue.state || '';
+      
+      const pConfig = this.getProjectConfig(issue.project_slug);
+      if (pConfig) {
+        const [owner, repo] = pConfig.github_repo.split('/');
+        envOverrides['SYMPHONY_GITHUB_OWNER'] = owner || '';
+        envOverrides['SYMPHONY_GITHUB_REPO'] = repo || pConfig.github_repo || '';
+      }
     }
 
     const result = await this.executeHook('after_run', this.hooks.after_run, workspacePath, envOverrides);
@@ -268,9 +300,16 @@ export class WorkspaceManager {
   /**
    * Remove a workspace using git worktree remove
    */
-  async removeWorkspace(workspacePath: string): Promise<{ success: boolean; error?: string }> {
+  async removeWorkspace(workspacePath: string, projectSlug?: string | null): Promise<{ success: boolean; error?: string }> {
+    const projectConfig = this.getProjectConfig(projectSlug);
+    const repoPath = projectConfig ? projectConfig.local_path : process.cwd();
+
     if (this.hooks.before_remove) {
-      const hookResult = await this.executeHook('before_remove', this.hooks.before_remove, workspacePath);
+      const [owner, repo] = projectConfig ? projectConfig.github_repo.split('/') : ['', ''];
+      const hookResult = await this.executeHook('before_remove', this.hooks.before_remove, workspacePath, {
+        SYMPHONY_GITHUB_OWNER: owner || '',
+        SYMPHONY_GITHUB_REPO: repo || projectConfig?.github_repo || ''
+      });
       if (!hookResult.success) {
         console.warn(`before_remove hook failed: ${hookResult.error}`);
       }
@@ -278,7 +317,7 @@ export class WorkspaceManager {
 
     try {
       // Try git worktree remove first
-      await execAsync(`git -C "${this.repoPath}" worktree remove "${workspacePath}"`, {
+      await execAsync(`git -C "${repoPath}" worktree remove "${workspacePath}"`, {
         maxBuffer: 10 * 1024 * 1024
       });
       return { success: true };
@@ -300,16 +339,19 @@ export class WorkspaceManager {
   /**
    * Get workspace path for an issue identifier (without creating)
    */
-  getWorkspacePath(identifier: string): string {
+  getWorkspacePath(identifier: string, projectSlug?: string | null): string {
     const workspaceKey = sanitizeWorkspaceKey(identifier);
+    if (projectSlug) {
+      return path.join(this.workspaceRoot, sanitizeWorkspaceKey(projectSlug), workspaceKey);
+    }
     return path.join(this.workspaceRoot, workspaceKey);
   }
 
   /**
    * Check if a workspace exists
    */
-  async workspaceExists(identifier: string): Promise<boolean> {
-    const workspacePath = this.getWorkspacePath(identifier);
+  async workspaceExists(identifier: string, projectSlug?: string | null): Promise<boolean> {
+    const workspacePath = this.getWorkspacePath(identifier, projectSlug);
     try {
       const stat = await fs.promises.stat(workspacePath);
       return stat.isDirectory();
