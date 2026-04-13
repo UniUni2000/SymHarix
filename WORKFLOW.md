@@ -39,11 +39,12 @@ When the issue is in **Todo** or **In Progress** state, your job is to **impleme
 
 ### Instructions:
 1. Read the issue title and description carefully.
-2. Explore the existing codebase to understand the context.
-3. Implement the required changes.
-4. Write or update tests if applicable.
-5. Make sure the code is clean, readable, and follows project conventions.
-6. When done, simply finish. The `after_run` hook will automatically:
+2. IMPORTANT: Check if a `REVIEW_FEEDBACK.md` file exists in your workspace root. If it does, your previous attempt was reviewed and rejected. You MUST read this file to see what specific issues to fix, apply the fixes, and then **delete the `REVIEW_FEEDBACK.md` file**.
+3. Explore the existing codebase to understand the context.
+4. Implement the required changes.
+5. Write or update tests if applicable.
+6. Make sure the code is clean, readable, and follows project conventions.
+7. When done, simply finish. The `after_run` hook will automatically:
    - Commit and push your changes to GitHub
    - Create a Pull Request
    - Move the issue to "In Review"
