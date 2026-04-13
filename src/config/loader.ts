@@ -193,7 +193,22 @@ export function buildServiceConfig(workflow: WorkflowDefinition): ServiceConfig 
   const trackerKind = (tracker.kind as string) || 'linear';
   const trackerEndpoint = (tracker.endpoint as string) || DEFAULTS.trackerEndpoint!;
   const trackerApiKey = resolveApiKey(tracker.api_key as string);
-  const trackerProjectSlug = (tracker.project_slug as string) || '';
+  
+  const projects: Record<string, { github_repo: string; local_path: string }> = {};
+  if (tracker.projects && typeof tracker.projects === 'object') {
+    for (const [slug, opts] of Object.entries(tracker.projects as Record<string, any>)) {
+       projects[slug] = {
+         github_repo: opts.github_repo || '',
+         local_path: normalizePath(opts.local_path || '', process.cwd())
+       };
+    }
+  } else if (tracker.project_slug) {
+    // Backwards compatibility
+    projects[tracker.project_slug as string] = {
+       github_repo: '',
+       local_path: process.cwd()
+    };
+  }
 
   // Polling config
   const polling = (config.polling as Record<string, unknown>) || {};
@@ -244,7 +259,7 @@ export function buildServiceConfig(workflow: WorkflowDefinition): ServiceConfig 
     trackerKind,
     trackerEndpoint,
     trackerApiKey,
-    trackerProjectSlug,
+    projects,
     activeStates: parseStringArray(tracker.active_states, DEFAULTS.activeStates!),
     terminalStates: parseStringArray(tracker.terminal_states, DEFAULTS.terminalStates!),
     pollIntervalMs,
