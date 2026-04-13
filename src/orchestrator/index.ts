@@ -514,7 +514,7 @@ export class Orchestrator extends EventEmitter {
       const workspace = workspaceResult.workspace;
 
       // Step 2: Run before_run hook
-      const beforeRunResult = await this.workspaceManager.beforeRun(workspace.path);
+      const beforeRunResult = await this.workspaceManager.beforeRun(workspace.path, issue);
       if (!beforeRunResult.success) {
         result.error = `before_run hook failed: ${beforeRunResult.error}`;
         return result;
@@ -635,14 +635,15 @@ export class Orchestrator extends EventEmitter {
       result.completed = true;
 
       // Run after_run hook
-      await this.workspaceManager.afterRun(workspace.path);
+      await this.workspaceManager.afterRun(workspace.path, issue);
 
     } catch (err) {
       result.error = `Agent attempt failed: ${(err as Error).message}`;
       // Run after_run hook on failure
       try {
         await this.workspaceManager.afterRun(
-          this.workspaceManager.getWorkspacePath(issue.identifier)
+          this.workspaceManager.getWorkspacePath(issue.identifier),
+          issue
         );
       } catch {}
     }
