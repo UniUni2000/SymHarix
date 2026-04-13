@@ -97,7 +97,7 @@ export class WorkspaceManager {
   /**
    * Execute a hook script in the workspace directory
    */
-  private async executeHook(hookName: string, script: string, workspacePath: string): Promise<{ success: boolean; output?: string; error?: string }> {
+  private async executeHook(hookName: string, script: string, workspacePath: string, envOverrides: Record<string, string> = {}): Promise<{ success: boolean; output?: string; error?: string }> {
     if (!script) {
       return { success: true, output: '' };
     }
@@ -109,7 +109,8 @@ export class WorkspaceManager {
         cwd: workspacePath,
         timeout: timeoutMs,
         shell: '/bin/bash',
-        maxBuffer: 10 * 1024 * 1024
+        maxBuffer: 10 * 1024 * 1024,
+        env: { ...process.env, ...envOverrides }
       });
 
       return {
@@ -229,24 +230,36 @@ export class WorkspaceManager {
   /**
    * Run before_run hook for a workspace
    */
-  async beforeRun(workspacePath: string): Promise<{ success: boolean; error?: string }> {
+  async beforeRun(workspacePath: string, issue?: Pick<Issue, 'identifier' | 'state'>): Promise<{ success: boolean; error?: string }> {
     if (!this.hooks.before_run) {
       return { success: true };
     }
 
-    const result = await this.executeHook('before_run', this.hooks.before_run, workspacePath);
+    const envOverrides: Record<string, string> = {};
+    if (issue) {
+      envOverrides['SYMPHONY_ISSUE_IDENTIFIER'] = issue.identifier;
+      envOverrides['SYMPHONY_ISSUE_STATE'] = issue.state;
+    }
+
+    const result = await this.executeHook('before_run', this.hooks.before_run, workspacePath, envOverrides);
     return { success: result.success, error: result.error };
   }
 
   /**
    * Run after_run hook for a workspace
    */
-  async afterRun(workspacePath: string): Promise<void> {
+  async afterRun(workspacePath: string, issue?: Pick<Issue, 'identifier' | 'state'>): Promise<void> {
     if (!this.hooks.after_run) {
       return;
     }
 
-    const result = await this.executeHook('after_run', this.hooks.after_run, workspacePath);
+    const envOverrides: Record<string, string> = {};
+    if (issue) {
+      envOverrides['SYMPHONY_ISSUE_IDENTIFIER'] = issue.identifier;
+      envOverrides['SYMPHONY_ISSUE_STATE'] = issue.state;
+    }
+
+    const result = await this.executeHook('after_run', this.hooks.after_run, workspacePath, envOverrides);
     if (!result.success) {
       console.warn(`after_run hook failed: ${result.error}`);
     }

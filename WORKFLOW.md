@@ -17,6 +17,7 @@ polling:
 workspace:
   root: /home/agent/test-cc/workspaces
 hooks:
+  before_run: /home/agent/test-cc/scripts/before-run.sh
   after_run: /home/agent/test-cc/scripts/after-run.sh
   timeout_ms: 120000
 agent:
