@@ -86,6 +86,11 @@ if [ "$MERGE_MERGED" = "True" ]; then
   echo "[approve-pr] PR #$PR_NUMBER merged successfully."
 else
   echo "[approve-pr] ERROR: Merge failed: $MERGE_RESPONSE"
+  if echo "$MERGE_RESPONSE" | grep -qi "not mergeable\|conflict"; then
+    echo "[approve-pr] Merge conflict detected! Handing back to developer..."
+    "$SCRIPT_DIR/reject-pr.sh" "Merge conflict detected. Please run \`git fetch origin main\` and \`git rebase origin/main\`, resolve any conflicts, and push your changes again."
+    exit 0
+  fi
   exit 1
 fi
 
