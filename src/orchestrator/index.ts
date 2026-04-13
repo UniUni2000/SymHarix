@@ -117,12 +117,13 @@ export class Orchestrator extends EventEmitter {
     this.tracker = new LinearClient({
       endpoint: config.trackerEndpoint,
       apiKey: config.trackerApiKey,
-      projectSlug: config.trackerProjectSlug
+      projectSlugs: Object.keys(config.projects)
     });
 
     // Initialize workspace manager
     this.workspaceManager = new WorkspaceManager({
       workspaceRoot: config.workspaceRoot,
+      projects: config.projects,
       hooks: config.hooks
     });
 
@@ -333,9 +334,9 @@ export class Orchestrator extends EventEmitter {
       errors.push('Missing tracker API key');
     }
 
-    // tracker.project_slug must be present
-    if (!this.config.trackerProjectSlug) {
-      errors.push('Missing tracker project slug');
+    // tracker.projects must be present and not empty
+    if (!this.config.projects || Object.keys(this.config.projects).length === 0) {
+      errors.push('Missing tracker projects mapping');
     }
 
     // codex.command must be present
@@ -868,8 +869,8 @@ export class Orchestrator extends EventEmitter {
     this.state.claimed.delete(entry.issue.id);
 
     if (cleanupWorkspace) {
-      const workspacePath = this.workspaceManager.getWorkspacePath(entry.identifier);
-      await this.workspaceManager.removeWorkspace(workspacePath);
+      const workspacePath = this.workspaceManager.getWorkspacePath(entry.identifier, entry.issue.project_slug);
+      await this.workspaceManager.removeWorkspace(workspacePath, entry.issue.project_slug);
     }
 
     this.emit('state:changed', this.getStateSnapshot());
@@ -902,9 +903,9 @@ export class Orchestrator extends EventEmitter {
     }
 
     for (const issue of issues) {
-      const workspacePath = this.workspaceManager.getWorkspacePath(issue.identifier);
+      const workspacePath = this.workspaceManager.getWorkspacePath(issue.identifier, issue.project_slug);
       try {
-        await this.workspaceManager.removeWorkspace(workspacePath);
+        await this.workspaceManager.removeWorkspace(workspacePath, issue.project_slug);
         console.log('[orchestrator] Cleaned up terminal workspace:', issue.identifier);
       } catch (err) {
         console.warn('[orchestrator] Failed to clean workspace:', issue.identifier, err);
