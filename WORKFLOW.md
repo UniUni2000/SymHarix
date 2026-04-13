@@ -7,15 +7,18 @@ tracker:
   active_states:
     - Todo
     - In Progress
-    - In Review
   terminal_states:
     - Done
     - Canceled
     - Duplicate
+    - In Review
 polling:
   interval_ms: 30000
 workspace:
   root: /home/agent/test-cc/workspaces
+hooks:
+  after_run: /home/agent/test-cc/scripts/after-run.sh
+  timeout_ms: 120000
 agent:
   max_concurrent_agents: 3
   max_retry_backoff_ms: 300000
