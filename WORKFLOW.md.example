@@ -1,0 +1,117 @@
+---
+tracker:
+  kind: linear
+  endpoint: https://api.linear.app/graphql
+  api_key: $LINEAR_API_KEY
+  project_slug: my-project
+
+  active_states:
+    - Todo
+    - In Progress
+
+  terminal_states:
+    - Closed
+    - Cancelled
+    - Canceled
+    - Duplicate
+    - Done
+
+polling:
+  interval_ms: 30000
+
+workspace:
+  root: /tmp/symphony_workspaces
+
+hooks:
+  after_create: |
+    # Initialize workspace after creation
+    echo "Workspace created at $(pwd)"
+
+  before_run: |
+    # Run before each agent attempt
+    echo "Preparing workspace..."
+
+  after_run: |
+    # Run after each agent attempt (failure logged and ignored)
+    echo "Run completed"
+
+  before_remove: |
+    # Run before workspace deletion
+    echo "Cleaning up workspace..."
+
+  timeout_ms: 60000
+
+agent:
+  max_concurrent_agents: 10
+  max_turns: 20
+  max_retry_backoff_ms: 300000
+
+  # Optional: per-state concurrency limits
+  # max_concurrent_agents_by_state:
+  #   "in progress": 5
+  #   "todo": 3
+
+codex:
+  command: codex app-server
+  # approval_policy: auto
+  # thread_sandbox: trusted
+  # turn_sandbox_policy:
+  #   type: trusted
+  turn_timeout_ms: 3600000
+  read_timeout_ms: 5000
+  stall_timeout_ms: 300000
+
+# Optional: HTTP server for dashboard (extension)
+# server:
+#   port: 3000
+---
+
+You are working on an issue from Linear.
+
+## Task
+
+{{ issue.title }}
+
+{% if issue.description %}
+## Description
+
+{{ issue.description }}
+{% endif %}
+
+## Details
+
+- **Issue**: {{ issue.identifier }}
+- **State**: {{ issue.state }}
+- **Priority**: {{ issue.priority | default: "None" }}
+- **URL**: {{ issue.url }}
+
+{% if issue.labels.size > 0 %}
+## Labels
+
+{% for label in issue.labels %}
+- {{ label }}
+{% endfor %}
+{% endif %}
+
+{% if issue.blocked_by.size > 0 %}
+## Blocked By
+
+{% for blocker in issue.blocked_by %}
+- {{ blocker.identifier }} ({{ blocker.state }})
+{% endfor %}
+{% endif %}
+
+{% if attempt %}
+## Retry Information
+
+This is attempt #{{ attempt }}.
+{% endif %}
+
+## Instructions
+
+1. Review the issue details above
+2. Implement the required changes
+3. Test your work thoroughly
+4. When complete, indicate what state the issue should move to
+
+Work in the current directory. This is your workspace.
