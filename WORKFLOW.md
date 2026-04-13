@@ -3,7 +3,13 @@ tracker:
   kind: linear
   api_key: $SYMPHONY_TRACKER_API_KEY
   endpoint: https://api.linear.app/graphql
-  project_slug: d886490c7fda
+  projects:
+    d886490c7fda:
+      github_repo: UniUni2000/test-myproject
+      local_path: /home/agent/test-cc
+    1d3a3f95809d:
+      github_repo: UniUni2000/test2
+      local_path: /home/agent/test-cc/repos/test2
   active_states:
     - Todo
     - In Progress

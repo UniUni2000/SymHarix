@@ -13,7 +13,7 @@ import { Issue, BlockerRef, LinearApiResponse, LinearIssue, TrackerError } from 
 export interface LinearClientOptions {
   endpoint: string;
   apiKey: string;
-  projectSlug: string;
+  projectSlugs: string[];
 }
 
 /**
@@ -22,12 +22,12 @@ export interface LinearClientOptions {
 export class LinearClient {
   private endpoint: string;
   private apiKey: string;
-  private projectSlug: string;
+  private projectSlugs: string[];
 
   constructor(options: LinearClientOptions) {
     this.endpoint = options.endpoint;
     this.apiKey = options.apiKey;
-    this.projectSlug = options.projectSlug;
+    this.projectSlugs = options.projectSlugs;
   }
 
   /**
@@ -115,6 +115,7 @@ export class LinearClient {
       description: linearIssue.description,
       priority,
       state: linearIssue.state.name,
+      project_slug: linearIssue.project?.slugId || null,
       branch_name: linearIssue.branchName,
       url: linearIssue.url,
       labels,
@@ -141,10 +142,10 @@ export class LinearClient {
 
     while (hasNextPage) {
       const query = `
-        query GetIssues($projectSlug: String!, $states: [String!], $first: Int, $after: String) {
+        query GetIssues($projectSlugs: [String!], $states: [String!], $first: Int, $after: String) {
           issues(
             filter: {
-              project: { slugId: { eq: $projectSlug } }
+              project: { slugId: { in: $projectSlugs } }
               state: { name: { in: $states } }
             }
             first: $first
@@ -198,7 +199,7 @@ export class LinearClient {
       `;
 
       const variables: Record<string, unknown> = {
-        projectSlug: this.projectSlug,
+        projectSlugs: this.projectSlugs,
         states: activeStates,
         first: 50,
         after: endCursor
@@ -256,10 +257,10 @@ export class LinearClient {
 
     while (hasNextPage) {
       const query = `
-        query GetIssues($projectSlug: String!, $states: [String!], $first: Int, $after: String) {
+        query GetIssues($projectSlugs: [String!], $states: [String!], $first: Int, $after: String) {
           issues(
             filter: {
-              project: { slugId: { eq: $projectSlug } }
+              project: { slugId: { in: $projectSlugs } }
               state: { name: { in: $states } }
             }
             first: $first
@@ -313,7 +314,7 @@ export class LinearClient {
       `;
 
       const variables: Record<string, unknown> = {
-        projectSlug: this.projectSlug,
+        projectSlugs: this.projectSlugs,
         states: stateNames,
         first: 50,
         after: endCursor

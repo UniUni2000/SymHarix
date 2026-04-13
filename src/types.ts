@@ -14,6 +14,7 @@ export interface Issue {
   description: string | null;
   priority: number | null;  // Lower numbers = higher priority
   state: string;  // Current tracker state name
+  project_slug: string | null;
   branch_name: string | null;
   url: string | null;
   labels: string[];  // Normalized to lowercase
@@ -41,12 +42,17 @@ export interface WorkflowDefinition {
 // Service Config - Typed View (Section 4.1.3)
 // ============================================================================
 
+export interface ProjectConfig {
+  github_repo: string;
+  local_path: string;
+}
+
 export interface ServiceConfig {
   // Tracker
   trackerKind: string;
   trackerEndpoint: string;
   trackerApiKey: string;
-  trackerProjectSlug: string;
+  projects: Record<string, ProjectConfig>;  // Project slug to config mapping
   activeStates: string[];
   terminalStates: string[];
 
@@ -92,6 +98,7 @@ export interface Workspace {
   path: string;
   workspace_key: string;  // Sanitized issue identifier
   created_now: boolean;  // True if directory created during this call
+  git_branch?: string;
 }
 
 // ============================================================================
