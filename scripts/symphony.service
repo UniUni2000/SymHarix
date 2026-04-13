@@ -1,0 +1,17 @@
+[Unit]
+Description=Symphony Enterprise Agent Platform
+After=network.target
+
+[Service]
+Type=simple
+User=%USER%
+WorkingDirectory=/home/%USER%/symphony
+Environment=PATH=/usr/bin:/home/%USER%/.bun/bin
+ExecStart=/home/%USER%/.bun/bin/bun run start
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/%USER%/symphony/symphony.log
+StandardError=append:/home/%USER%/symphony/symphony.log
+
+[Install]
+WantedBy=multi-user.target
