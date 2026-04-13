@@ -31,3 +31,4 @@ coverage/
 
 # Claude Code symlink (points to /home/agent/cc-haha)
 claude-code
+repos/
