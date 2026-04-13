@@ -70,6 +70,18 @@ Please address the above issues and push new commits to this branch.''',
   echo "[reject-pr] Review submitted: changes requested on PR #$PR_NUMBER."
 fi
 
+# 将审阅意见直接写入工作目录并 commit，让开发 Agent 一眼就能看到
+echo "[reject-pr] Writing feedback to REVIEW_FEEDBACK.md for the developer agent..."
+cat << EOF > REVIEW_FEEDBACK.md
+# Code Review Feedback
+**Please address these issues before requesting another review.**
+
+$REJECT_REASON
+EOF
+git add REVIEW_FEEDBACK.md
+git commit -m "chore: add code review feedback" || true
+git push origin "$BRANCH_NAME" || true
+
 # 更新 Linear Issue 回 In Progress
 echo "[reject-pr] Updating Linear issue $ISSUE_IDENTIFIER back to In Progress..."
 
