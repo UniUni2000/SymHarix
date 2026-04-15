@@ -184,6 +184,7 @@ export interface RunningEntry {
   retry_attempt: number;
   started_at: Date;
   turn_count: number;
+  codex_child_process?: unknown;
 }
 
 export interface CodexTotals {

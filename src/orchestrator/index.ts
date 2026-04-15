@@ -416,6 +416,11 @@ export class Orchestrator extends EventEmitter {
       return false;
     }
 
+    // Must not already be completed
+    if (this.state.completed.has(issue.id)) {
+      return false;
+    }
+
     // Blocker rule for Todo state (Section 8.2)
     if (issue.state.toLowerCase() === 'todo') {
       const hasNonTerminalBlocker = issue.blocked_by.some(blocker => {
@@ -447,7 +452,9 @@ export class Orchestrator extends EventEmitter {
    * Section 16.4: Dispatch One Issue
    */
   private async dispatchIssue(issue: Issue, attempt: number | null): Promise<void> {
-    console.log('[orchestrator] Dispatching issue:', issue.identifier);
+    const isReview = issue.state.toLowerCase() === 'in review';
+    const phaseLabel = isReview ? '[REVIEW]' : '[DEV]';
+    console.log(`[orchestrator] Dispatching issue: ${issue.identifier} ${phaseLabel} (State: ${issue.state})`);
 
     // Mark as claimed before spawning to prevent duplicate dispatch
     this.state.claimed.add(issue.id);
@@ -458,7 +465,7 @@ export class Orchestrator extends EventEmitter {
 
     // Spawn worker
     try {
-      const workerPromise = this.runAgentAttempt(issue, attempt);
+      const workerPromise = this.runAgentAttempt(issue, attempt).then(result => this.handleWorkerExit(issue.id, result));
 
       const runningEntry: RunningEntry = {
         worker_handle: workerPromise,
@@ -643,7 +650,7 @@ export class Orchestrator extends EventEmitter {
       // Run after_run hook on failure
       try {
         await this.workspaceManager.afterRun(
-          this.workspaceManager.getWorkspacePath(issue.identifier),
+          this.workspaceManager.getWorkspacePath(issue.identifier, issue.project_slug),
           issue
         );
       } catch {}
@@ -681,17 +688,35 @@ export class Orchestrator extends EventEmitter {
 
     // Remove from running
     this.state.running.delete(issueId);
+    // Remove from claimed set
+    this.state.claimed.delete(issueId);
 
     if (result.success && result.completed) {
-      // Normal exit - schedule short continuation retry
+      // Normal exit - do not schedule retry
       console.log('[orchestrator] Worker completed normally:', identifier);
       this.state.completed.add(issueId);
-      await this.scheduleRetry(issueId, identifier, 1, null, 1000);  // 1 second delay
+      // Emit completion event
+      this.emit('issue:completed', runningEntry.issue, true);
     } else {
       // Abnormal exit - exponential backoff retry
       console.error('[orchestrator] Worker failed:', identifier, result.error);
       const nextAttempt = (runningEntry.retry_attempt || 0) + 1;
-      await this.scheduleRetry(issueId, identifier, nextAttempt, result.error || 'Worker failed');
+      
+      // Prevent aggressive hammering on globally exhausted API Limits
+      const rawErrorStr = String(result.error).toLowerCase();
+      let overrideDelayMs = undefined;
+      if (rawErrorStr.includes('rate limit') || rawErrorStr.includes('over_limit') || rawErrorStr.includes('balance is too low')) {
+          if (nextAttempt > 3) {
+              console.error(`[orchestrator] 🛑 API Error detected 3 times. Suspending ${identifier} for 5 minutes to prevent spamming.`);
+              overrideDelayMs = 300000; // Suspend for exactly 5 minutes
+          } else {
+              console.error(`[orchestrator] ⚠️ API Error detected (Attempt ${nextAttempt}/3). Retrying as it might be transient...`);
+          }
+      }
+
+      await this.scheduleRetry(issueId, identifier, nextAttempt, result.error || 'Worker failed', overrideDelayMs);
+      // Emit failure event
+      this.emit('issue:failed', runningEntry.issue, result.error || 'Worker failed');
     }
 
     this.emit('state:changed', this.getStateSnapshot());
@@ -759,6 +784,12 @@ export class Orchestrator extends EventEmitter {
     // Remove from retry queue
     this.state.retry_attempts.delete(issueId);
 
+    // Check if issue is already completed
+    if (this.state.completed.has(issueId)) {
+      console.log('[orchestrator] Retry issue already completed, skipping:', retryEntry.identifier);
+      return;
+    }
+
     // Fetch active candidates and find this issue
     const { issues, error } = await this.tracker.fetchCandidateIssues(this.config.activeStates);
 
@@ -785,7 +816,9 @@ export class Orchestrator extends EventEmitter {
     }
 
     // Dispatch the issue
-    console.log('[orchestrator] Dispatching retry for:', retryEntry.identifier);
+    const isReview = issue.state.toLowerCase() === 'in review';
+    const phaseLabel = isReview ? '[REVIEW]' : '[DEV]';
+    console.log(`[orchestrator] Dispatching retry for: ${retryEntry.identifier} ${phaseLabel} (State: ${issue.state})`);
     await this.dispatchIssue(issue, retryEntry.attempt);
   }
 

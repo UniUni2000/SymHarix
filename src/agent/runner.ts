@@ -231,7 +231,7 @@ export class AgentRunner extends EventEmitter {
    */
   launch(workspacePath: string): cp.ChildProcess {
     // Section 10.1: Invoke via bash -lc in workspace directory
-    const child = cp.spawn('bash', ['-lc', this.options.codexCommand], {
+    const child = cp.spawn('/usr/bin/bash', ['-lc', this.options.codexCommand], {
       cwd: workspacePath,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: process.env

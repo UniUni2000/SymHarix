@@ -167,9 +167,11 @@ export function validateWorkflowForDispatch(definition: WorkflowDefinition): { v
       errors.push(`Unsupported tracker kind: "${tracker.kind}". Currently only "linear" is supported.`);
     }
 
-    // tracker.project_slug is required for linear
-    if (tracker.kind === 'linear' && !tracker.project_slug) {
-      errors.push('Missing required "tracker.project_slug" configuration for Linear tracker');
+    // tracker.projects is required for linear
+    if (tracker.kind === 'linear') {
+      if (!tracker.projects || typeof tracker.projects !== 'object' || Object.keys(tracker.projects).length === 0) {
+        errors.push('Missing required "tracker.projects" mapping configuration for Linear tracker');
+      }
     }
   }
 

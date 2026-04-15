@@ -29,6 +29,6 @@ Thumbs.db
 # Test coverage
 coverage/
 
-# Claude Code symlink (points to /home/agent/cc-haha)
-claude-code
+# Claude Code
+hooks/
 repos/
