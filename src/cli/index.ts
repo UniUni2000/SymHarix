@@ -126,7 +126,9 @@ async function main(): Promise<void> {
     logger.info('Issue dispatched', {
       issue_id: issue.id,
       issue_identifier: issue.identifier,
-      title: issue.title
+      title: issue.title,
+      state: issue.state,
+      phase: issue.state.toLowerCase() === 'in review' ? 'REVIEW' : 'DEV'
     });
   });
 
@@ -156,9 +158,10 @@ async function main(): Promise<void> {
   });
 
   orchestrator.on('session:event', (issueId: string, event: AgentEvent) => {
-    logger.debug('Agent event', {
+    logger.info('Agent event', {
       issue_id: issueId,
       event: event.event,
+      payload: event.payload,
       timestamp: event.timestamp.toISOString()
     });
   });

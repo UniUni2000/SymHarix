@@ -105,17 +105,45 @@ export class WorkspaceManager {
     const timeoutMs = this.hooks.timeout_ms;
 
     try {
-      const { stdout, stderr } = await execAsync(script, {
-        cwd: workspacePath,
-        timeout: timeoutMs,
-        shell: '/bin/bash',
-        maxBuffer: 10 * 1024 * 1024,
-        env: { ...process.env, ...envOverrides }
+      const result = await new Promise<{stdout: string; stderr: string}>((resolve, reject) => {
+        const child = cp.spawn('/usr/bin/bash', [script], {
+          cwd: workspacePath,
+          env: { ...process.env, ...envOverrides }
+        });
+        
+        let stdout = '';
+        let stderr = '';
+        
+        child.stdout?.on('data', d => stdout += d.toString());
+        child.stderr?.on('data', d => stderr += d.toString());
+        
+        // Timeout handling
+        const timer = setTimeout(() => {
+          child.kill('SIGKILL');
+          reject(new Error('ETIMEDOUT'));
+        }, timeoutMs);
+        
+        child.on('error', err => {
+          clearTimeout(timer);
+          reject(err);
+        });
+        
+        child.on('close', code => {
+          clearTimeout(timer);
+          if (code !== 0) {
+            const err = new Error(`Exited with code ${code}`) as any;
+            err.stdout = stdout;
+            err.stderr = stderr;
+            reject(err);
+          } else {
+            resolve({ stdout, stderr });
+          }
+        });
       });
 
       return {
         success: true,
-        output: (stdout + stderr).trim().slice(0, 1000)
+        output: (result.stdout + result.stderr).trim().slice(0, 1000)
       };
     } catch (err) {
       const execError = err as cp.ExecException & { stdout?: string; stderr?: string };
@@ -204,6 +232,9 @@ export class WorkspaceManager {
         createdNow = false;
       } else {
         const branchName = `feature/${workspaceKey.toLowerCase()}`;
+        try {
+          await execAsync(`git -C "${repoPath}" branch -D "${branchName}"`);
+        } catch {}
         await execAsync(
           `git -C "${repoPath}" worktree add -b "${branchName}" "${workspacePath}"`,
           { maxBuffer: 10 * 1024 * 1024 }

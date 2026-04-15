@@ -299,9 +299,11 @@ export function validateConfigForDispatch(cfg: ServiceConfig): { valid: boolean;
     errors.push('Missing required "tracker.api_key" (or environment variable not set)');
   }
 
-  // tracker.project_slug is required for linear
-  if (cfg.trackerKind === 'linear' && !cfg.trackerProjectSlug) {
-    errors.push('Missing required "tracker.project_slug" for Linear tracker');
+  // tracker.projects must have at least one mapping
+  if (cfg.trackerKind === 'linear') {
+    if (!cfg.projects || Object.keys(cfg.projects).length === 0) {
+      errors.push('Missing required "tracker.projects" mapping for Linear tracker');
+    }
   }
 
   // codex.command is required
