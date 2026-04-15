@@ -6,10 +6,10 @@ tracker:
   projects:
     d886490c7fda:
       github_repo: UniUni2000/test-myproject
-      local_path: /home/agent/test-cc
+      local_path: ~/.symphony_cc/repos/test-myproject
     1d3a3f95809d:
       github_repo: UniUni2000/test2
-      local_path: /home/agent/test-cc/repos/test2
+      local_path: ~/.symphony_cc/repos/test2
   active_states:
     - Todo
     - In Progress
@@ -21,15 +21,17 @@ tracker:
 polling:
   interval_ms: 30000
 workspace:
-  root: /home/agent/test-cc/workspaces
+  root: ~/.symphony_cc/workspaces
 hooks:
-  before_run: /home/agent/test-cc/scripts/before-run.sh
-  after_run: /home/agent/test-cc/scripts/after-run.sh
+  before_run: ./scripts/before-run.sh
+  after_run: ./scripts/after-run.sh
   timeout_ms: 120000
+codex:
+  command: node ./scripts/claude-adapter.cjs
 agent:
   max_concurrent_agents: 3
   max_retry_backoff_ms: 300000
-  max_turns: 100
+  max_turns: 1
 server:
   port: 8080
 ---
