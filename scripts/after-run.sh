@@ -26,10 +26,10 @@ PROJECT_ROOT="${SYMPHONY_PROJECT_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 ENV_FILE="$PROJECT_ROOT/.env"
 
 if [ -f "$ENV_FILE" ]; then
-  # 只导出非注释、非空行
+  # 加载所有环境变量（非注释、非空行会被bash正确处理）
   set -o allexport
   # shellcheck disable=SC1090
-  source <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ENV_FILE")
+  source "$ENV_FILE"
   set +o allexport
 fi
 
@@ -82,7 +82,8 @@ fetchLinearStateIds() {
     --max-time 15 \
     -d '{"query": "{ teams { nodes { name states { nodes { id name type } } } } }"}' 2>/dev/null || echo "{}")
 
-  LINEAR_API_CALLS=$((LINEAR_API_CALLS + 1))
+  LINEAR_API_CALLS=${LINEAR_API_CALLS:-0}
+LINEAR_API_CALLS=$((LINEAR_API_CALLS + 1))
 
   # 解析状态 ID（从响应中提取）
   # 这里简化处理，假设状态名称唯一
@@ -121,7 +122,7 @@ except:
 }
 
 # 如果环境变量未设置，则从 API 获取
-if [ -z "$LINEAR_DONE_STATE_ID" ] || [ -z "$LINEAR_IN_PROGRESS_STATE_ID" ]; then
+if [ -z "${LINEAR_DONE_STATE_ID:-}" ] || [ -z "${LINEAR_IN_PROGRESS_STATE_ID:-}" ]; then
   fetchLinearStateIds
 fi
 
@@ -240,6 +241,7 @@ LINEAR_RESPONSE=$(curl -s -X POST https://api.linear.app/graphql \
   -H "Content-Type: application/json" \
   --max-time 15 \
   -d "{\"query\": \"{ issues(filter: { identifier: { eq: \\\"$ISSUE_IDENTIFIER\\\" } }) { nodes { id title description } } }\"}" 2>/dev/null || echo "{}")
+LINEAR_API_CALLS=${LINEAR_API_CALLS:-0}
 LINEAR_API_CALLS=$((LINEAR_API_CALLS + 1))
 
 ISSUE_ID=$(echo "$LINEAR_RESPONSE" | python3 -c "
@@ -307,6 +309,7 @@ GITHUB_API_RESPONSE=$(curl -s -X POST \
   "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/pulls" \
   --max-time 15 \
   -d "$PR_DATA" 2>/dev/null || echo "{}")
+GITHUB_API_CALLS=${GITHUB_API_CALLS:-0}
 GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
 
 PR_URL=$(echo "$GITHUB_API_RESPONSE" | python3 -c "
@@ -353,7 +356,8 @@ if [ -n "$PR_URL" ]; then
           -H "Content-Type: application/json" \
           "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/commits/$BRANCH_NAME/status" \
           --max-time 15 2>/dev/null || echo "{}")
-        GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
+        GITHUB_API_CALLS=${GITHUB_API_CALLS:-0}
+GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
 
         CI_STATE=$(echo "$CI_RESPONSE" | python3 -c "
 import sys, json
@@ -407,6 +411,7 @@ CURRENT_STATE_RESPONSE=$(curl -s -X POST https://api.linear.app/graphql \
   -H "Content-Type: application/json" \
   --max-time 15 \
   -d "{\"query\": \"{ issues { nodes { id identifier state { name } } } }\"}" 2>/dev/null || echo "{}")
+LINEAR_API_CALLS=${LINEAR_API_CALLS:-0}
 LINEAR_API_CALLS=$((LINEAR_API_CALLS + 1))
 
 # Parse response to find matching issue by identifier
@@ -461,7 +466,8 @@ if [ "$CURRENT_STATE" = "In Review" ]; then
     -H "Content-Type: application/json" \
     "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/pulls?head=$GITHUB_OWNER:$BRANCH_NAME&state=open" \
     --max-time 15 2>/dev/null || echo "[]")
-  GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
+  GITHUB_API_CALLS=${GITHUB_API_CALLS:-0}
+GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
 
   # Check if PR has been merged
   PR_REVIEW_STATUS=$(echo "$PR_RESPONSE" | python3 -c "
@@ -509,7 +515,8 @@ except:
         -H "Content-Type: application/json" \
         "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/pulls/$PR_NUMBER/reviews" \
         --max-time 15 2>/dev/null || echo "[]")
-      GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
+      GITHUB_API_CALLS=${GITHUB_API_CALLS:-0}
+GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
 
       # Determine final review outcome - check formal reviews first, then comments
       REVIEW_DECISION=$(echo "$REVIEWS_RESPONSE" | python3 -c "
@@ -546,7 +553,8 @@ except:
           -H "Content-Type: application/json" \
           "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/issues/$PR_NUMBER/comments" \
           --max-time 15 2>/dev/null || echo "[]")
-        GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
+        GITHUB_API_CALLS=${GITHUB_API_CALLS:-0}
+GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
 
         REVIEW_DECISION=$(echo "$COMMENTS_RESPONSE" | python3 -c "
 import sys, json
@@ -593,7 +601,8 @@ except:
           --max-time 15 \
           -d "{\"merge_method\":\"squash\",\"commit_title\":\"feat($ISSUE_IDENTIFIER): merge PR #$PR_NUMBER\"}" \
           2>/dev/null || echo "{}")
-        GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
+        GITHUB_API_CALLS=${GITHUB_API_CALLS:-0}
+GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
 
         MERGE_SUCCESS=$(echo "$MERGE_RESPONSE" | python3 -c "
 import sys, json
@@ -639,7 +648,8 @@ Automated comment by Symphony Agent."
               --max-time 15 \
               -d "$(python3 -c "import json; print(json.dumps({\"body\": '''$CONFLICT_COMMENT'''}))")" \
               2>/dev/null || true
-            GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
+            GITHUB_API_CALLS=${GITHUB_API_CALLS:-0}
+GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
             echo "[after-run] Added conflict comment on PR #$PR_NUMBER"
           fi
         fi
@@ -666,12 +676,33 @@ Automated comment by Symphony Agent."
     echo "[after-run] PR needs work, sending back to dev (In Progress)"
   fi
 
-  # If there's a REVIEW_REPORT.md, post it as a comment to Linear
+  # If there's a REVIEW_REPORT.md, use its decision to determine state
   if [ -f "REVIEW_REPORT.md" ]; then
     echo "[after-run] Found REVIEW_REPORT.md, posting to Linear..."
 
-    # Extract decision for the comment
+    # Extract decision for the comment and state determination
     DECISION_DISPLAY=$(grep "## 评审结果:" REVIEW_REPORT.md | sed 's/.*: //' | tr -d ' ')
+
+    # Parse decision to determine TARGET_STATE
+    # APPROVE/approve -> Done, APPROVE_MINOR -> Done, REQUEST_CHANGES_* / REQUEST_TESTS / reject -> In Progress
+    case "${DECISION_DISPLAY}" in
+      APPROVE|APPROVE_MINOR)
+        TARGET_STATE_ID="$LINEAR_DONE_STATE_ID"
+        TARGET_STATE_NAME="Done"
+        echo "[after-run] Review decision: $DECISION_DISPLAY - PR approved, will merge"
+        ;;
+      REQUEST_CHANGES_MINOR|REQUEST_CHANGES_MAJOR|REQUEST_TESTS|REJECT)
+        TARGET_STATE_ID="$LINEAR_IN_PROGRESS_STATE_ID"
+        TARGET_STATE_NAME="In Progress"
+        echo "[after-run] Review decision: $DECISION_DISPLAY - needs rework"
+        ;;
+      *)
+        # Default to staying in review if can't parse
+        TARGET_STATE_ID="$LINEAR_IN_REVIEW_STATE_ID"
+        TARGET_STATE_NAME="In Review"
+        echo "[after-run] Review decision: $DECISION_DISPLAY - staying in Review"
+        ;;
+    esac
 
     # Build summary from the report
     SUMMARY=$(grep -A3 "## 总结" REVIEW_REPORT.md 2>/dev/null | tail -n +2 | head -3 | tr '\n' ' ' | sed 's/"/\\"/g')
@@ -700,6 +731,7 @@ LINEAR_UPDATE_RESPONSE=$(curl -s -X POST https://api.linear.app/graphql \
   -H "Content-Type: application/json" \
   --max-time 15 \
   -d "{\"query\": \"mutation { issueUpdate(id: \\\"$ISSUE_ID\\\", input: { stateId: \\\"$TARGET_STATE_ID\\\" }) { success issue { identifier state { name } } } }\"}" 2>/dev/null || echo "{}")
+LINEAR_API_CALLS=${LINEAR_API_CALLS:-0}
 LINEAR_API_CALLS=$((LINEAR_API_CALLS + 1))
 
 UPDATE_SUCCESS=$(echo "$LINEAR_UPDATE_RESPONSE" | python3 -c "
