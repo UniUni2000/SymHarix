@@ -22,6 +22,8 @@ import { GitHubIssueClient } from '../github/issue-client';
 import { WorkspaceManager } from '../workspace/manager';
 import { AgentRunner, TurnResult } from '../agent/runner';
 import { buildReviewPrompt } from '../hooks/review-prompt';
+import { buildDevPrompt, buildDevContinuationPrompt } from '../hooks/dev-prompt';
+import { parseHandover, updateHandoverNextSteps } from '../hooks/handover';
 
 /**
  * GitHub Issue Client for E2E flow
@@ -587,13 +589,8 @@ export class Orchestrator extends EventEmitter {
         // Review-specific prompt using structured review prompt builder
         currentPrompt = buildReviewPrompt(issue);
       } else {
-        // Development prompt - use workflow template
-        const renderedPrompt = this.agentRunner.renderPrompt(this.workflow, issue, attempt);
-        if (renderedPrompt.error) {
-          result.error = `Prompt rendering failed: ${renderedPrompt.error}`;
-          return result;
-        }
-        currentPrompt = renderedPrompt.prompt;
+        // Development prompt - use DEV agent prompt builder with complexity judgment
+        currentPrompt = buildDevPrompt(issue);
       }
 
       // Step 4: Launch agent session
@@ -691,7 +688,8 @@ export class Orchestrator extends EventEmitter {
           if (isReview) {
             currentPrompt = `Continue your code review for ${issue.identifier}. Check if you've completed the review and provided clear feedback.`;
           } else {
-            currentPrompt = `Continue working on ${issue.identifier}. Check if the task is complete.`;
+            // DEV continuation: guide towards completion
+            currentPrompt = `Continue working on issue ${issue.identifier}. Check DEVELOPMENT_LOG.md for progress. If implementation is complete with passing tests, commit and push.`;
           }
         } else {
           sessionActive = false;
@@ -748,6 +746,31 @@ export class Orchestrator extends EventEmitter {
       } else {
         // Hook failed - definitely don't add to completed
         console.warn('[orchestrator] after_run hook failed, not adding to completed set:', issue.identifier);
+      }
+
+      // After review completion, update HANDOVER.md if REQUEST_CHANGES
+      if (isReview && hookResult.success && hookResult.output) {
+        const statsMatch = hookResult.output.match(/SYMPHONY_STATS:(\{.*\})/);
+        if (statsMatch) {
+          try {
+            const stats = JSON.parse(statsMatch[1]);
+            const reviewDecision = stats.review_decision || '';
+
+            if (reviewDecision === 'REQUEST_CHANGES' && stats.feedback) {
+              // Read existing HANDOVER.md and update "下次继续" section
+              const handoverPath = path.join(workspace.path, 'HANDOVER.md');
+              try {
+                const fs = await import('fs/promises');
+                const handoverContent = await fs.readFile(handoverPath, 'utf-8');
+                const updatedHandover = updateHandoverNextSteps(handoverContent, stats.feedback);
+                await fs.writeFile(handoverPath, updatedHandover, 'utf-8');
+                console.log('[orchestrator] Updated HANDOVER.md with review feedback');
+              } catch (err) {
+                console.warn('[orchestrator] Failed to update HANDOVER.md:', err);
+              }
+            }
+          } catch {}
+        }
       }
 
       // Clean up running/claimed state AFTER after_run completes.
