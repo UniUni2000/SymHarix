@@ -114,3 +114,4 @@ export { initializeSchema, dropAllTables } from './schema';
 // Re-export repository classes
 export { TaskRepository } from './repositories/taskRepository';
 export { EventRepository } from './repositories/eventRepository';
+export { ReviewRepository } from './repositories/reviewRepository';
