@@ -103,7 +103,8 @@ ${historySection}
 export function parseReviewDecision(reportContent: string): ReviewDecision {
   const lines = reportContent.split('\n');
   for (const line of lines) {
-    if (line.startsWith('## 评审结果:')) {
+    // Support both English "## Review Decision" and Chinese "## 评审结果:"
+    if (line.startsWith('## 评审结果:') || line.startsWith('## Review Decision')) {
       const decision = line.split(':')[1].trim().toUpperCase().replace(' ', '_');
       if (decision === 'APPROVE') return 'APPROVE';
       if (decision === 'APPROVE_MINOR') return 'APPROVE_MINOR';
