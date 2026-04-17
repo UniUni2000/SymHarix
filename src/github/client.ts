@@ -12,14 +12,29 @@ export class GitHubClient {
     this.owner = options.owner;
   }
 
-  async repoExists(repo: string): Promise<boolean> {
-    const response = await fetch(`https://api.github.com/repos/${this.owner}/${repo}`, {
-      headers: {
-        'Authorization': `token ${this.token}`,
-        'Accept': 'application/vnd.github.v3+json'
+  async repoExists(repo: string): Promise<{ exists: boolean; error?: string }> {
+    try {
+      const response = await fetch(`https://api.github.com/repos/${this.owner}/${repo}`, {
+        headers: {
+          'Authorization': `token ${this.token}`,
+          'Accept': 'application/vnd.github.v3+json'
+        },
+        signal: AbortSignal.timeout(10000)
+      });
+
+      if (response.status === 200) {
+        return { exists: true };
       }
-    });
-    return response.status === 200;
+
+      if (response.status === 404) {
+        return { exists: false };
+      }
+
+      const error = await response.text();
+      return { exists: false, error: `GitHub API error: ${response.status} - ${error}` };
+    } catch (err: any) {
+      return { exists: false, error: `Request failed: ${err.message}` };
+    }
   }
 
   async createRepo(repo: string, isPrivate: boolean = true): Promise<{ success: boolean; error?: string }> {
@@ -34,7 +49,8 @@ export class GitHubClient {
         name: repo,
         private: isPrivate,
         auto_init: false
-      })
+      }),
+      signal: AbortSignal.timeout(10000)
     });
 
     if (response.status === 201) {
@@ -50,7 +66,8 @@ export class GitHubClient {
       headers: {
         'Authorization': `token ${this.token}`,
         'Accept': 'application/vnd.github.v3+json'
-      }
+      },
+      signal: AbortSignal.timeout(10000)
     });
 
     if (response.status !== 200) {
