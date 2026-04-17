@@ -26,12 +26,13 @@ writeIssueContext() {
     -H "Content-Type: application/json" \
     --max-time 10 2>/dev/null || echo "{}")
 
-  # Parse issue data
+  # Check if response is valid (has title field)
   local title=$(echo "$issue_response" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('title',''))" 2>/dev/null || echo "")
   local body=$(echo "$issue_response" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('body',''))" 2>/dev/null || echo "")
 
-  # Write context file
-  cat > ISSUE_CONTEXT.md << EOF
+  # Only overwrite if we got valid GitHub data
+  if [ -n "$title" ]; then
+    cat > ISSUE_CONTEXT.md << EOF
 # Issue Context
 
 **Source:** GitHub Issue #${issue_number}
@@ -47,7 +48,10 @@ ${body}
 - Write unit tests for your changes
 - Ensure all tests pass before submitting
 EOF
-  echo "[before-run] Wrote ISSUE_CONTEXT.md for $issue_identifier"
+    echo "[before-run] Wrote ISSUE_CONTEXT.md with GitHub data for $issue_identifier"
+  else
+    echo "[before-run] GitHub fetch failed or repo not found, keeping default ISSUE_CONTEXT.md"
+  fi
 }
 
 # Create issue context file for Claude to read
