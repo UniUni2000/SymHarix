@@ -142,69 +142,16 @@ export class LinearClient {
     let endCursor: string | null = null;
 
     while (hasNextPage) {
-      const query = `
-        query GetIssues($projectSlugs: [String!], $states: [String!], $first: Int, $after: String) {
-          issues(
-            filter: {
-              project: { slugId: { in: $projectSlugs } }
-              state: { name: { in: $states } }
-            }
-            first: $first
-            after: $after
-          ) {
-            nodes {
-              id
-              identifier
-              title
-              description
-              priority
-              state {
-                id
-                name
-                type
-              }
-              project {
-                id
-                name
-                slugId
-              }
-              labels {
-                nodes {
-                  name
-                }
-              }
-              relations {
-                nodes {
-                  type
-                  relatedIssue {
-                    id
-                    identifier
-                    state {
-                      name
-                      type
-                    }
-                  }
-                }
-              }
-              createdAt
-              updatedAt
-              branchName
-              url
-            }
-            pageInfo {
-              hasNextPage
-              endCursor
-            }
-          }
-        }
-      `;
+      // Use different queries depending on whether we have project filter
+      const hasProjectFilter = this.projectSlugs.length > 0;
 
-      const variables: Record<string, unknown> = {
-        projectSlugs: this.projectSlugs,
-        states: activeStates,
-        first: 50,
-        after: endCursor
-      };
+      const query = hasProjectFilter
+        ? `query GetIssues($projectSlugs: [String!], $states: [String!], $first: Int, $after: String) { issues(filter: { project: { slugId: { in: $projectSlugs } }, state: { name: { in: $states } } }, first: $first, after: $after) { nodes { id identifier title description priority state { id name type } project { id name slugId } labels { nodes { name } } relations { nodes { type relatedIssue { id identifier state { name type } } } } createdAt updatedAt branchName url } pageInfo { hasNextPage endCursor } } }`
+        : `query GetIssues($states: [String!], $first: Int, $after: String) { issues(filter: { state: { name: { in: $states } } }, first: $first, after: $after) { nodes { id identifier title description priority state { id name type } project { id name slugId } labels { nodes { name } } relations { nodes { type relatedIssue { id identifier state { name type } } } } createdAt updatedAt branchName url } pageInfo { hasNextPage endCursor } } }`;
+
+      const variables: Record<string, unknown> = hasProjectFilter
+        ? { projectSlugs: this.projectSlugs, states: activeStates, first: 50, after: endCursor }
+        : { states: activeStates, first: 50, after: endCursor };
 
       const result = await this.graphqlQuery<{ issues: { nodes: LinearIssue[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } }>(query, variables);
 
@@ -257,69 +204,16 @@ export class LinearClient {
     let endCursor: string | null = null;
 
     while (hasNextPage) {
-      const query = `
-        query GetIssues($projectSlugs: [String!], $states: [String!], $first: Int, $after: String) {
-          issues(
-            filter: {
-              project: { slugId: { in: $projectSlugs } }
-              state: { name: { in: $states } }
-            }
-            first: $first
-            after: $after
-          ) {
-            nodes {
-              id
-              identifier
-              title
-              description
-              priority
-              state {
-                id
-                name
-                type
-              }
-              project {
-                id
-                name
-                slugId
-              }
-              labels {
-                nodes {
-                  name
-                }
-              }
-              relations {
-                nodes {
-                  type
-                  relatedIssue {
-                    id
-                    identifier
-                    state {
-                      name
-                      type
-                    }
-                  }
-                }
-              }
-              createdAt
-              updatedAt
-              branchName
-              url
-            }
-            pageInfo {
-              hasNextPage
-              endCursor
-            }
-          }
-        }
-      `;
+      // Use different queries depending on whether we have project filter
+      const hasProjectFilter = this.projectSlugs.length > 0;
 
-      const variables: Record<string, unknown> = {
-        projectSlugs: this.projectSlugs,
-        states: stateNames,
-        first: 50,
-        after: endCursor
-      };
+      const query = hasProjectFilter
+        ? `query GetIssues($projectSlugs: [String!], $states: [String!], $first: Int, $after: String) { issues(filter: { project: { slugId: { in: $projectSlugs } }, state: { name: { in: $states } } }, first: $first, after: $after) { nodes { id identifier title description priority state { id name type } project { id name slugId } labels { nodes { name } } relations { nodes { type relatedIssue { id identifier state { name type } } } } createdAt updatedAt branchName url } pageInfo { hasNextPage endCursor } } }`
+        : `query GetIssues($states: [String!], $first: Int, $after: String) { issues(filter: { state: { name: { in: $states } } }, first: $first, after: $after) { nodes { id identifier title description priority state { id name type } project { id name slugId } labels { nodes { name } } relations { nodes { type relatedIssue { id identifier state { name type } } } } createdAt updatedAt branchName url } pageInfo { hasNextPage endCursor } } }`;
+
+      const variables: Record<string, unknown> = hasProjectFilter
+        ? { projectSlugs: this.projectSlugs, states: stateNames, first: 50, after: endCursor }
+        : { states: stateNames, first: 50, after: endCursor };
 
       const result = await this.graphqlQuery<{ issues: { nodes: LinearIssue[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } }>(query, variables);
 
