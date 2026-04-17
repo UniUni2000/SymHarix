@@ -40,6 +40,7 @@ fi
 WORKSPACE_PATH="$(pwd)"
 ISSUE_IDENTIFIER="$(basename "$WORKSPACE_PATH")"
 
+echo "[after-run] === START $(date '+%Y-%m-%d %H:%M:%S') ==="
 echo "[after-run] Workspace: $WORKSPACE_PATH"
 echo "[after-run] Issue: $ISSUE_IDENTIFIER"
 
@@ -79,7 +80,7 @@ fetchLinearStateIds() {
   local team_response=$(curl -s -X POST https://api.linear.app/graphql \
     -H "Authorization: $LINEAR_API_KEY" \
     -H "Content-Type: application/json" \
-    --max-time 15 \
+    --max-time 10 \
     -d '{"query": "{ teams { nodes { name states { nodes { id name type } } } } }"}' 2>/dev/null || echo "{}")
 
   LINEAR_API_CALLS=${LINEAR_API_CALLS:-0}
@@ -121,7 +122,7 @@ except:
   fi
 }
 
-# 如果环境变量未设置，则从 API 获取
+# 如果环境变量未设置，则从 API 获取（只调用一次）
 if [ -z "${LINEAR_DONE_STATE_ID:-}" ] || [ -z "${LINEAR_IN_PROGRESS_STATE_ID:-}" ]; then
   fetchLinearStateIds
 fi
@@ -130,6 +131,9 @@ fi
 LINEAR_IN_REVIEW_STATE_ID="${LINEAR_IN_REVIEW_STATE_ID:-2d55ad60-e9a3-4490-a78d-d8ddd0f5e45a}"
 LINEAR_DONE_STATE_ID="${LINEAR_DONE_STATE_ID:-8abac616-912a-44d5-8be0-fad6f2403807}"
 LINEAR_IN_PROGRESS_STATE_ID="${LINEAR_IN_PROGRESS_STATE_ID:-d66c7727-7626-4da1-9d08-7189a226fee6}"
+
+# 导出状态 ID（避免重复从 API 获取）
+export LINEAR_IN_REVIEW_STATE_ID LINEAR_DONE_STATE_ID LINEAR_IN_PROGRESS_STATE_ID
 
 # API call counters
 LINEAR_API_CALLS=0
@@ -147,23 +151,20 @@ postLinearComment() {
     return 1
   fi
 
-  # Write comment to temp file to avoid shell escaping issues
-  local tmpfile=$(mktemp)
-  echo "$comment" > "$tmpfile"
-
-  # Use python to read comment, escape it properly, and make the API call
-  local response=$(python3 << PYSCRIPT
+  # Use single python invocation for all JSON operations
+  local result=$(python3 << PYSCRIPT
 import json
 import subprocess
+import sys
 
-with open('$tmpfile', 'r') as f:
-    comment = f.read()
+comment = '''$comment'''
+issue_id = '''$issue_id'''
 
 # Escape for JSON
-escaped_comment = json.dumps(comment)[1:-1]  # Remove surrounding quotes
+escaped_comment = json.dumps(comment)[1:-1]
 
 # Build GraphQL mutation
-query = 'mutation { issueCommentCreate(input: {issueId: "' + '$issue_id' + '", body: "' + escaped_comment + '"}) { success } }'
+query = 'mutation { issueCommentCreate(input: {issueId: "' + issue_id + '", body: "' + escaped_comment + '"}) { success } }'
 mutation = {'query': query}
 
 # Make curl request
@@ -172,29 +173,27 @@ result = subprocess.run([
     'https://api.linear.app/graphql',
     '-H', 'Authorization: $LINEAR_API_KEY',
     '-H', 'Content-Type: application/json',
-    '--max-time', '15',
+    '--max-time', '10',
     '-d', json.dumps(mutation)
 ], capture_output=True, text=True, timeout=20)
 
-print(result.stdout)
+# Parse response
+try:
+    d = json.loads(result.stdout)
+    success = d.get('data', {}).get('issueCommentCreate', {}).get('success', False)
+    if success:
+        print('SUCCESS')
+    else:
+        print('FAILED: ' + str(d))
+except Exception as e:
+    print('ERROR: ' + str(e) + ' | stdout: ' + result.stdout[:200])
 PYSCRIPT
 )
 
-  rm -f "$tmpfile"
-
-  local success=$(echo "$response" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    print('success' if d.get('data', {}).get('issueCommentCreate', {}).get('success') else 'failed')
-except:
-    print('error')
-" 2>/dev/null || echo "error")
-
-  if [ "$success" = "success" ]; then
+  if [[ "$result" == "SUCCESS" ]]; then
     echo "[after-run] Posted comment to Linear issue $issue_id"
   else
-    echo "[after-run] Failed to post comment: $response"
+    echo "[after-run] Failed to post comment: $result"
   fi
 }
 
@@ -206,7 +205,7 @@ fi
 # -----------------------------------------------------------------------------
 # Step 1: Git commit & push
 # -----------------------------------------------------------------------------
-echo "[after-run] Staging and committing changes..."
+echo "[after-run] $(date '+%H:%M:%S') - Staging and committing changes..."
 
 # 检查是否有改动
 if git diff --quiet && git diff --staged --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
@@ -223,7 +222,7 @@ fi
 
 # 获取当前分支名
 BRANCH_NAME="$(git rev-parse --abbrev-ref HEAD)"
-echo "[after-run] Pushing branch: $BRANCH_NAME"
+echo "[after-run] $(date '+%H:%M:%S') - Pushing branch: $BRANCH_NAME"
 
 # 配置 remote URL
 REMOTE_URL="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git"
@@ -253,12 +252,12 @@ rm -f "$ASKPASS_SCRIPT"
 # -----------------------------------------------------------------------------
 # Step 2: 获取 Linear Issue 标题（用于 PR 标题）
 # -----------------------------------------------------------------------------
-echo "[after-run] Fetching Linear issue info..."
+echo "[after-run] $(date '+%H:%M:%S') - Fetching Linear issue info..."
 
 LINEAR_RESPONSE=$(curl -s -X POST https://api.linear.app/graphql \
   -H "Authorization: $LINEAR_API_KEY" \
   -H "Content-Type: application/json" \
-  --max-time 15 \
+  --max-time 10 \
   -d "{\"query\": \"{ issues(filter: { identifier: { eq: \\\"$ISSUE_IDENTIFIER\\\" } }) { nodes { id title description } } }\"}" 2>/dev/null || echo "{}")
 LINEAR_API_CALLS=${LINEAR_API_CALLS:-0}
 LINEAR_API_CALLS=$((LINEAR_API_CALLS + 1))
@@ -288,7 +287,7 @@ echo "[after-run] Issue title: $ISSUE_TITLE"
 # -----------------------------------------------------------------------------
 # Step 3: 创建 GitHub Pull Request
 # -----------------------------------------------------------------------------
-echo "[after-run] Creating GitHub PR..."
+echo "[after-run] $(date '+%H:%M:%S') - Creating GitHub PR..."
 
 # Build PR data using Python with proper JSON escaping
 PR_DATA=$(python3 - "$ISSUE_IDENTIFIER" "$ISSUE_TITLE" "$BRANCH_NAME" "$GITHUB_DEFAULT_BRANCH" << 'PYTHON_SCRIPT'
@@ -326,7 +325,7 @@ GITHUB_API_RESPONSE=$(curl -s -X POST \
   -H "Authorization: token $GITHUB_TOKEN" \
   -H "Content-Type: application/json" \
   "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/pulls" \
-  --max-time 15 \
+  --max-time 10 \
   -d "$PR_DATA" 2>/dev/null || echo "{}")
 GITHUB_API_CALLS=${GITHUB_API_CALLS:-0}
 GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
@@ -374,7 +373,7 @@ if [ -n "$PR_URL" ]; then
           -H "Authorization: token $GITHUB_TOKEN" \
           -H "Content-Type: application/json" \
           "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/commits/$BRANCH_NAME/status" \
-          --max-time 15 2>/dev/null || echo "{}")
+          --max-time 10 2>/dev/null || echo "{}")
         GITHUB_API_CALLS=${GITHUB_API_CALLS:-0}
 GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
 
@@ -428,7 +427,7 @@ fi
 CURRENT_STATE_RESPONSE=$(curl -s -X POST https://api.linear.app/graphql \
   -H "Authorization: $LINEAR_API_KEY" \
   -H "Content-Type: application/json" \
-  --max-time 15 \
+  --max-time 10 \
   -d "{\"query\": \"{ issues { nodes { id identifier state { name } } } }\"}" 2>/dev/null || echo "{}")
 LINEAR_API_CALLS=${LINEAR_API_CALLS:-0}
 LINEAR_API_CALLS=$((LINEAR_API_CALLS + 1))
@@ -484,7 +483,7 @@ if [ "$CURRENT_STATE" = "In Review" ]; then
     -H "Authorization: token $GITHUB_TOKEN" \
     -H "Content-Type: application/json" \
     "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/pulls?head=$GITHUB_OWNER:$BRANCH_NAME&state=open" \
-    --max-time 15 2>/dev/null || echo "[]")
+    --max-time 10 2>/dev/null || echo "[]")
   GITHUB_API_CALLS=${GITHUB_API_CALLS:-0}
 GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
 
@@ -533,7 +532,7 @@ except:
         -H "Authorization: token $GITHUB_TOKEN" \
         -H "Content-Type: application/json" \
         "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/pulls/$PR_NUMBER/reviews" \
-        --max-time 15 2>/dev/null || echo "[]")
+        --max-time 10 2>/dev/null || echo "[]")
       GITHUB_API_CALLS=${GITHUB_API_CALLS:-0}
 GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
 
@@ -571,7 +570,7 @@ except:
           -H "Authorization: token $GITHUB_TOKEN" \
           -H "Content-Type: application/json" \
           "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/issues/$PR_NUMBER/comments" \
-          --max-time 15 2>/dev/null || echo "[]")
+          --max-time 10 2>/dev/null || echo "[]")
         GITHUB_API_CALLS=${GITHUB_API_CALLS:-0}
 GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
 
@@ -617,7 +616,7 @@ except:
           -H "Authorization: token $GITHUB_TOKEN" \
           -H "Content-Type: application/json" \
           "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/pulls/$PR_NUMBER/merge" \
-          --max-time 15 \
+          --max-time 10 \
           -d "{\"merge_method\":\"squash\",\"commit_title\":\"feat($ISSUE_IDENTIFIER): merge PR #$PR_NUMBER\"}" \
           2>/dev/null || echo "{}")
         GITHUB_API_CALLS=${GITHUB_API_CALLS:-0}
@@ -664,7 +663,7 @@ Automated comment by Symphony Agent."
               -H "Authorization: token $GITHUB_TOKEN" \
               -H "Content-Type: application/json" \
               "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/issues/$PR_NUMBER/comments" \
-              --max-time 15 \
+              --max-time 10 \
               -d "$(python3 -c "import json; print(json.dumps({\"body\": '''$CONFLICT_COMMENT'''}))")" \
               2>/dev/null || true
             GITHUB_API_CALLS=${GITHUB_API_CALLS:-0}
@@ -743,12 +742,12 @@ else
   echo "[after-run] Dev agent completed, updating to In Review"
 fi
 
-echo "[after-run] Updating Linear issue $ISSUE_IDENTIFIER from '$CURRENT_STATE' to '$TARGET_STATE_NAME'..."
+echo "[after-run] $(date '+%H:%M:%S') - Updating Linear issue $ISSUE_IDENTIFIER from '$CURRENT_STATE' to '$TARGET_STATE_NAME'..."
 
 LINEAR_UPDATE_RESPONSE=$(curl -s -X POST https://api.linear.app/graphql \
   -H "Authorization: $LINEAR_API_KEY" \
   -H "Content-Type: application/json" \
-  --max-time 15 \
+  --max-time 10 \
   -d "{\"query\": \"mutation { issueUpdate(id: \\\"$ISSUE_ID\\\", input: { stateId: \\\"$TARGET_STATE_ID\\\" }) { success issue { identifier state { name } } } }\"}" 2>/dev/null || echo "{}")
 LINEAR_API_CALLS=${LINEAR_API_CALLS:-0}
 LINEAR_API_CALLS=$((LINEAR_API_CALLS + 1))
@@ -772,6 +771,7 @@ else
   FINAL_STATE="$CURRENT_STATE"
 fi
 
+echo "[after-run] === END $(date '+%Y-%m-%d %H:%M:%S') ==="
 echo "[after-run] Done."
 
 # -----------------------------------------------------------------------------
