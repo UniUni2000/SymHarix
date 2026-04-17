@@ -18,9 +18,15 @@ import {
   CodexTotals
 } from '../types';
 import { LinearClient } from '../tracker/linear-client';
+import { GitHubIssueClient } from '../github/issue-client';
 import { WorkspaceManager } from '../workspace/manager';
 import { AgentRunner, TurnResult } from '../agent/runner';
 import { buildReviewPrompt } from '../hooks/review-prompt';
+
+/**
+ * GitHub Issue Client for E2E flow
+ */
+let githubIssueClient: GitHubIssueClient | null = null;
 
 /**
  * Orchestrator events
@@ -145,6 +151,15 @@ export class Orchestrator extends EventEmitter {
       stallTimeoutMs: config.codexStallTimeoutMs,
       projectRoot: config.projectRoot
     });
+
+    // Initialize GitHub Issue client for E2E flow
+    if (config.githubOwner && config.githubToken) {
+      githubIssueClient = new GitHubIssueClient({
+        token: config.githubToken,
+        owner: config.githubOwner,
+        repo: '' // Will be set per-issue via project_slug
+      });
+    }
 
     // Initialize runtime state
     this.state = {
@@ -1131,5 +1146,199 @@ export class Orchestrator extends EventEmitter {
         console.warn('[orchestrator] Failed to clean workspace:', issue.identifier, err);
       }
     }
+  }
+
+  // ============================================================================
+  // E2E Flow Methods (Section 7: End-to-End Orchestration)
+  // ============================================================================
+
+  /**
+   * Ensure GitHub Issue exists for a Linear issue
+   * Creates a GitHub Issue if one doesn't already exist
+   * Used in E2E flow to link Linear issues to GitHub Issues
+   */
+  async ensureGitHubIssue(issue: Issue, githubRepo: string): Promise<{ success: boolean; issueNumber?: number; url?: string; error?: string }> {
+    if (!githubIssueClient) {
+      return { success: false, error: 'GitHub Issue client not initialized' };
+    }
+
+    // Initialize a new GitHub Issue client with the specific repo
+    const client = new GitHubIssueClient({
+      token: this.config.githubToken,
+      owner: this.config.githubOwner,
+      repo: githubRepo
+    });
+
+    // Extract issue number from Linear identifier (e.g., "ABC-123" -> 123)
+    const issueNumberMatch = issue.identifier.match(/(\d+)$/);
+    if (!issueNumberMatch) {
+      return { success: false, error: `Invalid Linear issue identifier format: ${issue.identifier}` };
+    }
+
+    const issueNumber = parseInt(issueNumberMatch[1], 10);
+
+    try {
+      // Check if GitHub issue already exists
+      const exists = await client.issueExists(issueNumber);
+      if (exists) {
+        console.log(`[orchestrator] GitHub issue #${issueNumber} already exists for ${issue.identifier}`);
+        return { success: true, issueNumber, url: `https://github.com/${this.config.githubOwner}/${githubRepo}/issues/${issueNumber}` };
+      }
+
+      // Create the GitHub issue
+      const body = [
+        `## Linear Issue`,
+        `[${issue.identifier}](${issue.url || '#'})`,
+        '',
+        `## Description`,
+        issue.description || '_No description provided_',
+        '',
+        `## Labels`,
+        issue.labels.length > 0 ? issue.labels.join(', ') : 'None',
+        '',
+        `## Priority`,
+        issue.priority !== null ? `P${issue.priority}` : 'Not set',
+      ].join('\n');
+
+      const result = await client.createIssue({
+        title: `[${issue.identifier}] ${issue.title}`,
+        body,
+        labels: issue.labels
+      });
+
+      console.log(`[orchestrator] Created GitHub issue #${result.number} for ${issue.identifier}: ${result.url}`);
+      return { success: true, issueNumber: result.number, url: result.url };
+    } catch (err) {
+      const error = err as Error;
+      console.error(`[orchestrator] Failed to ensure GitHub issue for ${issue.identifier}:`, error.message);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Handle successful merge
+   * Updates Linear issue to Done and performs workspace cleanup
+   * Called when a PR is merged and the issue work is complete
+   */
+  async handleMergeSuccess(issue: Issue): Promise<{ success: boolean; error?: string }> {
+    console.log(`[orchestrator] Handling merge success for ${issue.identifier}`);
+
+    // Step 1: Post a comment to the Linear issue noting the merge
+    try {
+      const commentBody = [
+        `## Merge Complete`,
+        `PR has been merged. Issue marked as complete.`,
+        new Date().toISOString()
+      ].join('\n');
+
+      await this.tracker.postComment(issue.id, commentBody);
+      console.log(`[orchestrator] Posted merge comment to Linear issue ${issue.identifier}`);
+    } catch (err) {
+      console.warn(`[orchestrator] Failed to post merge comment to Linear:`, err);
+      // Non-fatal, continue with cleanup
+    }
+
+    // Step 2: Update Linear issue state to Done
+    try {
+      const stateResult = await this.tracker.updateIssueState(issue.id, 'Done');
+      if (stateResult.success) {
+        console.log(`[orchestrator] Updated Linear issue ${issue.identifier} to Done`);
+      } else {
+        console.warn(`[orchestrator] Failed to update issue state to Done: ${stateResult.error}`);
+      }
+    } catch (err) {
+      console.warn(`[orchestrator] Exception updating issue state:`, err);
+      // Non-fatal, continue with cleanup
+    }
+
+    // Step 3: Clean up the workspace
+    const workspacePath = this.workspaceManager.getWorkspacePath(issue.identifier, issue.project_slug);
+    try {
+      await this.workspaceManager.removeWorkspace(workspacePath, issue.project_slug);
+      console.log(`[orchestrator] Cleaned up workspace for merged issue: ${issue.identifier}`);
+    } catch (err) {
+      console.warn(`[orchestrator] Failed to clean workspace for ${issue.identifier}:`, err);
+      // Non-fatal, continue
+    }
+
+    // Step 4: Mark as completed in orchestrator state
+    this.state.completed.add(issue.id);
+    this.state.running.delete(issue.id);
+    this.state.claimed.delete(issue.id);
+    this.state.retry_attempts.delete(issue.id);
+
+    console.log(`[orchestrator] Merge success handling complete for ${issue.identifier}`);
+    return { success: true };
+  }
+
+  /**
+   * Reconcile issues - detect cancelled issues and clean up
+   * Public wrapper around reconcileRunningIssues for external callers
+   * This method is called during the poll tick but can also be invoked manually
+   */
+  async reconcileIssues(): Promise<{ cancelled: string[]; cleaned: string[] }> {
+    const cancelled: string[] = [];
+    const cleaned: string[] = [];
+
+    if (this.state.running.size === 0) {
+      return { cancelled, cleaned };
+    }
+
+    // Part A: Stall detection
+    await this.reconcileStalledRuns();
+
+    // Part B: Tracker state refresh
+    const runningIds = Array.from(this.state.running.keys());
+    const { issues, error } = await this.tracker.fetchIssueStatesByIds(runningIds);
+
+    if (error) {
+      console.error('[orchestrator] State refresh failed during reconcileIssues:', error);
+      return { cancelled, cleaned };
+    }
+
+    for (const issue of issues) {
+      const runningEntry = this.state.running.get(issue.id);
+      if (!runningEntry) continue;
+
+      const stateLower = issue.state.toLowerCase();
+
+      // Check for Cancelled state
+      if (stateLower === 'cancelled' || stateLower === 'canceled') {
+        console.log(`[orchestrator] Reconcile detected cancelled issue: ${runningEntry.identifier}`);
+
+        // Remove from running state
+        this.state.running.delete(issue.id);
+        this.state.claimed.delete(issue.id);
+        this.state.retry_attempts.delete(issue.id);
+
+        // Mark as completed
+        this.state.completed.add(issue.id);
+
+        cancelled.push(runningEntry.identifier);
+
+        // Clean up workspace
+        try {
+          const workspacePath = this.workspaceManager.getWorkspacePath(
+            runningEntry.identifier,
+            runningEntry.issue.project_slug
+          );
+          await this.workspaceManager.removeWorkspace(workspacePath, runningEntry.issue.project_slug);
+          cleaned.push(runningEntry.identifier);
+          console.log(`[orchestrator] Workspace cleaned for cancelled issue: ${runningEntry.identifier}`);
+        } catch (err) {
+          console.warn(`[orchestrator] Failed to clean workspace for ${runningEntry.identifier}:`, err);
+        }
+
+        // Emit events
+        this.emit('issue:completed', runningEntry.issue, false);
+        this.emit('state:changed', this.getStateSnapshot());
+      } else {
+        // Update running entry with latest state
+        runningEntry.issue = issue;
+        this.emit('issue:reconciled', issue, issue.state);
+      }
+    }
+
+    return { cancelled, cleaned };
   }
 }
