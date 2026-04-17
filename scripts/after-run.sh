@@ -784,8 +784,8 @@ GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
     echo "[after-run] Found REVIEW_REPORT.md, posting to Linear..."
 
     # Extract decision for the comment and state determination
-    # The header is "## Review Decision" or "## 评审结果:" and the value is on the next line like "**REJECT**"
-    DECISION_DISPLAY=$(awk '/^## Review Decision|^## 评审结果:/{getline; gsub(/\*\*/,""); print}' REVIEW_REPORT.md | tr -d ' ')
+    # The header is "## Review Decision" or "## 评审结果:" and the value is on the next line
+    DECISION_DISPLAY=$(grep -A1 -E "^## Review Decision$|^## 评审结果:$" REVIEW_REPORT.md 2>/dev/null | tail -1 | tr -d ' *')
 
     # Parse decision to determine TARGET_STATE
     # APPROVE/approve -> Done, APPROVE_MINOR -> Done, REQUEST_CHANGES_* / REQUEST_TESTS / reject -> In Progress
