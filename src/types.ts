@@ -61,6 +61,7 @@ export interface ServiceConfig {
 
   // Workspace
   workspaceRoot: string;
+  projectRoot: string;
 
   // Hooks
   hooks: {
@@ -345,4 +346,33 @@ export interface LinearApiResponse {
     locations?: Array<{ line: number; column: number }>;
     path?: (string | number)[];
   }>;
+}
+
+// ============================================================================
+// Linear Custom Fields Types (Section 3: State Machine Design)
+// ============================================================================
+
+export interface LinearCustomFields {
+  dev_attempts?: number;
+  review_round?: number;
+  complexity?: 'small' | 'medium' | 'large';
+  last_review_decision?: 'approve' | 'minor' | 'major' | 'tests' | 'reject';
+}
+
+/**
+ * Custom field definition for Linear
+ */
+export interface LinearCustomField {
+  id: string;
+  name: string;
+  value: string | number | null;
+}
+
+/**
+ * Extended LinearIssue with custom fields
+ */
+export interface LinearIssueExtended extends LinearIssue {
+  customFields?: {
+    nodes: LinearCustomField[];
+  };
 }
