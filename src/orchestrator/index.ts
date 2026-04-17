@@ -1020,6 +1020,39 @@ When done, output a summary of your review.`;
       const isTerminal = this.config.terminalStates.some(s => s.toLowerCase() === stateLower);
       const isActive = this.config.activeStates.some(s => s.toLowerCase() === stateLower);
 
+      // Check for Cancelled state FIRST (highest priority)
+      if (stateLower === 'cancelled') {
+        // Immediate cleanup for cancelled issues
+        console.log(`[orchestrator] Issue ${runningEntry.identifier} was CANCELLED - immediate cleanup`);
+
+        // 1. Remove from running state
+        this.state.running.delete(issue.id);
+        this.state.claimed.delete(issue.id);
+        this.state.retry_attempts.delete(issue.id);
+
+        // 2. Mark as completed (don't retry)
+        this.state.completed.add(issue.id);
+
+        // 3. Clean up workspace
+        try {
+          const workspacePath = this.workspaceManager.getWorkspacePath(
+            runningEntry.identifier,
+            runningEntry.issue.project_slug
+          );
+          await this.workspaceManager.removeWorkspace(workspacePath, runningEntry.issue.project_slug);
+          console.log(`[orchestrator] Workspace cleaned for cancelled issue: ${runningEntry.identifier}`);
+        } catch (err) {
+          console.warn(`[orchestrator] Failed to clean workspace for ${runningEntry.identifier}:`, err);
+        }
+
+        // 4. Emit event
+        this.emit('issue:completed', runningEntry.issue, false);
+        this.emit('state:changed', this.getStateSnapshot());
+
+        // 5. Skip further processing for this issue
+        continue;
+      }
+
       if (isTerminal) {
         // Terminal state - terminate worker and clean workspace
         console.log('[orchestrator] Issue terminal, stopping:', runningEntry.identifier);
