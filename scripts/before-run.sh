@@ -11,6 +11,45 @@ set -euo pipefail
 
 echo "[before-run] Initializing for issue $SYMPHONY_ISSUE_IDENTIFIER in state: $SYMPHONY_ISSUE_STATE"
 
+# Write ISSUE_CONTEXT.md with GitHub Issue info
+writeIssueContext() {
+  local issue_identifier="$1"
+  local github_repo="$2"
+
+  # Extract issue number from identifier (e.g., INT-23 -> 23)
+  local issue_number=$(echo "$issue_identifier" | grep -oE '[0-9]+$')
+
+  # Fetch GitHub issue
+  local issue_response=$(curl -s -X GET \
+    "https://api.github.com/repos/${GITHUB_OWNER}/${github_repo}/issues/${issue_number}" \
+    -H "Authorization: token $GITHUB_TOKEN" \
+    -H "Content-Type: application/json" \
+    --max-time 10 2>/dev/null || echo "{}")
+
+  # Parse issue data
+  local title=$(echo "$issue_response" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('title',''))" 2>/dev/null || echo "")
+  local body=$(echo "$issue_response" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('body',''))" 2>/dev/null || echo "")
+
+  # Write context file
+  cat > ISSUE_CONTEXT.md << EOF
+# Issue Context
+
+**Source:** GitHub Issue #${issue_number}
+
+## Title
+${title}
+
+## Description
+${body}
+
+## Development Guidelines
+- Complete the task as described above
+- Write unit tests for your changes
+- Ensure all tests pass before submitting
+EOF
+  echo "[before-run] Wrote ISSUE_CONTEXT.md for $issue_identifier"
+}
+
 # Create issue context file for Claude to read
 cat << EOF > ISSUE_CONTEXT.md
 # Issue: $SYMPHONY_ISSUE_IDENTIFIER
@@ -127,3 +166,6 @@ if [ -n "${GITHUB_TOKEN:-}" ] && [ -f ".mcp.json" ]; then
 fi
 
 echo "[before-run] .mcp.json generated successfully."
+
+# Fetch GitHub Issue and write context
+writeIssueContext "$SYMPHONY_ISSUE_IDENTIFIER" "$GITHUB_REPO"
