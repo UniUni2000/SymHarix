@@ -86,6 +86,10 @@ export interface WorkerResult {
     output: number;
     total: number;
   };
+  // API call statistics
+  claude_api_calls: number;
+  linear_api_calls: number;
+  github_api_calls: number;
 }
 
 /**
@@ -124,7 +128,8 @@ export class Orchestrator extends EventEmitter {
     this.workspaceManager = new WorkspaceManager({
       workspaceRoot: config.workspaceRoot,
       projects: config.projects,
-      hooks: config.hooks
+      hooks: config.hooks,
+      projectRoot: config.projectRoot
     });
 
     // Initialize agent runner
@@ -135,7 +140,8 @@ export class Orchestrator extends EventEmitter {
       turnSandboxPolicy: config.codexTurnSandboxPolicy,
       turnTimeoutMs: config.codexTurnTimeoutMs,
       readTimeoutMs: config.codexReadTimeoutMs,
-      stallTimeoutMs: config.codexStallTimeoutMs
+      stallTimeoutMs: config.codexStallTimeoutMs,
+      projectRoot: config.projectRoot
     });
 
     // Initialize runtime state
@@ -298,12 +304,21 @@ export class Orchestrator extends EventEmitter {
         const sortedIssues = this.sortForDispatch(issues);
 
         // Step 5: Dispatch eligible issues while slots remain
+        // Use a local set to track issues dispatched in THIS tick, preventing
+        // the same issue from being dispatched multiple times in one loop.
+        const dispatchedThisTick = new Set<string>();
         for (const issue of sortedIssues) {
           if (!this.hasAvailableSlots()) {
             break;
           }
 
+          // Skip if already dispatched in this tick (e.g., re-dispatched after cleanup)
+          if (dispatchedThisTick.has(issue.id)) {
+            continue;
+          }
+
           if (this.shouldDispatch(issue)) {
+            dispatchedThisTick.add(issue.id);
             await this.dispatchIssue(issue, null);
           }
         }
@@ -416,8 +431,18 @@ export class Orchestrator extends EventEmitter {
       return false;
     }
 
-    // Must not already be completed
-    if (this.state.completed.has(issue.id)) {
+    // Must not already have a retry scheduled (prevents duplicate dispatch when retry timer
+    // fires while executeTick is also running in the same poll cycle)
+    if (this.state.retry_attempts.has(issue.id)) {
+      return false;
+    }
+
+    // Must not already be completed — but "In Review" issues bypass this check
+    // because they may have been incorrectly added to completed before the
+    // after-run hook updated Linear state. Since "In Review" is an active state,
+    // we always allow re-dispatch for review agents.
+    const isInReview = issue.state.toLowerCase() === 'in review';
+    if (this.state.completed.has(issue.id) && !isInReview) {
       return false;
     }
 
@@ -452,6 +477,12 @@ export class Orchestrator extends EventEmitter {
    * Section 16.4: Dispatch One Issue
    */
   private async dispatchIssue(issue: Issue, attempt: number | null): Promise<void> {
+    // Guard: if already claimed (another dispatch in flight), skip
+    if (this.state.claimed.has(issue.id)) {
+      console.log(`[orchestrator] Issue ${issue.identifier} already claimed, skipping duplicate dispatch`);
+      return;
+    }
+
     const isReview = issue.state.toLowerCase() === 'in review';
     const phaseLabel = isReview ? '[REVIEW]' : '[DEV]';
     console.log(`[orchestrator] Dispatching issue: ${issue.identifier} ${phaseLabel} (State: ${issue.state})`);
@@ -508,7 +539,10 @@ export class Orchestrator extends EventEmitter {
       success: false,
       completed: false,
       turns: 0,
-      tokens: { input: 0, output: 0, total: 0 }
+      tokens: { input: 0, output: 0, total: 0 },
+      claude_api_calls: 0,
+      linear_api_calls: 0,
+      github_api_calls: 0
     };
 
     try {
@@ -528,11 +562,40 @@ export class Orchestrator extends EventEmitter {
         return result;
       }
 
-      // Step 3: Build prompt
-      const renderedPrompt = this.agentRunner.renderPrompt(this.workflow, issue, attempt);
-      if (renderedPrompt.error) {
-        result.error = `Prompt rendering failed: ${renderedPrompt.error}`;
-        return result;
+      // Step 3: Build prompt - use review-specific prompt for "In Review" state
+      const isReview = issue.state.toLowerCase() === 'in review';
+      let currentPrompt: string;
+
+      if (isReview) {
+        // Review-specific prompt
+        currentPrompt = `You are a code reviewer. The PR for ${issue.identifier} has been created and is in "In Review" state.
+
+**Task**: ${issue.identifier} - ${issue.title}
+**Details**: ${issue.description}
+
+Your job:
+1. Review the code changes in this PR
+2. Check for code quality, best practices, and potential issues
+3. Leave constructive feedback as comments or suggest improvements
+4. If the code looks good, approve the PR
+5. If there are issues, request changes with clear explanation
+
+Be thorough but constructive. Focus on:
+- Code correctness and potential bugs
+- Code style and consistency
+- Performance implications
+- Security considerations
+- Test coverage
+
+When done, output a summary of your review.`;
+      } else {
+        // Development prompt - use workflow template
+        const renderedPrompt = this.agentRunner.renderPrompt(this.workflow, issue, attempt);
+        if (renderedPrompt.error) {
+          result.error = `Prompt rendering failed: ${renderedPrompt.error}`;
+          return result;
+        }
+        currentPrompt = renderedPrompt.prompt;
       }
 
       // Step 4: Launch agent session
@@ -561,7 +624,6 @@ export class Orchestrator extends EventEmitter {
 
       // Step 5: Run turns (up to max_turns)
       let turnNumber = 1;
-      let currentPrompt = renderedPrompt.prompt;
       let sessionActive = true;
 
       while (sessionActive && turnNumber <= this.config.maxTurns) {
@@ -619,6 +681,7 @@ export class Orchestrator extends EventEmitter {
 
         result.turns = turnNumber;
         result.tokens = turnResult.tokens;
+        result.claude_api_calls += turnResult.claude_api_calls || 0;
 
         if (!turnResult.success) {
           result.error = turnResult.error;
@@ -627,7 +690,11 @@ export class Orchestrator extends EventEmitter {
           // Turn completed successfully - prepare for next turn
           turnNumber++;
           // Continuation turns send only continuation guidance, not full prompt
-          currentPrompt = `Continue working on ${issue.identifier}. Check if the task is complete.`;
+          if (isReview) {
+            currentPrompt = `Continue your code review for ${issue.identifier}. Check if you've completed the review and provided clear feedback.`;
+          } else {
+            currentPrompt = `Continue working on ${issue.identifier}. Check if the task is complete.`;
+          }
         } else {
           sessionActive = false;
         }
@@ -642,8 +709,83 @@ export class Orchestrator extends EventEmitter {
       result.success = true;
       result.completed = true;
 
-      // Run after_run hook
-      await this.workspaceManager.afterRun(workspace.path, issue);
+      // Run after_run hook and parse API call statistics
+      console.log(`[orchestrator] Running after_run hook for ${issue.identifier}...`);
+      const hookResult = await this.workspaceManager.afterRun(workspace.path, issue);
+      console.log(`[orchestrator] after_run hook completed: success=${hookResult.success}, output=${hookResult.output ? 'present' : 'empty'}`);
+      // Only add to completed if hook succeeded. Failure means we couldn't
+      // update Linear state, so the issue should remain dispatchable.
+      if (hookResult.success) {
+        if (hookResult.output) {
+          // Parse SYMPHONY_STATS line from hook output
+          const statsMatch = hookResult.output.match(/SYMPHONY_STATS:(\{.*\})/);
+          if (statsMatch) {
+            try {
+              const stats = JSON.parse(statsMatch[1]);
+              result.linear_api_calls = stats.linear_api_calls || 0;
+              result.github_api_calls = stats.github_api_calls || 0;
+
+              // Check final state to decide whether to add to completed set
+              // Only "Done" (terminal state) should be added to completed
+              // "In Review" and "In Progress" should NOT be added - allow re-dispatch
+              const finalState = stats.final_state || '';
+              const isTerminalState = finalState.toLowerCase() === 'done' ||
+                                      finalState.toLowerCase() === 'canceled' ||
+                                      finalState.toLowerCase() === 'duplicate';
+
+              if (isTerminalState) {
+                this.state.completed.add(issue.id);
+                console.log(`[orchestrator] Issue state is "${finalState}" (terminal), adding to completed set:`, issue.identifier);
+              } else {
+                console.log(`[orchestrator] Issue state is "${finalState}" (active), skipping completed set to allow re-dispatch:`, issue.identifier);
+              }
+            } catch (err) {
+              console.warn('[orchestrator] Failed to parse SYMPHONY_STATS:', err);
+              // Don't add to completed on parse failure - allow re-dispatch
+            }
+          }
+          // else: hook succeeded but no stats - don't add to completed
+        }
+        // else: hook succeeded with empty output - don't add to completed
+      } else {
+        // Hook failed - definitely don't add to completed
+        console.warn('[orchestrator] after_run hook failed, not adding to completed set:', issue.identifier);
+      }
+
+      // Clean up running/claimed state AFTER after_run completes.
+      // This is done here (synchronously in runAgentAttempt, before the
+      // handleWorkerExit microtask fires) to ensure cleanup happens before
+      // the next poll tick's shouldDispatch runs.
+      this.state.running.delete(issue.id);
+      this.state.claimed.delete(issue.id);
+
+      // Update the runningEntry issue state if still accessible (for state tracking)
+      if (hookResult.success && hookResult.output) {
+        const statsMatch = hookResult.output.match(/SYMPHONY_STATS:(\{.*\})/);
+        if (statsMatch) {
+          try {
+            const stats = JSON.parse(statsMatch[1]);
+            const finalState = stats.final_state || '';
+            console.log(`[orchestrator] Issue ${issue.identifier} final state after after_run: "${finalState}"`);
+          } catch {}
+        }
+      }
+
+      // If after_run moved the issue to "In Progress" (e.g., merge conflict),
+      // immediately schedule a retry to DEV instead of waiting for next poll.
+      if (hookResult.success && hookResult.output) {
+        const statsMatch = hookResult.output.match(/SYMPHONY_STATS:(\{.*\})/);
+        if (statsMatch) {
+          try {
+            const stats = JSON.parse(statsMatch[1]);
+            const finalState = stats.final_state || '';
+            if (finalState.toLowerCase() === 'in progress') {
+              console.log(`[orchestrator] Issue ${issue.identifier} needs rework, scheduling DEV retry...`);
+              await this.scheduleRetry(issue.id, issue.identifier, 1, 'needs_rework', 1000);
+            }
+          } catch {}
+        }
+      }
 
     } catch (err) {
       result.error = `Agent attempt failed: ${(err as Error).message}`;
@@ -654,6 +796,10 @@ export class Orchestrator extends EventEmitter {
           issue
         );
       } catch {}
+
+      // Clean up even on failure
+      this.state.running.delete(issue.id);
+      this.state.claimed.delete(issue.id);
     }
 
     return result;
@@ -686,37 +832,62 @@ export class Orchestrator extends EventEmitter {
     runningEntry.last_reported_output_tokens = runningEntry.codex_output_tokens;
     runningEntry.last_reported_total_tokens = runningEntry.codex_total_tokens;
 
-    // Remove from running
-    this.state.running.delete(issueId);
-    // Remove from claimed set
-    this.state.claimed.delete(issueId);
+    // NOTE: We do NOT remove from running/claimed here.
+    // That is done in runAgentAttempt after after_run hook completes.
+    // This prevents the issue from being re-dispatched during after_run execution.
+
+    // Clean up running/claimed AFTER after_run completes (in runAgentAttempt).
+    // handleWorkerExit is called after runAgentAttempt returns (via .then()),
+    // so by the time this runs, after_run has already completed and the
+    // next poll tick will see the issue properly cleaned up.
 
     if (result.success && result.completed) {
       // Normal exit - do not schedule retry
       console.log('[orchestrator] Worker completed normally:', identifier);
-      this.state.completed.add(issueId);
+
+      // Print completion report with API statistics
+      const runtimeSeconds = (Date.now() - runningEntry.started_at.getTime()) / 1000;
+      console.log(`
+========================================
+[ISSUE COMPLETE] ${identifier}
+----------------------------------------
+  Turns:        ${result.turns}
+  Tokens:       ${result.tokens.total} (input: ${result.tokens.input}, output: ${result.tokens.output})
+  Claude API:   ${result.claude_api_calls} calls
+  Linear API:   ${result.linear_api_calls} calls
+  GitHub API:   ${result.github_api_calls} calls
+  Duration:     ${runtimeSeconds.toFixed(1)}s
+  Est. Cost:    $${(result.tokens.total * 0.000004).toFixed(5)}*
+========================================
+* Estimated based on typical rates`);
+
       // Emit completion event
       this.emit('issue:completed', runningEntry.issue, true);
-    } else {
-      // Abnormal exit - exponential backoff retry
-      console.error('[orchestrator] Worker failed:', identifier, result.error);
-      const nextAttempt = (runningEntry.retry_attempt || 0) + 1;
-      
-      // Prevent aggressive hammering on globally exhausted API Limits
-      const rawErrorStr = String(result.error).toLowerCase();
-      let overrideDelayMs = undefined;
-      if (rawErrorStr.includes('rate limit') || rawErrorStr.includes('over_limit') || rawErrorStr.includes('balance is too low')) {
-          if (nextAttempt > 3) {
-              console.error(`[orchestrator] 🛑 API Error detected 3 times. Suspending ${identifier} for 5 minutes to prevent spamming.`);
-              overrideDelayMs = 300000; // Suspend for exactly 5 minutes
-          } else {
-              console.error(`[orchestrator] ⚠️ API Error detected (Attempt ${nextAttempt}/3). Retrying as it might be transient...`);
-          }
-      }
 
-      await this.scheduleRetry(issueId, identifier, nextAttempt, result.error || 'Worker failed', overrideDelayMs);
-      // Emit failure event
-      this.emit('issue:failed', runningEntry.issue, result.error || 'Worker failed');
+      // Don't add to completed set yet - wait for state reconciliation
+      // This allows "In Review" state to be re-dispatched for review agent
+      // The issue will be added to completed set when reconciliation confirms terminal/active state
+    } else {
+      // Abnormal exit - 3-tier crash recovery
+      console.error('[orchestrator] Worker failed:', identifier, result.error);
+      const attempt = (runningEntry.retry_attempt || 0) + 1;
+
+      if (attempt >= 3) {
+        // Tier 3: Mark as failed, requires manual intervention
+        console.error(`[orchestrator] Issue ${identifier} failed after 3 attempts, requiring manual intervention`);
+        this.state.completed.add(issueId);
+        this.emit('issue:failed', runningEntry.issue, 'Max retry attempts exceeded - manual intervention required');
+      } else if (attempt === 2) {
+        // Tier 2: Log that we'll resume from DEVELOPMENT_LOG.md
+        console.log(`[orchestrator] Issue ${identifier} will resume from DEVELOPMENT_LOG.md on retry #${attempt}`);
+        await this.scheduleRetry(issueId, identifier, attempt, result.error || 'Worker failed', 1000);
+        this.emit('issue:failed', runningEntry.issue, 'Worker failed, will retry with log recovery');
+      } else {
+        // Tier 1: Simple retry
+        console.log(`[orchestrator] Issue ${identifier} retry attempt #${attempt}`);
+        await this.scheduleRetry(issueId, identifier, attempt, result.error || 'Worker failed');
+        this.emit('issue:failed', runningEntry.issue, result.error || 'Worker failed');
+      }
     }
 
     this.emit('state:changed', this.getStateSnapshot());
