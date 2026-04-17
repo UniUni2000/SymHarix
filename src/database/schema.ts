@@ -75,6 +75,66 @@ export const INDEXES_SCHEMA = `
 `;
 
 /**
+ * SQL schema for issue_tracking table
+ * Tracks issue state with custom fields synced from Linear
+ */
+export const ISSUE_TRACKING_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS issue_tracking (
+    id TEXT PRIMARY KEY,
+    identifier TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL,
+    complexity TEXT,
+    dev_attempts INTEGER DEFAULT 0,
+    review_round INTEGER DEFAULT 0,
+    last_review_decision TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+`;
+
+/**
+ * SQL schema for review_history table
+ * Stores all review reports for audit trail
+ */
+export const REVIEW_HISTORY_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS review_history (
+    id TEXT PRIMARY KEY,
+    issue_id TEXT NOT NULL,
+    round INTEGER NOT NULL,
+    decision TEXT NOT NULL,
+    report_md TEXT NOT NULL,
+    reviewer_comment TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (issue_id) REFERENCES issue_tracking(id) ON DELETE CASCADE
+  );
+`;
+
+/**
+ * SQL schema for audit_log table
+ * Tracks all agent actions for debugging
+ */
+export const AUDIT_LOG_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id TEXT PRIMARY KEY,
+    issue_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    agent_type TEXT,
+    details TEXT,
+    created_at TEXT NOT NULL
+  );
+`;
+
+/**
+ * New indexes for review-related queries
+ */
+export const REVIEW_INDEXES_SCHEMA = `
+  CREATE INDEX IF NOT EXISTS idx_issue_tracking_identifier ON issue_tracking(identifier);
+  CREATE INDEX IF NOT EXISTS idx_review_history_issue_id ON review_history(issue_id);
+  CREATE INDEX IF NOT EXISTS idx_audit_log_issue_id ON audit_log(issue_id);
+  CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
+`;
+
+/**
  * Initialize the database schema
  * Creates all tables and indexes if they don't exist
  */
@@ -83,12 +143,19 @@ export function initializeSchema(db: Database): void {
   db.exec(WORKSPACES_TABLE_SCHEMA);
   db.exec(EXECUTION_EVENTS_TABLE_SCHEMA);
   db.exec(INDEXES_SCHEMA);
+  db.exec(ISSUE_TRACKING_SCHEMA);
+  db.exec(REVIEW_HISTORY_SCHEMA);
+  db.exec(AUDIT_LOG_SCHEMA);
+  db.exec(REVIEW_INDEXES_SCHEMA);
 }
 
 /**
  * Drop all tables (useful for testing)
  */
 export function dropAllTables(db: Database): void {
+  db.exec('DROP TABLE IF EXISTS audit_log;');
+  db.exec('DROP TABLE IF EXISTS review_history;');
+  db.exec('DROP TABLE IF EXISTS issue_tracking;');
   db.exec('DROP TABLE IF EXISTS execution_events;');
   db.exec('DROP TABLE IF EXISTS workspaces;');
   db.exec('DROP TABLE IF EXISTS tasks;');
