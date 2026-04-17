@@ -832,7 +832,30 @@ echo "[after-run] === END $(date '+%Y-%m-%d %H:%M:%S') ==="
 echo "[after-run] Done."
 
 # -----------------------------------------------------------------------------
-# Output API call statistics for orchestrator parsing
-# Format: SYMPHONY_STATS:{"linear_api_calls":N,"github_api_calls":N,"final_state":"..."}
+# Extract review decision and feedback for orchestrator HANDOVER.md update
+# These values are used by orchestrator to update HANDOVER.md "下次继续" section
 # -----------------------------------------------------------------------------
-echo "SYMPHONY_STATS:{\"linear_api_calls\":${LINEAR_API_CALLS},\"github_api_calls\":${GITHUB_API_CALLS},\"final_state\":\"${FINAL_STATE}\"}"
+REVIEW_DECISION=""
+REVIEW_FEEDBACK=""
+
+if [ -f "REVIEW_REPORT.md" ]; then
+  REVIEW_DECISION=$(grep "## 评审结果:" REVIEW_REPORT.md 2>/dev/null | sed 's/.*: //' | tr -d ' ' || echo "")
+
+  # Extract must-fix items for feedback
+  if [ -n "$REVIEW_DECISION" ] && [ "$REVIEW_DECISION" = "REQUEST_CHANGES" ]; then
+    # Get all must-fix items (lines after "### 必须修复" until next "###" or "##")
+    REVIEW_FEEDBACK=$(awk '/^### 必须修复/,/^##/ {if(/^##/) exit; if(/^- \*\*现状\*\*/) {gsub(/^- \*\*现状\*\*: */,""); print}}' REVIEW_REPORT.md 2>/dev/null | head -10 | tr '\n' '|' | sed 's/"|*$//g')
+    # Escape quotes for JSON
+    REVIEW_FEEDBACK=$(echo "$REVIEW_FEEDBACK" | sed 's/"/\\"/g')
+  fi
+fi
+
+# -----------------------------------------------------------------------------
+# Output API call statistics for orchestrator parsing
+# Format: SYMPHONY_STATS:{"linear_api_calls":N,"github_api_calls":N,"final_state":"...","review_decision":"...","feedback":"..."}
+# -----------------------------------------------------------------------------
+if [ -n "$REVIEW_DECISION" ]; then
+  echo "SYMPHONY_STATS:{\"linear_api_calls\":${LINEAR_API_CALLS},\"github_api_calls\":${GITHUB_API_CALLS},\"final_state\":\"${FINAL_STATE}\",\"review_decision\":\"${REVIEW_DECISION}\",\"feedback\":\"${REVIEW_FEEDBACK}\"}"
+else
+  echo "SYMPHONY_STATS:{\"linear_api_calls\":${LINEAR_API_CALLS},\"github_api_calls\":${GITHUB_API_CALLS},\"final_state\":\"${FINAL_STATE}\"}"
+fi
