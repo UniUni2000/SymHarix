@@ -622,4 +622,91 @@ export class LinearClient {
 
     return { success: result.data?.issueCommentCreate?.success || false };
   }
+
+  /**
+   * Update an issue's state (e.g., to Done)
+   */
+  async updateIssueState(issueId: string, stateName: string): Promise<{ success: boolean; error?: string }> {
+    // First, find the project slug ID for this issue
+    const stateQuery = `
+      query GetIssueProject($issueId: ID!) {
+        issue(id: $issueId) {
+          id
+          project {
+            slugId
+          }
+        }
+      }
+    `;
+
+    const issueResult = await this.graphqlQuery<{ issue: { id: string; project: { slugId: string } | null } | null }>(
+      stateQuery,
+      { issueId }
+    );
+
+    if (issueResult.error || !issueResult.data?.issue) {
+      return { success: false, error: issueResult.errorMessage || 'Issue not found' };
+    }
+
+    const projectSlugId = issueResult.data.issue.project?.slugId;
+    if (!projectSlugId) {
+      return { success: false, error: 'Issue has no associated project' };
+    }
+
+    // Now fetch available states for the team/project
+    const teamQuery = `
+      query GetTeamStates($projectSlugs: [String!]) {
+        projects(filter: { slugId: { in: $projectSlugs } }) {
+          nodes {
+            id
+            name
+            slugId
+            team {
+              id
+              states {
+                nodes {
+                  id
+                  name
+                  type
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const teamResult = await this.graphqlQuery<{ projects: { nodes: Array<{ team: { id: string; states: { nodes: Array<{ id: string; name: string; type: string }> } } }> } }>(teamQuery, { projectSlugs: [projectSlugId] });
+
+    if (teamResult.error || !teamResult.data?.projects?.nodes?.length) {
+      return { success: false, error: teamResult.errorMessage || 'Team not found' };
+    }
+
+    const team = teamResult.data.projects.nodes[0].team;
+    const targetState = team.states.nodes.find(s => s.name.toLowerCase() === stateName.toLowerCase());
+
+    if (!targetState) {
+      return { success: false, error: `State "${stateName}" not found in team states` };
+    }
+
+    // Update the issue state
+    const mutation = `
+      mutation UpdateIssueState($issueId: String!, $stateId: String!) {
+        issueUpdate(input: { id: $issueId, stateId: $stateId }) {
+          success
+        }
+      }
+    `;
+
+    const updateResult = await this.graphqlQuery<{ issueUpdate: { success: boolean } }>(
+      mutation,
+      { issueId, stateId: targetState.id }
+    );
+
+    if (updateResult.error) {
+      return { success: false, error: updateResult.errorMessage };
+    }
+
+    return { success: updateResult.data?.issueUpdate?.success || false };
+  }
 }
