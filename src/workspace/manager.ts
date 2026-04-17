@@ -10,6 +10,7 @@ import * as path from 'path';
 import * as cp from 'child_process';
 import { promisify } from 'util';
 import { Workspace, Issue } from '../types';
+import { GitHubClient } from '../github/client';
 
 const execAsync = promisify(cp.exec);
 
@@ -28,7 +29,8 @@ export function sanitizeWorkspaceKey(identifier: string): string {
 export interface WorkspaceManagerOptions {
   workspaceRoot: string;
   projectRoot: string;
-  projects: Record<string, { github_repo: string; local_path: string }>;
+  githubOwner: string;
+  githubToken: string;
   hooks: {
     after_create: string | null;
     before_run: string | null;
@@ -55,15 +57,20 @@ export interface WorkspaceResult {
  */
 export class WorkspaceManager {
   private workspaceRoot: string;
-  private projects: Record<string, { github_repo: string; local_path: string }>;
-  private hooks: WorkspaceManagerOptions['hooks'];
   private projectRoot: string;
+  private githubOwner: string;
+  private githubClient: GitHubClient;
+  private hooks: WorkspaceManagerOptions['hooks'];
 
   constructor(options: WorkspaceManagerOptions) {
     this.workspaceRoot = options.workspaceRoot;
-    this.projects = options.projects;
-    this.hooks = options.hooks;
     this.projectRoot = options.projectRoot;
+    this.githubOwner = options.githubOwner;
+    this.githubClient = new GitHubClient({
+      token: options.githubToken,
+      owner: options.githubOwner
+    });
+    this.hooks = options.hooks;
   }
 
   /**
@@ -211,13 +218,11 @@ export class WorkspaceManager {
     } catch (err) {
       // Repo doesn't exist, clone from remote
       try {
-        const githubToken = process.env.GITHUB_TOKEN || process.env.SYMPHONY_GITHUB_TOKEN || '';
-
         // Build clone URL
         let cloneUrl: string;
-        if (githubRepo && githubToken) {
+        if (githubRepo && this.githubClient) {
           // Use authenticated URL for private repos
-          cloneUrl = `https://${githubToken}@github.com/${githubRepo}.git`;
+          cloneUrl = `https://${this.githubClient.token}@github.com/${githubRepo}.git`;
         } else if (githubRepo) {
           // Public repo URL
           cloneUrl = `https://github.com/${githubRepo}.git`;
@@ -252,14 +257,28 @@ export class WorkspaceManager {
     }
   }
 
-  private getProjectConfig(projectSlug: string | null | undefined): { github_repo: string; local_path: string } | null {
-    if (!projectSlug || !this.projects[projectSlug]) {
-      // If none or invalid, try to fallback to the first one available or process.cwd()
-      const keys = Object.keys(this.projects);
-      if (keys.length > 0) return this.projects[keys[0]];
-      return null;
+  /**
+   * Prepare workspace by ensuring GitHub repo exists before creating worktree
+   */
+  async prepareWorkspace(projectSlug?: string | null): Promise<{ success: boolean; error?: string }> {
+    // Determine the repo name from project slug or use default
+    const repoName = projectSlug ? sanitizeWorkspaceKey(projectSlug) : 'main';
+
+    // Check if repo exists on GitHub
+    const { exists, error: checkError } = await this.githubClient.repoExists(repoName);
+    if (checkError) {
+      return { success: false, error: checkError };
     }
-    return this.projects[projectSlug];
+
+    if (!exists) {
+      // Create the repo if it doesn't exist
+      const { success, error: createError } = await this.githubClient.createRepo(repoName, true);
+      if (!success) {
+        return { success: false, error: createError };
+      }
+    }
+
+    return { success: true };
   }
 
   /**
@@ -267,9 +286,9 @@ export class WorkspaceManager {
    * Section 9.3: Workspace Layout and Lifecycle
    */
   async createForIssue(issue: Pick<Issue, 'identifier' | 'project_slug'>): Promise<WorkspaceResult> {
-    const projectConfig = this.getProjectConfig(issue.project_slug);
-    const repoPath = projectConfig ? projectConfig.local_path : process.cwd();
-    const githubRepo = projectConfig ? projectConfig.github_repo : undefined;
+    const repoName = issue.project_slug ? sanitizeWorkspaceKey(issue.project_slug) : 'main';
+    const repoPath = path.join(this.projectRoot, repoName);
+    const githubRepo = `${this.githubOwner}/${repoName}`;
 
     // Step 1: Check git repository
     const gitResult = await this.checkGitRepo(repoPath, githubRepo);
@@ -401,10 +420,9 @@ export class WorkspaceManager {
 
     // Step 5: Run after_create hook if newly created
     if (createdNow && this.hooks.after_create) {
-      const [owner, repo] = projectConfig ? projectConfig.github_repo.split('/') : ['', ''];
       const hookResult = await this.executeHook('after_create', this.hooks.after_create, workspacePath, {
-        SYMPHONY_GITHUB_OWNER: owner || '',
-        SYMPHONY_GITHUB_REPO: repo || projectConfig?.github_repo || '',
+        SYMPHONY_GITHUB_OWNER: this.githubOwner,
+        SYMPHONY_GITHUB_REPO: repoName,
         SYMPHONY_ISSUE_IDENTIFIER: issue.identifier
       });
       if (!hookResult.success) {
@@ -438,13 +456,10 @@ export class WorkspaceManager {
     if (issue) {
       envOverrides['SYMPHONY_ISSUE_IDENTIFIER'] = issue.identifier;
       envOverrides['SYMPHONY_ISSUE_STATE'] = issue.state || '';
-      
-      const pConfig = this.getProjectConfig(issue.project_slug);
-      if (pConfig) {
-        const [owner, repo] = pConfig.github_repo.split('/');
-        envOverrides['SYMPHONY_GITHUB_OWNER'] = owner || '';
-        envOverrides['SYMPHONY_GITHUB_REPO'] = repo || pConfig.github_repo || '';
-      }
+
+      const repoName = issue.project_slug ? sanitizeWorkspaceKey(issue.project_slug) : 'main';
+      envOverrides['SYMPHONY_GITHUB_OWNER'] = this.githubOwner;
+      envOverrides['SYMPHONY_GITHUB_REPO'] = repoName;
     }
 
     const result = await this.executeHook('before_run', this.hooks.before_run, workspacePath, {
@@ -468,12 +483,9 @@ export class WorkspaceManager {
       envOverrides['SYMPHONY_ISSUE_IDENTIFIER'] = issue.identifier;
       envOverrides['SYMPHONY_ISSUE_STATE'] = issue.state || '';
 
-      const pConfig = this.getProjectConfig(issue.project_slug);
-      if (pConfig) {
-        const [owner, repo] = pConfig.github_repo.split('/');
-        envOverrides['SYMPHONY_GITHUB_OWNER'] = owner || '';
-        envOverrides['SYMPHONY_GITHUB_REPO'] = repo || pConfig.github_repo || '';
-      }
+      const repoName = issue.project_slug ? sanitizeWorkspaceKey(issue.project_slug) : 'main';
+      envOverrides['SYMPHONY_GITHUB_OWNER'] = this.githubOwner;
+      envOverrides['SYMPHONY_GITHUB_REPO'] = repoName;
     }
 
     const result = await this.executeHook('after_run', this.hooks.after_run, workspacePath, {
@@ -490,14 +502,13 @@ export class WorkspaceManager {
    * Remove a workspace using git worktree remove
    */
   async removeWorkspace(workspacePath: string, projectSlug?: string | null): Promise<{ success: boolean; error?: string }> {
-    const projectConfig = this.getProjectConfig(projectSlug);
-    const repoPath = projectConfig ? projectConfig.local_path : process.cwd();
+    const repoName = projectSlug ? sanitizeWorkspaceKey(projectSlug) : 'main';
+    const repoPath = path.join(this.projectRoot, repoName);
 
     if (this.hooks.before_remove) {
-      const [owner, repo] = projectConfig ? projectConfig.github_repo.split('/') : ['', ''];
       const hookResult = await this.executeHook('before_remove', this.hooks.before_remove, workspacePath, {
-        SYMPHONY_GITHUB_OWNER: owner || '',
-        SYMPHONY_GITHUB_REPO: repo || projectConfig?.github_repo || ''
+        SYMPHONY_GITHUB_OWNER: this.githubOwner,
+        SYMPHONY_GITHUB_REPO: repoName
       });
       if (!hookResult.success) {
         console.warn(`before_remove hook failed: ${hookResult.error}`);
