@@ -766,7 +766,7 @@ GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
         TARGET_STATE_NAME="Done"
         echo "[after-run] Review decision: $DECISION_DISPLAY - PR approved, will merge"
         ;;
-      REQUEST_CHANGES_MINOR|REQUEST_CHANGES_MAJOR|REQUEST_TESTS|REJECT)
+      REQUEST_CHANGES|REQUEST_CHANGES_MINOR|REQUEST_CHANGES_MAJOR|REQUEST_TESTS|REJECT)
         TARGET_STATE_ID="$LINEAR_IN_PROGRESS_STATE_ID"
         TARGET_STATE_NAME="In Progress"
         echo "[after-run] Review decision: $DECISION_DISPLAY - needs rework"
