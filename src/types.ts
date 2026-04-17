@@ -15,6 +15,7 @@ export interface Issue {
   priority: number | null;  // Lower numbers = higher priority
   state: string;  // Current tracker state name
   project_slug: string | null;
+  project_name: string | null;
   branch_name: string | null;
   url: string | null;
   labels: string[];  // Normalized to lowercase
@@ -52,6 +53,7 @@ export interface ServiceConfig {
   trackerKind: string;
   trackerEndpoint: string;
   trackerApiKey: string;
+  githubOwner: string;
   projects: Record<string, ProjectConfig>;  // Project slug to config mapping
   activeStates: string[];
   terminalStates: string[];
