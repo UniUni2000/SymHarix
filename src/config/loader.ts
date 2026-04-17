@@ -194,21 +194,7 @@ export function buildServiceConfig(workflow: WorkflowDefinition): ServiceConfig 
   const trackerEndpoint = (tracker.endpoint as string) || DEFAULTS.trackerEndpoint!;
   const trackerApiKey = resolveApiKey(tracker.api_key as string);
   
-  const projects: Record<string, { github_repo: string; local_path: string }> = {};
-  if (tracker.projects && typeof tracker.projects === 'object') {
-    for (const [slug, opts] of Object.entries(tracker.projects as Record<string, any>)) {
-       projects[slug] = {
-         github_repo: opts.github_repo || '',
-         local_path: normalizePath(opts.local_path || '', process.cwd())
-       };
-    }
-  } else if (tracker.project_slug) {
-    // Backwards compatibility
-    projects[tracker.project_slug as string] = {
-       github_repo: '',
-       local_path: process.cwd()
-    };
-  }
+  const githubOwner = process.env.GITHUB_OWNER || '';
 
   // Polling config
   const polling = (config.polling as Record<string, unknown>) || {};
@@ -259,7 +245,7 @@ export function buildServiceConfig(workflow: WorkflowDefinition): ServiceConfig 
     trackerKind,
     trackerEndpoint,
     trackerApiKey,
-    projects,
+    githubOwner,
     activeStates: parseStringArray(tracker.active_states, DEFAULTS.activeStates!),
     terminalStates: parseStringArray(tracker.terminal_states, DEFAULTS.terminalStates!),
     pollIntervalMs,
@@ -300,11 +286,9 @@ export function validateConfigForDispatch(cfg: ServiceConfig): { valid: boolean;
     errors.push('Missing required "tracker.api_key" (or environment variable not set)');
   }
 
-  // tracker.projects must have at least one mapping
-  if (cfg.trackerKind === 'linear') {
-    if (!cfg.projects || Object.keys(cfg.projects).length === 0) {
-      errors.push('Missing required "tracker.projects" mapping for Linear tracker');
-    }
+  // githubOwner is required for GitHub integration
+  if (!cfg.githubOwner) {
+    errors.push('Missing required "GITHUB_OWNER" environment variable');
   }
 
   // codex.command is required
