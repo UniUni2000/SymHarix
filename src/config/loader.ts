@@ -242,6 +242,14 @@ export function buildServiceConfig(workflow: WorkflowDefinition): ServiceConfig 
     ? parseNumber(server.port, 0)
     : null;
 
+  // Dev Policy config
+  const devPolicyConfig = (config.dev_policy as Record<string, unknown>) || {};
+  const maxDevAttempts = parseNumber(devPolicyConfig.max_dev_attempts, 3);
+
+  // Review Policy config
+  const reviewPolicyConfig = (config.review_policy as Record<string, unknown>) || {};
+  const notifyLinearOnReview = reviewPolicyConfig.notify_linear_on_review !== false;
+
   return {
     trackerKind,
     trackerEndpoint,
@@ -265,6 +273,12 @@ export function buildServiceConfig(workflow: WorkflowDefinition): ServiceConfig 
     codexTurnTimeoutMs,
     codexReadTimeoutMs,
     codexStallTimeoutMs,
+    devPolicy: {
+      maxDevAttempts
+    },
+    reviewPolicy: {
+      notifyLinearOnReview
+    },
     serverPort: serverPort !== null && serverPort > 0 ? serverPort : null
   };
 }
