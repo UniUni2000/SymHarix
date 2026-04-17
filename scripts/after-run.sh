@@ -147,36 +147,40 @@ postLinearComment() {
     return 1
   fi
 
-  # Use python to properly escape and build the GraphQL mutation
-  local response=$(python3 -c "
+  # Write comment to temp file to avoid shell escaping issues
+  local tmpfile=$(mktemp)
+  echo "$comment" > "$tmpfile"
+
+  # Use python to read comment, escape it properly, and make the API call
+  local response=$(python3 << PYSCRIPT
 import json
 import subprocess
-import sys
 
-issue_id = '$issue_id'
-comment = '''$comment'''
+with open('$tmpfile', 'r') as f:
+    comment = f.read()
 
-# Escape comment for JSON
-escaped_comment = json.dumps(comment)
+# Escape for JSON
+escaped_comment = json.dumps(comment)[1:-1]  # Remove surrounding quotes
 
-# Build the GraphQL mutation
-query = 'mutation { issueCommentCreate(input: {issueId: \"' + issue_id + '\", body: ' + escaped_comment + '}) { success } }'
+# Build GraphQL mutation
+query = 'mutation { issueCommentCreate(input: {issueId: "' + '$issue_id' + '", body: "' + escaped_comment + '"}) { success } }'
 mutation = {'query': query}
 
-mutation_json = json.dumps(mutation)
-
-# Make the curl request
+# Make curl request
 result = subprocess.run([
     'curl', '-s', '-X', 'POST',
     'https://api.linear.app/graphql',
     '-H', 'Authorization: $LINEAR_API_KEY',
     '-H', 'Content-Type: application/json',
     '--max-time', '15',
-    '-d', mutation_json
-], capture_output=True, text=True)
+    '-d', json.dumps(mutation)
+], capture_output=True, text=True, timeout=20)
 
 print(result.stdout)
-" 2>/dev/null || echo "{}")
+PYSCRIPT
+)
+
+  rm -f "$tmpfile"
 
   local success=$(echo "$response" | python3 -c "
 import sys, json
