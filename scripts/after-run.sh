@@ -197,6 +197,58 @@ PYSCRIPT
   fi
 }
 
+# -----------------------------------------------------------------------------
+# Helper: Update Linear issue state (curl-based)
+# -----------------------------------------------------------------------------
+updateLinearState() {
+  local issue_id="$1"
+  local target_state_id="$2"
+
+  curl -s -X POST https://api.linear.app/graphql \
+    -H "Authorization: $LINEAR_API_KEY" \
+    -H "Content-Type: application/json" \
+    --max-time 10 \
+    -d "{\"query\": \"mutation { issueUpdate(id: \\\"$issue_id\\\", input: { stateId: \\\"$target_state_id\\\" }) { success } }\"}" \
+    2>/dev/null
+}
+
+# -----------------------------------------------------------------------------
+# Helper: Post comment to Linear (curl-based, simpler version)
+# -----------------------------------------------------------------------------
+postLinearComment() {
+  local issue_id="$1"
+  local comment="$2"
+
+  # Escape comment for JSON
+  local escaped_comment=$(python3 -c "import json; print(json.dumps('''$comment'''))" | tr -d '"')
+
+  curl -s -X POST https://api.linear.app/graphql \
+    -H "Authorization: $LINEAR_API_KEY" \
+    -H "Content-Type: application/json" \
+    --max-time 10 \
+    -d "{\"query\": \"mutation { issueCommentCreate(input: {issueId: \\\"$issue_id\\\", body: $escaped_comment}) { success } }\"}" \
+    2>/dev/null
+}
+
+# -----------------------------------------------------------------------------
+# Helper: Update Linear to In Review and post PR link
+# -----------------------------------------------------------------------------
+updateLinearInReview() {
+  local issue_id="$1"
+  local pr_url="$2"
+
+  # Update to In Review
+  updateLinearState "$issue_id" "$LINEAR_IN_REVIEW_STATE_ID"
+
+  # Post PR link comment
+  local comment="## PR Created 🤖
+
+PR: $pr_url
+
+Automated PR created by Symphony Agent Platform."
+  postLinearComment "$issue_id" "$comment"
+}
+
 if [ -z "$GITHUB_TOKEN" ] || [ -z "$GITHUB_OWNER" ] || [ -z "$GITHUB_REPO" ]; then
   echo "[after-run] WARNING: GitHub config missing (GITHUB_TOKEN/GITHUB_OWNER/GITHUB_REPO), skipping PR creation."
   exit 0
@@ -350,6 +402,11 @@ except:
 
 if [ -n "$PR_URL" ]; then
   echo "[after-run] PR created: $PR_URL"
+
+  # Update Linear to In Review and post PR link as comment
+  if [ -n "$ISSUE_ID" ]; then
+    updateLinearInReview "$ISSUE_ID" "$PR_URL"
+  fi
 
   # -----------------------------------------------------------------------------
   # Step 3b: Wait for CI checks to pass (optional, configurable)
