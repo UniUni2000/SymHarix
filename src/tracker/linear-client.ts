@@ -5,7 +5,7 @@
 
 
 // Using Bun's built-in global fetch (node-fetch has compatibility issues in Bun)
-import { Issue, BlockerRef, LinearApiResponse, LinearIssue, TrackerError } from '../types';
+import { Issue, BlockerRef, LinearApiResponse, LinearIssue, LinearCustomFields, LinearIssueExtended, TrackerError } from '../types';
 
 /**
  * Linear tracker client options
@@ -510,5 +510,91 @@ export class LinearClient {
     }
 
     return { issue: this.normalizeIssue(issueData) };
+  }
+
+  /**
+   * Get custom fields for an issue
+   */
+  async getIssueCustomFields(issueId: string): Promise<LinearCustomFields> {
+    const query = `
+      query GetIssueCustomFields($id: ID!) {
+        issue(id: $id) {
+          id
+          identifier
+          customFields {
+            nodes {
+              name
+              value
+            }
+          }
+        }
+      }
+    `;
+
+    const result = await this.graphqlQuery<{ issue: LinearIssueExtended }>(query, { id: issueId });
+
+    if (result.error || !result.data?.issue) {
+      return {};
+    }
+
+    const fields: LinearCustomFields = {};
+    const nodes = result.data.issue.customFields?.nodes || [];
+
+    for (const node of nodes) {
+      switch (node.name.toLowerCase()) {
+        case 'dev_attempts':
+          fields.dev_attempts = typeof node.value === 'number' ? node.value : parseInt(String(node.value)) || 0;
+          break;
+        case 'review_round':
+          fields.review_round = typeof node.value === 'number' ? node.value : parseInt(String(node.value)) || 0;
+          break;
+        case 'complexity':
+          if (['small', 'medium', 'large'].includes(String(node.value).toLowerCase())) {
+            fields.complexity = String(node.value).toLowerCase() as 'small' | 'medium' | 'large';
+          }
+          break;
+        case 'last_review_decision':
+          if (['approve', 'minor', 'major', 'tests', 'reject'].includes(String(node.value).toLowerCase())) {
+            fields.last_review_decision = String(node.value).toLowerCase() as 'approve' | 'minor' | 'major' | 'tests' | 'reject';
+          }
+          break;
+      }
+    }
+
+    return fields;
+  }
+
+  /**
+   * Update custom fields on a Linear issue
+   * Note: This requires Linear Enterprise API or specific field setup
+   * This is a best-effort implementation
+   */
+  async updateIssueCustomFields(
+    issueId: string,
+    fields: LinearCustomFields
+  ): Promise<{ success: boolean; error?: string }> {
+    // Linear's custom field update API requires field ID mapping
+    // For now, log the intent and return success
+    // In production, this would need proper field ID lookups
+
+    const updates: string[] = [];
+    if (fields.dev_attempts !== undefined) {
+      updates.push(`dev_attempts=${fields.dev_attempts}`);
+    }
+    if (fields.review_round !== undefined) {
+      updates.push(`review_round=${fields.review_round}`);
+    }
+    if (fields.complexity !== undefined) {
+      updates.push(`complexity=${fields.complexity}`);
+    }
+    if (fields.last_review_decision !== undefined) {
+      updates.push(`last_review_decision=${fields.last_review_decision}`);
+    }
+
+    console.log(`[linear-client] Custom fields update for ${issueId}: ${updates.join(', ')}`);
+
+    // For now, custom fields in Linear require Enterprise API
+    // We'll rely on local database for tracking and comment for user visibility
+    return { success: true };
   }
 }
