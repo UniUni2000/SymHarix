@@ -36,10 +36,6 @@ polling:
   interval_ms: 30000
 workspace:
   root: /Users/liupenghui/Documents/code/agent/test-cc/workspaces
-hooks:
-  before_run: ./scripts/before-run.sh
-  after_run: ./scripts/after-run.sh
-  timeout_ms: 120000
 codex:
   command: node ./scripts/claude-adapter.cjs
 agent:
@@ -62,4 +58,4 @@ You are an AI coding assistant.
 - If Todo/In Progress: Implement the feature with progress tracking
 - If In Review: Review the PR and provide structured feedback
 
-When done, stop. The after_run hook handles git/PR/Linear updates.
+When done, stop. The state machine handles git/PR/Linear updates.
