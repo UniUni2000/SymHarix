@@ -598,4 +598,28 @@ export class LinearClient {
     // We'll rely on local database for tracking and comment for user visibility
     return { success: true };
   }
+
+  /**
+   * Post a comment to a Linear issue
+   */
+  async postComment(issueId: string, body: string): Promise<{ success: boolean; error?: string }> {
+    const mutation = `
+      mutation IssueCommentCreate($issueId: String!, $body: String!) {
+        issueCommentCreate(input: { issueId: $issueId, body: $body }) {
+          success
+        }
+      }
+    `;
+
+    const result = await this.graphqlQuery<{ issueCommentCreate: { success: boolean } }>(
+      mutation,
+      { issueId, body }
+    );
+
+    if (result.error) {
+      return { success: false, error: result.errorMessage };
+    }
+
+    return { success: result.data?.issueCommentCreate?.success || false };
+  }
 }
