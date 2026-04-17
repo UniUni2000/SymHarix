@@ -76,7 +76,7 @@ describe('Config Layer', () => {
       const config = buildServiceConfig(workflow);
       expect(config.pollIntervalMs).toBe(30000);
       expect(config.maxConcurrentAgents).toBe(10);
-      expect(config.activeStates).toEqual(['Todo', 'In Progress']);
+      expect(config.activeStates).toEqual(['Todo', 'In Progress', 'In Review']);
     });
 
     it('should resolve $VAR environment references', () => {
