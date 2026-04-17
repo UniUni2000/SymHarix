@@ -9,12 +9,11 @@ import type { Issue } from '../types';
  * Review decision types
  */
 export type ReviewDecision =
-  | 'approve'           // Can merge
-  | 'approve_minor'     // Can merge, minor suggestions
-  | 'request_changes_minor'  // Need small changes
-  | 'request_changes_major' // Need significant changes
-  | 'request_tests'         // Need tests
-  | 'reject';               // Completely unacceptable
+  | 'APPROVE'           // Can merge, code is correct and well-written
+  | 'APPROVE_MINOR'     // Can merge now, minor suggestions only
+  | 'REQUEST_CHANGES'   // Need changes before approval
+  | 'REQUEST_TESTS'     // Must add tests before approval
+  | 'REJECT';           // Completely wrong approach
 
 /**
  * Structured review report
@@ -36,7 +35,7 @@ export interface ReviewReport {
     testsPass: boolean;
     coverage?: string;
   };
-  testRequirements?: string;  // For request_tests decision
+  testRequirements?: string;  // For REQUEST_TESTS decision
   summary: string;
 }
 
@@ -50,7 +49,7 @@ export function buildReviewPrompt(
 ): string {
   const historySection = previousReviews && previousReviews.length > 0
     ? previousReviews.map(r =>
-        `- Round ${r.round}: ${r.decision.toUpperCase()} - ${r.summary.slice(0, 100)}`
+        `- Round ${r.round}: ${r.decision} - ${r.summary.slice(0, 100)}`
       ).join('\n')
     : '(no previous reviews)';
 
@@ -74,17 +73,16 @@ ${historySection}
 4. Assess code quality: logic, naming, performance, security
 5. Generate a structured review report
 
-## Review Decision Options
-Choose ONE of these:
+## Review Decision Options (pick ONE)
+Choose the most appropriate:
 
 | Decision | When to Use |
 |----------|-------------|
 | APPROVE | Code is correct, well-written, tests pass (if required) |
-| APPROVE_MINOR | Can merge now, small suggestions (naming, comments) |
-| REQUEST_CHANGES_MINOR | Need small changes (typos, formatting, minor logic) |
-| REQUEST_CHANGES_MAJOR | Need significant changes (architecture, logic bugs) |
+| APPROVE_MINOR | Can merge now, minor suggestions (naming, comments) only |
+| REQUEST_CHANGES | Need changes before approval |
 | REQUEST_TESTS | Must add tests before approval |
-| REJECT | Completely wrong approach, start over |
+| REJECT | Completely wrong approach |
 
 ## Test Requirements (if complexity=large or medium)
 - Check if tests exist and pass
@@ -92,7 +90,7 @@ Choose ONE of these:
 - If tests fail: REQUEST_CHANGES with failure details
 
 ## Output Format
-Generate your review report in Markdown format and save to REVIEW_REPORT.md:
+Generate your review report in Markdown format and save to REVIEW_REPORT.md (NOT committed):
 
 \`\`\`markdown
 # Review Report: ${issue.identifier}
@@ -103,7 +101,7 @@ Generate your review report in Markdown format and save to REVIEW_REPORT.md:
 - **Reviewer**: Symphony Review Agent
 - **时间**: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-## 评审结果: [APPROVE | APPROVE_MINOR | REQUEST_CHANGES_MINOR | REQUEST_CHANGES_MAJOR | REQUEST_TESTS | REJECT]
+## 评审结果: [APPROVE | APPROVE_MINOR | REQUEST_CHANGES | REQUEST_TESTS | REJECT]
 
 ## 代码质量
 - ✅/❌ 逻辑正确
@@ -131,9 +129,10 @@ Generate your review report in Markdown format and save to REVIEW_REPORT.md:
 \`\`\`
 
 ## After Your Review
-- Write the report to REVIEW_REPORT.md in the workspace
-- The after-run hook will post a comment to the Linear issue
-- The orchestrator will update Linear state based on your decision
+1. Write the report to REVIEW_REPORT.md in the workspace (do NOT commit it)
+2. Post feedback as a comment on the GitHub Issue
+3. Sync feedback to Linear issue
+4. The orchestrator will update Linear state based on your decision
 `;
 }
 
@@ -144,16 +143,15 @@ export function parseReviewDecision(reportContent: string): ReviewDecision {
   const lines = reportContent.split('\n');
   for (const line of lines) {
     if (line.startsWith('## 评审结果:')) {
-      const decision = line.split(':')[1].trim().toLowerCase().replace('_', '');
-      if (decision.includes('approve') && !decision.includes('minor')) return 'approve';
-      if (decision.includes('approve') && decision.includes('minor')) return 'approve_minor';
-      if (decision.includes('request_changes') && decision.includes('minor')) return 'request_changes_minor';
-      if (decision.includes('request_changes') && decision.includes('major')) return 'request_changes_major';
-      if (decision.includes('request_tests')) return 'request_tests';
-      if (decision.includes('reject')) return 'reject';
+      const decision = line.split(':')[1].trim().toUpperCase().replace(' ', '_');
+      if (decision === 'APPROVE') return 'APPROVE';
+      if (decision === 'APPROVE_MINOR') return 'APPROVE_MINOR';
+      if (decision === 'REQUEST_CHANGES') return 'REQUEST_CHANGES';
+      if (decision === 'REQUEST_TESTS') return 'REQUEST_TESTS';
+      if (decision === 'REJECT') return 'REJECT';
     }
   }
-  return 'approve'; // default to approve if can't parse
+  return 'APPROVE'; // default to approve if can't parse
 }
 
 /**
@@ -161,21 +159,19 @@ export function parseReviewDecision(reportContent: string): ReviewDecision {
  */
 export function formatLinearComment(report: ReviewReport): string {
   const emoji: Record<ReviewDecision, string> = {
-    approve: '✅',
-    approve_minor: '👍',
-    request_changes_minor: '⚠️',
-    request_changes_major: '🔴',
-    request_tests: '🧪',
-    reject: '🚫'
+    APPROVE: '✅',
+    APPROVE_MINOR: '👍',
+    REQUEST_CHANGES: '⚠️',
+    REQUEST_TESTS: '🧪',
+    REJECT: '🚫'
   };
 
   const labels: Record<ReviewDecision, string> = {
-    approve: 'APPROVED',
-    approve_minor: 'APPROVED (Minor Suggestions)',
-    request_changes_minor: 'Changes Requested (Minor)',
-    request_changes_major: 'Changes Requested (Major)',
-    request_tests: 'Tests Required',
-    reject: 'REJECTED'
+    APPROVE: 'APPROVED',
+    APPROVE_MINOR: 'APPROVED (Minor Suggestions)',
+    REQUEST_CHANGES: 'Changes Requested',
+    REQUEST_TESTS: 'Tests Required',
+    REJECT: 'REJECTED'
   };
 
   let comment = `## Code Review ${emoji[report.decision]} **${labels[report.decision]}**\n\n`;
