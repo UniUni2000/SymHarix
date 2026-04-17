@@ -54,7 +54,7 @@ export interface ServiceConfig {
   trackerEndpoint: string;
   trackerApiKey: string;
   githubOwner: string;
-  projects: Record<string, ProjectConfig>;  // Project slug to config mapping
+  githubToken: string;
   activeStates: string[];
   terminalStates: string[];
 
