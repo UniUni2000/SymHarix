@@ -103,28 +103,46 @@ export function buildDevPrompt(issue: Issue, existingLog?: string): string {
 ${issue.branch_name ? `- **Branch**: ${issue.branch_name}` : ''}
 
 ## Complexity Assessment
-After analyzing the issue, I determined:
 - **Complexity**: ${judgment.complexity.toUpperCase()}
 - **Reasoning**: ${judgment.reasoning}
 - **Requires Tests**: ${judgment.requiresTests ? 'YES - must write and pass tests' : 'NO - code changes only'}
 
-## Your Task
-1. First, ${existingLog ? 'read the existing DEVELOPMENT_LOG.md to understand previous progress' : 'create DEVELOPMENT_LOG.md to track your progress'}
-2. Implement the required changes
-3. ${judgment.requiresTests ? 'Write tests that pass (required for this complexity level)' : 'Commit your changes'}
-4. Update DEVELOPMENT_LOG.md after each significant step
+## Your Responsibilities
+1. Analyze the issue and implement the required changes
+2. Write and run tests (required for ${judgment.complexity} complexity)
+3. Update DEVELOPMENT_LOG.md after each significant step
+4. **When done: create HANDOVER.md with development summary**
+5. Commit changes, push, and create PR
+
+## HANDOVER.md Template (required when completing)
+\`\`\`markdown
+# Handover: ${issue.identifier}
+
+## 开发摘要
+{一句话描述做了什么}
+
+## 变更范围
+- 文件列表
+- 新增/删除/修改
+
+## 测试情况
+- 单元测试: PASS/FAIL/N/A
+- 集成测试: PASS/FAIL/N/A
+
+## 已知问题
+{DEV 认为可能有问题的地方，Review 重点关注}
+
+## 下次继续（如需打回）
+{空，DEV 不填写}
+\`\`\`
 
 ${existingLog ? `## Existing Progress\n${existingLog}\n---\nContinue from where the previous session left off.` : ''}
 
-## Workflow
-- After each significant change, update DEVELOPMENT_LOG.md
-- When done: commit, push, create PR, and the after-run hook will handle Linear state
-- Do NOT modify .mcp.json or ISSUE_CONTEXT.md
-
 ## Important
-- Be thorough but efficient
-- Write meaningful commit messages
-- If blocked, document what you tried in DEVELOPMENT_LOG.md
+- Do NOT decide if code is ready for review — that is Review's job
+- Do NOT fix issues pointed out by Review — wait for their feedback
+- If you discover the issue description is unclear, document it in HANDOVER.md "已知问题" and continue with your best judgment
+- When complete: commit, push, create PR, create HANDOVER.md
 `;
 
   return prompt;
