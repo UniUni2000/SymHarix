@@ -23,7 +23,7 @@ import { WorkspaceManager } from '../workspace/manager';
 import { AgentRunner, TurnResult } from '../agent/runner';
 import { buildReviewPrompt } from '../hooks/review-prompt';
 import { buildDevPrompt, buildDevContinuationPrompt } from '../hooks/dev-prompt';
-import { parseHandover, updateHandoverNextSteps } from '../hooks/handover';
+import { updateHandoverNextSteps } from '../hooks/handover';
 
 /**
  * GitHub Issue Client for E2E flow
@@ -126,11 +126,11 @@ export class Orchestrator extends EventEmitter {
     this.config = config;
     this.workflow = workflow;
 
-    // Initialize tracker client
+    // Initialize tracker client (projectSlugs empty = auto-detect from Linear)
     this.tracker = new LinearClient({
       endpoint: config.trackerEndpoint,
       apiKey: config.trackerApiKey,
-      projectSlugs: Object.keys(config.projects)
+      projectSlugs: []
     });
 
     // Initialize workspace manager
@@ -363,14 +363,9 @@ export class Orchestrator extends EventEmitter {
       errors.push(`Unsupported tracker kind: ${this.config.trackerKind}`);
     }
 
-    // tracker.api_key must be present
+    // tracker.api_key is required after $ resolution
     if (!this.config.trackerApiKey) {
       errors.push('Missing tracker API key');
-    }
-
-    // tracker.projects must be present and not empty
-    if (!this.config.projects || Object.keys(this.config.projects).length === 0) {
-      errors.push('Missing tracker projects mapping');
     }
 
     // codex.command must be present
@@ -769,7 +764,9 @@ export class Orchestrator extends EventEmitter {
                 console.warn('[orchestrator] Failed to update HANDOVER.md:', err);
               }
             }
-          } catch {}
+          } catch (err) {
+            console.warn('[orchestrator] Failed to parse SYMPHONY_STATS for HANDOVER update:', err);
+          }
         }
       }
 

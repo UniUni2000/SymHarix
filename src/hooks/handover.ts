@@ -50,7 +50,7 @@ ${data.testStatus.coverage ? `- 测试覆盖: ${data.testStatus.coverage}` : ''}
 ## 已知问题
 ${data.knownIssues.length > 0 ? data.knownIssues.map(i => `- ${i}`).join('\n') : '(无)'}
 
-## 下次继续（如需打回）
+## 下次继续
 ${'(由 Review 填写)'}
 
 ---
@@ -89,6 +89,8 @@ export function parseHandover(content: string): ParsedHandover | null {
         }
       } else if (section === '已知问题' && line.trim().startsWith('- ')) {
         result.knownIssues.push(line.replace(/^- /, '').trim());
+      } else if (section === '下次继续') {
+        // Skip this section
       }
     }
 
@@ -99,32 +101,30 @@ export function parseHandover(content: string): ParsedHandover | null {
 }
 
 /**
- * Update "下次继续（如需打回）" section in existing HANDOVER.md
+ * Update "下次继续" section in existing HANDOVER.md
  */
 export function updateHandoverNextSteps(content: string, nextSteps: string): string {
   const lines = content.split('\n');
-  let inNextSection = false;
-  const updatedLines: string[] = [];
+  const result: string[] = [];
+  let i = 0;
 
-  for (const line of lines) {
-    if (line.startsWith('## 下次继续（如需打回）')) {
-      inNextSection = true;
-      updatedLines.push(line);
-    } else if (inNextSection && line.startsWith('## ')) {
-      inNextSection = false;
-      updatedLines.push(line);
-    } else if (inNextSection && !line.trim()) {
-      // Skip empty lines in this section
-      continue;
-    } else if (inNextSection) {
-      // Replace content in this section
-      if (!updatedLines.includes(nextSteps)) {
-        updatedLines.push(nextSteps);
+  while (i < lines.length) {
+    const line = lines[i];
+
+    if (line.startsWith('## 下次继续')) {
+      // Found the section - add header and new content
+      result.push(line);
+      result.push(nextSteps);
+      // Skip until next ## section or end
+      i++;
+      while (i < lines.length && !lines[i].startsWith('## ')) {
+        i++;
       }
     } else {
-      updatedLines.push(line);
+      result.push(line);
+      i++;
     }
   }
 
-  return updatedLines.join('\n');
+  return result.join('\n');
 }
