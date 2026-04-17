@@ -3,10 +3,7 @@ tracker:
   kind: linear
   api_key: $SYMPHONY_TRACKER_API_KEY
   endpoint: https://api.linear.app/graphql
-  projects:
-    6d0843db8904:
-      github_repo: UniUni2000/symphony-test
-      local_path: /Users/liupenghui/Documents/code/agent/test-cc/repos/symphony-test
+  # projects 配置已移除 - 现在自动从 Linear Project 名字推导
   active_states:
     - Todo
     - In Progress
