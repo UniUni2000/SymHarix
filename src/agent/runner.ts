@@ -6,6 +6,7 @@
 import { EventEmitter } from 'events';
 import * as cp from 'child_process';
 import * as path from 'path';
+import * as fs from 'fs';
 import { AgentEvent, AgentEventType, LiveSession, Issue, WorkflowDefinition } from '../types';
 import { Liquid } from 'liquidjs';
 
@@ -31,6 +32,7 @@ export interface AgentRunnerOptions {
   turnTimeoutMs: number;
   readTimeoutMs: number;
   stallTimeoutMs: number;
+  projectRoot: string;
 }
 
 /**
@@ -46,6 +48,7 @@ export interface TurnResult {
     output: number;
     total: number;
   };
+  claude_api_calls: number;
 }
 
 /**
@@ -76,6 +79,27 @@ export class AgentRunner extends EventEmitter {
       strictVariables: true,  // Section 5.4: Unknown variables must fail
       strictFilters: true     // Section 5.4: Unknown filters must fail
     });
+  }
+
+  /**
+   * Resolve command path relative to project root
+   */
+  private resolveCommandPath(command: string): string {
+    // If command starts with node/python etc., extract the interpreter and script
+    const parts = command.split(' ');
+    if (parts.length > 0) {
+      const interpreter = parts[0];
+      const script = parts.slice(1).join(' ');
+      
+      // Check if it's a node/python command with a relative script path
+      if ((interpreter === 'node' || interpreter === 'python' || interpreter === 'python3') && script) {
+        const scriptPath = path.isAbsolute(script) ? script : path.resolve(this.options.projectRoot, script);
+        return `${interpreter} ${scriptPath}`;
+      }
+    }
+    
+    // For absolute paths or other commands, return as is
+    return command;
   }
 
   /**
@@ -143,27 +167,44 @@ export class AgentRunner extends EventEmitter {
    */
   private extractTokens(msg: CodexMessage): { input: number; output: number; total: number } | null {
     // Look for token counts in various payload shapes
-    const params = msg.params as Record<string, unknown> | undefined;
-    if (!params) return null;
 
-    // Check for usage object
-    const usage = params.usage as Record<string, unknown> | undefined;
-    if (usage) {
-      return {
-        input: (usage.input_tokens as number) || (usage.inputTokens as number) || 0,
-        output: (usage.output_tokens as number) || (usage.outputTokens as number) || 0,
-        total: (usage.total_tokens as number) || (usage.totalTokens as number) || 0
-      };
+    // Check msg.params first (standard usage object)
+    const params = msg.params as Record<string, unknown> | undefined;
+    if (params) {
+      const usage = params.usage as Record<string, unknown> | undefined;
+      if (usage) {
+        return {
+          input: (usage.input_tokens as number) || (usage.inputTokens as number) || 0,
+          output: (usage.output_tokens as number) || (usage.outputTokens as number) || 0,
+          total: (usage.total_tokens as number) || (usage.totalTokens as number) || 0
+        };
+      }
+
+      // Check for tokenUsage nested object
+      const tokenUsage = params.tokenUsage as Record<string, unknown> | undefined;
+      if (tokenUsage) {
+        return {
+          input: (tokenUsage.inputTokens as number) || 0,
+          output: (tokenUsage.outputTokens as number) || 0,
+          total: (tokenUsage.totalTokens as number) || 0
+        };
+      }
     }
 
-    // Check for tokenUsage nested object
-    const tokenUsage = params.tokenUsage as Record<string, unknown> | undefined;
-    if (tokenUsage) {
-      return {
-        input: (tokenUsage.inputTokens as number) || 0,
-        output: (tokenUsage.outputTokens as number) || 0,
-        total: (tokenUsage.totalTokens as number) || 0
-      };
+    // Also check msg.result.turn.tokens (adapter format)
+    const result = msg.result as Record<string, unknown> | undefined;
+    if (result) {
+      const turn = result.turn as Record<string, unknown> | undefined;
+      if (turn) {
+        const turnTokens = turn.tokens as Record<string, number> | undefined;
+        if (turnTokens) {
+          return {
+            input: turnTokens.input || 0,
+            output: turnTokens.output || 0,
+            total: turnTokens.total || 0
+          };
+        }
+      }
     }
 
     return null;
@@ -230,14 +271,30 @@ export class AgentRunner extends EventEmitter {
    * Section 10.1: Launch Contract
    */
   launch(workspacePath: string): cp.ChildProcess {
+    // Find bash path dynamically for sandbox compatibility
+    const bashPath = this.findBashPath();
+    
+    // Resolve command path relative to project root
+    const resolvedCommand = this.resolveCommandPath(this.options.codexCommand);
+    
     // Section 10.1: Invoke via bash -lc in workspace directory
-    const child = cp.spawn('/usr/bin/bash', ['-lc', this.options.codexCommand], {
+    const child = cp.spawn(bashPath, ['-lc', resolvedCommand], {
       cwd: workspacePath,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: process.env
     });
 
     return child;
+  }
+
+  /**
+   * Find bash executable path
+   * In sandbox environments, use 'bash' with PATH lookup rather than absolute paths
+   */
+  private findBashPath(): string {
+    // In sandbox/container environments, using 'bash' directly often works better
+    // because the sandbox may have its own PATH mapping
+    return 'bash';
   }
 
   /**
@@ -387,6 +444,7 @@ export class AgentRunner extends EventEmitter {
       let cancelled = false;
       let error: string | undefined;
       let tokens = { input: 0, output: 0, total: 0 };
+      let claudeApiCalls = 0;  // Count each result message as one API call
 
       const timeout = setTimeout(() => {
         if (!completed) {
@@ -398,7 +456,7 @@ export class AgentRunner extends EventEmitter {
       const completeTurn = (result: TurnResult) => {
         completed = true;
         clearTimeout(timeout);
-        resolve(result);
+        resolve({ ...result, claude_api_calls: claudeApiCalls });
       };
 
       child.stdout?.on('data', (data: Buffer) => {
@@ -421,6 +479,8 @@ export class AgentRunner extends EventEmitter {
           const extractedTokens = this.extractTokens(msg);
           if (extractedTokens) {
             tokens = extractedTokens;
+            // Don't count here - we count once per turn completion in claude-adapter
+            // to avoid double-counting when multiple messages contain tokens
           }
 
           // Determine event type and emit
@@ -442,6 +502,22 @@ export class AgentRunner extends EventEmitter {
 
           // Check for completion states
           if (msg.method === 'turn/completed') {
+            // Extract api_calls and tokens from the adapter's turn/completed message
+            // Adapter sends: { method: "turn/completed", result: { turn: { api_calls: N, tokens: { input, output, total } } } }
+            const result = msg.result as Record<string, unknown> | undefined;
+            const turnData = result?.turn as Record<string, unknown> | undefined;
+            claudeApiCalls = (turnData?.api_calls as number) || 0;
+
+            // Extract tokens from adapter's turn data (overrides any tokens from earlier messages)
+            const turnTokens = turnData?.tokens as { input?: number; output?: number; total?: number } | undefined;
+            if (turnTokens) {
+              tokens = {
+                input: turnTokens.input || 0,
+                output: turnTokens.output || 0,
+                total: turnTokens.total || 0
+              };
+            }
+
             completeTurn({
               success: true,
               completed: true,

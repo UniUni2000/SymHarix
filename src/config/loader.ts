@@ -14,7 +14,7 @@ import * as path from 'path';
 const DEFAULTS: Partial<ServiceConfig> = {
   // Tracker defaults (for linear)
   trackerEndpoint: 'https://api.linear.app/graphql',
-  activeStates: ['Todo', 'In Progress'],
+  activeStates: ['Todo', 'In Progress', 'In Review'],
   terminalStates: ['Closed', 'Cancelled', 'Canceled', 'Duplicate', 'Done'],
 
   // Polling
@@ -264,6 +264,7 @@ export function buildServiceConfig(workflow: WorkflowDefinition): ServiceConfig 
     terminalStates: parseStringArray(tracker.terminal_states, DEFAULTS.terminalStates!),
     pollIntervalMs,
     workspaceRoot,
+    projectRoot: process.cwd(),
     hooks,
     maxConcurrentAgents,
     maxRetryBackoffMs,
