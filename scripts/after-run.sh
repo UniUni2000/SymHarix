@@ -219,15 +219,41 @@ postLinearComment() {
   local issue_id="$1"
   local comment="$2"
 
+  if [ -z "$LINEAR_API_KEY" ]; then
+    echo "[after-run] Linear API key not set, skipping comment"
+    return 0
+  fi
+
   # Escape comment for JSON
   local escaped_comment=$(python3 -c "import json; print(json.dumps('''$comment'''))" | tr -d '"')
 
-  curl -s -X POST https://api.linear.app/graphql \
+  # Use a temp file for the JSON payload to avoid shell escaping issues
+  local json_payload=$(python3 -c "
+import json
+payload = {
+    'query': 'mutation { issueCommentCreate(input: {issueId: \"$issue_id\", body: $escaped_comment}) { success } }'
+}
+print(json.dumps(payload))
+" 2>/dev/null)
+
+  if [ -z "$json_payload" ]; then
+    echo "[after-run] Failed to create JSON payload for comment"
+    return 0  # Return 0 to not trigger set -e
+  fi
+
+  local response=$(curl -s -X POST https://api.linear.app/graphql \
     -H "Authorization: $LINEAR_API_KEY" \
     -H "Content-Type: application/json" \
     --max-time 10 \
-    -d "{\"query\": \"mutation { issueCommentCreate(input: {issueId: \\\"$issue_id\\\", body: $escaped_comment}) { success } }\"}" \
-    2>/dev/null
+    -d "$json_payload" 2>/dev/null)
+
+  if echo "$response" | grep -q '"success":true'; then
+    echo "[after-run] Posted comment to Linear issue $issue_id"
+    return 0
+  else
+    echo "[after-run] Failed to post comment: $response"
+    return 0  # Return 0 to not trigger set -e
+  fi
 }
 
 # -----------------------------------------------------------------------------
@@ -265,7 +291,9 @@ if git diff --quiet && git diff --staged --quiet && [ -z "$(git ls-files --other
 else
   git add -A
   # 排除 Symphony 工作区配置文件，不提交到 GitHub
-  git reset ISSUE_CONTEXT.md .mcp.json 2>/dev/null || true
+  # 这些文件仅用于 agent 内部通信，不应暴露到 Git 历史
+  git reset ISSUE_CONTEXT.md DEVELOPMENT_LOG.md REVIEW_REPORT.md .mcp.json 2>/dev/null || true
+  git clean -f ISSUE_CONTEXT.md DEVELOPMENT_LOG.md REVIEW_REPORT.md .mcp.json 2>/dev/null || true
   git commit -m "feat($ISSUE_IDENTIFIER): agent completed task
 
 Automated commit by Symphony Agent Platform.
@@ -756,7 +784,8 @@ GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
     echo "[after-run] Found REVIEW_REPORT.md, posting to Linear..."
 
     # Extract decision for the comment and state determination
-    DECISION_DISPLAY=$(grep "## 评审结果:" REVIEW_REPORT.md | sed 's/.*: //' | tr -d ' ')
+    # The header is "## Review Decision" or "## 评审结果:" and the value is on the next line like "**REJECT**"
+    DECISION_DISPLAY=$(awk '/^## Review Decision|^## 评审结果:/{getline; gsub(/\*\*/,""); print}' REVIEW_REPORT.md | tr -d ' ')
 
     # Parse decision to determine TARGET_STATE
     # APPROVE/approve -> Done, APPROVE_MINOR -> Done, REQUEST_CHANGES_* / REQUEST_TESTS / reject -> In Progress
@@ -779,8 +808,8 @@ GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
         ;;
     esac
 
-    # Build summary from the report
-    SUMMARY=$(grep -A3 "## 总结" REVIEW_REPORT.md 2>/dev/null | tail -n +2 | head -3 | tr '\n' ' ' | sed 's/"/\\"/g')
+    # Build summary from the report (support both Chinese and English headers)
+    SUMMARY=$(grep -A3 "^## Review Summary|^## 总结" REVIEW_REPORT.md 2>/dev/null | tail -n +2 | head -3 | tr '\n' ' ' | sed 's/"/\\"/g')
 
     if [ -n "$DECISION_DISPLAY" ]; then
       COMMENT="## Code Review 🤖 **$DECISION_DISPLAY**
@@ -789,7 +818,7 @@ GITHUB_API_CALLS=$((GITHUB_API_CALLS + 1))
 
 *Automated review by Symphony Agent - see REVIEW_REPORT.md for details*"
 
-      postLinearComment "$ISSUE_ID" "$COMMENT"
+      postLinearComment "$ISSUE_ID" "$COMMENT" || true
     fi
   fi
 else
@@ -839,7 +868,7 @@ REVIEW_DECISION=""
 REVIEW_FEEDBACK=""
 
 if [ -f "REVIEW_REPORT.md" ]; then
-  REVIEW_DECISION=$(grep "## 评审结果:" REVIEW_REPORT.md 2>/dev/null | sed 's/.*: //' | tr -d ' ' || echo "")
+  REVIEW_DECISION=$(awk '/^## Review Decision|^## 评审结果:/{getline; gsub(/\*\*/,""); print}' REVIEW_REPORT.md 2>/dev/null | tr -d ' ' || echo "")
 
   # Extract must-fix items for feedback
   if [ -n "$REVIEW_DECISION" ] && [ "$REVIEW_DECISION" = "REQUEST_CHANGES" ]; then

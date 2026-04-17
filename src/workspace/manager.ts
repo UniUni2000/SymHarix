@@ -379,8 +379,8 @@ export class WorkspaceManager {
     // Step 2: Sanitize identifier
     const workspaceKey = sanitizeWorkspaceKey(issue.identifier);
 
-    // Step 3: Compute workspace path
-    const workspacePath = this.getWorkspacePath(issue.identifier, issue.project_slug);
+    // Step 3: Compute workspace path (use project_name, fallback to project_slug)
+    const workspacePath = this.getWorkspacePath(issue.identifier, issue.project_slug, issue.project_name);
 
     // Validate path safety
     const pathValidation = this.validateWorkspacePath(workspacePath);
@@ -527,7 +527,7 @@ export class WorkspaceManager {
   /**
    * Run before_run hook for a workspace
    */
-  async beforeRun(workspacePath: string, issue?: Pick<Issue, 'identifier' | 'state' | 'project_slug'>): Promise<{ success: boolean; error?: string }> {
+  async beforeRun(workspacePath: string, issue?: Pick<Issue, 'identifier' | 'state' | 'project_slug' | 'project_name'>): Promise<{ success: boolean; error?: string }> {
     if (!this.hooks.before_run) {
       return { success: true };
     }
@@ -537,7 +537,8 @@ export class WorkspaceManager {
       envOverrides['SYMPHONY_ISSUE_IDENTIFIER'] = issue.identifier;
       envOverrides['SYMPHONY_ISSUE_STATE'] = issue.state || '';
 
-      const repoName = issue.project_slug ? sanitizeWorkspaceKey(issue.project_slug) : 'main';
+      // Use project_name for GitHub repo (e.g., "test2"), not project_slug (Linear slugId like "1d3a3f95809d")
+      const repoName = issue.project_name ? sanitizeWorkspaceKey(issue.project_name) : (issue.project_slug ? sanitizeWorkspaceKey(issue.project_slug) : 'main');
       envOverrides['SYMPHONY_GITHUB_OWNER'] = this.githubOwner;
       envOverrides['SYMPHONY_GITHUB_REPO'] = repoName;
     }
@@ -552,7 +553,7 @@ export class WorkspaceManager {
   /**
    * Run after_run hook for a workspace
    */
-  async afterRun(workspacePath: string, issue?: Pick<Issue, 'identifier' | 'state' | 'project_slug'>): Promise<{ success: boolean; output?: string }> {
+  async afterRun(workspacePath: string, issue?: Pick<Issue, 'identifier' | 'state' | 'project_slug' | 'project_name'>): Promise<{ success: boolean; output?: string }> {
     console.log(`[workspace-manager] afterRun called, hook=${this.hooks.after_run || 'NOT SET'}`);
     if (!this.hooks.after_run) {
       return { success: true };
@@ -563,7 +564,8 @@ export class WorkspaceManager {
       envOverrides['SYMPHONY_ISSUE_IDENTIFIER'] = issue.identifier;
       envOverrides['SYMPHONY_ISSUE_STATE'] = issue.state || '';
 
-      const repoName = issue.project_slug ? sanitizeWorkspaceKey(issue.project_slug) : 'main';
+      // Use project_name for GitHub repo (e.g., "test2"), not project_slug (Linear slugId)
+      const repoName = issue.project_name ? sanitizeWorkspaceKey(issue.project_name) : (issue.project_slug ? sanitizeWorkspaceKey(issue.project_slug) : 'main');
       envOverrides['SYMPHONY_GITHUB_OWNER'] = this.githubOwner;
       envOverrides['SYMPHONY_GITHUB_REPO'] = repoName;
     }
@@ -619,10 +621,11 @@ export class WorkspaceManager {
   /**
    * Get workspace path for an issue identifier (without creating)
    */
-  getWorkspacePath(identifier: string, projectSlug?: string | null): string {
-    const projectName = projectSlug ? sanitizeWorkspaceKey(projectSlug) : 'main';
+  getWorkspacePath(identifier: string, projectSlug?: string | null, projectName?: string | null): string {
+    // Prefer project_name for workspace path, fallback to projectSlug
+    const workspaceProjectName = projectName ? sanitizeWorkspaceKey(projectName) : (projectSlug ? sanitizeWorkspaceKey(projectSlug) : 'main');
     const workspaceKey = sanitizeWorkspaceKey(identifier);
-    return path.join(this.workspaceRoot, projectName, workspaceKey);
+    return path.join(this.workspaceRoot, workspaceProjectName, workspaceKey);
   }
 
   /**
