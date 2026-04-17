@@ -116,6 +116,7 @@ export class LinearClient {
       priority,
       state: linearIssue.state.name,
       project_slug: linearIssue.project?.slugId || null,
+      project_name: linearIssue.project?.name || null,
       branch_name: linearIssue.branchName,
       url: linearIssue.url,
       labels,
