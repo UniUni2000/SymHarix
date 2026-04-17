@@ -89,6 +89,16 @@ export interface ServiceConfig {
   codexReadTimeoutMs: number;
   codexStallTimeoutMs: number;
 
+  // Dev Policy
+  devPolicy: {
+    maxDevAttempts: number;
+  };
+
+  // Review Policy
+  reviewPolicy: {
+    notifyLinearOnReview: boolean;
+  };
+
   // Server (extension)
   serverPort: number | null;
 }
