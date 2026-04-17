@@ -6,6 +6,14 @@
 
 import * as path from 'path';
 import * as fs from 'fs';
+import * as dotenv from 'dotenv';
+
+// Load .env file explicitly
+const envPath = path.resolve(__dirname, '../../.env');
+if (fs.existsSync(envPath)) {
+  dotenv.config({ path: envPath });
+}
+
 import { Orchestrator } from '../orchestrator';
 import { WorkflowWatcher } from '../workflow/watcher';
 import { loadWorkflow, resolveWorkflowPath } from '../workflow/loader';
@@ -16,14 +24,16 @@ import { Issue, AgentEvent, WorkflowDefinition, ServiceConfig } from '../types';
 /**
  * Parse command line arguments
  */
-function parseArgs(): { workflowPath?: string; port?: number } {
+function parseArgs(): { workflowPath?: string; port?: number; kill?: boolean } {
   const args = process.argv.slice(2);
-  const result: { workflowPath?: string; port?: number } = {};
+  const result: { workflowPath?: string; port?: number; kill?: boolean } = {};
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
 
-    if (arg === '--port' && args[i + 1]) {
+    if (arg === '--kill') {
+      result.kill = true;
+    } else if (arg === '--port' && args[i + 1]) {
       result.port = parseInt(args[i + 1], 10);
       i++;
     } else if (arg.startsWith('--port=')) {
@@ -48,6 +58,7 @@ Usage: symphony [options] [workflow-path]
 
 Options:
   --port <number>    Enable HTTP server on specified port
+  --kill             Stop all running symphony agent processes
   --help             Show this help message
 
 Arguments:
@@ -57,6 +68,7 @@ Examples:
   symphony                        # Use ./WORKFLOW.md
   symphony path/to/WORKFLOW.md    # Use specified workflow file
   symphony --port 3000            # Enable HTTP server on port 3000
+  symphony --kill                 # Stop all running agents
 `);
 }
 
@@ -69,6 +81,48 @@ async function main(): Promise<void> {
   // Handle --help
   if (process.argv.includes('--help')) {
     printUsage();
+    process.exit(0);
+  }
+
+  // --kill: terminate all running symphony processes
+  if (args.kill) {
+    const myPid = process.pid;
+    const { execSync } = await import('child_process');
+
+    // Find symphony-related processes
+    const pids = execSync(
+      `ps aux | grep -E 'bun run src/cli|node.*symharix.*cli|bun.*cli\\.tsx' | grep -v grep | awk '{print $2}'`
+    ).toString().trim().split('\n').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n !== myPid && n !== 1);
+
+    if (pids.length === 0) {
+      console.log('[symphony] No running processes found.');
+      process.exit(0);
+    }
+
+    console.log('[symphony] Stopping processes:', pids.join(', '));
+    for (const pid of pids) {
+      try {
+        process.kill(pid, 'SIGTERM');
+        console.log(`[symphony] Sent SIGTERM to ${pid}`);
+      } catch (err) {
+        console.error(`[symphony] Failed to kill ${pid}:`, err);
+      }
+    }
+
+    // Also kill any orphaned claude-adapter processes
+    try {
+      const adapterPids = execSync(
+        `ps aux | grep 'claude-adapter\\.cjs' | grep -v grep | awk '{print $2}'`
+      ).toString().trim().split('\n').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
+      for (const pid of adapterPids) {
+        try {
+          process.kill(pid, 'SIGTERM');
+          console.log(`[symphony] Sent SIGTERM to adapter ${pid}`);
+        } catch {}
+      }
+    } catch {}
+
+    console.log('[symphony] All processes stopped.');
     process.exit(0);
   }
 

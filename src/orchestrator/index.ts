@@ -20,6 +20,7 @@ import {
 import { LinearClient } from '../tracker/linear-client';
 import { WorkspaceManager } from '../workspace/manager';
 import { AgentRunner, TurnResult } from '../agent/runner';
+import { buildReviewPrompt } from '../hooks/review-prompt';
 
 /**
  * Orchestrator events
@@ -567,27 +568,8 @@ export class Orchestrator extends EventEmitter {
       let currentPrompt: string;
 
       if (isReview) {
-        // Review-specific prompt
-        currentPrompt = `You are a code reviewer. The PR for ${issue.identifier} has been created and is in "In Review" state.
-
-**Task**: ${issue.identifier} - ${issue.title}
-**Details**: ${issue.description}
-
-Your job:
-1. Review the code changes in this PR
-2. Check for code quality, best practices, and potential issues
-3. Leave constructive feedback as comments or suggest improvements
-4. If the code looks good, approve the PR
-5. If there are issues, request changes with clear explanation
-
-Be thorough but constructive. Focus on:
-- Code correctness and potential bugs
-- Code style and consistency
-- Performance implications
-- Security considerations
-- Test coverage
-
-When done, output a summary of your review.`;
+        // Review-specific prompt using structured review prompt builder
+        currentPrompt = buildReviewPrompt(issue);
       } else {
         // Development prompt - use workflow template
         const renderedPrompt = this.agentRunner.renderPrompt(this.workflow, issue, attempt);
