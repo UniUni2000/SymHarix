@@ -43,7 +43,7 @@ echo "[before-run] Created ISSUE_CONTEXT.md"
 if [ -f "DEVELOPMENT_LOG.md" ]; then
   echo "[before-run] Found existing DEVELOPMENT_LOG.md, will resume from last position"
   # Parse complexity from existing log if present
-  COMPLEXITY=$(grep -i "复杂度:" DEVELOPMENT_LOG.md | head -1 | sed 's/.*: //' | tr -d ' ')
+  COMPLEXITY=$(grep "复杂度" DEVELOPMENT_LOG.md | head -1 | sed 's/.*\*\*//' | sed 's/\*\*.*: //' | tr -d ' ')
   if [ -n "$COMPLEXITY" ]; then
     echo "[before-run] Resuming with complexity: $COMPLEXITY"
   fi
@@ -51,7 +51,7 @@ else
   echo "[before-run] No existing log, starting fresh"
 
   # Create DEVELOPMENT_LOG.md
-  cat << 'DEVLOG' > DEVELOPMENT_LOG.md
+  cat << DEVLOG > DEVELOPMENT_LOG.md
 # Development Log: $SYMPHONY_ISSUE_IDENTIFIER
 
 ## 基本信息
