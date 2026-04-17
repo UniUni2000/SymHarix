@@ -101,7 +101,7 @@ Generate your review report in Markdown format and save to REVIEW_REPORT.md:
 - **Issue**: ${issue.identifier}
 - **Review Round**: ${(previousReviews?.length || 0) + 1}
 - **Reviewer**: Symphony Review Agent
-- **时间**: \${new Date().toISOString()}
+- **时间**: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 ## 评审结果: [APPROVE | APPROVE_MINOR | REQUEST_CHANGES_MINOR | REQUEST_CHANGES_MAJOR | REQUEST_TESTS | REJECT]
 

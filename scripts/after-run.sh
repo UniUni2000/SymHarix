@@ -51,7 +51,84 @@ GITHUB_OWNER="${SYMPHONY_GITHUB_OWNER:-${GITHUB_OWNER:-}}"
 GITHUB_REPO="${SYMPHONY_GITHUB_REPO:-${GITHUB_REPO:-}}"
 GITHUB_DEFAULT_BRANCH="${GITHUB_DEFAULT_BRANCH:-main}"
 LINEAR_API_KEY="${SYMPHONY_TRACKER_API_KEY:-}"
-LINEAR_IN_REVIEW_STATE_ID="2d55ad60-e9a3-4490-a78d-d8ddd0f5e45a"
+
+# 动态获取 Linear 状态 ID（从环境变量或 API）
+getLinearStateId() {
+  local state_name="$1"
+  local cache_key="linear_state_${state_name}"
+
+  # 先尝试从环境变量获取
+  case "$state_name" in
+    "In Review") echo "${LINEAR_IN_REVIEW_STATE_ID:-${SYMPHONY_STATE_IN_REVIEW:-}}" ;;
+    "Done") echo "${LINEAR_DONE_STATE_ID:-${SYMPHONY_STATE_DONE:-}}" ;;
+    "In Progress") echo "${LINEAR_IN_PROGRESS_STATE_ID:-${SYMPHONY_STATE_IN_PROGRESS:-}}" ;;
+    *) echo "" ;;
+  esac
+}
+
+# 尝试从 Linear API 获取状态 ID
+fetchLinearStateIds() {
+  if [ -z "$LINEAR_API_KEY" ]; then
+    echo "[after-run] Linear API key not set, using defaults"
+    return
+  fi
+
+  echo "[after-run] Fetching Linear state IDs..."
+
+  # 从 Linear API 获取团队的工作流状态
+  local team_response=$(curl -s -X POST https://api.linear.app/graphql \
+    -H "Authorization: $LINEAR_API_KEY" \
+    -H "Content-Type: application/json" \
+    --max-time 15 \
+    -d '{"query": "{ teams { nodes { name states { nodes { id name type } } } } }"}' 2>/dev/null || echo "{}")
+
+  LINEAR_API_CALLS=$((LINEAR_API_CALLS + 1))
+
+  # 解析状态 ID（从响应中提取）
+  # 这里简化处理，假设状态名称唯一
+  LINEAR_DONE_STATE_ID=$(echo "$team_response" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    for team in d.get('data', {}).get('teams', {}).get('nodes', []):
+        for state in team.get('states', {}).get('nodes', []):
+            if state.get('name') == 'Done' and state.get('type') == 'completed':
+                print(state.get('id', ''))
+                break
+except:
+    print('')
+" 2>/dev/null || echo "")
+
+  LINEAR_IN_PROGRESS_STATE_ID=$(echo "$team_response" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    for team in d.get('data', {}).get('teams', {}).get('nodes', []):
+        for state in team.get('states', {}).get('nodes', []):
+            if state.get('name') == 'In Progress' and state.get('type') == 'started':
+                print(state.get('id', ''))
+                break
+except:
+    print('')
+" 2>/dev/null || echo "")
+
+  if [ -n "$LINEAR_DONE_STATE_ID" ]; then
+    echo "[after-run] Found Done state ID: $LINEAR_DONE_STATE_ID"
+  fi
+  if [ -n "$LINEAR_IN_PROGRESS_STATE_ID" ]; then
+    echo "[after-run] Found In Progress state ID: $LINEAR_IN_PROGRESS_STATE_ID"
+  fi
+}
+
+# 如果环境变量未设置，则从 API 获取
+if [ -z "$LINEAR_DONE_STATE_ID" ] || [ -z "$LINEAR_IN_PROGRESS_STATE_ID" ]; then
+  fetchLinearStateIds
+fi
+
+# 如果仍然没有设置，使用默认值（fallback）
+LINEAR_IN_REVIEW_STATE_ID="${LINEAR_IN_REVIEW_STATE_ID:-2d55ad60-e9a3-4490-a78d-d8ddd0f5e45a}"
+LINEAR_DONE_STATE_ID="${LINEAR_DONE_STATE_ID:-8abac616-912a-44d5-8be0-fad6f2403807}"
+LINEAR_IN_PROGRESS_STATE_ID="${LINEAR_IN_PROGRESS_STATE_ID:-d66c7727-7626-4da1-9d08-7189a226fee6}"
 
 # API call counters
 LINEAR_API_CALLS=0
@@ -128,9 +205,19 @@ fi
 BRANCH_NAME="$(git rev-parse --abbrev-ref HEAD)"
 echo "[after-run] Pushing branch: $BRANCH_NAME"
 
-# 配置 remote URL（带 token 认证）
-REMOTE_URL="https://${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git"
+# 配置 remote URL
+REMOTE_URL="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git"
 git remote set-url origin "$REMOTE_URL" 2>/dev/null || git remote add origin "$REMOTE_URL"
+
+# 使用 GIT_ASKPASS 脚本安全传递 token（避免 token 在 ps 或 log 中暴露）
+ASKPASS_SCRIPT="/tmp/git-askpass-$$.sh"
+cat << 'ASKSCRIPT' > "$ASKPASS_SCRIPT"
+#!/bin/bash
+echo "password=$GITHUB_TOKEN"
+ASKSCRIPT
+chmod 700 "$ASKPASS_SCRIPT"
+export GIT_ASKPASS="$ASKPASS_SCRIPT"
+export GIT_TERMINAL_PROMPT=0
 
 if git push origin "$BRANCH_NAME" --force-with-lease 2>&1; then
   echo "[after-run] Push successful."
@@ -139,6 +226,9 @@ elif git push origin "$BRANCH_NAME" --force 2>&1; then
 else
   echo "[after-run] WARNING: GitHub push failed (network unreachable). Continuing anyway to update Linear..."
 fi
+
+# 清理 ASKPASS 脚本
+rm -f "$ASKPASS_SCRIPT"
 
 # -----------------------------------------------------------------------------
 # Step 2: 获取 Linear Issue 标题（用于 PR 标题）
@@ -360,10 +450,7 @@ fi
 
 echo "[after-run] Current Linear state: $CURRENT_STATE"
 
-# Determine target state based on current state and agent type
-LINEAR_DONE_STATE_ID="8abac616-912a-44d5-8be0-fad6f2403807"
-LINEAR_IN_PROGRESS_STATE_ID="d66c7727-7626-4da1-9d08-7189a226fee6"
-
+# Use the state IDs fetched earlier (from env or API)
 if [ "$CURRENT_STATE" = "In Review" ]; then
   # Review agent completed - check PR status to decide pass/fail
   echo "[after-run] Review agent completed, checking PR status..."
