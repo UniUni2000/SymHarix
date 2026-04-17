@@ -87,6 +87,40 @@ export class WorkspaceManager {
   }
 
   /**
+   * Check if a path exists
+   */
+  private async pathExists(p: string): Promise<boolean> {
+    try {
+      await fs.promises.access(p);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Create a bare git repository
+   */
+  private async createBareRepo(bareRepoPath: string): Promise<void> {
+    await fs.promises.mkdir(path.dirname(bareRepoPath), { recursive: true });
+    await execAsync(`git init --bare "${bareRepoPath}"`);
+  }
+
+  /**
+   * Clone bare repo to main working directory
+   */
+  private async cloneToMain(mainWorkDir: string, bareRepoPath: string): Promise<void> {
+    await execAsync(`git clone "${bareRepoPath}" "${mainWorkDir}"`);
+  }
+
+  /**
+   * Create a git worktree for an issue
+   */
+  private async createWorktree(mainWorkDir: string, worktreePath: string, branchName: string): Promise<void> {
+    await execAsync(`git -C "${mainWorkDir}" worktree add -b "${branchName}" "${worktreePath}"`);
+  }
+
+  /**
    * Validate that a workspace path is inside the workspace root
    * Section 9.5 Safety Invariants - Invariant 2
    */
@@ -258,27 +292,72 @@ export class WorkspaceManager {
   }
 
   /**
-   * Prepare workspace by ensuring GitHub repo exists before creating worktree
+   * Prepare workspace for an issue using bare repo structure
+   * Creates bare repo, main working directory, and worktree if needed
    */
-  async prepareWorkspace(projectSlug?: string | null): Promise<{ success: boolean; error?: string }> {
-    // Determine the repo name from project slug or use default
-    const repoName = projectSlug ? sanitizeWorkspaceKey(projectSlug) : 'main';
+  async prepareWorkspace(issue: Pick<Issue, 'identifier' | 'project_slug'>): Promise<WorkspaceResult> {
+    const projectName = issue.project_slug ? sanitizeWorkspaceKey(issue.project_slug) : 'main';
+    const bareRepoPath = path.join(this.workspaceRoot, 'repos', `${projectName}.git`);
+    const mainWorkDir = path.join(this.workspaceRoot, projectName);
+    const workspaceKey = sanitizeWorkspaceKey(issue.identifier);
+    const worktreePath = path.join(mainWorkDir, workspaceKey);
 
-    // Check if repo exists on GitHub
-    const { exists, error: checkError } = await this.githubClient.repoExists(repoName);
-    if (checkError) {
-      return { success: false, error: checkError };
+    // Ensure workspace root exists
+    await this.ensureWorkspaceRoot();
+
+    // Step 1: Create bare repo if not exists
+    if (!(await this.pathExists(bareRepoPath))) {
+      await this.createBareRepo(bareRepoPath);
     }
 
-    if (!exists) {
-      // Create the repo if it doesn't exist
-      const { success, error: createError } = await this.githubClient.createRepo(repoName, true);
-      if (!success) {
-        return { success: false, error: createError };
+    // Step 2: Clone to main working directory if not exists
+    if (!(await this.pathExists(mainWorkDir))) {
+      await this.cloneToMain(mainWorkDir, bareRepoPath);
+    }
+
+    // Step 3: Create worktree for issue
+    const branchName = `feature/${workspaceKey.toLowerCase()}`;
+
+    // Check if worktree already exists
+    try {
+      const { stdout } = await execAsync(`git -C "${mainWorkDir}" worktree list --porcelain`);
+      const worktrees = stdout.split('\n').filter(line => line.startsWith('worktree '));
+      const existingWorktree = worktrees.find(w => {
+        const match = w.match(/^worktree\s+(.+)$/);
+        return match && path.resolve(match[1]) === path.resolve(worktreePath);
+      });
+
+      if (existingWorktree) {
+        // Worktree already exists, reuse it
+        return {
+          success: true,
+          workspace: {
+            path: worktreePath,
+            workspace_key: workspaceKey,
+            created_now: false,
+            git_branch: branchName
+          }
+        };
       }
-    }
+    } catch {}
 
-    return { success: true };
+    // Prune missing worktrees
+    try {
+      await execAsync(`git -C "${mainWorkDir}" worktree prune`);
+    } catch {}
+
+    // Create new worktree
+    await this.createWorktree(mainWorkDir, worktreePath, branchName);
+
+    return {
+      success: true,
+      workspace: {
+        path: worktreePath,
+        workspace_key: workspaceKey,
+        created_now: true,
+        git_branch: branchName
+      }
+    };
   }
 
   /**
@@ -540,11 +619,9 @@ export class WorkspaceManager {
    * Get workspace path for an issue identifier (without creating)
    */
   getWorkspacePath(identifier: string, projectSlug?: string | null): string {
+    const projectName = projectSlug ? sanitizeWorkspaceKey(projectSlug) : 'main';
     const workspaceKey = sanitizeWorkspaceKey(identifier);
-    if (projectSlug) {
-      return path.join(this.workspaceRoot, sanitizeWorkspaceKey(projectSlug), workspaceKey);
-    }
-    return path.join(this.workspaceRoot, workspaceKey);
+    return path.join(this.workspaceRoot, projectName, workspaceKey);
   }
 
   /**
