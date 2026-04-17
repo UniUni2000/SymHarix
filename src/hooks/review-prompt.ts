@@ -60,73 +60,34 @@ export function buildReviewPrompt(
 - **Description**: ${issue.description || '(no description)'}
 - **Labels**: ${issue.labels.join(', ') || '(none)'}
 
+## Your Responsibilities
+1. **First: Read HANDOVER.md** — This is DEV's summary of what was done
+2. Review the PR/Diff: examine changed files carefully
+3. Run tests if available: \`npm test\` or \`bun test\`
+4. Assess code quality: logic, naming, performance, security
+5. **Give feedback in "现状+期望" format** — Do NOT give solutions
+
+## Feedback Format (MUST follow)
+For each issue found:
+**现状**: {现在的行为}
+**期望**: {期望的行为}
+**文件**: {文件:行号}
+
+## Review Decision Options
+
+| Decision | When to Use |
+|----------|-------------|
+| APPROVE | Code is correct, well-written, tests pass |
+| APPROVE_MINOR | Can merge now, minor suggestions only |
+| REQUEST_CHANGES | Need changes before approval |
+| REQUEST_TESTS | Must add tests before approval |
+| REJECT | Completely wrong approach |
+
 ## Development Context (from DEVELOPMENT_LOG.md)
 ${devLog || '(no development log found)'}
 
 ## Previous Review Rounds
 ${historySection}
-
-## Your Review Process
-1. First read DEVELOPMENT_LOG.md to understand what was done
-2. Review the PR/Diff: examine changed files carefully
-3. Run tests if available: \`npm test\` or \`bun test\`
-4. Assess code quality: logic, naming, performance, security
-5. Generate a structured review report
-
-## Review Decision Options (pick ONE)
-Choose the most appropriate:
-
-| Decision | When to Use |
-|----------|-------------|
-| APPROVE | Code is correct, well-written, tests pass (if required) |
-| APPROVE_MINOR | Can merge now, minor suggestions (naming, comments) only |
-| REQUEST_CHANGES | Need changes before approval |
-| REQUEST_TESTS | Must add tests before approval |
-| REJECT | Completely wrong approach |
-
-## Test Requirements (if complexity=large or medium)
-- Check if tests exist and pass
-- If tests missing: REQUEST_TESTS with specific requirements
-- If tests fail: REQUEST_CHANGES with failure details
-
-## Output Format
-Generate your review report in Markdown format and save to REVIEW_REPORT.md (NOT committed):
-
-\`\`\`markdown
-# Review Report: ${issue.identifier}
-
-## 基本信息
-- **Issue**: ${issue.identifier}
-- **Review Round**: ${(previousReviews?.length || 0) + 1}
-- **Reviewer**: Symphony Review Agent
-- **时间**: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
-## 评审结果: [APPROVE | APPROVE_MINOR | REQUEST_CHANGES | REQUEST_TESTS | REJECT]
-
-## 代码质量
-- ✅/❌ 逻辑正确
-- ✅/❌ 命名规范
-- ✅/❌ 性能考虑
-- ✅/❌ 安全性
-
-## 具体意见
-
-### 必须修复
-1. [list must-fix items]
-
-### 建议改进
-1. [list suggestions]
-
-### 测试情况
-- 有测试: YES/NO
-- 测试通过: YES/NO
-
-## 总结
-[2-3 sentence summary of the review]
-
-## 下次继续（如需打回）
-[If requesting changes, explain what DEV should do next]
-\`\`\`
 
 ## After Your Review
 1. Write the report to REVIEW_REPORT.md in the workspace (do NOT commit it)
@@ -179,7 +140,7 @@ export function formatLinearComment(report: ReviewReport): string {
   comment += `### Summary\n${report.summary}\n\n`;
 
   if (report.mustFix.length > 0) {
-    comment += `### Must Fix\n`;
+    comment += `### Must Fix (现状 → 期望)\n`;
     report.mustFix.forEach(item => {
       comment += `- ${item}\n`;
     });
