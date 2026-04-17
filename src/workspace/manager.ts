@@ -364,8 +364,9 @@ export class WorkspaceManager {
    * Create or reuse a workspace for an issue using git worktree
    * Section 9.3: Workspace Layout and Lifecycle
    */
-  async createForIssue(issue: Pick<Issue, 'identifier' | 'project_slug'>): Promise<WorkspaceResult> {
-    const repoName = issue.project_slug ? sanitizeWorkspaceKey(issue.project_slug) : 'main';
+  async createForIssue(issue: Pick<Issue, 'identifier' | 'project_slug' | 'project_name'>): Promise<WorkspaceResult> {
+    // Use project_name for GitHub repo (e.g., "test2"), not project_slug (Linear slugId)
+    const repoName = issue.project_name ? sanitizeWorkspaceKey(issue.project_name) : (issue.project_slug ? sanitizeWorkspaceKey(issue.project_slug) : 'main');
     const repoPath = path.join(this.projectRoot, repoName);
     const githubRepo = `${this.githubOwner}/${repoName}`;
 
