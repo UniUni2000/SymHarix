@@ -128,7 +128,8 @@ export class Orchestrator extends EventEmitter {
     // Initialize workspace manager
     this.workspaceManager = new WorkspaceManager({
       workspaceRoot: config.workspaceRoot,
-      projects: config.projects,
+      githubOwner: config.githubOwner,
+      githubToken: config.githubToken,
       hooks: config.hooks,
       projectRoot: config.projectRoot
     });

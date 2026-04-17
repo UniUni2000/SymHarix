@@ -195,6 +195,7 @@ export function buildServiceConfig(workflow: WorkflowDefinition): ServiceConfig 
   const trackerApiKey = resolveApiKey(tracker.api_key as string);
   
   const githubOwner = process.env.GITHUB_OWNER || '';
+  const githubToken = process.env.GITHUB_TOKEN || '';
 
   // Polling config
   const polling = (config.polling as Record<string, unknown>) || {};
@@ -246,6 +247,7 @@ export function buildServiceConfig(workflow: WorkflowDefinition): ServiceConfig 
     trackerEndpoint,
     trackerApiKey,
     githubOwner,
+    githubToken,
     activeStates: parseStringArray(tracker.active_states, DEFAULTS.activeStates!),
     terminalStates: parseStringArray(tracker.terminal_states, DEFAULTS.terminalStates!),
     pollIntervalMs,
