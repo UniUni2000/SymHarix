@@ -569,16 +569,6 @@ export class WorkspaceManager {
     const repoName = projectSlug ? sanitizeWorkspaceKey(projectSlug) : 'main';
     const repoPath = path.join(this.projectRoot, repoName);
 
-    if (this.hooks.before_remove) {
-      const hookResult = await this.executeHook('before_remove', this.hooks.before_remove, workspacePath, {
-        SYMPHONY_GITHUB_OWNER: this.githubOwner,
-        SYMPHONY_GITHUB_REPO: repoName
-      });
-      if (!hookResult.success) {
-        console.warn(`before_remove hook failed: ${hookResult.error}`);
-      }
-    }
-
     try {
       // Try git worktree remove first with --force to handle modified/untracked files
       await execAsync(`git -C "${repoPath}" worktree remove --force "${workspacePath}"`, {
