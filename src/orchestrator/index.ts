@@ -5,6 +5,7 @@
  */
 
 import { EventEmitter } from 'events';
+import * as cp from 'child_process';
 import * as path from 'path';
 import {
   Issue,
@@ -99,6 +100,14 @@ export interface WorkerResult {
   claude_api_calls: number;
   linear_api_calls: number;
   github_api_calls: number;
+}
+
+interface CliStats {
+  linear_api_calls?: number;
+  github_api_calls?: number;
+  final_state?: string;
+  review_decision?: string;
+  feedback?: string;
 }
 
 /**
@@ -569,10 +578,10 @@ export class Orchestrator extends EventEmitter {
 
       const workspace = workspaceResult.workspace;
 
-      // Step 2: Run before_run hook
-      const beforeRunResult = await this.workspaceManager.beforeRun(workspace.path, issue);
-      if (!beforeRunResult.success) {
-        result.error = `before_run hook failed: ${beforeRunResult.error}`;
+      // Step 2: Initialize state via dispatch command
+      const dispatchResult = await this.runCliCommand('dispatch', issue.identifier, workspace.path);
+      if (!dispatchResult.success) {
+        result.error = `dispatch failed: ${dispatchResult.error}`;
         return result;
       }
 
@@ -700,72 +709,42 @@ export class Orchestrator extends EventEmitter {
       result.success = true;
       result.completed = true;
 
-      // Run after_run hook and parse API call statistics
-      console.log(`[orchestrator] Running after_run hook for ${issue.identifier}...`);
-      const hookResult = await this.workspaceManager.afterRun(workspace.path, issue);
-      console.log(`[orchestrator] after_run hook completed: success=${hookResult.success}, output=${hookResult.output ? 'present' : 'empty'}`);
-      // Only add to completed if hook succeeded. Failure means we couldn't
-      // update Linear state, so the issue should remain dispatchable.
-      if (hookResult.success) {
-        if (hookResult.output) {
-          // Parse SYMPHONY_STATS line from hook output
-          const statsMatch = hookResult.output.match(/SYMPHONY_STATS:(\{.*\})/);
-          if (statsMatch) {
-            try {
-              const stats = JSON.parse(statsMatch[1]);
-              result.linear_api_calls = stats.linear_api_calls || 0;
-              result.github_api_calls = stats.github_api_calls || 0;
+      // Run appropriate CLI command based on state
+      const cliCommand = isReview ? 'review' : 'dev';
+      const cliResult = await this.runCliCommand(cliCommand, issue.identifier, workspace.path);
+      console.log(`[orchestrator] CLI ${cliCommand} result: success=${cliResult.success}`);
 
-              // Check final state to decide whether to add to completed set
-              // Only "Done" (terminal state) should be added to completed
-              // "In Review" and "In Progress" should NOT be added - allow re-dispatch
-              const finalState = stats.final_state || '';
-              const isTerminalState = finalState.toLowerCase() === 'done' ||
-                                      finalState.toLowerCase() === 'canceled' ||
-                                      finalState.toLowerCase() === 'duplicate';
+      if (cliResult.success && cliResult.stats) {
+        result.linear_api_calls = cliResult.stats.linear_api_calls || 0;
+        result.github_api_calls = cliResult.stats.github_api_calls || 0;
 
-              if (isTerminalState) {
-                this.state.completed.add(issue.id);
-                console.log(`[orchestrator] Issue state is "${finalState}" (terminal), adding to completed set:`, issue.identifier);
-              } else {
-                console.log(`[orchestrator] Issue state is "${finalState}" (active), skipping completed set to allow re-dispatch:`, issue.identifier);
-              }
-            } catch (err) {
-              console.warn('[orchestrator] Failed to parse SYMPHONY_STATS:', err);
-              // Don't add to completed on parse failure - allow re-dispatch
-            }
-          }
-          // else: hook succeeded but no stats - don't add to completed
+        const finalState = cliResult.stats.final_state || '';
+        const isTerminalState = ['done', 'canceled', 'duplicate'].some(
+          s => finalState.toLowerCase() === s
+        );
+
+        if (isTerminalState) {
+          this.state.completed.add(issue.id);
         }
-        // else: hook succeeded with empty output - don't add to completed
-      } else {
-        // Hook failed - definitely don't add to completed
-        console.warn('[orchestrator] after_run hook failed, not adding to completed set:', issue.identifier);
+      } else if (!cliResult.success) {
+        console.warn(`[orchestrator] CLI ${cliCommand} failed: ${cliResult.error}`);
       }
 
       // After review completion, update HANDOVER.md if REQUEST_CHANGES
-      if (isReview && hookResult.success && hookResult.output) {
-        const statsMatch = hookResult.output.match(/SYMPHONY_STATS:(\{.*\})/);
-        if (statsMatch) {
-          try {
-            const stats = JSON.parse(statsMatch[1]);
-            const reviewDecision = stats.review_decision || '';
+      if (isReview && cliResult.success && cliResult.stats) {
+        const reviewDecision = cliResult.stats.review_decision || '';
 
-            if (reviewDecision === 'REQUEST_CHANGES' && stats.feedback) {
-              // Read existing HANDOVER.md and update "下次继续" section
-              const handoverPath = path.join(workspace.path, 'HANDOVER.md');
-              try {
-                const fs = await import('fs/promises');
-                const handoverContent = await fs.readFile(handoverPath, 'utf-8');
-                const updatedHandover = updateHandoverNextSteps(handoverContent, stats.feedback);
-                await fs.writeFile(handoverPath, updatedHandover, 'utf-8');
-                console.log('[orchestrator] Updated HANDOVER.md with review feedback');
-              } catch (err) {
-                console.warn('[orchestrator] Failed to update HANDOVER.md:', err);
-              }
-            }
+        if (reviewDecision === 'REQUEST_CHANGES' && cliResult.stats.feedback) {
+          // Read existing HANDOVER.md and update "下次继续" section
+          const handoverPath = path.join(workspace.path, 'HANDOVER.md');
+          try {
+            const fs = await import('fs/promises');
+            const handoverContent = await fs.readFile(handoverPath, 'utf-8');
+            const updatedHandover = updateHandoverNextSteps(handoverContent, cliResult.stats.feedback);
+            await fs.writeFile(handoverPath, updatedHandover, 'utf-8');
+            console.log('[orchestrator] Updated HANDOVER.md with review feedback');
           } catch (err) {
-            console.warn('[orchestrator] Failed to parse SYMPHONY_STATS for HANDOVER update:', err);
+            console.warn('[orchestrator] Failed to update HANDOVER.md:', err);
           }
         }
       }
@@ -778,30 +757,18 @@ export class Orchestrator extends EventEmitter {
       this.state.claimed.delete(issue.id);
 
       // Update the runningEntry issue state if still accessible (for state tracking)
-      if (hookResult.success && hookResult.output) {
-        const statsMatch = hookResult.output.match(/SYMPHONY_STATS:(\{.*\})/);
-        if (statsMatch) {
-          try {
-            const stats = JSON.parse(statsMatch[1]);
-            const finalState = stats.final_state || '';
-            console.log(`[orchestrator] Issue ${issue.identifier} final state after after_run: "${finalState}"`);
-          } catch {}
-        }
+      if (cliResult.success && cliResult.stats) {
+        const finalState = cliResult.stats.final_state || '';
+        console.log(`[orchestrator] Issue ${issue.identifier} final state after CLI: "${finalState}"`);
       }
 
-      // If after_run moved the issue to "In Progress" (e.g., merge conflict),
+      // If CLI moved the issue to "In Progress" (e.g., merge conflict),
       // immediately schedule a retry to DEV instead of waiting for next poll.
-      if (hookResult.success && hookResult.output) {
-        const statsMatch = hookResult.output.match(/SYMPHONY_STATS:(\{.*\})/);
-        if (statsMatch) {
-          try {
-            const stats = JSON.parse(statsMatch[1]);
-            const finalState = stats.final_state || '';
-            if (finalState.toLowerCase() === 'in progress') {
-              console.log(`[orchestrator] Issue ${issue.identifier} needs rework, scheduling DEV retry...`);
-              await this.scheduleRetry(issue.id, issue.identifier, 1, 'needs_rework', 1000);
-            }
-          } catch {}
+      if (cliResult.success && cliResult.stats) {
+        const finalState = cliResult.stats.final_state || '';
+        if (finalState.toLowerCase() === 'in progress') {
+          console.log(`[orchestrator] Issue ${issue.identifier} needs rework, scheduling DEV retry...`);
+          await this.scheduleRetry(issue.id, issue.identifier, 1, 'needs_rework', 1000);
         }
       }
 
@@ -960,6 +927,63 @@ export class Orchestrator extends EventEmitter {
 
     console.log('[orchestrator] Scheduled retry for', identifier, 'attempt', attempt, 'in', delayMs, 'ms');
     this.emit('issue:retrying', { id: issueId, identifier } as Issue, attempt, delayMs);
+  }
+
+  /**
+   * Run a cli.py command and parse SYMPHONY_STATS from output
+   */
+  private async runCliCommand(
+    command: 'dispatch' | 'dev' | 'review',
+    issueId: string,
+    workspacePath: string
+  ): Promise<{ success: boolean; stats?: CliStats; error?: string }> {
+    const cmd = ['python3', './scripts/cli.py', command, issueId];
+
+    console.log(`[orchestrator] Running: ${cmd.join(' ')}`);
+
+    return new Promise((resolve) => {
+      const child = cp.spawn(cmd[0], cmd.slice(1), {
+        cwd: workspacePath,
+        env: { ...process.env },
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      child.stdout?.on('data', d => stdout += d.toString());
+      child.stderr?.on('data', d => stderr += d.toString());
+
+      const timeout = setTimeout(() => {
+        child.kill('SIGKILL');
+        resolve({ success: false, error: 'Command timed out' });
+      }, this.hooks.timeout_ms);
+
+      child.on('close', code => {
+        clearTimeout(timeout);
+        const output = (stdout + stderr).trim();
+
+        if (code !== 0) {
+          resolve({ success: false, error: `Command failed with code ${code}: ${output}` });
+          return;
+        }
+
+        // Parse SYMPHONY_STATS
+        const statsMatch = output.match(/SYMPHONY_STATS:(\{.*\})/);
+        let stats: CliStats | undefined;
+        if (statsMatch) {
+          try {
+            stats = JSON.parse(statsMatch[1]);
+          } catch {}
+        }
+
+        resolve({ success: true, stats, error: undefined });
+      });
+
+      child.on('error', err => {
+        clearTimeout(timeout);
+        resolve({ success: false, error: err.message });
+      });
+    });
   }
 
   /**
