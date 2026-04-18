@@ -28,6 +28,8 @@ class ReviewHook:
     ):
         self.workspace_root = workspace_root
         self.issue_id = issue_id
+        self.config = config
+        self.auto_merge_no_reviews = config.auto_merge_no_reviews if config else False
 
         # Use provided clients or load from config
         if config:
@@ -119,6 +121,16 @@ class ReviewHook:
             print("[REVIEW] PR still pending review")
             self.store.set_error("PR pending review")
             return False
+
+        elif pr_status == "no_reviews":
+            # No reviews yet
+            if self.auto_merge_no_reviews:
+                print("[REVIEW] Auto-merging PR with no reviews (enabled)")
+                return self._handle_merge_and_done(pr_info.get("pr_number"), pr_info.get("linear_issue_id"))
+            else:
+                print("[REVIEW] PR has no reviews yet")
+                self.store.set_error("PR has no reviews")
+                return False
 
         else:
             print(f"[REVIEW] Unexpected PR status: {pr_status}")

@@ -6,25 +6,39 @@ from scripts.lib.linear_client import LinearClient
 @patch("scripts.lib.linear_client.requests.post")
 def test_fetch_issue_by_identifier(mock_post):
     """Test fetching issue by identifier."""
-    mock_response = MagicMock()
-    mock_response.json.return_value = {
+    # First call: get teams
+    # Second call: get issues from team
+    mock_response_teams = MagicMock()
+    mock_response_teams.json.return_value = {
         "data": {
-            "issues": {
+            "teams": {
                 "nodes": [
-                    {
-                        "id": "uuid-123",
-                        "identifier": "INT-23",
-                        "title": "Test Issue",
-                        "description": "Test description",
-                        "state": {"name": "Todo", "id": "state-1", "type": "unstarted"},
-                        "createdAt": "2026-04-17T10:00:00Z",
-                        "updatedAt": "2026-04-17T10:00:00Z",
-                    }
+                    {"id": "team-uuid-1", "key": "INT"}
                 ]
             }
         }
     }
-    mock_post.return_value = mock_response
+    mock_response_issues = MagicMock()
+    mock_response_issues.json.return_value = {
+        "data": {
+            "team": {
+                "issues": {
+                    "nodes": [
+                        {
+                            "id": "uuid-123",
+                            "identifier": "INT-23",
+                            "title": "Test Issue",
+                            "description": "Test description",
+                            "state": {"name": "Todo", "id": "state-1", "type": "unstarted"},
+                            "createdAt": "2026-04-17T10:00:00Z",
+                            "updatedAt": "2026-04-17T10:00:00Z",
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    mock_post.side_effect = [mock_response_teams, mock_response_issues]
 
     client = LinearClient(api_key="test_key")
     issue = client.fetch_issue_by_identifier("INT-23")
@@ -38,11 +52,27 @@ def test_fetch_issue_by_identifier(mock_post):
 @patch("scripts.lib.linear_client.requests.post")
 def test_fetch_issue_not_found(mock_post):
     """Test fetching non-existent issue returns None."""
-    mock_response = MagicMock()
-    mock_response.json.return_value = {
-        "data": {"issues": {"nodes": []}}
+    mock_response_teams = MagicMock()
+    mock_response_teams.json.return_value = {
+        "data": {
+            "teams": {
+                "nodes": [
+                    {"id": "team-uuid-1", "key": "INT"}
+                ]
+            }
+        }
     }
-    mock_post.return_value = mock_response
+    mock_response_issues = MagicMock()
+    mock_response_issues.json.return_value = {
+        "data": {
+            "team": {
+                "issues": {
+                    "nodes": []
+                }
+            }
+        }
+    }
+    mock_post.side_effect = [mock_response_teams, mock_response_issues]
 
     client = LinearClient(api_key="test_key")
     issue = client.fetch_issue_by_identifier("INT-999")
@@ -51,17 +81,29 @@ def test_fetch_issue_not_found(mock_post):
 @patch("scripts.lib.linear_client.requests.post")
 def test_fetch_issue_state(mock_post):
     """Test fetching issue state."""
-    mock_response = MagicMock()
-    mock_response.json.return_value = {
+    mock_response_teams = MagicMock()
+    mock_response_teams.json.return_value = {
         "data": {
-            "issues": {
+            "teams": {
                 "nodes": [
-                    {"id": "uuid-123", "identifier": "INT-23", "state": {"name": "In Progress", "id": "state-2", "type": "started"}}
+                    {"id": "team-uuid-1", "key": "INT"}
                 ]
             }
         }
     }
-    mock_post.return_value = mock_response
+    mock_response_issues = MagicMock()
+    mock_response_issues.json.return_value = {
+        "data": {
+            "team": {
+                "issues": {
+                    "nodes": [
+                        {"id": "uuid-123", "identifier": "INT-23", "state": {"name": "In Progress", "id": "state-2", "type": "started"}}
+                    ]
+                }
+            }
+        }
+    }
+    mock_post.side_effect = [mock_response_teams, mock_response_issues]
 
     client = LinearClient(api_key="test_key")
     state = client.fetch_issue_state("INT-23")

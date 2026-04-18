@@ -26,6 +26,8 @@ class Config:
     max_concurrent_agents: int = 3
     max_turns: int = 20
     codex_command: str = "node ./scripts/claude-adapter.cjs"
+    # Auto-merge PR even if no reviews received
+    auto_merge_no_reviews: bool = False
 
 def load_config() -> Config:
     """Load configuration from environment variables."""
@@ -54,10 +56,14 @@ def load_config() -> Config:
         "SYMPHONY_WORKSPACE_ROOT", "/tmp/symphony_workspaces"
     )
 
+    # Auto-merge no reviews
+    auto_merge_no_reviews = os.environ.get("SYMPHONY_AUTO_MERGE_NO_REVIEWS", "").lower() in ("true", "1", "yes")
+
     return Config(
         linear_api_key=linear_api_key,
         github_token=github_token,
         github_owner=github_owner,
         github_repo=github_repo,
         workspace_root=Path(workspace_root),
+        auto_merge_no_reviews=auto_merge_no_reviews,
     )
