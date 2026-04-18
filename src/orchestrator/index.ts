@@ -956,7 +956,7 @@ export class Orchestrator extends EventEmitter {
       const timeout = setTimeout(() => {
         child.kill('SIGKILL');
         resolve({ success: false, error: 'Command timed out' });
-      }, this.hooks.timeout_ms);
+      }, this.config.hooks.timeout_ms);
 
       child.on('close', code => {
         clearTimeout(timeout);
