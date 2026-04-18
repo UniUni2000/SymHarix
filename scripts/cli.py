@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Symphony CLI - Unified entry point for all commands."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -127,6 +128,11 @@ def dev(ctx, issue_id):
     success = hook.run()
     if success:
         click.echo(f"Dev phase completed for {issue_id}")
+        click.echo(f"SYMPHONY_STATS:{json.dumps({
+            'linear_api_calls': 0,
+            'github_api_calls': 0,
+            'final_state': 'In Review'
+        })}")
     else:
         click.echo(f"Dev phase failed for {issue_id}", err=True)
         sys.exit(1)
@@ -185,6 +191,11 @@ def review(ctx, issue_id):
             click.echo("Issue completed - cleaning workspace...")
             hook.cleanup()
         click.echo(f"Review phase completed for {issue_id}")
+        click.echo(f"SYMPHONY_STATS:{json.dumps({
+            'linear_api_calls': 0,
+            'github_api_calls': 0,
+            'final_state': final_state.value if final_state else 'unknown'
+        })}")
     else:
         click.echo(f"Review phase failed for {issue_id}", err=True)
         sys.exit(1)
