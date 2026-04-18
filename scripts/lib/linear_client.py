@@ -38,29 +38,72 @@ class LinearClient:
         """
         Fetch issue by identifier (e.g., 'INT-23').
         Returns issue dict or None if not found.
+        Linear API doesn't support filtering by identifier directly,
+        so we fetch from teams and filter client-side.
         """
-        query = """
-        query GetIssue($identifier: String!) {
-            issues(filter: { identifier: { eq: $identifier } }) {
+        # Parse identifier to get team key and issue number (e.g., "INT-24" -> "INT", "24")
+        parts = identifier.rsplit("-", 1)
+        if len(parts) != 2:
+            return None
+        team_key, issue_num = parts
+
+        # First get teams to find the right team ID
+        teams_query = """
+        query GetTeams {
+            teams(first: 10) {
                 nodes {
                     id
-                    identifier
-                    title
-                    description
-                    state {
-                        name
-                        id
-                        type
-                    }
-                    createdAt
-                    updatedAt
+                    key
                 }
             }
         }
         """
-        result = self._post(query, {"identifier": identifier})
-        nodes = result.get("data", {}).get("issues", {}).get("nodes", [])
-        return nodes[0] if nodes else None
+        teams_result = self._post(teams_query)
+        teams = teams_result.get("data", {}).get("teams", {}).get("nodes", [])
+
+        # Find team matching the key
+        team_id = None
+        for team in teams:
+            if team.get("key", "").upper() == team_key.upper():
+                team_id = team.get("id")
+                break
+
+        if not team_id:
+            return None
+
+        # Now fetch issues from that team
+        issues_query = """
+        query GetTeamIssues($teamId: String!) {
+            team(id: $teamId) {
+                issues(first: 100) {
+                    nodes {
+                        id
+                        identifier
+                        title
+                        description
+                        state {
+                            name
+                            id
+                            type
+                        }
+                        project {
+                            name
+                        }
+                        createdAt
+                        updatedAt
+                    }
+                }
+            }
+        }
+        """
+        issues_result = self._post(issues_query, {"teamId": team_id})
+        nodes = issues_result.get("data", {}).get("team", {}).get("issues", {}).get("nodes", [])
+
+        # Filter by identifier (case-insensitive)
+        for node in nodes:
+            if node.get("identifier", "").lower() == identifier.lower():
+                return node
+        return None
 
     def fetch_issue_state(self, identifier: str) -> Optional[str]:
         """Fetch current state name for an issue."""

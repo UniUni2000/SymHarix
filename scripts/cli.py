@@ -39,12 +39,6 @@ def dispatch(ctx, issue_id):
     click.echo(f"Dispatching issue {issue_id}...")
 
     linear = LinearClient(api_key=config.linear_api_key, endpoint=config.linear_endpoint)
-    github = GitHubClient(
-        token=config.github_token,
-        owner=config.github_owner,
-        repo=config.github_repo,
-        default_branch=config.github_default_branch,
-    )
 
     # Fetch issue from Linear
     issue = linear.fetch_issue_by_identifier(issue_id)
@@ -52,8 +46,22 @@ def dispatch(ctx, issue_id):
         click.echo(f"Issue {issue_id} not found in Linear", err=True)
         sys.exit(1)
 
-    # Create branch name
-    branch = issue["identifier"].lower().replace("int-", "int-")
+    # Get project name from Linear issue - this is the GitHub repo name
+    project_name = issue.get("project", {}).get("name", config.github_repo)
+
+    # Create GitHub repo full name (owner/project)
+    github_repo_full = f"{config.github_owner}/{project_name}"
+
+    # Initialize GitHub client with correct repo
+    github = GitHubClient(
+        token=config.github_token,
+        owner=config.github_owner,
+        repo=project_name,
+        default_branch=config.github_default_branch,
+    )
+
+    # Create branch name (use feature/ prefix like the original system)
+    branch = f"feature/{issue['identifier'].lower()}"
 
     # Create workspace directory
     workspace_root = config.workspace_root
@@ -65,7 +73,7 @@ def dispatch(ctx, issue_id):
         store.initialize(
             linear_issue_id=issue["id"],
             linear_state=issue["state"]["name"],
-            github_repo=f"{config.github_owner}/{config.github_repo}",
+            github_repo=github_repo_full,
             branch=branch,
         )
     except ValueError as e:
@@ -73,6 +81,7 @@ def dispatch(ctx, issue_id):
         sys.exit(1)
 
     click.echo(f"Issue {issue_id} dispatched to {workspace_path}")
+    click.echo(f"GitHub repo: {github_repo_full}, branch: {branch}")
 
 
 @cli.command("dev")
@@ -137,18 +146,28 @@ def review(ctx, issue_id):
     config = ctx.obj["config"]
 
     linear = LinearClient(api_key=config.linear_api_key, endpoint=config.linear_endpoint)
-    github = GitHubClient(
-        token=config.github_token,
-        owner=config.github_owner,
-        repo=config.github_repo,
-        default_branch=config.github_default_branch,
-    )
 
     store = StateStore(config.workspace_root, issue_id)
     state = store.get_state()
     if not state:
         click.echo(f"No state found for {issue_id}", err=True)
         sys.exit(1)
+
+    # Get github repo from state metadata (set during dispatch from Linear project)
+    metadata = state.get("metadata", {})
+    github_repo_full = metadata.get("github_repo", f"{config.github_owner}/{config.github_repo}")
+    # Parse owner/repo
+    if "/" in github_repo_full:
+        gh_owner, gh_repo = github_repo_full.split("/", 1)
+    else:
+        gh_owner, gh_repo = config.github_owner, github_repo_full
+
+    github = GitHubClient(
+        token=config.github_token,
+        owner=gh_owner,
+        repo=gh_repo,
+        default_branch=config.github_default_branch,
+    )
 
     hook = ReviewHook(
         workspace_root=config.workspace_root,
