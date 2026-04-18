@@ -34,6 +34,8 @@ review_policy:
 
 polling:
   interval_ms: 30000
+hooks:
+  timeout_ms: 300000
 workspace:
   root: /Users/liupenghui/Documents/code/agent/test-cc/workspaces
 codex:
