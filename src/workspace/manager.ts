@@ -159,6 +159,13 @@ export class WorkspaceManager {
    * Execute a hook script in the workspace directory
    */
   private async executeHook(hookName: string, script: string, workspacePath: string, envOverrides: Record<string, string> = {}): Promise<{ success: boolean; output?: string; error?: string }> {
+    // Only allow after_create hook
+    const allowedHooks = ['after_create'];
+    if (!allowedHooks.includes(hookName)) {
+      console.log(`[executeHook] Skipping disallowed hook: ${hookName}`);
+      return { success: true, output: '' };
+    }
+
     console.log(`[executeHook] ${hookName}: script="${script}", workspace="${workspacePath}"`);
     if (!script) {
       return { success: true, output: '' };
@@ -178,7 +185,22 @@ export class WorkspaceManager {
       await fs.promises.mkdir(workspacePath, { recursive: true });
 
       const result = await new Promise<{stdout: string; stderr: string}>((resolve, reject) => {
-        const child = cp.spawn(bashPath, [scriptPath], {
+        // Detect script type and use appropriate interpreter
+        const scriptExt = path.extname(scriptPath).toLowerCase();
+        let cmd: string;
+        let args: string[];
+
+        if (scriptExt === '.py') {
+          // Python script
+          cmd = 'python3';
+          args = [scriptPath];
+        } else {
+          // Shell script (default)
+          cmd = bashPath;
+          args = [scriptPath];
+        }
+
+        const child = cp.spawn(cmd, args, {
           cwd: workspacePath,
           env: { ...process.env, ...envOverrides }
         });
@@ -528,56 +550,16 @@ export class WorkspaceManager {
    * Run before_run hook for a workspace
    */
   async beforeRun(workspacePath: string, issue?: Pick<Issue, 'identifier' | 'state' | 'project_slug' | 'project_name'>): Promise<{ success: boolean; error?: string }> {
-    if (!this.hooks.before_run) {
-      return { success: true };
-    }
-
-    const envOverrides: Record<string, string> = {};
-    if (issue) {
-      envOverrides['SYMPHONY_ISSUE_IDENTIFIER'] = issue.identifier;
-      envOverrides['SYMPHONY_ISSUE_STATE'] = issue.state || '';
-
-      // Use project_name for GitHub repo (e.g., "test2"), not project_slug (Linear slugId like "1d3a3f95809d")
-      const repoName = issue.project_name ? sanitizeWorkspaceKey(issue.project_name) : (issue.project_slug ? sanitizeWorkspaceKey(issue.project_slug) : 'main');
-      envOverrides['SYMPHONY_GITHUB_OWNER'] = this.githubOwner;
-      envOverrides['SYMPHONY_GITHUB_REPO'] = repoName;
-    }
-
-    const result = await this.executeHook('before_run', this.hooks.before_run, workspacePath, {
-      ...envOverrides,
-      SYMPHONY_PROJECT_ROOT: this.projectRoot
-    });
-    return { success: result.success, error: result.error };
+    // before_run hook is disabled - only after_create is allowed
+    return { success: true };
   }
 
   /**
    * Run after_run hook for a workspace
    */
   async afterRun(workspacePath: string, issue?: Pick<Issue, 'identifier' | 'state' | 'project_slug' | 'project_name'>): Promise<{ success: boolean; output?: string }> {
-    console.log(`[workspace-manager] afterRun called, hook=${this.hooks.after_run || 'NOT SET'}`);
-    if (!this.hooks.after_run) {
-      return { success: true };
-    }
-
-    const envOverrides: Record<string, string> = {};
-    if (issue) {
-      envOverrides['SYMPHONY_ISSUE_IDENTIFIER'] = issue.identifier;
-      envOverrides['SYMPHONY_ISSUE_STATE'] = issue.state || '';
-
-      // Use project_name for GitHub repo (e.g., "test2"), not project_slug (Linear slugId)
-      const repoName = issue.project_name ? sanitizeWorkspaceKey(issue.project_name) : (issue.project_slug ? sanitizeWorkspaceKey(issue.project_slug) : 'main');
-      envOverrides['SYMPHONY_GITHUB_OWNER'] = this.githubOwner;
-      envOverrides['SYMPHONY_GITHUB_REPO'] = repoName;
-    }
-
-    const result = await this.executeHook('after_run', this.hooks.after_run, workspacePath, {
-      ...envOverrides,
-      SYMPHONY_PROJECT_ROOT: this.projectRoot
-    });
-    if (!result.success) {
-      console.warn(`after_run hook failed: ${result.error}`);
-    }
-    return { success: result.success, output: result.output };
+    // after_run hook is disabled - only after_create is allowed
+    return { success: true, output: undefined };
   }
 
   /**
