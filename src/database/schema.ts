@@ -6,132 +6,140 @@
 import type { Database } from 'bun:sqlite';
 
 /**
- * SQL schema for the tasks table
- * Stores task/work item information synced from tracker
+ * SQL schema for work_items table
+ * Control-plane source of truth for issue -> GitHub -> PR -> workspace mapping
  */
-export const TASKS_TABLE_SCHEMA = `
-  CREATE TABLE IF NOT EXISTS tasks (
+export const WORK_ITEMS_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS work_items (
     id TEXT PRIMARY KEY,
-    identifier TEXT NOT NULL UNIQUE,
-    title TEXT NOT NULL,
-    description TEXT,
-    priority INTEGER,
-    state TEXT NOT NULL,
+    linear_issue_id TEXT NOT NULL UNIQUE,
+    linear_identifier TEXT NOT NULL UNIQUE,
+    linear_title TEXT NOT NULL,
+    linear_state TEXT NOT NULL,
+    github_repo TEXT NOT NULL,
+    github_issue_number INTEGER,
+    active_pr_number INTEGER,
     branch_name TEXT,
-    url TEXT,
-    labels TEXT DEFAULT '[]',
-    blocked_by TEXT DEFAULT '[]',
+    workspace_path TEXT,
     workspace_key TEXT,
-    retry_count INTEGER DEFAULT 0,
-    max_retries INTEGER DEFAULT 3,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    deleted_at TEXT
-  );
-`;
-
-/**
- * SQL schema for the workspaces table
- * Tracks workspace directories for each task
- */
-export const WORKSPACES_TABLE_SCHEMA = `
-  CREATE TABLE IF NOT EXISTS workspaces (
-    id TEXT PRIMARY KEY,
-    task_id TEXT NOT NULL,
-    path TEXT NOT NULL UNIQUE,
-    workspace_key TEXT NOT NULL UNIQUE,
-    created_at TEXT NOT NULL,
-    cleaned_at TEXT,
-    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
-  );
-`;
-
-/**
- * SQL schema for the execution_events table
- * Stores all runtime events for auditing and streaming
- */
-export const EXECUTION_EVENTS_TABLE_SCHEMA = `
-  CREATE TABLE IF NOT EXISTS execution_events (
-    id TEXT PRIMARY KEY,
-    task_id TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    event_data TEXT NOT NULL,
-    severity TEXT DEFAULT 'info',
-    source TEXT,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
-  );
-`;
-
-/**
- * Create indexes for common query patterns
- */
-export const INDEXES_SCHEMA = `
-  CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state) WHERE deleted_at IS NULL;
-  CREATE INDEX IF NOT EXISTS idx_tasks_identifier ON tasks(identifier) WHERE deleted_at IS NULL;
-  CREATE INDEX IF NOT EXISTS idx_workspaces_task_id ON workspaces(task_id);
-  CREATE INDEX IF NOT EXISTS idx_execution_events_task_id ON execution_events(task_id);
-  CREATE INDEX IF NOT EXISTS idx_execution_events_created_at ON execution_events(created_at);
-`;
-
-/**
- * SQL schema for issue_tracking table
- * Tracks issue state with custom fields synced from Linear
- */
-export const ISSUE_TRACKING_SCHEMA = `
-  CREATE TABLE IF NOT EXISTS issue_tracking (
-    id TEXT PRIMARY KEY,
-    identifier TEXT NOT NULL UNIQUE,
-    state TEXT NOT NULL,
-    complexity TEXT,
-    dev_attempts INTEGER DEFAULT 0,
-    review_round INTEGER DEFAULT 0,
+    orchestrator_state TEXT NOT NULL DEFAULT 'discovering',
+    dev_attempt_count INTEGER NOT NULL DEFAULT 0,
+    review_round INTEGER NOT NULL DEFAULT 0,
     last_review_decision TEXT,
+    last_review_summary TEXT,
+    cancelled_at TEXT,
+    merged_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
 `;
 
 /**
- * SQL schema for review_history table
- * Stores all review reports for audit trail
+ * SQL schema for repo_caches table
+ * Tracks shared per-repo source caches used to create issue worktrees
  */
-export const REVIEW_HISTORY_SCHEMA = `
-  CREATE TABLE IF NOT EXISTS review_history (
+export const REPO_CACHES_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS repo_caches (
     id TEXT PRIMARY KEY,
-    issue_id TEXT NOT NULL,
-    round INTEGER NOT NULL,
-    decision TEXT NOT NULL,
-    report_md TEXT NOT NULL,
-    reviewer_comment TEXT,
+    github_repo TEXT NOT NULL UNIQUE,
+    local_source_path TEXT NOT NULL UNIQUE,
+    default_branch TEXT NOT NULL DEFAULT 'main',
+    last_fetched_at TEXT,
+    last_fetch_commit TEXT,
     created_at TEXT NOT NULL,
-    FOREIGN KEY (issue_id) REFERENCES issue_tracking(id) ON DELETE CASCADE
+    updated_at TEXT NOT NULL
   );
 `;
 
 /**
- * SQL schema for audit_log table
- * Tracks all agent actions for debugging
+ * SQL schema for agent_runs table
+ * Stores every dev/review agent execution for audit and recovery
  */
-export const AUDIT_LOG_SCHEMA = `
-  CREATE TABLE IF NOT EXISTS audit_log (
+export const AGENT_RUNS_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS agent_runs (
     id TEXT PRIMARY KEY,
-    issue_id TEXT NOT NULL,
-    action TEXT NOT NULL,
-    agent_type TEXT,
-    details TEXT,
-    created_at TEXT NOT NULL
+    work_item_id TEXT NOT NULL,
+    agent_type TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    run_status TEXT NOT NULL DEFAULT 'running',
+    input_summary TEXT,
+    output_summary TEXT,
+    decision TEXT,
+    error TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE
   );
 `;
 
 /**
- * New indexes for review-related queries
+ * SQL schema for review_events table
+ * Stores structured review outcomes by round
  */
-export const REVIEW_INDEXES_SCHEMA = `
-  CREATE INDEX IF NOT EXISTS idx_issue_tracking_identifier ON issue_tracking(identifier);
-  CREATE INDEX IF NOT EXISTS idx_review_history_issue_id ON review_history(issue_id);
-  CREATE INDEX IF NOT EXISTS idx_audit_log_issue_id ON audit_log(issue_id);
-  CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
+export const REVIEW_EVENTS_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS review_events (
+    id TEXT PRIMARY KEY,
+    work_item_id TEXT NOT NULL,
+    pr_number INTEGER NOT NULL,
+    review_round INTEGER NOT NULL,
+    decision TEXT NOT NULL,
+    summary_md TEXT NOT NULL,
+    requested_changes_md TEXT,
+    merge_block_reason TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE
+  );
+`;
+
+/**
+ * SQL schema for sync_events table
+ * Tracks all Linear/GitHub synchronization attempts and outcomes
+ */
+export const SYNC_EVENTS_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS sync_events (
+    id TEXT PRIMARY KEY,
+    work_item_id TEXT NOT NULL,
+    target_system TEXT NOT NULL,
+    action TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    result TEXT NOT NULL DEFAULT 'success',
+    error TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE
+  );
+`;
+
+/**
+ * SQL schema for service_leases table
+ * Stores short-lived singleton leadership leases for control-plane services
+ */
+export const SERVICE_LEASES_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS service_leases (
+    lease_key TEXT PRIMARY KEY,
+    holder_id TEXT NOT NULL,
+    holder_pid INTEGER,
+    holder_host TEXT,
+    metadata_json TEXT,
+    acquired_at TEXT NOT NULL,
+    heartbeat_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+  );
+`;
+
+/**
+ * Indexes for new control-plane tables
+ */
+export const CONTROL_PLANE_INDEXES_SCHEMA = `
+  CREATE INDEX IF NOT EXISTS idx_work_items_linear_state ON work_items(linear_state);
+  CREATE INDEX IF NOT EXISTS idx_work_items_orchestrator_state ON work_items(orchestrator_state);
+  CREATE INDEX IF NOT EXISTS idx_work_items_github_repo ON work_items(github_repo);
+  CREATE INDEX IF NOT EXISTS idx_agent_runs_work_item_id ON agent_runs(work_item_id);
+  CREATE INDEX IF NOT EXISTS idx_agent_runs_started_at ON agent_runs(started_at);
+  CREATE INDEX IF NOT EXISTS idx_review_events_work_item_id ON review_events(work_item_id);
+  CREATE INDEX IF NOT EXISTS idx_review_events_round ON review_events(work_item_id, review_round DESC);
+  CREATE INDEX IF NOT EXISTS idx_sync_events_work_item_id ON sync_events(work_item_id);
+  CREATE INDEX IF NOT EXISTS idx_sync_events_target_result ON sync_events(target_system, result);
+  CREATE INDEX IF NOT EXISTS idx_service_leases_expires_at ON service_leases(expires_at);
 `;
 
 /**
@@ -139,24 +147,23 @@ export const REVIEW_INDEXES_SCHEMA = `
  * Creates all tables and indexes if they don't exist
  */
 export function initializeSchema(db: Database): void {
-  db.exec(TASKS_TABLE_SCHEMA);
-  db.exec(WORKSPACES_TABLE_SCHEMA);
-  db.exec(EXECUTION_EVENTS_TABLE_SCHEMA);
-  db.exec(INDEXES_SCHEMA);
-  db.exec(ISSUE_TRACKING_SCHEMA);
-  db.exec(REVIEW_HISTORY_SCHEMA);
-  db.exec(AUDIT_LOG_SCHEMA);
-  db.exec(REVIEW_INDEXES_SCHEMA);
+  db.exec(WORK_ITEMS_TABLE_SCHEMA);
+  db.exec(REPO_CACHES_TABLE_SCHEMA);
+  db.exec(AGENT_RUNS_TABLE_SCHEMA);
+  db.exec(REVIEW_EVENTS_TABLE_SCHEMA);
+  db.exec(SYNC_EVENTS_TABLE_SCHEMA);
+  db.exec(SERVICE_LEASES_TABLE_SCHEMA);
+  db.exec(CONTROL_PLANE_INDEXES_SCHEMA);
 }
 
 /**
  * Drop all tables (useful for testing)
  */
 export function dropAllTables(db: Database): void {
-  db.exec('DROP TABLE IF EXISTS audit_log;');
-  db.exec('DROP TABLE IF EXISTS review_history;');
-  db.exec('DROP TABLE IF EXISTS issue_tracking;');
-  db.exec('DROP TABLE IF EXISTS execution_events;');
-  db.exec('DROP TABLE IF EXISTS workspaces;');
-  db.exec('DROP TABLE IF EXISTS tasks;');
+  db.exec('DROP TABLE IF EXISTS service_leases;');
+  db.exec('DROP TABLE IF EXISTS sync_events;');
+  db.exec('DROP TABLE IF EXISTS review_events;');
+  db.exec('DROP TABLE IF EXISTS agent_runs;');
+  db.exec('DROP TABLE IF EXISTS repo_caches;');
+  db.exec('DROP TABLE IF EXISTS work_items;');
 }

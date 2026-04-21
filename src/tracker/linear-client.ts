@@ -54,9 +54,13 @@ export class LinearClient {
       });
 
       if (!response.ok) {
+        const responseBody = await response.text();
+        const detail = responseBody.trim().replace(/\s+/g, ' ').slice(0, 500);
         return {
           error: 'linear_api_status',
-          errorMessage: `Linear API returned status ${response.status}`
+          errorMessage: detail
+            ? `Linear API returned status ${response.status}: ${detail}`
+            : `Linear API returned status ${response.status}`
         };
       }
 
@@ -348,7 +352,7 @@ export class LinearClient {
    */
   async fetchIssueById(issueId: string): Promise<{ issue: Issue | null; error?: TrackerError; errorMessage?: string }> {
     const query = `
-      query GetIssue($id: ID!) {
+      query GetIssue($id: String!) {
         issue(id: $id) {
           id
           identifier
@@ -412,7 +416,7 @@ export class LinearClient {
    */
   async getIssueCustomFields(issueId: string): Promise<LinearCustomFields> {
     const query = `
-      query GetIssueCustomFields($id: ID!) {
+      query GetIssueCustomFields($id: String!) {
         issue(id: $id) {
           id
           identifier
@@ -498,14 +502,14 @@ export class LinearClient {
    */
   async postComment(issueId: string, body: string): Promise<{ success: boolean; error?: string }> {
     const mutation = `
-      mutation IssueCommentCreate($issueId: String!, $body: String!) {
-        issueCommentCreate(input: { issueId: $issueId, body: $body }) {
+      mutation CommentCreate($issueId: String!, $body: String!) {
+        commentCreate(input: { issueId: $issueId, body: $body }) {
           success
         }
       }
     `;
 
-    const result = await this.graphqlQuery<{ issueCommentCreate: { success: boolean } }>(
+    const result = await this.graphqlQuery<{ commentCreate: { success: boolean } }>(
       mutation,
       { issueId, body }
     );
@@ -514,7 +518,7 @@ export class LinearClient {
       return { success: false, error: result.errorMessage };
     }
 
-    return { success: result.data?.issueCommentCreate?.success || false };
+    return { success: result.data?.commentCreate?.success || false };
   }
 
   /**
@@ -523,17 +527,44 @@ export class LinearClient {
   async updateIssueState(issueId: string, stateName: string): Promise<{ success: boolean; error?: string }> {
     // First, find the project slug ID for this issue
     const stateQuery = `
-      query GetIssueProject($issueId: ID!) {
+      query GetIssueProject($issueId: String!) {
         issue(id: $issueId) {
           id
           project {
             slugId
+            teams {
+              nodes {
+                id
+                states {
+                  nodes {
+                    id
+                    name
+                    type
+                  }
+                }
+              }
+            }
           }
         }
       }
     `;
 
-    const issueResult = await this.graphqlQuery<{ issue: { id: string; project: { slugId: string } | null } | null }>(
+    const issueResult = await this.graphqlQuery<{
+      issue: {
+        id: string;
+        project: {
+          slugId: string;
+          teams?: {
+            nodes: Array<{
+              id: string;
+              states: {
+                nodes: Array<{ id: string; name: string; type: string }>;
+              };
+            }>;
+          };
+        } | null;
+      } | null;
+    }>(
       stateQuery,
       { issueId }
     );
@@ -547,46 +578,19 @@ export class LinearClient {
       return { success: false, error: 'Issue has no associated project' };
     }
 
-    // Now fetch available states for the team/project
-    const teamQuery = `
-      query GetTeamStates($projectSlugs: [String!]) {
-        projects(filter: { slugId: { in: $projectSlugs } }) {
-          nodes {
-            id
-            name
-            slugId
-            team {
-              id
-              states {
-                nodes {
-                  id
-                  name
-                  type
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-
-    const teamResult = await this.graphqlQuery<{ projects: { nodes: Array<{ team: { id: string; states: { nodes: Array<{ id: string; name: string; type: string }> } } }> } }>(teamQuery, { projectSlugs: [projectSlugId] });
-
-    if (teamResult.error || !teamResult.data?.projects?.nodes?.length) {
-      return { success: false, error: teamResult.errorMessage || 'Team not found' };
-    }
-
-    const team = teamResult.data.projects.nodes[0].team;
-    const targetState = team.states.nodes.find(s => s.name.toLowerCase() === stateName.toLowerCase());
+    const teams = issueResult.data.issue.project?.teams?.nodes || [];
+    const targetState = teams
+      .flatMap(team => team.states.nodes)
+      .find(state => state.name.toLowerCase() === stateName.toLowerCase());
 
     if (!targetState) {
-      return { success: false, error: `State "${stateName}" not found in team states` };
+      return { success: false, error: `State "${stateName}" not found in project team states` };
     }
 
     // Update the issue state
     const mutation = `
       mutation UpdateIssueState($issueId: String!, $stateId: String!) {
-        issueUpdate(input: { id: $issueId, stateId: $stateId }) {
+        issueUpdate(id: $issueId, input: { stateId: $stateId }) {
           success
         }
       }

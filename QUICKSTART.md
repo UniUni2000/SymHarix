@@ -1,77 +1,50 @@
-# Symphony 项目快速开始
+# Symphony 快速开始
 
-## 项目结构
+## 当前保留的最小主链
 
+```text
+WORKFLOW.md
+  -> CLI
+  -> Orchestrator
+  -> Workspace Manager
+  -> Claude adapter
+  -> claude-code runtime
+  -> Python hooks
 ```
-test-cc/
-├── claude-code/        # 集成的本地 Claude Code CLI 源码
-├── src/
-│   ├── web-dashboard/  # React Web 界面
-│   ├── server/         # Hono HTTP 服务器
-│   ├── telegram/       # Telegram Bot
-│   ├── orchestrator/   # 任务编排器
-│   └── ...
-├── scripts/            # 部署脚本
-├── docs/               # 文档
-└── package.json
-```
+
+项目里已经移除了旧的 `Telegram`、`Web Dashboard`、旧 `task/event` 控制层，当前只保留 `V1` 控制面主链。
 
 ## 运行
 
-### Claude Code
-
 ```bash
-# 运行集成的 Claude Code
-bun run claude
-
-# 或使用 bin 直接运行
-./claude-code/bin/claude-haha
+bun install
+bun run start
 ```
 
-### Symphony
+开发模式：
 
 ```bash
-# 安装依赖
-bun install
-
-# 运行 Symphony
-bun run start
-
-# 开发模式
 bun run dev
 ```
 
-### Web Dashboard
+## 必要配置
 
-```bash
-# 构建
-bun run build:dashboard
+1. 准备 `.env`
+2. 准备 `WORKFLOW.md`
+3. 配好 `Linear` / `GitHub` / Claude 运行所需变量
 
-# 开发服务器 (在 src/web-dashboard 目录)
-cd src/web-dashboard && bun dev
+最关键的是 [WORKFLOW.md](/Users/liupenghui/Documents/code/agent/test-cc/WORKFLOW.md) 里的 `codex.command`，当前默认走：
+
+```yaml
+codex:
+  command: node ./scripts/claude-adapter.cjs
 ```
 
-## 配置
+而 `scripts/claude-adapter.cjs` 会继续调用仓库里的 `claude-code` runtime。
 
-复制环境变量文件并配置：
-
-```bash
-cp .env.example .env
-```
-
-需要配置：
-- `ANTHROPIC_API_KEY` - Anthropic API 密钥
-- `SYMPHONY_TRACKER_API_KEY` - Linear API 密钥（如果使用 Linear）
-- `TELEGRAM_BOT_TOKEN` - Telegram Bot 令牌（可选）
-
-## 部署
+## 常用命令
 
 ```bash
-# 准备部署
-bun run deploy:prepare
-
-# 安装 systemd 服务
-bun run deploy:service
+bun run build
+bun run test
 ```
-
-详见 [docs/deployment.md](docs/deployment.md)

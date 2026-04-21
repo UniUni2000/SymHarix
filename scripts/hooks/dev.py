@@ -18,6 +18,12 @@ from lib.state_store import StateStore
 
 class DevHook:
     """Handles the DEV phase of issue workflow."""
+    WORKFLOW_ARTIFACT_PATHS = (
+        "DEVELOPMENT_LOG.md",
+        "HANDOVER.md",
+        "REVIEW_REPORT.md",
+        ".symphony",
+    )
 
     def __init__(
         self,
@@ -92,17 +98,11 @@ class DevHook:
     def run(self) -> bool:
         """
         Run the DEV phase (hybrid mode - orchestrator handles agent):
-        1. Wait for Linear state to confirm IN_PROGRESS
+        1. Verify local state
         2. (orchestrator already ran Claude Code agent)
         3. Create/update PR
-        4. Update Linear to In Review
-        5. Wait for Linear to confirm In Review
+        4. Move local state to IN_REVIEW
         """
-        # Step 1: Dual-check Linear state
-        print(f"[DEV] Verifying Linear state for {self.issue_id}...")
-        linear_current = self.linear.fetch_issue_state(self.issue_id)
-        print(f"[DEV] Linear state: {linear_current}")
-
         current = self.store.get_current_state_enum()
         # Allow both TODO (standalone mode) and IN_PROGRESS (orchestrator hybrid mode)
         if current not in (State.IN_PROGRESS, State.TODO):
@@ -114,35 +114,15 @@ class DevHook:
         # If TODO, we're in standalone mode and should run agent (skip in hybrid)
 
         # Step 3: Create PR if not exists
-        pr_info = self._ensure_pr_exists()
-        if not pr_info:
-            self.store.set_error("Failed to create PR")
+        try:
+            pr_info = self._ensure_pr_exists()
+        except Exception as e:
+            error_message = str(e) or "Failed to create PR"
+            print(f"[DEV] ERROR: {error_message}")
+            self.store.set_error(error_message)
             return False
 
-        # Step 4: Update Linear to In Review
-        print(f"[DEV] Updating Linear state to In Review...")
-        in_review_state_id = self.linear.fetch_state_id("In Review")
-        if not in_review_state_id:
-            print("[DEV] ERROR: Could not find In Review state ID")
-            self.store.set_error("Could not find In Review state ID")
-            return False
-
-        self.linear.update_issue_state(self.linear_issue_id, in_review_state_id)
-
-        # Step 5: Wait for Linear to confirm
-        print(f"[DEV] Waiting for Linear to confirm In Review...")
-        confirmed = self.linear.wait_for_state(
-            self.issue_id,
-            "In Review",
-            max_wait_seconds=30,
-            poll_interval=2,
-        )
-
-        if not confirmed:
-            print("[DEV] WARNING: Linear state not confirmed after update")
-            # Continue anyway - might be eventual consistency
-
-        # Step 6: Transition state to IN_REVIEW
+        # Step 4: Transition local state to IN_REVIEW
         self.store.update_state(
             from_state=State.IN_PROGRESS,
             to_state=State.IN_REVIEW,
@@ -153,6 +133,8 @@ class DevHook:
                 "pr_number": pr_info["number"],
             },
         )
+
+        self._publish_handover_summary(pr_info["number"])
 
         print(f"[DEV] Complete - PR: {pr_info['url']}")
         return True
@@ -173,8 +155,10 @@ Description: {issue.get('description', 'No description')}
 
 Implement the required changes. When complete:
 1. Run tests to verify
-2. Commit your changes
-3. Push to the branch {self.branch}
+2. Write handover details to .symphony/HANDOVER.md
+3. Do not commit files under .symphony/
+4. Commit only product code changes
+5. Push to the branch {self.branch}
 """
 
         # Run Claude Code adapter
@@ -200,6 +184,8 @@ Implement the required changes. When complete:
 
     def _ensure_pr_exists(self) -> Optional[dict]:
         """Ensure PR exists for the branch, create if not."""
+        self._prepare_branch_for_pr()
+
         # Check if PR already exists
         existing = self.github.pr_exists(self.branch)
         if existing:
@@ -229,5 +215,185 @@ Agent completed the task for issue [{self.issue_id}](https://linear.app/inteliwa
             print(f"[DEV] PR created: {pr['html_url']}")
             return {"url": pr["html_url"], "number": pr["number"]}
         except Exception as e:
-            print(f"[DEV] ERROR creating PR: {e}")
+            raise RuntimeError(f"ERROR creating PR: {e}") from e
+
+    def _prepare_branch_for_pr(self) -> None:
+        """Verify the branch has changes and is pushed before PR creation."""
+        base_ref = self._resolve_base_ref()
+        self._sanitize_workflow_artifacts_for_pr(base_ref)
+        ahead_count = self._count_commits_ahead(base_ref)
+        if ahead_count <= 0:
+            if self._workspace_has_uncommitted_changes():
+                raise RuntimeError(
+                    f"Workspace for {self.branch} has uncommitted changes but no commits "
+                    f"relative to {base_ref}; commit and push are required before PR creation"
+                )
+            raise RuntimeError(
+                f"No commits found on {self.branch} relative to {base_ref}; skipping PR creation"
+            )
+
+        local_head = self._git_stdout("rev-parse", "HEAD")
+        remote_ref = f"refs/remotes/origin/{self.branch}"
+        remote_head = self._try_git_stdout("rev-parse", "--verify", remote_ref)
+
+        if remote_head == local_head:
+            print(f"[DEV] Branch {self.branch} already pushed at {local_head[:8]}")
+            return
+
+        print(f"[DEV] Pushing branch {self.branch} to origin")
+        push_result = self._git(
+            "push",
+            "-u",
+            "origin",
+            self.branch,
+            check=False,
+        )
+        if push_result.returncode != 0:
+            message = (push_result.stderr or push_result.stdout or "").strip()
+            raise RuntimeError(f"Failed to push branch {self.branch}: {message or 'unknown git error'}")
+
+    def _sanitize_workflow_artifacts_for_pr(self, base_ref: str) -> None:
+        """Keep workflow/process artifacts out of the branch before PR creation."""
+        branch_paths = self._git_path_list(
+            "diff",
+            "--name-only",
+            f"{base_ref}...HEAD",
+            "--",
+            *self.WORKFLOW_ARTIFACT_PATHS,
+        )
+        if not branch_paths:
+            return
+
+        print(
+            "[DEV] Removing workflow artifacts from branch diff:",
+            ", ".join(branch_paths),
+        )
+        self._restore_paths_from_ref(base_ref, branch_paths)
+
+        if self._workspace_has_uncommitted_changes():
+            self._git("add", "--all", "--", *branch_paths)
+            commit_result = self._git(
+                "commit",
+                "-m",
+                "chore: remove workflow artifacts from submission",
+                check=False,
+            )
+            if commit_result.returncode != 0:
+                message = (commit_result.stderr or commit_result.stdout or "").strip()
+                if "nothing to commit" not in message.lower():
+                    raise RuntimeError(
+                        f"Failed to remove workflow artifacts from branch {self.branch}: {message or 'unknown git error'}"
+                    )
+
+        remaining_paths = self._git_path_list(
+            "diff",
+            "--name-only",
+            f"{base_ref}...HEAD",
+            "--",
+            *self.WORKFLOW_ARTIFACT_PATHS,
+        )
+        if remaining_paths:
+            raise RuntimeError(
+                "Workflow artifacts are still present in the branch diff: "
+                + ", ".join(remaining_paths)
+            )
+
+    def _restore_paths_from_ref(self, source_ref: str, paths: list[str]) -> None:
+        for workflow_path in paths:
+            if self._path_exists_in_ref(source_ref, workflow_path):
+                self._git(
+                    "restore",
+                    "--source",
+                    source_ref,
+                    "--staged",
+                    "--worktree",
+                    "--",
+                    workflow_path,
+                )
+                continue
+
+            self._git("rm", "-r", "-f", "--ignore-unmatch", "--", workflow_path, check=False)
+            local_path = self._workspace_path() / workflow_path
+            if local_path.is_dir():
+                import shutil
+                shutil.rmtree(local_path, ignore_errors=True)
+            elif local_path.exists():
+                local_path.unlink()
+
+    def _path_exists_in_ref(self, source_ref: str, workflow_path: str) -> bool:
+        result = self._git("cat-file", "-e", f"{source_ref}:{workflow_path}", check=False)
+        return result.returncode == 0
+
+    def _resolve_base_ref(self) -> str:
+        """Prefer the tracked remote default branch when available."""
+        default_branch = getattr(self.github, "default_branch", "main")
+        remote_ref = f"refs/remotes/origin/{default_branch}"
+        if self._git("rev-parse", "--verify", remote_ref, check=False).returncode == 0:
+            return remote_ref
+        return default_branch
+
+    def _count_commits_ahead(self, base_ref: str) -> int:
+        """Count commits on HEAD that are not in the base branch."""
+        count_str = self._git_stdout("rev-list", "--count", f"{base_ref}..HEAD")
+        try:
+            return int(count_str)
+        except ValueError as e:
+            raise RuntimeError(
+                f"Unexpected git rev-list output for {self.branch}: {count_str!r}"
+            ) from e
+
+    def _workspace_has_uncommitted_changes(self) -> bool:
+        """Check whether the workspace has local tracked or untracked changes."""
+        return bool(self._git_stdout("status", "--short"))
+
+    def _git_path_list(self, *args: str) -> list[str]:
+        output = self._git_stdout(*args)
+        if not output:
+            return []
+        return [line.strip() for line in output.splitlines() if line.strip()]
+
+    def _workspace_path(self) -> Path:
+        """Resolve the actual git workspace path."""
+        return self.store.symphony_dir.path.parent
+
+    def _workflow_file_path(self, filename: str) -> Path:
+        """Resolve workflow artifacts under the canonical .symphony/ directory."""
+        return self._workspace_path() / ".symphony" / filename
+
+    def _publish_handover_summary(self, pr_number: int) -> None:
+        """Publish the dev handover into the PR timeline instead of committing it."""
+        handover_path = self._workflow_file_path("HANDOVER.md")
+        if not handover_path.exists():
+            return
+
+        content = handover_path.read_text().strip()
+        if not content:
+            return
+
+        try:
+            self.github.add_pull_request_comment(pr_number, content)
+            print(f"[DEV] Published .symphony/HANDOVER.md to PR #{pr_number}")
+        except Exception as e:
+            print(f"[DEV] WARNING: Failed to publish handover summary to PR #{pr_number}: {e}")
+
+    def _git(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+        """Run a git command inside the issue workspace."""
+        return subprocess.run(
+            ["git", *args],
+            cwd=self._workspace_path(),
+            capture_output=True,
+            text=True,
+            check=check,
+        )
+
+    def _git_stdout(self, *args: str) -> str:
+        """Run git and return trimmed stdout."""
+        result = self._git(*args)
+        return result.stdout.strip()
+
+    def _try_git_stdout(self, *args: str) -> Optional[str]:
+        """Run git and return stdout when the ref exists."""
+        result = self._git(*args, check=False)
+        if result.returncode != 0:
             return None
+        return result.stdout.strip()
