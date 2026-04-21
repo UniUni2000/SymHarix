@@ -20,6 +20,12 @@ import { loadWorkflow, resolveWorkflowPath } from '../workflow/loader';
 import { buildServiceConfig, validateConfigForDispatch } from '../config/loader';
 import { logger } from '../logging';
 import { Issue, AgentEvent, WorkflowDefinition, ServiceConfig } from '../types';
+import {
+  consumeTimelineEventForCli,
+  createCliTimelineRenderState,
+  flushCliTimelineState,
+  shouldLogStructuredAgentEvent,
+} from './timeline';
 
 /**
  * Parse command line arguments
@@ -72,6 +78,39 @@ Examples:
 `);
 }
 
+async function killKnownSymphonyProcesses(currentPid?: number): Promise<void> {
+  const { execSync } = await import('child_process');
+  const orchestratorPattern = 'bun .*src/cli/index\\.ts|node .*src/cli/index\\.ts|bun .*cli\\.tsx|node.*symharix.*cli';
+
+  const orchestratorPids = execSync(
+    `ps aux | grep -E '${orchestratorPattern}' | grep -v grep | awk '{print $2}'`
+  ).toString().trim().split('\n').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n !== 1 && n !== currentPid);
+
+  if (orchestratorPids.length > 0) {
+    console.log('[symphony] Stopping processes:', orchestratorPids.join(', '));
+  }
+  for (const pid of orchestratorPids) {
+    try {
+      process.kill(pid, 'SIGTERM');
+      console.log(`[symphony] Sent SIGTERM to ${pid}`);
+    } catch (err) {
+      console.error(`[symphony] Failed to kill ${pid}:`, err);
+    }
+  }
+
+  try {
+    const adapterPids = execSync(
+      `ps aux | grep 'claude-adapter\\.cjs' | grep -v grep | awk '{print $2}'`
+    ).toString().trim().split('\n').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n !== 1 && n !== currentPid);
+    for (const pid of adapterPids) {
+      try {
+        process.kill(pid, 'SIGTERM');
+        console.log(`[symphony] Sent SIGTERM to adapter ${pid}`);
+      } catch {}
+    }
+  } catch {}
+}
+
 /**
  * Main entry point
  */
@@ -87,41 +126,15 @@ async function main(): Promise<void> {
   // --kill: terminate all running symphony processes
   if (args.kill) {
     const myPid = process.pid;
+    await killKnownSymphonyProcesses(myPid);
     const { execSync } = await import('child_process');
-
-    // Find symphony-related processes
-    const pids = execSync(
-      `ps aux | grep -E 'bun run src/cli|node.*symharix.*cli|bun.*cli\\.tsx' | grep -v grep | awk '{print $2}'`
+    const remainingPids = execSync(
+      `ps aux | grep -E 'bun .*src/cli/index\\.ts|node .*src/cli/index\\.ts|bun .*cli\\.tsx|node.*symharix.*cli' | grep -v grep | awk '{print $2}'`
     ).toString().trim().split('\n').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n !== myPid && n !== 1);
 
-    if (pids.length === 0) {
+    if (remainingPids.length === 0) {
       console.log('[symphony] No running processes found.');
-      process.exit(0);
     }
-
-    console.log('[symphony] Stopping processes:', pids.join(', '));
-    for (const pid of pids) {
-      try {
-        process.kill(pid, 'SIGTERM');
-        console.log(`[symphony] Sent SIGTERM to ${pid}`);
-      } catch (err) {
-        console.error(`[symphony] Failed to kill ${pid}:`, err);
-      }
-    }
-
-    // Also kill any orphaned claude-adapter processes
-    try {
-      const adapterPids = execSync(
-        `ps aux | grep 'claude-adapter\\.cjs' | grep -v grep | awk '{print $2}'`
-      ).toString().trim().split('\n').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
-      for (const pid of adapterPids) {
-        try {
-          process.kill(pid, 'SIGTERM');
-          console.log(`[symphony] Sent SIGTERM to adapter ${pid}`);
-        } catch {}
-      }
-    } catch {}
-
     console.log('[symphony] All processes stopped.');
     process.exit(0);
   }
@@ -174,6 +187,7 @@ async function main(): Promise<void> {
 
   // Create orchestrator
   const orchestrator = new Orchestrator(config, loadResult.definition!);
+  const timelineRenderStateByIssue = new Map<string, ReturnType<typeof createCliTimelineRenderState>>();
 
   // Set up event handlers
   orchestrator.on('issue:dispatched', (issue: Issue) => {
@@ -187,6 +201,13 @@ async function main(): Promise<void> {
   });
 
   orchestrator.on('issue:completed', (issue: Issue, success: boolean) => {
+    const timelineState = timelineRenderStateByIssue.get(issue.id);
+    if (timelineState) {
+      for (const message of flushCliTimelineState(timelineState)) {
+        console.log(`[agent] ${message}`);
+      }
+      timelineRenderStateByIssue.delete(issue.id);
+    }
     logger.info('Issue completed', {
       issue_id: issue.id,
       issue_identifier: issue.identifier,
@@ -195,6 +216,13 @@ async function main(): Promise<void> {
   });
 
   orchestrator.on('issue:failed', (issue: Issue, error: string) => {
+    const timelineState = timelineRenderStateByIssue.get(issue.id);
+    if (timelineState) {
+      for (const message of flushCliTimelineState(timelineState)) {
+        console.log(`[agent] ${message}`);
+      }
+      timelineRenderStateByIssue.delete(issue.id);
+    }
     logger.error('Issue failed', {
       issue_id: issue.id,
       issue_identifier: issue.identifier,
@@ -212,6 +240,23 @@ async function main(): Promise<void> {
   });
 
   orchestrator.on('session:event', (issueId: string, event: AgentEvent) => {
+    let timelineState = timelineRenderStateByIssue.get(issueId);
+    if (!timelineState) {
+      timelineState = createCliTimelineRenderState();
+      timelineRenderStateByIssue.set(issueId, timelineState);
+    }
+
+    const timelineMessages = consumeTimelineEventForCli(event, timelineState);
+    if (timelineMessages.length > 0) {
+      for (const message of timelineMessages) {
+        console.log(`[agent] ${message}`);
+      }
+      return;
+    }
+    if (!shouldLogStructuredAgentEvent(event)) {
+      return;
+    }
+
     logger.info('Agent event', {
       issue_id: issueId,
       event: event.event,
@@ -252,6 +297,7 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     if (shuttingDown) {
       console.log('[symphony] Force shutdown...');
+      await killKnownSymphonyProcesses(process.pid);
       process.exit(1);
     }
 

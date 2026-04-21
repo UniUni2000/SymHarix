@@ -12,6 +12,17 @@ def test_symphony_dir_path():
         expected = Path(tmpdir) / "INT-23" / ".symphony"
         assert sd.path == expected
 
+def test_symphony_dir_prefers_workspace_local_path_for_git_worktree():
+    """Test real git workspaces store state inside workspace/.symphony."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir) / "INT-23"
+        workspace.mkdir()
+        (workspace / ".git").write_text("gitdir: /tmp/fake-worktree\n")
+
+        sd = SymphonyDir(workspace, "INT-23")
+
+        assert sd.path == workspace / ".symphony"
+
 def test_create_directory_structure():
     """Test that create() creates the directory structure."""
     with tempfile.TemporaryDirectory() as tmpdir:

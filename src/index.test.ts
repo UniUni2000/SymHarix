@@ -7,6 +7,7 @@ import { describe, it, expect } from '@jest/globals';
 import { loadWorkflow, parseWorkflowContent, resolveWorkflowPath } from './workflow/loader';
 import { buildServiceConfig, validateConfigForDispatch } from './config/loader';
 import { sanitizeWorkspaceKey } from './workspace/manager';
+import { judgeComplexity } from './hooks/dev-prompt';
 
 describe('Workflow Loader', () => {
   describe('parseWorkflowContent', () => {
@@ -154,5 +155,70 @@ describe('Issue Sorting', () => {
   // and testing the sortForDispatch method
   it('placeholder for orchestrator tests', () => {
     expect(true).toBe(true);
+  });
+});
+
+describe('Complexity Judgment', () => {
+  it('classifies single-file script tasks as small', () => {
+    const result = judgeComplexity({
+      id: 'issue-1',
+      identifier: 'INT-1',
+      title: '写一个 python 文件输出 hello world',
+      description: '创建一个简单的 python 脚本文件。',
+      priority: 1,
+      state: 'Todo',
+      project_slug: null,
+      project_name: null,
+      branch_name: null,
+      url: null,
+      labels: [],
+      blocked_by: [],
+      created_at: new Date(),
+      updated_at: new Date(),
+    });
+
+    expect(result.complexity).toBe('small');
+  });
+
+  it('classifies fibonacci single-file tasks as small', () => {
+    const result = judgeComplexity({
+      id: 'issue-3',
+      identifier: 'INT-27',
+      title: '写一个计算斐波那契数列的 python 文件',
+      description: '创建一个简单的 python 脚本文件来输出结果',
+      priority: 1,
+      state: 'Todo',
+      project_slug: 'proj',
+      project_name: 'repo',
+      branch_name: null,
+      url: null,
+      labels: [],
+      blocked_by: [],
+      created_at: null,
+      updated_at: null,
+    });
+
+    expect(result.complexity).toBe('small');
+  });
+
+  it('classifies simple export-to-txt tasks as small', () => {
+    const result = judgeComplexity({
+      id: 'issue-2',
+      identifier: 'INT-28',
+      title: '搜集今日特朗普动态存到 txt 里面',
+      description: '把结果保存到 txt 文件中。',
+      priority: 1,
+      state: 'Todo',
+      project_slug: null,
+      project_name: null,
+      branch_name: null,
+      url: null,
+      labels: [],
+      blocked_by: [],
+      created_at: new Date(),
+      updated_at: new Date(),
+    });
+
+    expect(result.complexity).toBe('small');
   });
 });

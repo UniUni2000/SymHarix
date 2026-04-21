@@ -21,10 +21,19 @@ class SymphonyDir:
     def __init__(self, workspace_root: Path, issue_id: str):
         self.workspace_root = workspace_root
         self.issue_id = issue_id
-        self.path = workspace_root / issue_id / SYMPHONY_DIR_NAME
+        direct_workspace_path = workspace_root / SYMPHONY_DIR_NAME
+        if direct_workspace_path.exists() or self._looks_like_git_workspace(workspace_root):
+            self.path = direct_workspace_path
+        else:
+            self.path = workspace_root / issue_id / SYMPHONY_DIR_NAME
         self.state_file = self.path / STATE_FILE_NAME
         self.context_file = self.path / CONTEXT_FILE_NAME
         self.events_file = self.path / EVENTS_FILE_NAME
+
+    @staticmethod
+    def _looks_like_git_workspace(workspace_root: Path) -> bool:
+        """Detect when the caller passed an actual git workspace/worktree path."""
+        return (workspace_root / ".git").exists()
 
     def create(self) -> None:
         """Create the .symphony directory and empty files."""
@@ -117,6 +126,7 @@ class StateStore:
                 "pr_url": None,
                 "pr_number": None,
                 "pr_merged": False,
+                "github_issue_number": None,
                 "branch": branch,
                 "github_repo": github_repo,
             },

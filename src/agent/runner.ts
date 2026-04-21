@@ -6,8 +6,16 @@
 import { EventEmitter } from 'events';
 import * as cp from 'child_process';
 import * as path from 'path';
-import * as fs from 'fs';
-import { AgentEvent, AgentEventType, LiveSession, Issue, WorkflowDefinition } from '../types';
+import {
+  AgentEvent,
+  AgentEventType,
+  AgentTimelinePayload,
+  Issue,
+  PendingRuntimeRequest,
+  RuntimeRequestResponse,
+  TurnTranscriptEntry,
+  WorkflowDefinition,
+} from '../types';
 import { Liquid } from 'liquidjs';
 
 /**
@@ -49,6 +57,8 @@ export interface TurnResult {
     total: number;
   };
   claude_api_calls: number;
+  timeline: AgentTimelinePayload[];
+  transcript: TurnTranscriptEntry[];
 }
 
 /**
@@ -67,11 +77,6 @@ export class AgentRunner extends EventEmitter {
   private options: AgentRunnerOptions;
   private liquid: Liquid;
   private messageCounter: number = 1;
-  private pendingResponses: Map<number, (msg: CodexMessage) => void> = new Map();
-  private currentStreamHandler: ((line: string, msg?: CodexMessage) => void) | null = null;
-  private streamComplete: (() => void) | null = null;
-  private streamError: ((err: string) => void) | null = null;
-
   constructor(options: AgentRunnerOptions) {
     super();
     this.options = options;
@@ -79,6 +84,27 @@ export class AgentRunner extends EventEmitter {
       strictVariables: true,  // Section 5.4: Unknown variables must fail
       strictFilters: true     // Section 5.4: Unknown filters must fail
     });
+  }
+
+  private sendSignal(
+    child: cp.ChildProcess,
+    signal?: NodeJS.Signals | number,
+  ): boolean {
+    try {
+      const kill = child.kill as
+        | ((signal?: NodeJS.Signals | number) => boolean)
+        | undefined;
+      if (typeof kill === 'function') {
+        return kill(signal);
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  private shouldLogDiagnostics(): boolean {
+    return process.env.SYMPHONY_ADAPTER_DEBUG === '1';
   }
 
   /**
@@ -240,6 +266,9 @@ export class AgentRunner extends EventEmitter {
     const method = msg.method;
     const result = msg.result as Record<string, unknown> | undefined;
 
+    if (method === 'agent/timeline') {
+      return 'timeline';
+    }
     if (method === 'session/started' || (result && result['sessionStarted'])) {
       return 'session_started';
     }
@@ -252,18 +281,120 @@ export class AgentRunner extends EventEmitter {
     if (method === 'turn/cancelled') {
       return 'turn_cancelled';
     }
-    if (method === 'item/tool/requestUserInput') {
-      return 'turn_input_required';
-    }
-    if (method === 'approval/request') {
-      // Auto-approve handling
-      return 'approval_auto_approved';
-    }
     if (result && (result as Record<string, unknown>)['userInputRequired']) {
       return 'turn_input_required';
     }
 
     return null;
+  }
+
+  private extractEventPayload(msg: CodexMessage): Record<string, unknown> | AgentTimelinePayload | undefined {
+    if (msg.method === 'agent/timeline') {
+      return msg.params as AgentTimelinePayload | undefined;
+    }
+    return (msg.result || msg.params) as Record<string, unknown> | undefined;
+  }
+
+  private buildRuntimeRequest(msg: CodexMessage): PendingRuntimeRequest | null {
+    const params = msg.params as Record<string, unknown> | undefined;
+    if (!params) {
+      return null;
+    }
+
+    if (msg.method === 'approval/request') {
+      const request = (params.request as Record<string, unknown> | undefined) || {};
+      const toolName =
+        typeof request.tool_name === 'string' ? request.tool_name : null;
+      const description = [
+        typeof request.title === 'string' ? request.title : null,
+        typeof request.description === 'string' ? request.description : null,
+        typeof request.decision_reason === 'string' ? request.decision_reason : null,
+      ]
+        .filter(Boolean)
+        .join(' · ');
+
+      return {
+        kind: 'approval',
+        method: 'approval/request',
+        request_id:
+          typeof params.request_id === 'string'
+            ? params.request_id
+            : typeof request.tool_use_id === 'string'
+              ? request.tool_use_id
+              : String(msg.id || ''),
+        turn: typeof params.turn === 'number' ? params.turn : null,
+        raw: request,
+        summary: {
+          title: toolName ? `Permission request for ${toolName}` : 'Permission request',
+          message: description || JSON.stringify(request.input || {}),
+          tool_name: toolName,
+          subtype: typeof request.subtype === 'string' ? request.subtype : 'can_use_tool',
+        },
+      };
+    }
+
+    if (msg.method === 'item/tool/requestUserInput') {
+      const request = (params.request as Record<string, unknown> | undefined) || params;
+      const subtype =
+        typeof request.subtype === 'string' ? request.subtype : 'elicitation';
+      const toolName =
+        typeof request.mcp_server_name === 'string' ? request.mcp_server_name : null;
+      const title =
+        typeof request.title === 'string'
+          ? request.title
+          : toolName
+            ? `Input requested by ${toolName}`
+            : 'Input requested';
+      const message =
+        typeof request.message === 'string'
+          ? request.message
+          : JSON.stringify(request.requested_schema || request);
+
+      return {
+        kind: 'user_input',
+        method: 'item/tool/requestUserInput',
+        request_id:
+          typeof params.request_id === 'string'
+            ? params.request_id
+            : typeof request.elicitation_id === 'string'
+              ? request.elicitation_id
+              : String(msg.id || ''),
+        turn: typeof params.turn === 'number' ? params.turn : null,
+        raw: request,
+        summary: {
+          title,
+          message,
+          tool_name: toolName,
+          subtype,
+        },
+      };
+    }
+
+    return null;
+  }
+
+  private buildFallbackRuntimeResponse(
+    request: PendingRuntimeRequest,
+  ): RuntimeRequestResponse {
+    if (request.kind === 'approval') {
+      const toolUseID =
+        typeof request.raw.tool_use_id === 'string'
+          ? request.raw.tool_use_id
+          : undefined;
+      return {
+        response: {
+          behavior: 'deny',
+          message: 'No runtime request handler configured.',
+          ...(toolUseID ? { toolUseID } : {}),
+        },
+      };
+    }
+
+    return {
+      response: {
+        action: 'cancel',
+      },
+    };
   }
 
   /**
@@ -312,6 +443,10 @@ export class AgentRunner extends EventEmitter {
     // Create async line reader for stdout
     const stdoutLineHandler = new Set<(line: string) => void>();
     const stderrLineHandler = new Set<(line: string) => void>();
+    const stdoutDataHandlerMap = new Map<(data: Buffer) => void, (line: string) => void>();
+    const stderrDataHandlerMap = new Map<(data: Buffer) => void, (line: string) => void>();
+    const exitHandlers = new Set<(code: number | null, signal: NodeJS.Signals | null) => void>();
+    const errorHandlers = new Set<(error: Error) => void>();
 
     // Start async stdout reader
     (async () => {
@@ -349,6 +484,17 @@ export class AgentRunner extends EventEmitter {
       }
     })();
 
+    child.exited.then((code) => {
+      for (const handler of exitHandlers) {
+        handler(code, null);
+      }
+    }).catch((err) => {
+      const error = err instanceof Error ? err : new Error(String(err));
+      for (const handler of errorHandlers) {
+        handler(error);
+      }
+    });
+
     // Create stdin/stdout/stderr wrapper objects with proper event handling
     const stdin = {
       write: (data: string) => {
@@ -363,52 +509,108 @@ export class AgentRunner extends EventEmitter {
     const stdout = {
       on: (event: string, handler: (data: Buffer) => void) => {
         if (event === 'data') {
-          stdoutLineHandler.add((line) => {
+          const wrapped = (line: string) => {
             handler(Buffer.from(line + '\n'));
-          });
+          };
+          stdoutDataHandlerMap.set(handler, wrapped);
+          stdoutLineHandler.add(wrapped);
         }
         return stdout;
       },
-      removeAllListeners: () => {
-        stdoutLineHandler.clear();
+      off: (event: string, handler: (data: Buffer) => void) => {
+        if (event === 'data') {
+          const wrapped = stdoutDataHandlerMap.get(handler);
+          if (wrapped) {
+            stdoutLineHandler.delete(wrapped);
+            stdoutDataHandlerMap.delete(handler);
+          }
+        }
+        return stdout;
+      },
+      removeListener: (event: string, handler: (data: Buffer) => void) => {
+        return stdout.off(event, handler);
+      },
+      removeAllListeners: (event?: string) => {
+        if (!event || event === 'data') {
+          stdoutLineHandler.clear();
+          stdoutDataHandlerMap.clear();
+        }
+        return stdout;
       }
     };
 
     const stderr = {
       on: (event: string, handler: (data: Buffer) => void) => {
         if (event === 'data') {
-          stderrLineHandler.add((line) => {
+          const wrapped = (line: string) => {
             handler(Buffer.from(line + '\n'));
-          });
+          };
+          stderrDataHandlerMap.set(handler, wrapped);
+          stderrLineHandler.add(wrapped);
         }
         return stderr;
       },
-      removeAllListeners: () => {
-        stderrLineHandler.clear();
+      off: (event: string, handler: (data: Buffer) => void) => {
+        if (event === 'data') {
+          const wrapped = stderrDataHandlerMap.get(handler);
+          if (wrapped) {
+            stderrLineHandler.delete(wrapped);
+            stderrDataHandlerMap.delete(handler);
+          }
+        }
+        return stderr;
+      },
+      removeListener: (event: string, handler: (data: Buffer) => void) => {
+        return stderr.off(event, handler);
+      },
+      removeAllListeners: (event?: string) => {
+        if (!event || event === 'data') {
+          stderrLineHandler.clear();
+          stderrDataHandlerMap.clear();
+        }
+        return stderr;
       }
     };
 
     // Create a proper ChildProcess-like object
     const processChild: cp.ChildProcess = {
       pid: child.pid,
-      kill: () => {
-        child.kill();
+      kill: (signal?: NodeJS.Signals | number) => {
+        child.kill(signal);
         return true;
       },
       on: (event: string, handler: (...args: any[]) => void) => {
         if (event === 'exit') {
-          child.exited.then((code) => {
-            handler(code, null);
-          }).catch((err) => {
-            handler(err, null);
-          });
+          exitHandlers.add(handler as (code: number | null, signal: NodeJS.Signals | null) => void);
+        }
+        if (event === 'error') {
+          errorHandlers.add(handler as (error: Error) => void);
         }
         return processChild;
+      },
+      off: (event: string, handler: (...args: any[]) => void) => {
+        if (event === 'exit') {
+          exitHandlers.delete(handler as (code: number | null, signal: NodeJS.Signals | null) => void);
+        }
+        if (event === 'error') {
+          errorHandlers.delete(handler as (error: Error) => void);
+        }
+        return processChild;
+      },
+      removeListener: (event: string, handler: (...args: any[]) => void) => {
+        return processChild.off(event, handler);
       },
       stdout: stdout as unknown as NodeJS.ReadableStream,
       stderr: stderr as unknown as NodeJS.WritableStream,
       stdin: stdin as unknown as NodeJS.WritableStream,
-      removeAllListeners: () => {},
+      removeAllListeners: (event?: string) => {
+        if (!event || event === 'exit') {
+          exitHandlers.clear();
+        }
+        if (!event || event === 'error') {
+          errorHandlers.clear();
+        }
+      },
       ref: () => processChild,
       unref: () => processChild
     } as unknown as cp.ChildProcess;
@@ -429,14 +631,14 @@ export class AgentRunner extends EventEmitter {
    */
   async initializeSession(child: cp.ChildProcess, workspacePath: string): Promise<{ threadId: string }> {
     const readTimeout = this.options.readTimeoutMs;
+    const initializeId = this.messageCounter++;
+    const threadStartId = this.messageCounter++;
 
     return new Promise((resolve, reject) => {
       let stdoutBuffer = '';
       let initializeResponseReceived = false;
       let threadId: string | null = null;
-
-      // Set up stdout reader
-      child.stdout?.on('data', (data: Buffer) => {
+      const onStdoutData = (data: Buffer) => {
         stdoutBuffer += data.toString();
         this.processLines(stdoutBuffer, (line) => {
           stdoutBuffer = stdoutBuffer.replace(line + '\n', '').replace(line + '\r\n', '');
@@ -445,12 +647,12 @@ export class AgentRunner extends EventEmitter {
           if (!msg) return;
 
           // After initialize response, send thread/start
-          if (msg.id === 1 && msg.result && !initializeResponseReceived) {
+          if (msg.id === initializeId && msg.result && !initializeResponseReceived) {
             initializeResponseReceived = true;
 
             // Send thread/start request
             const threadStartMsg: CodexMessage = {
-              id: this.messageCounter++,
+              id: threadStartId,
               method: 'thread/start',
               params: {
                 approvalPolicy: 'on-request',
@@ -463,7 +665,7 @@ export class AgentRunner extends EventEmitter {
 
           // Check for thread/start response (id=2) with threadId
           // Only look at responses to thread/start, not initialize
-          if (msg.id === 2 && msg.result && !threadId) {
+          if (msg.id === threadStartId && msg.result && !threadId) {
             const threadInfo = this.extractThreadInfo(msg.result);
             if (threadInfo) {
               threadId = threadInfo.threadId;
@@ -478,12 +680,17 @@ export class AgentRunner extends EventEmitter {
             reject(new Error(`Session initialization failed: ${msg.error.message}`));
           }
         });
-      });
+      };
 
-      child.stderr?.on('data', (data: Buffer) => {
-        // Stderr is not part of protocol stream - log as diagnostics
-        console.error('[codex stderr]', data.toString().trim());
-      });
+      const onStderrData = (data: Buffer) => {
+        if (this.shouldLogDiagnostics()) {
+          console.error('[codex stderr]', data.toString().trim());
+        }
+      };
+
+      // Set up stdout reader
+      child.stdout?.on('data', onStdoutData);
+      child.stderr?.on('data', onStderrData);
 
       const timeout = setTimeout(() => {
         cleanup();
@@ -491,14 +698,14 @@ export class AgentRunner extends EventEmitter {
       }, readTimeout * 2);
 
       const cleanup = () => {
-        child.stdout?.removeAllListeners('data');
-        child.stderr?.removeAllListeners('data');
+        child.stdout?.removeListener?.('data', onStdoutData);
+        child.stderr?.removeListener?.('data', onStderrData);
         clearTimeout(timeout);
       };
 
       // Send initialize request (Section 10.2)
       const initializeMsg: CodexMessage = {
-        id: this.messageCounter++,
+        id: initializeId,
         method: 'initialize',
         params: {
           clientInfo: { name: 'symphony', version: '1.0.0' },
@@ -572,11 +779,17 @@ export class AgentRunner extends EventEmitter {
     prompt: string,
     issueTitle: string,
     workspacePath: string,
-    onEvent: (event: AgentEvent) => void
+    onEvent: (event: AgentEvent) => void,
+    onRuntimeRequest?: (
+      request: PendingRuntimeRequest,
+      state: {
+        timeline: AgentTimelinePayload[];
+        transcript: TurnTranscriptEntry[];
+      }
+    ) => Promise<RuntimeRequestResponse>
   ): Promise<TurnResult> {
     return new Promise((resolve, reject) => {
       const turnTimeout = this.options.turnTimeoutMs;
-      const readTimeout = this.options.readTimeoutMs;
       let stdoutBuffer = '';
       let turnId: string | null = null;
       let completed = false;
@@ -584,6 +797,20 @@ export class AgentRunner extends EventEmitter {
       let error: string | undefined;
       let tokens = { input: 0, output: 0, total: 0 };
       let claudeApiCalls = 0;  // Count each result message as one API call
+      const timeline: AgentTimelinePayload[] = [];
+      const transcript: TurnTranscriptEntry[] = [];
+      type TurnCompletion = Omit<
+        TurnResult,
+        'claude_api_calls' | 'timeline' | 'transcript'
+      >;
+
+      const cleanup = () => {
+        child.stdout?.removeListener?.('data', onStdoutData);
+        child.stderr?.removeListener?.('data', onStderrData);
+        child.removeListener?.('exit', onExit);
+        child.removeListener?.('error', onError);
+        clearTimeout(timeout);
+      };
 
       const timeout = setTimeout(() => {
         if (!completed) {
@@ -592,19 +819,47 @@ export class AgentRunner extends EventEmitter {
         }
       }, turnTimeout);
 
-      const completeTurn = (result: TurnResult) => {
+      const completeTurn = (result: TurnCompletion) => {
+        if (completed) {
+          return;
+        }
         completed = true;
-        clearTimeout(timeout);
-        resolve({ ...result, claude_api_calls: claudeApiCalls });
+        cleanup();
+        resolve({
+          ...result,
+          claude_api_calls: claudeApiCalls,
+          timeline,
+          transcript,
+        });
       };
 
-      child.stdout?.on('data', (data: Buffer) => {
+      const onStdoutData = (data: Buffer) => {
         stdoutBuffer += data.toString();
         this.processLines(stdoutBuffer, (line) => {
           stdoutBuffer = stdoutBuffer.replace(line + '\n', '').replace(line + '\r\n', '');
 
           const msg = this.parseLine(line);
           if (!msg) return;
+
+          if (msg.method === 'agent/transcript_delta') {
+            const params = msg.params as Record<string, unknown> | undefined;
+            if (
+              params &&
+              (params.role === 'assistant' || params.role === 'user') &&
+              (params.kind === 'message' || params.kind === 'tool_result') &&
+              typeof params.text === 'string'
+            ) {
+              transcript.push({
+                role: params.role,
+                kind: params.kind,
+                text: params.text,
+                turn: typeof params.turn === 'number' ? params.turn : null,
+                tool_name:
+                  typeof params.tool_name === 'string' ? params.tool_name : null,
+              });
+            }
+            return;
+          }
 
           // Extract turn ID from turn/start result
           if (msg.result && !turnId) {
@@ -625,6 +880,9 @@ export class AgentRunner extends EventEmitter {
           // Determine event type and emit
           const eventType = this.determineEventType(msg);
           if (eventType) {
+            if (eventType === 'timeline' && msg.method === 'agent/timeline') {
+              timeline.push((msg.params || {}) as AgentTimelinePayload);
+            }
             const event: AgentEvent = {
               event: eventType,
               timestamp: new Date(),
@@ -634,9 +892,45 @@ export class AgentRunner extends EventEmitter {
                 output_tokens: tokens.output,
                 total_tokens: tokens.total
               } : undefined,
-              payload: msg.result || msg.params
+              payload: this.extractEventPayload(msg)
             };
             onEvent(event);
+          }
+
+          const runtimeRequest = this.buildRuntimeRequest(msg);
+          if (runtimeRequest && typeof msg.id === 'number') {
+            void (async () => {
+              try {
+                const response =
+                  onRuntimeRequest
+                    ? await onRuntimeRequest(runtimeRequest, {
+                        timeline: [...timeline],
+                        transcript: [...transcript],
+                      })
+                    : this.buildFallbackRuntimeResponse(runtimeRequest);
+                child.stdin?.write(
+                  JSON.stringify({
+                    id: msg.id,
+                    result: response.response,
+                  }) + '\n'
+                );
+              } catch (runtimeError) {
+                const runtimeMessage =
+                  runtimeError instanceof Error
+                    ? runtimeError.message
+                    : String(runtimeError);
+                child.stdin?.write(
+                  JSON.stringify({
+                    id: msg.id,
+                    error: {
+                      code: -32000,
+                      message: runtimeMessage,
+                    },
+                  }) + '\n'
+                );
+              }
+            })();
+            return;
           }
 
           // Check for completion states
@@ -680,46 +974,15 @@ export class AgentRunner extends EventEmitter {
               cancelled: true,
               tokens
             });
-          } else if (msg.method === 'item/tool/requestUserInput') {
-            // Section 10.5: User input requests must not stall indefinitely
-            // Fail the run attempt immediately
-            error = 'User input required - failing run attempt';
-            completeTurn({
-              success: false,
-              completed: false,
-              cancelled: false,
-              error,
-              tokens
-            });
-          } else if (msg.method === 'item/tool/call') {
-            // Section 17.5: Unsupported dynamic tool calls must be rejected without stalling
-            // Check if this is a supported tool call - if not, return failure response
-            const toolName = (msg.params as Record<string, unknown> | undefined)?.name as string | undefined;
-            if (toolName && toolName !== 'linear_graphql') {
-              // Unsupported tool - send failure response and continue
-              const toolCallId = msg.id;
-              const failureResponse: CodexMessage = {
-                id: toolCallId,
-                result: { success: false, error: `unsupported_tool_call: ${toolName}` }
-              };
-              child.stdin?.write(JSON.stringify(failureResponse) + '\n');
-              // Emit event for observability
-              const event: AgentEvent = {
-                event: 'unsupported_tool_call',
-                timestamp: new Date(),
-                codex_app_server_pid: String(child.pid || ''),
-                payload: { toolName, error: 'unsupported_tool_call' }
-              };
-              onEvent(event);
-            }
           }
         });
-      });
+      };
 
-      child.stderr?.on('data', (data: Buffer) => {
-        // Log stderr but don't fail the turn
-        console.error('[codex stderr]', data.toString().trim());
-      });
+      const onStderrData = (data: Buffer) => {
+        if (this.shouldLogDiagnostics()) {
+          console.error('[codex stderr]', data.toString().trim());
+        }
+      };
 
       // Send turn/start request
       const turnStartMsg: CodexMessage = {
@@ -736,7 +999,7 @@ export class AgentRunner extends EventEmitter {
       };
       child.stdin?.write(JSON.stringify(turnStartMsg) + '\n');
 
-      child.on('exit', (code) => {
+      const onExit = (code: number | null) => {
         if (!completed) {
           error = `Codex process exited with code ${code}`;
           completeTurn({
@@ -747,9 +1010,9 @@ export class AgentRunner extends EventEmitter {
             tokens
           });
         }
-      });
+      };
 
-      child.on('error', (err) => {
+      const onError = (err: Error) => {
         if (!completed) {
           error = `Codex process error: ${err.message}`;
           completeTurn({
@@ -760,7 +1023,12 @@ export class AgentRunner extends EventEmitter {
             tokens
           });
         }
-      });
+      };
+
+      child.stdout?.on('data', onStdoutData);
+      child.stderr?.on('data', onStderrData);
+      child.on('exit', onExit);
+      child.on('error', onError);
     });
   }
 
@@ -768,6 +1036,10 @@ export class AgentRunner extends EventEmitter {
    * Stop a turn/session
    */
   stopSession(child: cp.ChildProcess): void {
-    child.kill('SIGTERM');
+    this.sendSignal(child, 'SIGTERM');
+  }
+
+  forceStopSession(child: cp.ChildProcess): void {
+    this.sendSignal(child, 'SIGKILL');
   }
 }

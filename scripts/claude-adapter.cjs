@@ -2,363 +2,1022 @@
 
 /**
  * claude-adapter.js
- * Translates Symphony's Codex App-Server JSON-RPC to Claude Code's stream-json format.
+ * Bridges Symphony's JSON-RPC protocol to a native Claude Code stream-json session.
  */
 
 const cp = require('child_process');
 const readline = require('readline');
 const path = require('path');
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-  terminal: false
-});
+const ADAPTER_TIMELINE_METHOD = 'agent/timeline';
+const ADAPTER_TRANSCRIPT_METHOD = 'agent/transcript_delta';
 
-let childProcess = null;
-let currentMessageId = 0;
-let apiCallCount = 0;  // Set to 1 when turn completes (represents one API call per turn)
-let turnCounter = 0; // Increments each turn/start; represents the logical turn number
-let lastOrchTurnCompleted = -1; // Orch turn number we last sent turn/completed for (dedup)
-let pendingOrchTurn = null; // Orch turn number for the current in-flight turn (set at turn/start)
-const processingOrchTurns = new Set(); // Tracks orch turns currently being processed (for dedup)
+const TOOL_NAME_TODO = new Set(['TodoWrite', 'todo_write']);
+const TOOL_NAME_BASH = new Set(['Bash', 'bash']);
+const TOOL_NAME_READ = new Set(['Read', 'read']);
+const TOOL_NAME_WRITE = new Set(['Write', 'write']);
+const TOOL_NAME_EDIT = new Set(['Edit', 'edit']);
+const TOOL_NAME_GLOB = new Set(['Glob', 'glob']);
+const TOOL_NAME_GREP = new Set(['Grep', 'grep', 'GrepTool']);
+const TOOL_NAME_WEB_FETCH = new Set(['WebFetch', 'web_fetch', 'WebFetchTool']);
+const TOOL_NAME_WEB_SEARCH = new Set(['WebSearch', 'web_search', 'WebSearchTool']);
 
-function sendToOrchestrator(payload) {
-  process.stdout.write(JSON.stringify(payload) + '\n');
+function isAdapterDebugEnabled(env = process.env) {
+  return env.SYMPHONY_ADAPTER_DEBUG === '1';
 }
 
-function debugLog(msg) {
-  // Can be viewed via orchestrator standard error
-  process.stderr.write(`[adapter] ${msg}\n`);
-}
-
-// Enhanced tool execution - supports all claude-haha built-in tools
-async function executeTool(toolName, toolInput, cwd) {
-  const { exec } = require('child_process');
-  const { promisify } = require('util');
-  const execAsync = promisify(exec);
-  const fs = require('fs').promises;
-
-  try {
-    switch (toolName) {
-      case 'Bash':
-      case 'bash':
-        const cmd = toolInput.command || '';
-        const { stdout, stderr } = await execAsync(cmd, {
-          cwd: cwd || process.cwd(),
-          timeout: 300000,  // 5 min timeout
-          maxBuffer: 50 * 1024 * 1024
-        });
-        return stdout || stderr || 'Command executed (no output)';
-
-      case 'Glob':
-      case 'glob':
-        const { glob } = require('glob');
-        const pattern = toolInput.pattern || '*';
-        const files = await glob(pattern, { cwd: cwd || process.cwd() });
-        return files.slice(0, 100).join('\n') + (files.length > 100 ? `\n... ${files.length - 100} more` : '');
-
-      case 'Read':
-      case 'read':
-        const content = await fs.readFile(toolInput.file_path, 'utf-8');
-        const maxLen = toolInput.max_length || 50000;
-        return content.slice(0, maxLen) + (content.length > maxLen ? '\n... (truncated)' : '');
-
-      case 'Write':
-      case 'write':
-        await fs.writeFile(toolInput.file_path, toolInput.content || '', 'utf-8');
-        return `Written to ${toolInput.file_path}`;
-
-      case 'Edit':
-      case 'edit':
-        const fileContent = await fs.readFile(toolInput.file_path, 'utf-8');
-        const newContent = fileContent.replace(toolInput.old_string, toolInput.new_string);
-        if (fileContent === newContent) {
-          return `No replacement made - old_string not found`;
-        }
-        await fs.writeFile(toolInput.file_path, newContent, 'utf-8');
-        return `Edited ${toolInput.file_path}`;
-
-      case 'WebFetch':
-      case 'web_fetch':
-      case 'WebFetchTool':
-        const fetch = (await import('node-fetch')).default;
-        const response = await fetch(toolInput.url, {
-          headers: toolInput.headers || {},
-          timeout: 15000
-        });
-        const text = await response.text();
-        return text.slice(0, 20000);
-
-      case 'Grep':
-      case 'grep':
-      case 'GrepTool':
-        const grepCmd = `rg -n "${toolInput.pattern}" ${toolInput.path || '.'} ${toolInput.glob ? `-g "${toolInput.glob}"` : ''} -C ${toolInput.context || 0}`.trim();
-        const grepResult = await execAsync(grepCmd, { cwd: cwd || process.cwd(), maxBuffer: 10 * 1024 * 1024 });
-        return grepResult.stdout.slice(0, 20000);
-
-      case 'MCPTool':
-      case 'mcp':
-        return `MCP tool ${toolInput.name || 'unknown'} called but not executed by adapter`;
-
-      default:
-        return `[Adapter] Tool '${toolName}' executed (unsupported by adapter, result simulated)`;
-    }
-  } catch (err) {
-    const error = err.message || String(err);
-    return `Error: ${error}`;
+function formatCompactNumber(value) {
+  const numeric = Number(value) || 0;
+  if (Math.abs(numeric) < 1000) {
+    return String(numeric);
   }
+
+  const units = ['k', 'm', 'b'];
+  let current = numeric;
+  let unitIndex = -1;
+  while (Math.abs(current) >= 1000 && unitIndex < units.length - 1) {
+    current /= 1000;
+    unitIndex += 1;
+  }
+
+  const rounded =
+    Math.abs(current) >= 10 ? current.toFixed(0) : current.toFixed(1);
+  return `${rounded.replace(/\.0$/, '')}${units[unitIndex]}`;
 }
 
-rl.on('line', (line) => {
-  if (!line.trim()) return;
+function formatTurnCompletedMessage(turn, tokens) {
+  const input = tokens && typeof tokens.input === 'number' ? tokens.input : 0;
+  const output =
+    tokens && typeof tokens.output === 'number' ? tokens.output : 0;
+  if (input > 0 || output > 0) {
+    return `Turn ${turn} completed · in ${formatCompactNumber(input)} / out ${formatCompactNumber(output)}`;
+  }
+  return `Turn ${turn} completed`;
+}
 
-  try {
-    const msg = JSON.parse(line);
-    
-    // 1. Handshake Phase
-    if (msg.method === 'initialize') {
-      debugLog('Received initialize');
-      sendToOrchestrator({ method: 'initialized' });
-      // Send thread ID response with the same id as the initialize request
-      sendToOrchestrator({ id: msg.id, result: { thread: { id: "adapter-thread-1" } } });
+function normalizeToolName(toolName) {
+  if (TOOL_NAME_BASH.has(toolName)) return 'Bash';
+  if (TOOL_NAME_READ.has(toolName)) return 'Read';
+  if (TOOL_NAME_WRITE.has(toolName)) return 'Write';
+  if (TOOL_NAME_EDIT.has(toolName)) return 'Edit';
+  if (TOOL_NAME_GLOB.has(toolName)) return 'Glob';
+  if (TOOL_NAME_GREP.has(toolName)) return 'Grep';
+  if (TOOL_NAME_WEB_FETCH.has(toolName)) return 'WebFetch';
+  if (TOOL_NAME_WEB_SEARCH.has(toolName)) return 'WebSearch';
+  if (TOOL_NAME_TODO.has(toolName)) return 'TodoWrite';
+  return toolName || 'Tool';
+}
+
+function truncatePreview(value, maxLength = 120) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) {
+    return '';
+  }
+
+  if (text.length <= maxLength) {
+    return text;
+  }
+
+  return `${text.slice(0, maxLength - 3)}...`;
+}
+
+function firstNonEmptyString(input, keys) {
+  if (!input || typeof input !== 'object') {
+    return null;
+  }
+
+  for (const key of keys) {
+    const value = input[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
     }
-    
-    // 2. Thread Session Setup Phase
-    if (msg.method === 'thread/start') {
-      const cwd = msg.params?.cwd || process.cwd();
-      debugLog(`Received thread/start. Spawning Claude Code at ${cwd}`);
-      
-      const cliPath = path.resolve(__dirname, '../claude-code/bin/claude-haha');
-      const args = [
-        '-c',                                  // Resume/continue from last session
-        '-p',
-        '--verbose',
-        '--input-format', 'stream-json',
-        '--output-format', 'stream-json',
-        '--replay-user-messages',
-        '--permission-mode', 'bypassPermissions'  // Bypass all permission checks for automated workflow
-      ];
-      
-      childProcess = cp.spawn(cliPath, args, {
-        cwd: cwd,
-        env: process.env,
-        stdio: ['pipe', 'pipe', 'inherit'] // pipe stdin/stdout, let stderr inherit
-      });
-      
-      // Intercept stream-json output
-      childProcess.stdout.on('data', (data) => {
-        const streamLines = data.toString().split('\n');
-        for (const l of streamLines) {
-          if (!l.trim()) continue;
-          try {
-            const ccMsg = JSON.parse(l);
-            debugLog(`Claude emitted: ${ccMsg.type}${ccMsg.subtype ? '/' + ccMsg.subtype : ''}`);
-            
-            // API Invocation and Rate Limit tracking
-            if (ccMsg.type === 'system' && ccMsg.subtype === 'api_retry') {
-              console.error(`[adapter] ⚠️ API Rate Limit Hit! Attempt: ${ccMsg.attempt}, Delay: ${Math.round(ccMsg.retry_delay_ms)}ms`);
-            }
-            if (ccMsg.type === 'system' && ccMsg.subtype === 'api_success') {
-               // This can be used if claude releases api_success events
-               console.log(`[adapter] API call succeeded.`);
-            }
-            
-            // Count API calls - each turn represents one API call
-            // Deduplicate by orchestrator turn number: only send turn/completed once per logical turn.
-            // We use pendingOrchTurn (set at turn/start) as the authoritative turn identifier.
-            // This avoids issues with session_id/num_turns being inconsistent across message types.
+  }
 
-            const isAssistantWithUsage = (() => {
-              const msg = ccMsg.message || {};
-              const usage = msg.usage || {};
-              const inputTokens = Number(usage.input_tokens) || 0;
-              const outputTokens = Number(usage.output_tokens) || 0;
-              return usage && (inputTokens > 0 || outputTokens > 0);
-            })();
-            const isResultSuccess = ccMsg.type === 'result';
+  return null;
+}
 
-            // Only send turn/completed if we haven't already sent it for this orch turn
-            if (pendingOrchTurn !== null && lastOrchTurnCompleted !== pendingOrchTurn) {
-              if (isAssistantWithUsage) {
-                const msg = ccMsg.message || {};
-                const usage = msg.usage || {};
-                const inputTokens = Number(usage.input_tokens) || 0;
-                const outputTokens = Number(usage.output_tokens) || 0;
-                apiCallCount = 1;
-                console.log(`[adapter] 📊 Agent Turn Finished (usage). OrchTurn=${pendingOrchTurn}, Tokens: In=${inputTokens}, Out=${outputTokens}`);
-                sendToOrchestrator({
-                  method: 'turn/completed',
-                  result: {
-                    turn: {
-                      id: `adapter-turn-${pendingOrchTurn}`,
-                      api_calls: apiCallCount,
-                      tokens: { input: inputTokens, output: outputTokens, total: inputTokens + outputTokens }
-                    }
-                  }
-                });
-                lastOrchTurnCompleted = pendingOrchTurn;
-                processingOrchTurns.delete(pendingOrchTurn);
-                apiCallCount = 0;
-              } else if (isResultSuccess) {
-                apiCallCount = 1;
-                console.log(`[adapter] 📊 Agent Turn Finished (result). OrchTurn=${pendingOrchTurn}`);
-                sendToOrchestrator({
-                  method: 'turn/completed',
-                  result: {
-                    turn: {
-                      id: `adapter-turn-${pendingOrchTurn}`,
-                      api_calls: apiCallCount,
-                      tokens: { input: 0, output: 0, total: 0 }
-                    }
-                  }
-                });
-                lastOrchTurnCompleted = pendingOrchTurn;
-                processingOrchTurns.delete(pendingOrchTurn);
-                apiCallCount = 0;
-              }
-            }
-            
-            if (ccMsg.type === 'error') {
-              const errorMessage = ccMsg.message || ccMsg.error || 'Unknown Claude Error';
-              console.error(`[adapter] 🚨 FATAL API ERROR: ${typeof errorMessage === 'object' ? JSON.stringify(errorMessage) : errorMessage}`);
-              sendToOrchestrator({
-                method: 'turn/failed',
-                error: { code: -32000, message: typeof errorMessage === 'object' ? JSON.stringify(errorMessage) : errorMessage }
-              });
-            }
-            // For observability in orchestrator
-            else if (ccMsg.type === 'text_delta') {
-               // We don't need to forward every token, but could track progress implicitly.
-               // Runner.ts ignores unknown methods but prints them in debug mode.
-               sendToOrchestrator({ method: 'turn/progress', text: ccMsg.text });
-            }
-            
-            // Check for tool_use in content array (Claude Code format)
-            if (ccMsg.message && ccMsg.message.content && Array.isArray(ccMsg.message.content)) {
-              for (const contentItem of ccMsg.message.content) {
-                if (contentItem.type === 'tool_use') {
-                  console.error(`[adapter] TOOL_USE DETECTED: ${contentItem.name}`);
-                  const toolCallId = contentItem.id;
-                  const toolName = contentItem.name;
-                  const toolInput = contentItem.input || {};
-                  
-                  debugLog(`Claude called tool: ${toolName}`);
-                  debugLog(`Tool input: ${JSON.stringify(toolInput).slice(0, 200)}`);
-                  debugLog(`Child process stdin available: ${!!(childProcess && childProcess.stdin && childProcess.stdin.writable)}`);
-                  debugLog(`Child process cwd: ${childProcess.cwd || process.cwd()}`);
-                  
-                  // Execute tool using process.nextTick to ensure it's processed after current line
-                  process.nextTick(async () => {
-                    console.error(`[adapter] EXECUTING TOOL: ${toolName}`);
-                    try {
-                      debugLog(`Starting tool execution: ${toolName}`);
-                      const result = await executeTool(toolName, toolInput, childProcess.cwd || process.cwd());
-                      debugLog(`Tool execution completed, result length: ${result.length}`);
-                      const toolResult = {
-                        type: 'tool_result',
-                        tool_use_id: toolCallId,
-                        content: [{type: 'text', text: result}]
-                      };
-                      debugLog(`Sending tool result back to Claude`);
-                      if (childProcess && childProcess.stdin && childProcess.stdin.writable) {
-                        childProcess.stdin.write(JSON.stringify(toolResult) + '\n');
-                        debugLog(`Tool result sent successfully`);
-                      } else {
-                        debugLog(`Error: child process stdin not available`);
-                      }
-                    } catch (err) {
-                      console.error(`[adapter] TOOL EXECUTION ERROR: ${err.message}`);
-                      debugLog(`Tool execution error: ${err.message}`);
-                      debugLog(`Stack: ${err.stack}`);
-                    }
-                  });
-                }
-              }
-            }
-          } catch (e) {
-            // Ignore incomplete lines or non-json
-          }
+function buildToolSummary(toolName, toolInput) {
+  const normalizedToolName = normalizeToolName(toolName);
+
+  if (normalizedToolName === 'Bash') {
+    return truncatePreview(firstNonEmptyString(toolInput, ['command', 'cmd']) || '', 140) || null;
+  }
+
+  if (normalizedToolName === 'Read' || normalizedToolName === 'Write' || normalizedToolName === 'Edit') {
+    return firstNonEmptyString(toolInput, ['file_path', 'path', 'target_file']);
+  }
+
+  if (normalizedToolName === 'Glob') {
+    const pattern = firstNonEmptyString(toolInput, ['pattern']);
+    const searchPath = firstNonEmptyString(toolInput, ['path']);
+    if (pattern && searchPath) {
+      return `${pattern} in ${searchPath}`;
+    }
+    return pattern || searchPath;
+  }
+
+  if (normalizedToolName === 'Grep') {
+    const pattern = firstNonEmptyString(toolInput, ['pattern', 'query']);
+    const searchPath = firstNonEmptyString(toolInput, ['path']);
+    if (pattern && searchPath) {
+      return `${pattern} in ${searchPath}`;
+    }
+    return pattern || searchPath;
+  }
+
+  if (normalizedToolName === 'WebFetch') {
+    return firstNonEmptyString(toolInput, ['url']);
+  }
+
+  if (normalizedToolName === 'WebSearch') {
+    return truncatePreview(
+      firstNonEmptyString(toolInput, ['query', 'search_term', 'term']) || '',
+      140,
+    ) || null;
+  }
+
+  if (normalizedToolName === 'TodoWrite') {
+    const todos = Array.isArray(toolInput && toolInput.todos) ? toolInput.todos : [];
+    const labels = todos
+      .map((todo) => {
+        if (!todo || typeof todo !== 'object') {
+          return null;
         }
-      });
-      
-      childProcess.on('exit', (code) => {
-         debugLog(`Claude process exited with code ${code}`);
-      });
-      
-      // Acknowledge thread start
-      sendToOrchestrator({
-        id: msg.id,
-        result: { thread: { id: "adapter-thread-1" } }
+        if (typeof todo.content === 'string' && todo.content.trim()) {
+          return truncatePreview(todo.content, 60);
+        }
+        if (typeof todo.activeForm === 'string' && todo.activeForm.trim()) {
+          return truncatePreview(todo.activeForm, 60);
+        }
+        return null;
+      })
+      .filter(Boolean);
+    if (labels.length > 0) {
+      return labels.slice(0, 2).join(', ');
+    }
+  }
+
+  return null;
+}
+
+function buildToolDetail(toolName, toolInput, resultText) {
+  const normalizedToolName = normalizeToolName(toolName);
+  const detail = {
+    output_length: typeof resultText === 'string' ? resultText.length : 0,
+  };
+  const summary = buildToolSummary(normalizedToolName, toolInput);
+
+  if (summary) {
+    detail.summary = summary;
+  }
+
+  const path = firstNonEmptyString(toolInput, ['file_path', 'path', 'target_file']);
+  if (path && (normalizedToolName === 'Read' || normalizedToolName === 'Write' || normalizedToolName === 'Edit')) {
+    detail.path = path;
+  }
+
+  const commandPreview = firstNonEmptyString(toolInput, ['command', 'cmd']);
+  if (commandPreview && normalizedToolName === 'Bash') {
+    detail.command_preview = truncatePreview(commandPreview, 140);
+  }
+
+  const pattern = firstNonEmptyString(toolInput, ['pattern', 'query']);
+  if (pattern && (normalizedToolName === 'Glob' || normalizedToolName === 'Grep' || normalizedToolName === 'WebSearch')) {
+    detail.pattern = truncatePreview(pattern, 100);
+  }
+
+  const url = firstNonEmptyString(toolInput, ['url']);
+  if (url && normalizedToolName === 'WebFetch') {
+    detail.url = url;
+  }
+
+  return detail;
+}
+
+function buildTimelineEvent({
+  level = 'info',
+  category,
+  code,
+  message,
+  turn = null,
+  toolName = null,
+  detail = null,
+}) {
+  return {
+    method: ADAPTER_TIMELINE_METHOD,
+    params: {
+      level,
+      category,
+      code,
+      message,
+      turn,
+      tool_name: toolName,
+      detail,
+    },
+  };
+}
+
+function createTimelineState() {
+  return {
+    assistantThinkingTurn: null,
+  };
+}
+
+function extractToolUses(ccMsg) {
+  const content =
+    ccMsg && ccMsg.message && Array.isArray(ccMsg.message.content)
+      ? ccMsg.message.content
+      : [];
+  return content.filter((contentItem) => contentItem && contentItem.type === 'tool_use');
+}
+
+function extractToolResultBlocks(ccMsg) {
+  const content =
+    ccMsg && ccMsg.message && Array.isArray(ccMsg.message.content)
+      ? ccMsg.message.content
+      : [];
+  return content.filter(
+    (contentItem) => contentItem && contentItem.type === 'tool_result',
+  );
+}
+
+function extractContentText(content) {
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => extractContentText(item))
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+  }
+
+  if (!content || typeof content !== 'object') {
+    return '';
+  }
+
+  if (content.type === 'text' && typeof content.text === 'string') {
+    return content.text;
+  }
+
+  if ('content' in content) {
+    return extractContentText(content.content);
+  }
+
+  return '';
+}
+
+function collectTranscriptEventsFromClaudeMessage(ccMsg, context) {
+  const events = [];
+  const turn = typeof context.turn === 'number' ? context.turn : null;
+
+  if (ccMsg.type === 'assistant') {
+    const text = extractContentText(ccMsg.message && ccMsg.message.content);
+    if (text) {
+      events.push({
+        method: ADAPTER_TRANSCRIPT_METHOD,
+        params: {
+          role: 'assistant',
+          kind: 'message',
+          text,
+          turn,
+          tool_name: null,
+        },
       });
     }
-    
-    // 3. Turn Execution Phase
-    if (msg.method === 'turn/start') {
-      // Deduplicate: ignore if we're already processing this specific orch turn number
-      // (same turn/start can arrive multiple times due to stdout buffering)
-      const newOrchTurn = turnCounter + 1;
-      if (processingOrchTurns.has(newOrchTurn)) {
-        debugLog(`Received duplicate turn/start (orch=${newOrchTurn}), ignoring`);
-        return;
+  }
+
+  if (ccMsg.type === 'user') {
+    for (const block of extractToolResultBlocks(ccMsg)) {
+      const toolName = context.pendingToolUses.get(block.tool_use_id)?.toolName || null;
+      const text = extractContentText(block.content);
+      if (text) {
+        events.push({
+          method: ADAPTER_TRANSCRIPT_METHOD,
+          params: {
+            role: 'user',
+            kind: 'tool_result',
+            text,
+            turn,
+            tool_name: toolName ? normalizeToolName(toolName) : null,
+          },
+        });
       }
-      // First time seeing this turn number - start processing it
-      turnCounter++;
-      processingOrchTurns.add(turnCounter);  // Mark as "in progress" before any async ops
-      pendingOrchTurn = turnCounter;
-      debugLog(`Received turn/start (orch=${pendingOrchTurn})`);
+    }
+  }
 
-      // Acknowledge turn start immediately (for logging inside Symphony target stream)
-      sendToOrchestrator({ result: { turn: { id: `adapter-turn-${pendingOrchTurn}` } } });
+  return events;
+}
 
-      if (childProcess && childProcess.stdin.writable) {
-        // Find the actual prompt. Orchestrator format: params.input[0].text
-        let textPrompt = '';
-        if (msg.params?.input && msg.params.input.length > 0) {
-           textPrompt = msg.params.input[0].text;
-        } else if (msg.params?.text) {
-           textPrompt = msg.params.text;
+function collectTimelineEventsFromClaudeMessage(ccMsg, context) {
+  const timelineState = context.timelineState || createTimelineState();
+  const turn = typeof context.turn === 'number' ? context.turn : null;
+  const events = [];
+  const toolUses = extractToolUses(ccMsg);
+  const hasAssistantActivity = Boolean(
+    ccMsg.type === 'assistant' || ccMsg.type === 'text_delta' || toolUses.length > 0,
+  );
+
+  if (
+    turn !== null &&
+    hasAssistantActivity &&
+    timelineState.assistantThinkingTurn !== turn
+  ) {
+    timelineState.assistantThinkingTurn = turn;
+    events.push(
+      buildTimelineEvent({
+        category: 'turn',
+        code: 'assistant_thinking',
+        message: 'Claude is thinking',
+        turn,
+      }),
+    );
+  }
+
+  if (ccMsg.type === 'system' && ccMsg.subtype === 'api_retry') {
+    const retryDelayMs = Math.round(Number(ccMsg.retry_delay_ms) || 0);
+    const seconds =
+      retryDelayMs > 0 ? Math.max(1, Math.round(retryDelayMs / 1000)) : 0;
+    events.push(
+      buildTimelineEvent({
+        level: 'warn',
+        category: 'rate_limit',
+        code: 'rate_limit_retry',
+        message:
+          seconds > 0
+            ? `Rate limit hit · retrying in ${seconds}s`
+            : 'Rate limit hit · retrying',
+        turn,
+        detail: {
+          attempt: Number(ccMsg.attempt) || 0,
+          retry_delay_ms: retryDelayMs,
+        },
+      }),
+    );
+  }
+
+  for (const toolUse of toolUses) {
+    const toolName = normalizeToolName(toolUse.name);
+    events.push(
+      buildTimelineEvent({
+        category: 'tool',
+        code: 'tool_started',
+        message: `Using ${toolName}`,
+        turn,
+        toolName,
+        detail: {
+          tool_call_id: toolUse.id || null,
+          ...buildToolDetail(toolName, toolUse.input || {}, ''),
+        },
+      }),
+    );
+  }
+
+  return {
+    events,
+    timelineState,
+  };
+}
+
+function buildToolResultTimelineEvents({
+  toolName,
+  failed,
+  resultText,
+  turn,
+  toolInput,
+}) {
+  const normalizedToolName = normalizeToolName(toolName);
+  const detail = buildToolDetail(toolName, toolInput, resultText);
+
+  if (TOOL_NAME_TODO.has(toolName)) {
+    const todos = Array.isArray(toolInput && toolInput.todos) ? toolInput.todos : [];
+    return [
+      buildTimelineEvent({
+        category: 'todo',
+        code: 'todo_updated',
+        message: `Updated todo list (${todos.length} item${todos.length === 1 ? '' : 's'})`,
+        turn,
+        toolName: normalizedToolName,
+        detail: {
+          todo_count: todos.length,
+          ...(detail.summary ? { summary: detail.summary } : {}),
+        },
+      }),
+    ];
+  }
+
+  if (failed) {
+    return [
+      buildTimelineEvent({
+        level: 'error',
+        category: 'tool',
+        code: 'tool_failed',
+        message: `${normalizedToolName} failed`,
+        turn,
+        toolName: normalizedToolName,
+        detail,
+      }),
+    ];
+  }
+
+  return [
+    buildTimelineEvent({
+      category: 'tool',
+      code: 'tool_completed',
+      message: `${normalizedToolName} completed`,
+      turn,
+      toolName: normalizedToolName,
+      detail,
+    }),
+  ];
+}
+
+function createAdapterRuntime() {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: false,
+  });
+
+  return {
+    rl,
+    childProcess: null,
+    childCwd: process.cwd(),
+    apiCallCount: 0,
+    turnCounter: 0,
+    lastOrchTurnCompleted: -1,
+    pendingOrchTurn: null,
+    processingOrchTurns: new Set(),
+    seenTurnRequestIds: new Set(),
+    childStdoutBuffer: '',
+    childStderrBuffer: '',
+    timelineState: createTimelineState(),
+    pendingToolUses: new Map(),
+    nextRuntimeRequestId: 1,
+    pendingControlRequests: new Map(),
+  };
+}
+
+function startAdapter({
+  env = process.env,
+  stdin = process.stdin,
+  stdout = process.stdout,
+  stderr = process.stderr,
+} = {}) {
+  const runtime = createAdapterRuntime();
+  const debugEnabled = isAdapterDebugEnabled(env);
+
+  if (
+    stdin !== process.stdin ||
+    stdout !== process.stdout ||
+    stderr !== process.stderr
+  ) {
+    runtime.rl.close();
+    runtime.rl = readline.createInterface({
+      input: stdin,
+      output: stdout,
+      terminal: false,
+    });
+  }
+
+  function sendToOrchestrator(payload) {
+    stdout.write(`${JSON.stringify(payload)}\n`);
+  }
+
+  function emitDebugLog(message) {
+    if (!debugEnabled) {
+      return;
+    }
+    stderr.write(`[adapter] ${message}\n`);
+  }
+
+  function emitTimelineEvent(event) {
+    sendToOrchestrator(event);
+  }
+
+  function emitTranscriptEvent(event) {
+    sendToOrchestrator(event);
+  }
+
+  function emitTurnStartedTimeline(turn) {
+    emitTimelineEvent(
+      buildTimelineEvent({
+        category: 'turn',
+        code: 'turn_started',
+        message: `Turn ${turn} started`,
+        turn,
+      }),
+    );
+  }
+
+  function emitTurnFailedTimeline(turn, message) {
+    emitTimelineEvent(
+      buildTimelineEvent({
+        level: 'error',
+        category: 'turn',
+        code: 'turn_failed',
+        message:
+          turn !== null
+            ? `Turn ${turn} failed${message ? ` · ${message}` : ''}`
+            : `Turn failed${message ? ` · ${message}` : ''}`,
+        turn,
+        detail: message ? { error: message } : null,
+      }),
+    );
+  }
+
+  function emitTurnCancelledTimeline(turn) {
+    emitTimelineEvent(
+      buildTimelineEvent({
+        level: 'warn',
+        category: 'turn',
+        code: 'turn_cancelled',
+        message: turn !== null ? `Turn ${turn} cancelled` : 'Turn cancelled',
+        turn,
+      }),
+    );
+  }
+
+  function emitTurnCompletedTimeline(turn, tokens) {
+    emitTimelineEvent(
+      buildTimelineEvent({
+        category: 'turn',
+        code: 'turn_completed',
+        message: formatTurnCompletedMessage(turn, tokens),
+        turn,
+        detail: tokens
+          ? {
+              input_tokens: tokens.input || 0,
+              output_tokens: tokens.output || 0,
+              total_tokens: tokens.total || 0,
+            }
+          : null,
+      }),
+    );
+  }
+
+  function resetTurnState() {
+    runtime.timelineState.assistantThinkingTurn = null;
+    runtime.pendingToolUses.clear();
+  }
+
+  function completeTurnIfNeeded(tokens) {
+    if (
+      runtime.pendingOrchTurn === null ||
+      runtime.lastOrchTurnCompleted === runtime.pendingOrchTurn
+    ) {
+      return;
+    }
+
+    const turn = runtime.pendingOrchTurn;
+    const finalTokens = tokens || { input: 0, output: 0, total: 0 };
+    runtime.apiCallCount = Math.max(1, runtime.apiCallCount || 1);
+
+    emitTurnCompletedTimeline(turn, finalTokens);
+    sendToOrchestrator({
+      method: 'turn/completed',
+      result: {
+        turn: {
+          id: `adapter-turn-${turn}`,
+          api_calls: runtime.apiCallCount,
+          tokens: finalTokens,
+        },
+      },
+    });
+
+    runtime.lastOrchTurnCompleted = turn;
+    runtime.processingOrchTurns.delete(turn);
+    runtime.apiCallCount = 0;
+  }
+
+  function failCurrentTurn(message) {
+    if (
+      runtime.pendingOrchTurn === null ||
+      runtime.lastOrchTurnCompleted === runtime.pendingOrchTurn
+    ) {
+      return;
+    }
+
+    emitTurnFailedTimeline(runtime.pendingOrchTurn, message);
+    sendToOrchestrator({
+      method: 'turn/failed',
+      result: { error: message },
+    });
+    runtime.lastOrchTurnCompleted = runtime.pendingOrchTurn;
+    runtime.processingOrchTurns.delete(runtime.pendingOrchTurn);
+    runtime.apiCallCount = 0;
+  }
+
+  function sendClaudeControlResponse(requestId, result, error) {
+    if (!runtime.childProcess || !runtime.childProcess.stdin || !runtime.childProcess.stdin.writable) {
+      emitDebugLog(`Claude stdin unavailable while answering control request ${requestId}`);
+      return;
+    }
+
+    const payload = error
+      ? {
+          type: 'control_response',
+          response: {
+            subtype: 'error',
+            request_id: requestId,
+            error,
+          },
         }
-
-        debugLog(`Sending prompt to Claude (${textPrompt.length} bytes)`);
-
-        const ccInput = {
-          type: "user",
-          message: { role: "user", content: textPrompt }
+      : {
+          type: 'control_response',
+          response: {
+            subtype: 'success',
+            request_id: requestId,
+            response: result,
+          },
         };
 
-        childProcess.stdin.write(JSON.stringify(ccInput) + '\n');
-      } else {
-        debugLog('Error: Claude process not available');
-        sendToOrchestrator({
-          method: 'turn/failed',
-          result: { error: 'Claude process not spawned or stdin closed.' }
+    runtime.childProcess.stdin.write(`${JSON.stringify(payload)}\n`);
+  }
+
+  function forwardRuntimeRequest(ccMsg) {
+    const subtype = ccMsg.request && ccMsg.request.subtype;
+    const runnerRequestId = runtime.nextRuntimeRequestId++;
+    runtime.pendingControlRequests.set(runnerRequestId, {
+      claudeRequestId: ccMsg.request_id,
+      subtype,
+    });
+
+    if (subtype === 'can_use_tool') {
+      sendToOrchestrator({
+        id: runnerRequestId,
+        method: 'approval/request',
+        params: {
+          request_id: ccMsg.request_id,
+          turn: runtime.pendingOrchTurn,
+          request: ccMsg.request,
+        },
+      });
+      return;
+    }
+
+    if (subtype === 'elicitation') {
+      sendToOrchestrator({
+        id: runnerRequestId,
+        method: 'item/tool/requestUserInput',
+        params: {
+          request_id: ccMsg.request_id,
+          turn: runtime.pendingOrchTurn,
+          request: ccMsg.request,
+        },
+      });
+      return;
+    }
+
+    emitTimelineEvent(
+      buildTimelineEvent({
+        level: 'error',
+        category: 'diagnostic',
+        code: 'turn_failed',
+        message: `Unsupported control request subtype: ${subtype || 'unknown'}`,
+        turn: runtime.pendingOrchTurn,
+        detail: {
+          subtype: subtype || null,
+        },
+      }),
+    );
+    runtime.pendingControlRequests.delete(runnerRequestId);
+    sendClaudeControlResponse(
+      ccMsg.request_id,
+      null,
+      `Unsupported control request subtype: ${subtype || 'unknown'}`,
+    );
+  }
+
+  function processToolLifecycle(ccMsg) {
+    for (const toolUse of extractToolUses(ccMsg)) {
+      if (toolUse.id) {
+        runtime.pendingToolUses.set(toolUse.id, {
+          toolName: toolUse.name,
+          input: toolUse.input || {},
         });
       }
     }
-    
-  } catch (err) {
-    debugLog(`Input parsing error: ${err.message}`);
+
+    if (ccMsg.type !== 'user') {
+      return;
+    }
+
+    for (const toolResult of extractToolResultBlocks(ccMsg)) {
+      const pendingTool = runtime.pendingToolUses.get(toolResult.tool_use_id);
+      const toolName = pendingTool?.toolName || 'Tool';
+      const resultText = extractContentText(toolResult.content);
+      const failed = Boolean(toolResult.is_error);
+
+      for (const event of buildToolResultTimelineEvents({
+        toolName,
+        failed,
+        resultText,
+        turn: runtime.pendingOrchTurn,
+        toolInput: pendingTool?.input || {},
+      })) {
+        emitTimelineEvent(event);
+      }
+
+      runtime.pendingToolUses.delete(toolResult.tool_use_id);
+    }
   }
-});
 
-// Avoid Zombie / Ghost process leakage when Orchestrator crashes
-rl.on('close', () => {
-  debugLog('Standard input stream severed. Parent must have died. Committing suicide.');
-  if (childProcess) {
-    childProcess.kill('SIGKILL');
+  function processClaudeStderrChunk(chunk) {
+    runtime.childStderrBuffer += chunk.toString();
+    const lines = runtime.childStderrBuffer.split('\n');
+    runtime.childStderrBuffer = lines.pop() || '';
+    for (const line of lines) {
+      if (line.trim()) {
+        emitDebugLog(`Claude stderr: ${line.trim()}`);
+      }
+    }
   }
-  process.exit(0);
-});
 
-process.on('SIGTERM', () => {
-  if (childProcess) childProcess.kill('SIGKILL');
-  process.exit(0);
-});
+  function processClaudeStdoutChunk(chunk) {
+    runtime.childStdoutBuffer += chunk.toString();
+    const lines = runtime.childStdoutBuffer.split('\n');
+    runtime.childStdoutBuffer = lines.pop() || '';
 
-process.on('SIGINT', () => {
-  if (childProcess) childProcess.kill('SIGKILL');
-  process.exit(0);
-});
+    for (const line of lines) {
+      if (!line.trim()) continue;
 
-debugLog('Started and listening for standard JSON-RPC');
+      try {
+        const ccMsg = JSON.parse(line);
+        emitDebugLog(
+          `Claude emitted: ${ccMsg.type}${ccMsg.subtype ? `/${ccMsg.subtype}` : ''}`,
+        );
+
+        if (ccMsg.type === 'control_request') {
+          forwardRuntimeRequest(ccMsg);
+          continue;
+        }
+
+        if (ccMsg.type === 'control_cancel_request') {
+          for (const [runnerRequestId, pending] of runtime.pendingControlRequests.entries()) {
+            if (pending.claudeRequestId === ccMsg.request_id) {
+              runtime.pendingControlRequests.delete(runnerRequestId);
+            }
+          }
+          continue;
+        }
+
+        const { events } = collectTimelineEventsFromClaudeMessage(ccMsg, {
+          turn: runtime.pendingOrchTurn,
+          timelineState: runtime.timelineState,
+        });
+        for (const event of events) {
+          emitTimelineEvent(event);
+        }
+
+        for (const transcriptEvent of collectTranscriptEventsFromClaudeMessage(ccMsg, {
+          turn: runtime.pendingOrchTurn,
+          pendingToolUses: runtime.pendingToolUses,
+        })) {
+          emitTranscriptEvent(transcriptEvent);
+        }
+
+        processToolLifecycle(ccMsg);
+
+        if (ccMsg.type === 'result' && ccMsg.subtype === 'success') {
+          runtime.apiCallCount = Math.max(
+            Number(ccMsg.num_turns) || 0,
+            runtime.apiCallCount || 0,
+            1,
+          );
+          const usage = ccMsg.usage || {};
+          completeTurnIfNeeded({
+            input: Number(usage.input_tokens) || 0,
+            output: Number(usage.output_tokens) || 0,
+            total:
+              (Number(usage.input_tokens) || 0) +
+              (Number(usage.output_tokens) || 0),
+          });
+          continue;
+        }
+
+        if (ccMsg.type === 'result' && ccMsg.is_error) {
+          const errorMessage =
+            Array.isArray(ccMsg.errors) && ccMsg.errors.length > 0
+              ? ccMsg.errors.join('; ')
+              : ccMsg.result || 'Claude turn failed';
+          failCurrentTurn(String(errorMessage));
+          continue;
+        }
+
+        if (ccMsg.type === 'error') {
+          const errorMessage =
+            ccMsg.message || ccMsg.error || 'Unknown Claude error';
+          failCurrentTurn(
+            typeof errorMessage === 'object'
+              ? JSON.stringify(errorMessage)
+              : String(errorMessage),
+          );
+          continue;
+        }
+
+        if (ccMsg.type === 'text_delta') {
+          sendToOrchestrator({ method: 'turn/progress', text: ccMsg.text });
+        }
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        emitDebugLog(`Ignoring non-JSON Claude output line: ${errorMessage}`);
+      }
+    }
+  }
+
+  runtime.rl.on('line', (line) => {
+    if (!line.trim()) {
+      return;
+    }
+
+    try {
+      const msg = JSON.parse(line);
+
+      if (
+        typeof msg.id === 'number' &&
+        !msg.method &&
+        runtime.pendingControlRequests.has(msg.id)
+      ) {
+        const pending = runtime.pendingControlRequests.get(msg.id);
+        runtime.pendingControlRequests.delete(msg.id);
+        if (pending) {
+          if (msg.error) {
+            sendClaudeControlResponse(
+              pending.claudeRequestId,
+              null,
+              msg.error.message || 'Runtime request failed',
+            );
+          } else {
+            sendClaudeControlResponse(pending.claudeRequestId, msg.result || {});
+          }
+        }
+        return;
+      }
+
+      if (msg.method === 'initialize') {
+        emitDebugLog('Received initialize');
+        sendToOrchestrator({ method: 'initialized' });
+        sendToOrchestrator({ id: msg.id, result: { thread: { id: 'adapter-thread-1' } } });
+        return;
+      }
+
+      if (msg.method === 'thread/start') {
+        const cwd = msg.params?.cwd || process.cwd();
+        runtime.childCwd = cwd;
+        runtime.childStdoutBuffer = '';
+        runtime.childStderrBuffer = '';
+        runtime.timelineState = createTimelineState();
+        runtime.pendingToolUses.clear();
+        emitDebugLog(`Received thread/start. Spawning Claude Code at ${cwd}`);
+
+        const cliPath = path.resolve(__dirname, '../claude-code/bin/claude-haha');
+        const args = [
+          '-c',
+          '-p',
+          '--verbose',
+          '--input-format', 'stream-json',
+          '--output-format', 'stream-json',
+          '--replay-user-messages',
+          '--permission-mode', 'default',
+          '--permission-prompt-tool', 'stdio',
+        ];
+
+        runtime.childProcess = cp.spawn(cliPath, args, {
+          cwd,
+          env,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+
+        runtime.childProcess.stdout.on('data', processClaudeStdoutChunk);
+        runtime.childProcess.stderr.on('data', processClaudeStderrChunk);
+        runtime.childProcess.on('exit', (code) => {
+          emitDebugLog(`Claude process exited with code ${code}`);
+        });
+
+        emitTimelineEvent(
+          buildTimelineEvent({
+            category: 'session',
+            code: 'session_started',
+            message: 'Session started',
+            detail: { cwd },
+          }),
+        );
+
+        sendToOrchestrator({
+          id: msg.id,
+          result: { thread: { id: 'adapter-thread-1' } },
+        });
+        return;
+      }
+
+      if (msg.method === 'turn/start') {
+        const requestId = msg.id ?? `turn-start-${runtime.turnCounter + 1}`;
+        if (runtime.seenTurnRequestIds.has(requestId)) {
+          emitDebugLog(`Received duplicate turn/start request id=${requestId}, ignoring`);
+          return;
+        }
+
+        runtime.seenTurnRequestIds.add(requestId);
+        runtime.turnCounter += 1;
+        runtime.processingOrchTurns.add(runtime.turnCounter);
+        runtime.pendingOrchTurn = runtime.turnCounter;
+        resetTurnState();
+        emitDebugLog(`Received turn/start (orch=${runtime.pendingOrchTurn})`);
+
+        sendToOrchestrator({
+          id: msg.id,
+          result: { turn: { id: `adapter-turn-${runtime.pendingOrchTurn}` } },
+        });
+        emitTurnStartedTimeline(runtime.pendingOrchTurn);
+
+        if (
+          runtime.childProcess &&
+          runtime.childProcess.stdin &&
+          runtime.childProcess.stdin.writable
+        ) {
+          let textPrompt = '';
+          if (msg.params?.input && msg.params.input.length > 0) {
+            textPrompt = msg.params.input[0].text;
+          } else if (msg.params?.text) {
+            textPrompt = msg.params.text;
+          }
+
+          runtime.childProcess.stdin.write(
+            `${JSON.stringify({
+              type: 'user',
+              message: { role: 'user', content: textPrompt },
+            })}\n`,
+          );
+        } else {
+          failCurrentTurn('Claude process not spawned or stdin closed.');
+        }
+      }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      emitDebugLog(`Input parsing error: ${errorMessage}`);
+    }
+  });
+
+  runtime.rl.on('close', () => {
+    emitDebugLog(
+      'Standard input stream severed. Parent must have died. Committing suicide.',
+    );
+    if (
+      runtime.pendingOrchTurn !== null &&
+      runtime.lastOrchTurnCompleted !== runtime.pendingOrchTurn
+    ) {
+      emitTurnCancelledTimeline(runtime.pendingOrchTurn);
+    }
+    if (runtime.childProcess) {
+      runtime.childProcess.kill('SIGKILL');
+    }
+    process.exit(0);
+  });
+
+  process.on('SIGTERM', () => {
+    if (
+      runtime.pendingOrchTurn !== null &&
+      runtime.lastOrchTurnCompleted !== runtime.pendingOrchTurn
+    ) {
+      emitTurnCancelledTimeline(runtime.pendingOrchTurn);
+    }
+    if (runtime.childProcess) runtime.childProcess.kill('SIGKILL');
+    process.exit(0);
+  });
+
+  process.on('SIGINT', () => {
+    if (
+      runtime.pendingOrchTurn !== null &&
+      runtime.lastOrchTurnCompleted !== runtime.pendingOrchTurn
+    ) {
+      emitTurnCancelledTimeline(runtime.pendingOrchTurn);
+    }
+    if (runtime.childProcess) runtime.childProcess.kill('SIGKILL');
+    process.exit(0);
+  });
+
+  emitDebugLog('Started and listening for standard JSON-RPC');
+  return runtime;
+}
+
+module.exports = {
+  ADAPTER_TIMELINE_METHOD,
+  ADAPTER_TRANSCRIPT_METHOD,
+  buildTimelineEvent,
+  buildToolResultTimelineEvents,
+  collectTimelineEventsFromClaudeMessage,
+  collectTranscriptEventsFromClaudeMessage,
+  createTimelineState,
+  formatCompactNumber,
+  formatTurnCompletedMessage,
+  isAdapterDebugEnabled,
+  normalizeToolName,
+  startAdapter,
+};
+
+if (require.main === module) {
+  startAdapter();
+}

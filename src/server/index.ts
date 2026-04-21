@@ -1,17 +1,14 @@
 /**
  * Symphony HTTP Server - Main Entry Point
- * Hono-based REST API server with WebSocket support
+ * Minimal Hono REST API for the control plane
  */
 
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
-import type { ServerWebSocket } from 'bun';
 import type { Database } from 'bun:sqlite';
 import { createHealthRoutes } from './routes/health';
-import { createTaskRoutes } from './routes/tasks';
-import { createStatsRoutes } from './routes/stats';
-import { createTaskWebSocketHandler } from './websocket/taskEvents';
+import { createWorkItemRoutes } from './routes/work-items';
 import type { ServerConfig, ApiResponse } from './types';
 
 /**
@@ -21,7 +18,6 @@ const DEFAULT_CONFIG: ServerConfig = {
   port: 3000,
   hostname: '0.0.0.0',
   corsOrigins: ['*'],
-  enableWebSocket: true,
 };
 
 /**
@@ -33,7 +29,6 @@ export class SymphonyServer {
   private config: ServerConfig;
   private db: Database;
   private server: Bun.HTTPServer | null = null;
-  private wsHandler: ReturnType<typeof createTaskWebSocketHandler> | null = null;
 
   /**
    * Create a new Symphony server instance
@@ -45,7 +40,6 @@ export class SymphonyServer {
 
     this.setupMiddleware();
     this.setupRoutes();
-    this.setupWebSocket();
   }
 
   /**
@@ -93,8 +87,7 @@ export class SymphonyServer {
 
     // Mount sub-routes
     apiV1.route('/health', createHealthRoutes(this.db));
-    apiV1.route('/tasks', createTaskRoutes(this.db));
-    apiV1.route('/stats', createStatsRoutes(this.db));
+    apiV1.route('/work-items', createWorkItemRoutes(this.db));
 
     // Mount API v1 under /api/v1
     this.app.route('/api/v1', apiV1);
@@ -108,22 +101,11 @@ export class SymphonyServer {
           version: '1.0.0',
           endpoints: {
             health: '/api/v1/health',
-            tasks: '/api/v1/tasks',
-            stats: '/api/v1/stats',
-            websocket: '/ws/tasks/:id',
+            workItems: '/api/v1/work-items',
           },
         },
       });
     });
-  }
-
-  /**
-   * Setup WebSocket handlers
-   */
-  private setupWebSocket(): void {
-    if (this.config.enableWebSocket) {
-      this.wsHandler = createTaskWebSocketHandler(this.db);
-    }
   }
 
   /**
@@ -143,14 +125,6 @@ export class SymphonyServer {
           port: this.config.port,
           hostname: this.config.hostname,
           fetch: this.app.fetch,
-          websocket: this.wsHandler
-            ? {
-                open: this.wsHandler.open,
-                message: this.wsHandler.message,
-                close: this.wsHandler.close,
-                idleTimeout: 30,
-              }
-            : undefined,
         });
 
         console.log(
@@ -188,13 +162,11 @@ export class SymphonyServer {
     running: boolean;
     port: number | null;
     hostname: string;
-    websocketEnabled: boolean;
   } {
     return {
       running: this.server !== null,
       port: this.server?.port ?? null,
       hostname: this.config.hostname,
-      websocketEnabled: this.config.enableWebSocket,
     };
   }
 }
