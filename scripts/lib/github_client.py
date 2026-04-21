@@ -40,6 +40,13 @@ class GitHubClient:
         response.raise_for_status()
         return response.json()
 
+    def _patch(self, path: str, data: dict, **kwargs) -> dict:
+        """Execute PATCH request."""
+        url = f"{self.base_url}{path}"
+        response = requests.patch(url, json=data, headers=self.headers, timeout=30, **kwargs)
+        response.raise_for_status()
+        return response.json()
+
     def get_pull_request(self, pr_number: int) -> Optional[dict]:
         """Get pull request by number."""
         try:
@@ -75,6 +82,14 @@ class GitHubClient:
             "base": self.default_branch,
             "draft": draft,
         })
+
+    def add_issue_comment(self, issue_number: int, body: str) -> dict:
+        """Post a comment to a GitHub issue."""
+        return self._post(f"/issues/{issue_number}/comments", {"body": body})
+
+    def add_pull_request_comment(self, pr_number: int, body: str) -> dict:
+        """Post a timeline comment to a pull request."""
+        return self._post(f"/issues/{pr_number}/comments", {"body": body})
 
     def merge_pull_request(
         self,
@@ -133,3 +148,23 @@ class GitHubClient:
     def pr_exists(self, branch: str) -> Optional[dict]:
         """Check if PR exists for branch and return it."""
         return self.get_pull_request_by_branch(branch, state="open")
+
+    def list_issues(self, state: str = "all", per_page: int = 100) -> list[dict]:
+        """List GitHub issues, excluding pull requests at the call site if needed."""
+        return self._get(f"/issues?state={state}&per_page={per_page}")
+
+    def find_issue_by_identifier(self, identifier: str, state: str = "all") -> Optional[dict]:
+        """Find a GitHub issue whose title starts with the Linear identifier."""
+        prefix = f"[{identifier.upper()}]"
+        issues = self.list_issues(state=state)
+        for issue in issues:
+            if issue.get("pull_request"):
+                continue
+            title = issue.get("title", "")
+            if title.upper().startswith(prefix):
+                return issue
+        return None
+
+    def close_issue(self, issue_number: int) -> dict:
+        """Close an existing GitHub issue."""
+        return self._patch(f"/issues/{issue_number}", {"state": "closed"})

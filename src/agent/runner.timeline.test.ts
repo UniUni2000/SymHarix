@@ -1,0 +1,314 @@
+import { describe, expect, mock, test } from 'bun:test';
+import { EventEmitter } from 'events';
+import type { ChildProcess } from 'child_process';
+import { AgentRunner } from './runner';
+
+class FakeStream extends EventEmitter {
+  override removeAllListeners(event?: string | symbol): this {
+    super.removeAllListeners(event);
+    return this;
+  }
+}
+
+function createFakeChildProcess() {
+  const child = new EventEmitter() as ChildProcess & EventEmitter & {
+    stdout: FakeStream;
+    stderr: FakeStream;
+    stdin: {
+      writes: string[];
+      write: (data: string) => boolean;
+      end: () => void;
+      writable: boolean;
+    };
+    pid: number;
+  };
+
+  child.pid = 12345;
+  child.stdout = new FakeStream();
+  child.stderr = new FakeStream();
+  child.stdin = {
+    writes: [],
+    writable: true,
+    write(data: string) {
+      this.writes.push(data);
+      return true;
+    },
+    end() {},
+  };
+
+  return child;
+}
+
+describe('AgentRunner timeline events', () => {
+  test('maps agent/timeline messages to timeline AgentEvent without breaking turn completion tokens', async () => {
+    const runner = new AgentRunner({
+      codexCommand: 'node ./scripts/claude-adapter.cjs',
+      turnTimeoutMs: 5000,
+      readTimeoutMs: 1000,
+      stallTimeoutMs: 5000,
+      projectRoot: process.cwd(),
+    });
+    const child = createFakeChildProcess();
+    const events: Array<{ event: string; payload?: Record<string, unknown> }> = [];
+
+    const resultPromise = runner.runTurn(
+      child,
+      'thread-1',
+      'hello',
+      'INT-1: Example',
+      process.cwd(),
+      (event) => events.push({ event: event.event, payload: event.payload as Record<string, unknown> | undefined })
+    );
+
+    queueMicrotask(() => {
+      child.stdout.emit(
+        'data',
+        Buffer.from(
+          `${JSON.stringify({
+            method: 'agent/timeline',
+            params: {
+              level: 'info',
+              category: 'turn',
+              code: 'turn_started',
+              message: 'Turn 1 started',
+              turn: 1,
+              tool_name: null,
+              detail: null,
+            },
+          })}\n`
+        )
+      );
+      child.stdout.emit(
+        'data',
+        Buffer.from(
+          `${JSON.stringify({
+            method: 'turn/completed',
+            result: {
+              turn: {
+                id: 'adapter-turn-1',
+                api_calls: 1,
+                tokens: { input: 10, output: 5, total: 15 },
+              },
+            },
+          })}\n`
+        )
+      );
+    });
+
+    const result = await resultPromise;
+
+    expect(result.success).toBe(true);
+    expect(result.tokens).toEqual({ input: 10, output: 5, total: 15 });
+    expect(events).toHaveLength(2);
+    expect(events[0]?.event).toBe('timeline');
+    expect(events[0]?.payload?.message).toBe('Turn 1 started');
+    expect(events[1]?.event).toBe('turn_completed');
+    expect(child.stdin.writes[0]).toContain('"method":"turn/start"');
+  });
+
+  test('round-trips approval requests and passes timeline/transcript state to the runtime handler', async () => {
+    const runner = new AgentRunner({
+      codexCommand: 'node ./scripts/claude-adapter.cjs',
+      turnTimeoutMs: 5000,
+      readTimeoutMs: 1000,
+      stallTimeoutMs: 5000,
+      projectRoot: process.cwd(),
+    });
+    const child = createFakeChildProcess();
+    const runtimeHandler = mock(async (request, state) => {
+      expect(request.kind).toBe('approval');
+      expect(request.summary.tool_name).toBe('Bash');
+      expect(state.timeline).toHaveLength(1);
+      expect(state.transcript).toEqual([
+        {
+          role: 'assistant',
+          kind: 'message',
+          text: 'I will inspect the repo.',
+          turn: 1,
+          tool_name: null,
+        },
+      ]);
+
+      return {
+        response: {
+          behavior: 'allow',
+          updatedInput: { command: 'pwd' },
+          toolUseID: 'tool-1',
+        },
+      };
+    });
+
+    const resultPromise = runner.runTurn(
+      child,
+      'thread-1',
+      'hello',
+      'INT-2: Runtime request',
+      process.cwd(),
+      () => undefined,
+      runtimeHandler,
+    );
+
+    queueMicrotask(() => {
+      child.stdout.emit(
+        'data',
+        Buffer.from(
+          `${JSON.stringify({
+            method: 'agent/timeline',
+            params: {
+              level: 'info',
+              category: 'turn',
+              code: 'turn_started',
+              message: 'Turn 1 started',
+              turn: 1,
+              tool_name: null,
+              detail: null,
+            },
+          })}\n`,
+        ),
+      );
+      child.stdout.emit(
+        'data',
+        Buffer.from(
+          `${JSON.stringify({
+            method: 'agent/transcript_delta',
+            params: {
+              role: 'assistant',
+              kind: 'message',
+              text: 'I will inspect the repo.',
+              turn: 1,
+              tool_name: null,
+            },
+          })}\n`,
+        ),
+      );
+      child.stdout.emit(
+        'data',
+        Buffer.from(
+          `${JSON.stringify({
+            id: 7,
+            method: 'approval/request',
+            params: {
+              request_id: 'runtime-1',
+              turn: 1,
+              request: {
+                subtype: 'can_use_tool',
+                tool_name: 'Bash',
+                tool_use_id: 'tool-1',
+                title: 'Use Bash',
+                input: { command: 'pwd' },
+              },
+            },
+          })}\n`,
+        ),
+      );
+
+      setTimeout(() => {
+        child.stdout.emit(
+          'data',
+          Buffer.from(
+            `${JSON.stringify({
+              method: 'turn/completed',
+              result: {
+                turn: {
+                  id: 'adapter-turn-1',
+                  api_calls: 1,
+                  tokens: { input: 12, output: 6, total: 18 },
+                },
+              },
+            })}\n`,
+          ),
+        );
+      }, 0);
+    });
+
+    const result = await resultPromise;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(runtimeHandler).toHaveBeenCalledTimes(1);
+    expect(result.transcript).toEqual([
+      {
+        role: 'assistant',
+        kind: 'message',
+        text: 'I will inspect the repo.',
+        turn: 1,
+        tool_name: null,
+      },
+    ]);
+    expect(result.timeline).toHaveLength(1);
+    expect(child.stdin.writes.some((line) => line.includes('"id":7') && line.includes('"behavior":"allow"'))).toBe(true);
+  });
+
+  test('round-trips elicitation requests back to the adapter process', async () => {
+    const runner = new AgentRunner({
+      codexCommand: 'node ./scripts/claude-adapter.cjs',
+      turnTimeoutMs: 5000,
+      readTimeoutMs: 1000,
+      stallTimeoutMs: 5000,
+      projectRoot: process.cwd(),
+    });
+    const child = createFakeChildProcess();
+
+    const resultPromise = runner.runTurn(
+      child,
+      'thread-1',
+      'hello',
+      'INT-3: Elicitation request',
+      process.cwd(),
+      () => undefined,
+      async () => ({
+        response: {
+          action: 'accept',
+          content: { answer: 'confirmed' },
+        },
+      }),
+    );
+
+    queueMicrotask(() => {
+      child.stdout.emit(
+        'data',
+        Buffer.from(
+          `${JSON.stringify({
+            id: 9,
+            method: 'item/tool/requestUserInput',
+            params: {
+              request_id: 'elicitation-1',
+              turn: 1,
+              request: {
+                subtype: 'elicitation',
+                title: 'Need confirmation',
+                message: 'Proceed?',
+                requested_schema: {
+                  type: 'object',
+                  properties: { answer: { type: 'string' } },
+                },
+              },
+            },
+          })}\n`,
+        ),
+      );
+
+      setTimeout(() => {
+        child.stdout.emit(
+          'data',
+          Buffer.from(
+            `${JSON.stringify({
+              method: 'turn/completed',
+              result: {
+                turn: {
+                  id: 'adapter-turn-1',
+                  api_calls: 1,
+                  tokens: { input: 4, output: 2, total: 6 },
+                },
+              },
+            })}\n`,
+          ),
+        );
+      }, 0);
+    });
+
+    await resultPromise;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(child.stdin.writes.some((line) => line.includes('"id":9') && line.includes('"action":"accept"'))).toBe(true);
+  });
+});

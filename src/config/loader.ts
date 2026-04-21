@@ -219,6 +219,10 @@ export function buildServiceConfig(workflow: WorkflowDefinition): ServiceConfig 
     timeout_ms: hooksTimeout > 0 ? hooksTimeout : DEFAULTS.hooks!.timeout_ms
   };
 
+  if (hooks.before_run || hooks.after_run) {
+    console.warn('[config] hooks.before_run and hooks.after_run are deprecated and ignored by the orchestrator');
+  }
+
   // Agent config
   const agent = (config.agent as Record<string, unknown>) || {};
   const maxConcurrentAgents = parseNumber(agent.max_concurrent_agents, DEFAULTS.maxConcurrentAgents!);

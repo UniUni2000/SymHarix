@@ -2,5 +2,9 @@
  * Repositories Index - Export all repository classes
  */
 
-export { TaskRepository } from './taskRepository';
-export { EventRepository } from './eventRepository';
+export { WorkItemRepository } from './workItemRepository';
+export { RepoCacheRepository } from './repoCacheRepository';
+export { AgentRunRepository } from './agentRunRepository';
+export { ReviewEventRepository } from './reviewEventRepository';
+export { SyncEventRepository } from './syncEventRepository';
+export { ServiceLeaseRepository } from './serviceLeaseRepository';
