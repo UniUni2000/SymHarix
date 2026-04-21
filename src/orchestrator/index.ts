@@ -608,18 +608,11 @@ export class Orchestrator extends EventEmitter {
       }
 
       // Initialize session (Section 10.2: Session Startup Handshake)
+      // This sends initialize + thread/start and returns threadId
       const { threadId } = await this.agentRunner.initializeSession(child, workspace.path);
       if (runningEntry) {
         runningEntry.session_id = `${threadId}-turn-1`;
       }
-
-      // Send thread/start request (Section 10.2)
-      await this.agentRunner.sendThreadStart(
-        child,
-        workspace.path,
-        this.config.codexApprovalPolicy,
-        this.config.codexThreadSandbox
-      );
 
       // Step 5: Run turns (up to max_turns)
       let turnNumber = 1;
@@ -777,7 +770,7 @@ export class Orchestrator extends EventEmitter {
       // Run after_run hook on failure
       try {
         await this.workspaceManager.afterRun(
-          this.workspaceManager.getWorkspacePath(issue.identifier, issue.project_slug),
+          this.workspaceManager.getWorkspacePath(issue.identifier, issue.project_slug, issue.project_name),
           issue
         );
       } catch {}
@@ -937,14 +930,22 @@ export class Orchestrator extends EventEmitter {
     issueId: string,
     workspacePath: string
   ): Promise<{ success: boolean; stats?: CliStats; error?: string }> {
+    // Build command with optional workspace-path
     const cmd = ['python3', './scripts/cli.py', command, issueId];
+    if (workspacePath) {
+      cmd.push('--workspace-path', workspacePath);
+    }
 
     console.log(`[orchestrator] Running: ${cmd.join(' ')}`);
 
     return new Promise((resolve) => {
       const child = cp.spawn(cmd[0], cmd.slice(1), {
-        cwd: workspacePath,
-        env: { ...process.env },
+        cwd: this.config.projectRoot,
+        env: {
+          ...process.env,
+          SYMPHONY_WORKSPACE_ROOT: this.config.workspaceRoot,
+          SYMPHONY_PROJECT_ROOT: this.config.projectRoot,
+        },
       });
 
       let stdout = '';
@@ -1079,7 +1080,8 @@ export class Orchestrator extends EventEmitter {
         try {
           const workspacePath = this.workspaceManager.getWorkspacePath(
             runningEntry.identifier,
-            runningEntry.issue.project_slug
+            runningEntry.issue.project_slug,
+            runningEntry.issue.project_name
           );
           await this.workspaceManager.removeWorkspace(workspacePath, runningEntry.issue.project_slug);
           console.log(`[orchestrator] Workspace cleaned for cancelled issue: ${runningEntry.identifier}`);
@@ -1148,7 +1150,7 @@ export class Orchestrator extends EventEmitter {
     this.state.claimed.delete(entry.issue.id);
 
     if (cleanupWorkspace) {
-      const workspacePath = this.workspaceManager.getWorkspacePath(entry.identifier, entry.issue.project_slug);
+      const workspacePath = this.workspaceManager.getWorkspacePath(entry.identifier, entry.issue.project_slug, entry.issue.project_name);
       await this.workspaceManager.removeWorkspace(workspacePath, entry.issue.project_slug);
     }
 
@@ -1182,7 +1184,7 @@ export class Orchestrator extends EventEmitter {
     }
 
     for (const issue of issues) {
-      const workspacePath = this.workspaceManager.getWorkspacePath(issue.identifier, issue.project_slug);
+      const workspacePath = this.workspaceManager.getWorkspacePath(issue.identifier, issue.project_slug, issue.project_name);
       try {
         await this.workspaceManager.removeWorkspace(workspacePath, issue.project_slug);
         console.log('[orchestrator] Cleaned up terminal workspace:', issue.identifier);
@@ -1296,7 +1298,7 @@ export class Orchestrator extends EventEmitter {
     }
 
     // Step 3: Clean up the workspace
-    const workspacePath = this.workspaceManager.getWorkspacePath(issue.identifier, issue.project_slug);
+    const workspacePath = this.workspaceManager.getWorkspacePath(issue.identifier, issue.project_slug, issue.project_name);
     try {
       await this.workspaceManager.removeWorkspace(workspacePath, issue.project_slug);
       console.log(`[orchestrator] Cleaned up workspace for merged issue: ${issue.identifier}`);
@@ -1364,7 +1366,8 @@ export class Orchestrator extends EventEmitter {
         try {
           const workspacePath = this.workspaceManager.getWorkspacePath(
             runningEntry.identifier,
-            runningEntry.issue.project_slug
+            runningEntry.issue.project_slug,
+            runningEntry.issue.project_name
           );
           await this.workspaceManager.removeWorkspace(workspacePath, runningEntry.issue.project_slug);
           cleaned.push(runningEntry.identifier);

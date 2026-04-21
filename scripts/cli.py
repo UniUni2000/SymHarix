@@ -29,9 +29,14 @@ def cli(ctx):
 
 @cli.command("dispatch")
 @click.argument("issue_id")
+@click.option("--workspace-path", "workspace_path_opt", help="Pre-created workspace path (orchestrator manages workspace creation)")
 @click.pass_context
-def dispatch(ctx, issue_id):
-    """Dispatch a new issue (creates state.json)."""
+def dispatch(ctx, issue_id, workspace_path_opt):
+    """Dispatch a new issue (creates state.json).
+
+    In hybrid mode, the orchestrator creates the workspace. This command
+    only initializes state and updates Linear.
+    """
     import json
     from lib.linear_client import LinearClient
     from lib.github_client import GitHubClient
@@ -53,42 +58,74 @@ def dispatch(ctx, issue_id):
     # Create GitHub repo full name (owner/project)
     github_repo_full = f"{config.github_owner}/{project_name}"
 
-    # Initialize GitHub client with correct repo
-    github = GitHubClient(
-        token=config.github_token,
-        owner=config.github_owner,
-        repo=project_name,
-        default_branch=config.github_default_branch,
-    )
-
     # Create branch name (use feature/ prefix like the original system)
     branch = f"feature/{issue['identifier'].lower()}"
 
-    # Create workspace directory
-    workspace_root = config.workspace_root
-    workspace_path = workspace_root / issue_id
+    # Update Linear state to In Progress
+    in_progress_state_id = linear.fetch_state_id("In Progress")
+    if in_progress_state_id:
+        linear.update_issue_state(issue["id"], in_progress_state_id)
+        click.echo(f"Updated Linear state to In Progress")
+    else:
+        click.echo(f"Warning: Could not find In Progress state ID", err=True)
 
-    # Initialize state
-    store = StateStore(workspace_root, issue_id)
-    try:
-        store.initialize(
-            linear_issue_id=issue["id"],
-            linear_state=issue["state"]["name"],
-            github_repo=github_repo_full,
-            branch=branch,
-        )
-    except ValueError as e:
-        click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
+    # Use workspace_path if provided, otherwise compute it
+    # The orchestrator creates git worktree at workspace_root/project_name/issue_id
+    # But for state, we use workspace_root/project_name/issue_id/.symphony (inside worktree)
+    if workspace_path_opt:
+        # Orchestrator provided workspace path - state goes inside it
+        workspace_path = Path(workspace_path_opt)
+    else:
+        # Fallback for standalone use
+        workspace_path = config.workspace_root / project_name / issue_id
 
-    click.echo(f"Issue {issue_id} dispatched to {workspace_path}")
+    # Initialize state INSIDE the workspace (git worktree), not outside
+    # StateStore expects: workspace_root / issue_id / .symphony
+    # But we want state inside the worktree: workspace_path / .symphony
+    # So we create a custom symphony_path
+    symphony_path = workspace_path / ".symphony"
+
+    # Initialize state if not already initialized
+    # For state inside worktree, we need to create the symphony dir manually
+    if symphony_path.exists():
+        click.echo(f"State already exists for {issue_id}, skipping initialization")
+    else:
+        try:
+            # Create the symphony directory inside workspace
+            symphony_path.mkdir(parents=True, exist_ok=True)
+
+            # Write state.json directly
+            import json
+            state_data = {
+                "version": 1,
+                "issue_id": issue_id,
+                "current_state": "TODO",
+                "previous_state": None,
+                "transition_history": [],
+                "metadata": {
+                    "linear_issue_id": issue["id"],
+                    "linear_state": "In Progress",
+                    "github_repo": github_repo_full,
+                    "branch": branch,
+                },
+                "error": None,
+                "retry_count": 0
+            }
+            with open(symphony_path / "state.json", "w") as f:
+                json.dump(state_data, f, indent=2)
+        except Exception as e:
+            click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+
+    click.echo(f"Issue {issue_id} dispatched")
     click.echo(f"GitHub repo: {github_repo_full}, branch: {branch}")
 
 
 @cli.command("dev")
 @click.argument("issue_id")
+@click.option("--workspace-path", "workspace_path_opt", help="Workspace path for state lookup")
 @click.pass_context
-def dev(ctx, issue_id):
+def dev(ctx, issue_id, workspace_path_opt):
     """Run development phase for an issue."""
     import sys
     sys.path.insert(0, str(Path(__file__).parent))
@@ -99,25 +136,52 @@ def dev(ctx, issue_id):
     config = ctx.obj["config"]
 
     linear = LinearClient(api_key=config.linear_api_key, endpoint=config.linear_endpoint)
-    github = GitHubClient(
-        token=config.github_token,
-        owner=config.github_owner,
-        repo=config.github_repo,
-        default_branch=config.github_default_branch,
-    )
 
-    store = StateStore(config.workspace_root, issue_id)
-    state = store.get_state()
+    # Use workspace_path if provided - state is at workspace_path/.symphony/state.json
+    if workspace_path_opt:
+        workspace_path = Path(workspace_path_opt)
+        symphony_path = workspace_path / ".symphony"
+        state_file = symphony_path / "state.json"
+        if not state_file.exists():
+            click.echo(f"No state found for {issue_id} at {state_file}", err=True)
+            sys.exit(1)
+        import json
+        with open(state_file) as f:
+            state = json.load(f)
+        workspace_root = workspace_path
+    else:
+        workspace_root = config.workspace_root
+        store = StateStore(workspace_root, issue_id)
+        state = store.get_state()
+        if not state:
+            click.echo(f"No state found for {issue_id}", err=True)
+            sys.exit(1)
     if not state:
         click.echo(f"No state found for {issue_id}", err=True)
         sys.exit(1)
 
+    # Get github repo from state metadata (set during dispatch from Linear project)
+    # github_repo in state is stored as "owner/repo" format
+    metadata = state.get("metadata", {})
+    github_repo_full = metadata.get("github_repo", f"{config.github_owner}/{config.github_repo}")
+    if "/" in github_repo_full:
+        gh_owner, gh_repo = github_repo_full.split("/", 1)
+    else:
+        gh_owner, gh_repo = config.github_owner, github_repo_full
+
+    github = GitHubClient(
+        token=config.github_token,
+        owner=gh_owner,
+        repo=gh_repo,
+        default_branch=config.github_default_branch,
+    )
+
     hook = DevHook(
-        workspace_root=config.workspace_root,
+        workspace_root=workspace_root,
         issue_id=issue_id,
         linear_issue_id=state["metadata"]["linear_issue_id"],
         linear_state=state["metadata"]["linear_state"],
-        github_repo=state["metadata"]["github_repo"],
+        github_repo=github_repo_full,
         branch=state["metadata"]["branch"],
         linear_client=linear,
         github_client=github,
@@ -140,8 +204,9 @@ def dev(ctx, issue_id):
 
 @cli.command("review")
 @click.argument("issue_id")
+@click.option("--workspace-path", "workspace_path_opt", help="Workspace path for state lookup")
 @click.pass_context
-def review(ctx, issue_id):
+def review(ctx, issue_id, workspace_path_opt):
     """Run review phase (review + merge) for an issue."""
     import sys
     sys.path.insert(0, str(Path(__file__).parent))
@@ -153,11 +218,25 @@ def review(ctx, issue_id):
 
     linear = LinearClient(api_key=config.linear_api_key, endpoint=config.linear_endpoint)
 
-    store = StateStore(config.workspace_root, issue_id)
-    state = store.get_state()
-    if not state:
-        click.echo(f"No state found for {issue_id}", err=True)
-        sys.exit(1)
+    # Use workspace_path if provided - state is at workspace_path/.symphony/state.json
+    if workspace_path_opt:
+        workspace_path = Path(workspace_path_opt)
+        symphony_path = workspace_path / ".symphony"
+        state_file = symphony_path / "state.json"
+        if not state_file.exists():
+            click.echo(f"No state found for {issue_id} at {state_file}", err=True)
+            sys.exit(1)
+        import json
+        with open(state_file) as f:
+            state = json.load(f)
+        workspace_root = workspace_path
+    else:
+        workspace_root = config.workspace_root
+        store = StateStore(workspace_root, issue_id)
+        state = store.get_state()
+        if not state:
+            click.echo(f"No state found for {issue_id}", err=True)
+            sys.exit(1)
 
     # Get github repo from state metadata (set during dispatch from Linear project)
     metadata = state.get("metadata", {})
@@ -176,7 +255,7 @@ def review(ctx, issue_id):
     )
 
     hook = ReviewHook(
-        workspace_root=config.workspace_root,
+        workspace_root=workspace_root,
         issue_id=issue_id,
         linear_client=linear,
         github_client=github,

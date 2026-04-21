@@ -120,9 +120,8 @@ rl.on('line', (line) => {
     if (msg.method === 'initialize') {
       debugLog('Received initialize');
       sendToOrchestrator({ method: 'initialized' });
-      // Symphony's runner.ts has a bug where initializeSession waits for thread ID 
-      // before sending thread/start. We satisfy it immediately to avoid deadlock.
-      sendToOrchestrator({ result: { thread: { id: "adapter-thread-1" } } });
+      // Send thread ID response with the same id as the initialize request
+      sendToOrchestrator({ id: msg.id, result: { thread: { id: "adapter-thread-1" } } });
     }
     
     // 2. Thread Session Setup Phase
