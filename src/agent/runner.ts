@@ -271,30 +271,156 @@ export class AgentRunner extends EventEmitter {
    * Section 10.1: Launch Contract
    */
   launch(workspacePath: string): cp.ChildProcess {
-    // Find bash path dynamically for sandbox compatibility
-    const bashPath = this.findBashPath();
-    
-    // Resolve command path relative to project root
-    const resolvedCommand = this.resolveCommandPath(this.options.codexCommand);
-    
-    // Section 10.1: Invoke via bash -lc in workspace directory
-    const child = cp.spawn(bashPath, ['-lc', resolvedCommand], {
-      cwd: workspacePath,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: process.env
-    });
+    // Resolve command path
+    const codexCommand = this.options.codexCommand;
+    const resolvedCommand = this.resolveCommandPath(codexCommand);
 
-    return child;
+    // Use Bun.spawn instead of cp.spawn - Bun's native spawn works in Bun runtime
+    // cp.spawn fails with ENOENT in Bun for external executables
+
+    // Parse resolved command into array for Bun.spawn
+    // resolvedCommand is like "node /path/to/adapter.cjs" or "codex app-server"
+    const cmdParts = resolvedCommand.split(' ');
+    let spawnArgs: string[];
+    if (cmdParts.length > 1 && (cmdParts[0] === 'node' || cmdParts[0] === 'python' || cmdParts[0] === 'python3')) {
+      // node/python script - use directly
+      spawnArgs = cmdParts;
+    } else if (cmdParts.length > 1 && !resolvedCommand.includes('/')) {
+      // CLI command with args (e.g., "codex app-server") - split and run directly
+      // No path separator means it's a command found via PATH
+      spawnArgs = cmdParts;
+    } else {
+      // Other commands with path - wrap in bun run
+      spawnArgs = ['/Users/liupenghui/.bun/bin/bun', 'run', resolvedCommand];
+    }
+
+    let child;
+    try {
+      child = Bun.spawn(spawnArgs, {
+        cwd: workspacePath,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          PATH: '/usr/local/bin:/usr/bin:/bin:' + (process.env.PATH || '')
+        }
+      });
+    } catch (err) {
+      console.error('[runner] Bun.spawn failed:', err);
+      throw err;
+    }
+
+    // Create async line reader for stdout
+    const stdoutLineHandler = new Set<(line: string) => void>();
+    const stderrLineHandler = new Set<(line: string) => void>();
+
+    // Start async stdout reader
+    (async () => {
+      try {
+        for await (const chunk of child.stdout) {
+          const lines = Buffer.from(chunk).toString().split('\n');
+          for (const line of lines) {
+            if (line.trim()) {
+              for (const handler of stdoutLineHandler) {
+                handler(line.trim());
+              }
+            }
+          }
+        }
+      } catch (e) {
+        // Stream closed
+      }
+    })();
+
+    // Start async stderr reader
+    (async () => {
+      try {
+        for await (const chunk of child.stderr) {
+          const lines = Buffer.from(chunk).toString().split('\n');
+          for (const line of lines) {
+            if (line.trim()) {
+              for (const handler of stderrLineHandler) {
+                handler(line.trim());
+              }
+            }
+          }
+        }
+      } catch (e) {
+        // Stream closed
+      }
+    })();
+
+    // Create stdin/stdout/stderr wrapper objects with proper event handling
+    const stdin = {
+      write: (data: string) => {
+        child.stdin?.write(data);
+        return true;
+      },
+      end: () => {
+        child.stdin?.end();
+      }
+    };
+
+    const stdout = {
+      on: (event: string, handler: (data: Buffer) => void) => {
+        if (event === 'data') {
+          stdoutLineHandler.add((line) => {
+            handler(Buffer.from(line + '\n'));
+          });
+        }
+        return stdout;
+      },
+      removeAllListeners: () => {
+        stdoutLineHandler.clear();
+      }
+    };
+
+    const stderr = {
+      on: (event: string, handler: (data: Buffer) => void) => {
+        if (event === 'data') {
+          stderrLineHandler.add((line) => {
+            handler(Buffer.from(line + '\n'));
+          });
+        }
+        return stderr;
+      },
+      removeAllListeners: () => {
+        stderrLineHandler.clear();
+      }
+    };
+
+    // Create a proper ChildProcess-like object
+    const processChild: cp.ChildProcess = {
+      pid: child.pid,
+      kill: () => {
+        child.kill();
+        return true;
+      },
+      on: (event: string, handler: (...args: any[]) => void) => {
+        if (event === 'exit') {
+          child.exited.then((code) => {
+            handler(code, null);
+          }).catch((err) => {
+            handler(err, null);
+          });
+        }
+        return processChild;
+      },
+      stdout: stdout as unknown as NodeJS.ReadableStream,
+      stderr: stderr as unknown as NodeJS.WritableStream,
+      stdin: stdin as unknown as NodeJS.WritableStream,
+      removeAllListeners: () => {},
+      ref: () => processChild,
+      unref: () => processChild
+    } as unknown as cp.ChildProcess;
+
+    return processChild;
   }
 
   /**
    * Find bash executable path
-   * In sandbox environments, use 'bash' with PATH lookup rather than absolute paths
    */
   private findBashPath(): string {
-    // In sandbox/container environments, using 'bash' directly often works better
-    // because the sandbox may have its own PATH mapping
-    return 'bash';
+    return '/bin/bash';
   }
 
   /**
@@ -306,8 +432,8 @@ export class AgentRunner extends EventEmitter {
 
     return new Promise((resolve, reject) => {
       let stdoutBuffer = '';
-      let initializedReceived = false;
-      let threadStartResponseReceived = false;
+      let initializeResponseReceived = false;
+      let threadId: string | null = null;
 
       // Set up stdout reader
       child.stdout?.on('data', (data: Buffer) => {
@@ -318,18 +444,31 @@ export class AgentRunner extends EventEmitter {
           const msg = this.parseLine(line);
           if (!msg) return;
 
-          // Check for initialized notification (Section 10.2)
-          if (msg.method === 'initialized') {
-            initializedReceived = true;
+          // After initialize response, send thread/start
+          if (msg.id === 1 && msg.result && !initializeResponseReceived) {
+            initializeResponseReceived = true;
+
+            // Send thread/start request
+            const threadStartMsg: CodexMessage = {
+              id: this.messageCounter++,
+              method: 'thread/start',
+              params: {
+                approvalPolicy: 'on-request',
+                sandbox: 'workspace-write',
+                cwd: String(workspacePath || '')
+              }
+            };
+            child.stdin?.write(JSON.stringify(threadStartMsg) + '\n');
           }
 
-          // Check for thread/start response (Section 10.2)
-          if (msg.result && !threadStartResponseReceived) {
+          // Check for thread/start response (id=2) with threadId
+          // Only look at responses to thread/start, not initialize
+          if (msg.id === 2 && msg.result && !threadId) {
             const threadInfo = this.extractThreadInfo(msg.result);
             if (threadInfo) {
-              threadStartResponseReceived = true;
+              threadId = threadInfo.threadId;
               cleanup();
-              resolve(threadInfo);
+              resolve({ threadId });
             }
           }
 
@@ -591,8 +730,8 @@ export class AgentRunner extends EventEmitter {
           input: [{ type: 'text', text: prompt }],
           cwd: workspacePath,
           title: `${issueTitle}`,
-          approvalPolicy: this.options.approvalPolicy || 'auto',
-          sandboxPolicy: this.options.turnSandboxPolicy ? JSON.parse(this.options.turnSandboxPolicy) : { type: 'trusted' }
+          approvalPolicy: this.options.approvalPolicy || 'on-request',
+          sandboxPolicy: this.options.turnSandboxPolicy ? JSON.parse(this.options.turnSandboxPolicy) : { type: 'workspace-write' }
         }
       };
       child.stdin?.write(JSON.stringify(turnStartMsg) + '\n');
