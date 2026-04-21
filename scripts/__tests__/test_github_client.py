@@ -161,3 +161,58 @@ def test_pr_exists(mock_get):
 
     assert pr is not None
     assert pr["number"] == 42
+
+
+@patch("scripts.lib.github_client.requests.get")
+def test_find_issue_by_identifier(mock_get):
+    mock_response = MagicMock()
+    mock_response.json.return_value = [
+        {"number": 5, "title": "[INT-25] Something", "state": "open"},
+        {"number": 6, "title": "Other issue", "state": "open"},
+    ]
+    mock_get.return_value = mock_response
+
+    client = GitHubClient(token="ghp_test", owner="owner", repo="repo")
+    issue = client.find_issue_by_identifier("INT-25")
+
+    assert issue is not None
+    assert issue["number"] == 5
+
+
+@patch("scripts.lib.github_client.requests.patch")
+def test_close_issue(mock_patch):
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"number": 5, "state": "closed"}
+    mock_patch.return_value = mock_response
+
+    client = GitHubClient(token="ghp_test", owner="owner", repo="repo")
+    result = client.close_issue(5)
+
+    assert result["state"] == "closed"
+    mock_patch.assert_called_once()
+
+
+@patch("scripts.lib.github_client.requests.post")
+def test_add_issue_comment(mock_post):
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"id": 123, "body": "hello"}
+    mock_post.return_value = mock_response
+
+    client = GitHubClient(token="ghp_test", owner="owner", repo="repo")
+    result = client.add_issue_comment(5, "hello")
+
+    assert result["body"] == "hello"
+    mock_post.assert_called_once()
+
+
+@patch("scripts.lib.github_client.requests.post")
+def test_add_pull_request_comment(mock_post):
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"id": 456, "body": "review"}
+    mock_post.return_value = mock_response
+
+    client = GitHubClient(token="ghp_test", owner="owner", repo="repo")
+    result = client.add_pull_request_comment(42, "review")
+
+    assert result["body"] == "review"
+    mock_post.assert_called_once()

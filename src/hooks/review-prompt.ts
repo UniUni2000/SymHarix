@@ -45,7 +45,8 @@ export interface ReviewReport {
 export function buildReviewPrompt(
   issue: Issue,
   devLog?: string,
-  previousReviews?: ReviewReport[]
+  previousReviews?: ReviewReport[],
+  githubContext?: string
 ): string {
   const historySection = previousReviews && previousReviews.length > 0
     ? previousReviews.map(r =>
@@ -60,12 +61,27 @@ export function buildReviewPrompt(
 - **Description**: ${issue.description || '(no description)'}
 - **Labels**: ${issue.labels.join(', ') || '(none)'}
 
+${githubContext || ''}
+
 ## Your Responsibilities
-1. **First: Read HANDOVER.md** — This is DEV's summary of what was done
-2. Review the PR/Diff: examine changed files carefully
-3. Run tests if available: \`npm test\` or \`bun test\`
+1. **First: Read \`.symphony/HANDOVER.md\`** — This is DEV's summary of what was done
+2. Inspect the local worktree diff directly with git and file reads; do not rely only on prior reports
+3. Run the narrowest relevant tests for the changed code; for Python code prefer the affected \`pytest\` target
 4. Assess code quality: logic, naming, performance, security
 5. **Give feedback in "现状+期望" format** — Do NOT give solutions
+6. Put the final decision in \`.symphony/REVIEW_REPORT.md\` so the orchestrator and review executor can act on it
+7. For straightforward small diffs, prefer completing the review in a single focused pass and writing the report in the same turn
+8. Treat the review as incomplete until \`.symphony/REVIEW_REPORT.md\` exists with the final decision line
+
+## Required Decision Line
+Include one exact machine-readable line near the top of \`.symphony/REVIEW_REPORT.md\`:
+- \`## Review Decision: APPROVE\`
+- \`## Review Decision: APPROVE_MINOR\`
+- \`## Review Decision: REQUEST_CHANGES\`
+- \`## Review Decision: REQUEST_TESTS\`
+- \`## Review Decision: REJECT\`
+
+Do not rely on only prose headings like “最终决定”; include the exact line above as well.
 
 ## Feedback Format (MUST follow)
 For each issue found:
@@ -83,17 +99,19 @@ For each issue found:
 | REQUEST_TESTS | Must add tests before approval |
 | REJECT | Completely wrong approach |
 
-## Development Context (from DEVELOPMENT_LOG.md)
+## Development Context (from \`.symphony/DEVELOPMENT_LOG.md\`)
 ${devLog || '(no development log found)'}
 
 ## Previous Review Rounds
 ${historySection}
 
 ## After Your Review
-1. Write the report to REVIEW_REPORT.md in the workspace (do NOT commit it)
-2. Post feedback as a comment on the GitHub Issue
-3. Sync feedback to Linear issue
-4. The orchestrator will update Linear state based on your decision
+1. Overwrite \`.symphony/REVIEW_REPORT.md\` from scratch in the workspace (do NOT append to stale content and do NOT commit it)
+2. The orchestrator will sync the final summary back to GitHub / Linear
+3. The review executor will merge only if your final decision is APPROVE or APPROVE_MINOR
+4. Do not commit files under \`.symphony/\`
+5. If you need notes while reviewing, keep them transient and still end the same turn with the final \`.symphony/REVIEW_REPORT.md\`
+6. Do not stop the turn until the final \`.symphony/REVIEW_REPORT.md\` has been written
 `;
 }
 
@@ -101,17 +119,27 @@ ${historySection}
  * Parse review decision from report content
  */
 export function parseReviewDecision(reportContent: string): ReviewDecision {
-  const lines = reportContent.split('\n');
-  for (const line of lines) {
-    // Support both English "## Review Decision" and Chinese "## 评审结果:"
-    if (line.startsWith('## 评审结果:') || line.startsWith('## Review Decision')) {
-      const decision = line.split(':')[1].trim().toUpperCase().replace(' ', '_');
-      if (decision === 'APPROVE') return 'APPROVE';
-      if (decision === 'APPROVE_MINOR') return 'APPROVE_MINOR';
-      if (decision === 'REQUEST_CHANGES') return 'REQUEST_CHANGES';
-      if (decision === 'REQUEST_TESTS') return 'REQUEST_TESTS';
-      if (decision === 'REJECT') return 'REJECT';
+  const patterns = [
+    /^##\s*评审结果[:：]\s*([A-Z_]+)\s*$/m,
+    /^##\s*Review Decision[:：]\s*([A-Z_]+)\s*$/m,
+    /^\s*[-*]?\s*\*\*Decision\*\*[:：]\s*([A-Z_]+)\s*$/m,
+    /^\s*[-*]?\s*\*\*决策\*\*[:：]\s*([A-Z_]+)\s*$/m,
+    /^##\s*最终决定\s*$[\r\n]+\s*(?:\*\*)?([A-Z_]+)(?:\*\*)?/m,
+    /^##\s*Final Decision\s*$[\r\n]+\s*(?:\*\*)?([A-Z_]+)(?:\*\*)?/m,
+  ];
+
+  for (const pattern of patterns) {
+    const match = reportContent.match(pattern);
+    if (!match?.[1]) {
+      continue;
     }
+
+    const decision = match[1].trim().toUpperCase().replace(/ /g, '_');
+    if (decision === 'APPROVE') return 'APPROVE';
+    if (decision === 'APPROVE_MINOR') return 'APPROVE_MINOR';
+    if (decision === 'REQUEST_CHANGES') return 'REQUEST_CHANGES';
+    if (decision === 'REQUEST_TESTS') return 'REQUEST_TESTS';
+    if (decision === 'REJECT') return 'REJECT';
   }
   return 'APPROVE'; // default to approve if can't parse
 }

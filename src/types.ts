@@ -179,10 +179,21 @@ export interface RetryEntry {
 // Orchestrator Runtime State (Section 4.1.8)
 // ============================================================================
 
+export type RunningStage =
+  | 'dispatching'
+  | 'coding'
+  | 'post_process_dev'
+  | 'post_process_review'
+  | 'completed'
+  | 'failed'
+  | 'retry_scheduled'
+  | 'halted';
+
 export interface RunningEntry {
   worker_handle: unknown;  // Worker process reference
   identifier: string;
   issue: Issue;
+  stage: RunningStage;
   session_id: string | null;
   codex_app_server_pid: string | null;
   last_codex_message: string | null;
@@ -197,6 +208,8 @@ export interface RunningEntry {
   retry_attempt: number;
   started_at: Date;
   turn_count: number;
+  workspace_path?: string | null;
+  branch_name?: string | null;
   codex_child_process?: unknown;
 }
 
@@ -235,6 +248,7 @@ export type OrchestrationState =
 
 export type AgentEventType =
   | 'session_started'
+  | 'timeline'
   | 'startup_failed'
   | 'turn_completed'
   | 'turn_failed'
@@ -247,6 +261,66 @@ export type AgentEventType =
   | 'other_message'
   | 'malformed';
 
+export type AgentTimelineLevel = 'info' | 'warn' | 'error' | 'debug';
+export type AgentTimelineCategory = 'session' | 'turn' | 'tool' | 'todo' | 'rate_limit' | 'diagnostic';
+export type AgentTimelineCode =
+  | 'session_started'
+  | 'turn_started'
+  | 'assistant_thinking'
+  | 'tool_started'
+  | 'tool_completed'
+  | 'tool_failed'
+  | 'todo_updated'
+  | 'rate_limit_retry'
+  | 'turn_completed'
+  | 'turn_failed'
+  | 'turn_cancelled';
+
+export interface AgentTimelinePayload {
+  level: AgentTimelineLevel;
+  category: AgentTimelineCategory;
+  code: AgentTimelineCode;
+  message: string;
+  turn: number | null;
+  tool_name: string | null;
+  detail: Record<string, unknown> | null;
+}
+
+export type TurnTranscriptRole = 'assistant' | 'user';
+export type TurnTranscriptKind = 'message' | 'tool_result';
+
+export interface TurnTranscriptEntry {
+  role: TurnTranscriptRole;
+  kind: TurnTranscriptKind;
+  text: string;
+  turn: number | null;
+  tool_name: string | null;
+}
+
+export interface SupervisorNextAction {
+  kind: 'continue' | 'finish' | 'abort';
+  message?: string;
+  reason?: string;
+}
+
+export interface PendingRuntimeRequest {
+  kind: 'approval' | 'user_input';
+  method: 'approval/request' | 'item/tool/requestUserInput';
+  request_id: string;
+  turn: number | null;
+  raw: Record<string, unknown>;
+  summary: {
+    title: string;
+    message: string;
+    tool_name: string | null;
+    subtype: string | null;
+  };
+}
+
+export interface RuntimeRequestResponse {
+  response: Record<string, unknown>;
+}
+
 export interface AgentEvent {
   event: AgentEventType;
   timestamp: Date;
@@ -256,7 +330,7 @@ export interface AgentEvent {
     output_tokens?: number;
     total_tokens?: number;
   };
-  payload?: Record<string, unknown>;
+  payload?: Record<string, unknown> | AgentTimelinePayload;
 }
 
 // ============================================================================

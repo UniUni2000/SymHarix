@@ -112,6 +112,9 @@ export function transaction<T>(db: Database, fn: () => T): T {
 export { initializeSchema, dropAllTables } from './schema';
 
 // Re-export repository classes
-export { TaskRepository } from './repositories/taskRepository';
-export { EventRepository } from './repositories/eventRepository';
-export { ReviewRepository } from './repositories/reviewRepository';
+export { WorkItemRepository } from './repositories/workItemRepository';
+export { RepoCacheRepository } from './repositories/repoCacheRepository';
+export { AgentRunRepository } from './repositories/agentRunRepository';
+export { ReviewEventRepository } from './repositories/reviewEventRepository';
+export { SyncEventRepository } from './repositories/syncEventRepository';
+export { ServiceLeaseRepository } from './repositories/serviceLeaseRepository';

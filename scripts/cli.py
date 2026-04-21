@@ -14,6 +14,47 @@ from lib.config import load_config
 from lib.state_machine import State
 from lib.state_store import StateStore
 
+RESULT_PREFIX = "SYMPHONY_RESULT:"
+WORKFLOW_ARTIFACT_FILES = (
+    "DEVELOPMENT_LOG.md",
+    "HANDOVER.md",
+    "REVIEW_REPORT.md",
+    "context.json",
+    "events.log",
+)
+
+
+def emit_result(
+    *,
+    ok: bool = True,
+    final_state: str = "unknown",
+    review_decision: str | None = None,
+    feedback: str | None = None,
+    retry_hint: str | None = None,
+    linear_api_calls: int = 0,
+    github_api_calls: int = 0,
+):
+    payload = {
+        "ok": ok,
+        "final_state": final_state,
+        "review_decision": review_decision,
+        "feedback": feedback,
+        "retry_hint": retry_hint,
+        "linear_api_calls": linear_api_calls,
+        "github_api_calls": github_api_calls,
+    }
+    click.echo(f"{RESULT_PREFIX}{json.dumps(payload)}")
+
+
+def reset_workspace_artifacts(_workspace_path: Path, symphony_path: Path) -> None:
+    """Remove stale .symphony workflow artifacts when initializing a fresh issue workspace."""
+    symphony_path.mkdir(parents=True, exist_ok=True)
+
+    for filename in WORKFLOW_ARTIFACT_FILES:
+        artifact_path = symphony_path / filename
+        if artifact_path.exists():
+            artifact_path.unlink()
+
 
 @click.group()
 @click.pass_context
@@ -57,17 +98,17 @@ def dispatch(ctx, issue_id, workspace_path_opt):
 
     # Create GitHub repo full name (owner/project)
     github_repo_full = f"{config.github_owner}/{project_name}"
+    github = GitHubClient(
+        token=config.github_token,
+        owner=config.github_owner,
+        repo=project_name,
+        default_branch=config.github_default_branch,
+    )
+    mapped_issue = github.find_issue_by_identifier(issue["identifier"])
+    github_issue_number = mapped_issue.get("number") if mapped_issue else None
 
     # Create branch name (use feature/ prefix like the original system)
     branch = f"feature/{issue['identifier'].lower()}"
-
-    # Update Linear state to In Progress
-    in_progress_state_id = linear.fetch_state_id("In Progress")
-    if in_progress_state_id:
-        linear.update_issue_state(issue["id"], in_progress_state_id)
-        click.echo(f"Updated Linear state to In Progress")
-    else:
-        click.echo(f"Warning: Could not find In Progress state ID", err=True)
 
     # Use workspace_path if provided, otherwise compute it
     # The orchestrator creates git worktree at workspace_root/project_name/issue_id
@@ -85,14 +126,18 @@ def dispatch(ctx, issue_id, workspace_path_opt):
     # So we create a custom symphony_path
     symphony_path = workspace_path / ".symphony"
 
-    # Initialize state if not already initialized
-    # For state inside worktree, we need to create the symphony dir manually
-    if symphony_path.exists():
+    state_file = symphony_path / "state.json"
+
+    # Initialize state if not already initialized.
+    # The worktree manager may pre-create .symphony/ for workflow artifacts, so
+    # the presence of the directory alone does not mean state exists yet.
+    if state_file.exists():
         click.echo(f"State already exists for {issue_id}, skipping initialization")
     else:
         try:
             # Create the symphony directory inside workspace
             symphony_path.mkdir(parents=True, exist_ok=True)
+            reset_workspace_artifacts(workspace_path, symphony_path)
 
             # Write state.json directly
             import json
@@ -106,12 +151,13 @@ def dispatch(ctx, issue_id, workspace_path_opt):
                     "linear_issue_id": issue["id"],
                     "linear_state": "In Progress",
                     "github_repo": github_repo_full,
+                    "github_issue_number": github_issue_number,
                     "branch": branch,
                 },
                 "error": None,
                 "retry_count": 0
             }
-            with open(symphony_path / "state.json", "w") as f:
+            with open(state_file, "w") as f:
                 json.dump(state_data, f, indent=2)
         except Exception as e:
             click.echo(f"Error: {e}", err=True)
@@ -119,6 +165,7 @@ def dispatch(ctx, issue_id, workspace_path_opt):
 
     click.echo(f"Issue {issue_id} dispatched")
     click.echo(f"GitHub repo: {github_repo_full}, branch: {branch}")
+    emit_result(final_state="In Progress")
 
 
 @cli.command("dev")
@@ -149,6 +196,7 @@ def dev(ctx, issue_id, workspace_path_opt):
         with open(state_file) as f:
             state = json.load(f)
         workspace_root = workspace_path
+        store = StateStore(workspace_root, issue_id)
     else:
         workspace_root = config.workspace_root
         store = StateStore(workspace_root, issue_id)
@@ -159,6 +207,7 @@ def dev(ctx, issue_id, workspace_path_opt):
     if not state:
         click.echo(f"No state found for {issue_id}", err=True)
         sys.exit(1)
+    store = StateStore(workspace_root, issue_id)
 
     # Get github repo from state metadata (set during dispatch from Linear project)
     # github_repo in state is stored as "owner/repo" format
@@ -192,11 +241,17 @@ def dev(ctx, issue_id, workspace_path_opt):
     success = hook.run()
     if success:
         click.echo(f"Dev phase completed for {issue_id}")
-        click.echo(f"SYMPHONY_STATS:{json.dumps({
-            'linear_api_calls': 0,
-            'github_api_calls': 0,
-            'final_state': 'In Review'
-        })}")
+        final_state = store.get_current_state_enum()
+        state_name = final_state.value if final_state else "IN_REVIEW"
+        final_state_label = {
+            "IN_PROGRESS": "In Progress",
+            "IN_REVIEW": "In Review",
+            "DONE": "Done",
+            "CANCELLED": "Cancelled",
+            "TODO": "Todo",
+            "ERROR": "Error",
+        }.get(state_name, state_name)
+        emit_result(final_state=final_state_label)
     else:
         click.echo(f"Dev phase failed for {issue_id}", err=True)
         sys.exit(1)
@@ -238,6 +293,8 @@ def review(ctx, issue_id, workspace_path_opt):
             click.echo(f"No state found for {issue_id}", err=True)
             sys.exit(1)
 
+    store = StateStore(workspace_root, issue_id)
+
     # Get github repo from state metadata (set during dispatch from Linear project)
     metadata = state.get("metadata", {})
     github_repo_full = metadata.get("github_repo", f"{config.github_owner}/{config.github_repo}")
@@ -264,17 +321,34 @@ def review(ctx, issue_id, workspace_path_opt):
 
     success = hook.run()
     if success:
-        # Check if done - auto-clean
-        final_state = store.get_current_state_enum()
-        if final_state == State.DONE:
-            click.echo("Issue completed - cleaning workspace...")
-            hook.cleanup()
         click.echo(f"Review phase completed for {issue_id}")
-        click.echo(f"SYMPHONY_STATS:{json.dumps({
-            'linear_api_calls': 0,
-            'github_api_calls': 0,
-            'final_state': final_state.value if final_state else 'unknown'
-        })}")
+        final_state = store.get_current_state_enum()
+        review_decision = None
+        retry_hint = None
+        if hook.last_pr_status == "changes_requested":
+            review_decision = "REQUEST_CHANGES"
+            retry_hint = "retry_dev"
+        elif hook.last_pr_status == "merge_blocked":
+            review_decision = "MERGE_BLOCKED"
+            retry_hint = "retry_dev"
+        elif hook.last_pr_status in ("approved", "merged"):
+            review_decision = "APPROVED"
+
+        state_name = final_state.value if final_state else "unknown"
+        final_state_label = {
+            "IN_PROGRESS": "In Progress",
+            "IN_REVIEW": "In Review",
+            "DONE": "Done",
+            "CANCELLED": "Cancelled",
+            "TODO": "Todo",
+            "ERROR": "Error",
+        }.get(state_name, state_name)
+
+        emit_result(
+            final_state=final_state_label,
+            review_decision=review_decision,
+            retry_hint=retry_hint,
+        )
     else:
         click.echo(f"Review phase failed for {issue_id}", err=True)
         sys.exit(1)
@@ -304,6 +378,7 @@ def status(ctx, issue_id, as_json):
     if not state:
         click.echo(f"No state found for {issue_id}", err=True)
         sys.exit(1)
+    store = StateStore(workspace_root, issue_id)
 
     if as_json:
         click.echo(json.dumps(state, indent=2))
