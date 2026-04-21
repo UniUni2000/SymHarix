@@ -44,10 +44,15 @@ class DevHook:
                 api_key=config.linear_api_key,
                 endpoint=config.linear_endpoint,
             )
+            # Parse github_repo from state (format: "owner/repo")
+            if github_repo and "/" in github_repo:
+                gh_owner, gh_repo = github_repo.split("/", 1)
+            else:
+                gh_owner, gh_repo = config.github_owner, (github_repo or config.github_repo)
             self.github = github_client or GitHubClient(
                 token=config.github_token,
-                owner=config.github_owner,
-                repo=config.github_repo,
+                owner=gh_owner,
+                repo=gh_repo,
                 default_branch=config.github_default_branch,
             )
         else:
@@ -86,9 +91,9 @@ class DevHook:
 
     def run(self) -> bool:
         """
-        Run the DEV phase:
+        Run the DEV phase (hybrid mode - orchestrator handles agent):
         1. Wait for Linear state to confirm IN_PROGRESS
-        2. Run Claude Code agent
+        2. (orchestrator already ran Claude Code agent)
         3. Create/update PR
         4. Update Linear to In Review
         5. Wait for Linear to confirm In Review
@@ -99,16 +104,14 @@ class DevHook:
         print(f"[DEV] Linear state: {linear_current}")
 
         current = self.store.get_current_state_enum()
-        if current != State.IN_PROGRESS:
-            print(f"[DEV] Issue not in IN_PROGRESS state, current: {current}")
+        # Allow both TODO (standalone mode) and IN_PROGRESS (orchestrator hybrid mode)
+        if current not in (State.IN_PROGRESS, State.TODO):
+            print(f"[DEV] Issue not in valid state for dev, current: {current}")
             return False
 
-        # Step 2: Run Claude Code agent
-        print(f"[DEV] Running Claude Code agent...")
-        success = self._run_agent()
-        if not success:
-            self.store.set_error("Claude Code agent failed")
-            return False
+        # Step 2: In hybrid mode, orchestrator runs the agent.
+        # If already IN_PROGRESS, agent was already run by orchestrator
+        # If TODO, we're in standalone mode and should run agent (skip in hybrid)
 
         # Step 3: Create PR if not exists
         pr_info = self._ensure_pr_exists()
@@ -175,8 +178,10 @@ Implement the required changes. When complete:
 """
 
         # Run Claude Code adapter
-        # Note: This is a placeholder - actual implementation depends on claude-adapter.cjs
-        cmd = ["node", "./scripts/claude-adapter.cjs", "--prompt", prompt]
+        # Use absolute path since adapter is in project root, not workspace
+        import os
+        project_root = os.environ.get("SYMPHONY_PROJECT_ROOT", str(Path(__file__).parent.parent.parent))
+        cmd = ["node", f"{project_root}/scripts/claude-adapter.cjs", "--prompt", prompt]
         try:
             result = subprocess.run(
                 cmd,

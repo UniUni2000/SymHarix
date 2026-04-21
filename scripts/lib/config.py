@@ -14,7 +14,9 @@ class Config:
     linear_api_key: str
     github_token: str
     github_owner: str
-    github_repo: str
+
+    # Optional fields (can be auto-detected from Linear issue)
+    github_repo: Optional[str] = None
 
     # Optional fields (with defaults)
     linear_endpoint: str = "https://api.linear.app/graphql"
@@ -46,10 +48,9 @@ def load_config() -> Config:
     if not github_owner:
         raise ValueError("GITHUB_OWNER or SYMPHONY_GITHUB_OWNER is required")
 
-    # GitHub repo
+    # GitHub repo (optional - can be auto-detected from Linear issue's project)
     github_repo = os.environ.get("GITHUB_REPO") or os.environ.get("SYMPHONY_GITHUB_REPO")
-    if not github_repo:
-        raise ValueError("GITHUB_REPO or SYMPHONY_GITHUB_REPO is required")
+    # Don't require github_repo - it can be obtained from Linear issue's project name
 
     # Workspace root
     workspace_root = os.environ.get("WORKSPACE_ROOT") or os.environ.get(
