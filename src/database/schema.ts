@@ -110,6 +110,58 @@ export const SYNC_EVENTS_TABLE_SCHEMA = `
 `;
 
 /**
+ * SQL schema for bot_watch_subscriptions table
+ * Persists chat watch preferences so bot subscriptions survive restarts
+ */
+export const BOT_WATCH_SUBSCRIPTIONS_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS bot_watch_subscriptions (
+    transport TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    issue_id TEXT NOT NULL,
+    issue_identifier TEXT,
+    user_id TEXT,
+    preset TEXT NOT NULL DEFAULT 'default',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (transport, conversation_id, issue_id)
+  );
+`;
+
+/**
+ * SQL schema for bot_conversation_preferences table
+ * Persists chat-scoped defaults such as the default Linear project slug
+ */
+export const BOT_CONVERSATION_PREFERENCES_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS bot_conversation_preferences (
+    transport TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    default_project_slug TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (transport, conversation_id)
+  );
+`;
+
+/**
+ * SQL schema for bot_pending_actions table
+ * Persists confirmation-gated bot actions so they survive restarts
+ */
+export const BOT_PENDING_ACTIONS_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS bot_pending_actions (
+    transport TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    user_id TEXT,
+    intent_kind TEXT NOT NULL,
+    normalized_payload_json TEXT NOT NULL,
+    summary_message TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (transport, conversation_id)
+  );
+`;
+
+/**
  * SQL schema for service_leases table
  * Stores short-lived singleton leadership leases for control-plane services
  */
@@ -139,6 +191,11 @@ export const CONTROL_PLANE_INDEXES_SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_review_events_round ON review_events(work_item_id, review_round DESC);
   CREATE INDEX IF NOT EXISTS idx_sync_events_work_item_id ON sync_events(work_item_id);
   CREATE INDEX IF NOT EXISTS idx_sync_events_target_result ON sync_events(target_system, result);
+  CREATE INDEX IF NOT EXISTS idx_bot_watch_subscriptions_issue_id ON bot_watch_subscriptions(issue_id);
+  CREATE INDEX IF NOT EXISTS idx_bot_watch_subscriptions_transport_conversation ON bot_watch_subscriptions(transport, conversation_id);
+  CREATE INDEX IF NOT EXISTS idx_bot_conversation_preferences_transport_conversation ON bot_conversation_preferences(transport, conversation_id);
+  CREATE INDEX IF NOT EXISTS idx_bot_pending_actions_expires_at ON bot_pending_actions(expires_at);
+  CREATE INDEX IF NOT EXISTS idx_bot_pending_actions_transport_conversation ON bot_pending_actions(transport, conversation_id);
   CREATE INDEX IF NOT EXISTS idx_service_leases_expires_at ON service_leases(expires_at);
 `;
 
@@ -152,6 +209,9 @@ export function initializeSchema(db: Database): void {
   db.exec(AGENT_RUNS_TABLE_SCHEMA);
   db.exec(REVIEW_EVENTS_TABLE_SCHEMA);
   db.exec(SYNC_EVENTS_TABLE_SCHEMA);
+  db.exec(BOT_WATCH_SUBSCRIPTIONS_TABLE_SCHEMA);
+  db.exec(BOT_CONVERSATION_PREFERENCES_TABLE_SCHEMA);
+  db.exec(BOT_PENDING_ACTIONS_TABLE_SCHEMA);
   db.exec(SERVICE_LEASES_TABLE_SCHEMA);
   db.exec(CONTROL_PLANE_INDEXES_SCHEMA);
 }
@@ -161,6 +221,9 @@ export function initializeSchema(db: Database): void {
  */
 export function dropAllTables(db: Database): void {
   db.exec('DROP TABLE IF EXISTS service_leases;');
+  db.exec('DROP TABLE IF EXISTS bot_pending_actions;');
+  db.exec('DROP TABLE IF EXISTS bot_conversation_preferences;');
+  db.exec('DROP TABLE IF EXISTS bot_watch_subscriptions;');
   db.exec('DROP TABLE IF EXISTS sync_events;');
   db.exec('DROP TABLE IF EXISTS review_events;');
   db.exec('DROP TABLE IF EXISTS agent_runs;');

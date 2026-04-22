@@ -6,6 +6,7 @@
 import { ServiceConfig, WorkflowDefinition } from '../types';
 import * as os from 'os';
 import * as path from 'path';
+import { parseRepositoryRouteConfigMap } from '../routing/repositoryRouting';
 
 /**
  * Default configuration values
@@ -36,6 +37,15 @@ const DEFAULTS: Partial<ServiceConfig> = {
   maxConcurrentAgents: 10,
   maxRetryBackoffMs: 300000,  // 5 minutes
   maxTurns: 20,
+
+  // Internal live verification
+  verification: {
+    lifecycle: {
+      timeoutMs: 1_800_000,
+      pollIntervalMs: 5_000,
+      projects: {},
+    },
+  },
 
   // Codex
   codexCommand: 'codex app-server',
@@ -138,6 +148,49 @@ function parseStringArray(value: unknown, defaultValue: string[]): string[] {
   return defaultValue;
 }
 
+function requireLifecycleScenarioString(
+  projectSlug: string,
+  fieldName: keyof ServiceConfig['verification']['lifecycle']['projects'][string],
+  value: unknown,
+): string {
+  if (typeof value === 'string' && value.trim()) {
+    return value.trim();
+  }
+
+  throw new Error(
+    `Invalid verification.lifecycle.projects entry for "${projectSlug}": ${fieldName} is required.`,
+  );
+}
+
+function parseVerificationLifecycleConfig(
+  config: WorkflowDefinition['config'],
+): ServiceConfig['verification']['lifecycle'] {
+  const verification = (config.verification as Record<string, unknown>) || {};
+  const lifecycle = (verification.lifecycle as Record<string, unknown>) || {};
+  const projects = (lifecycle.projects as Record<string, unknown>) || {};
+  const parsedProjects: Record<string, ServiceConfig['verification']['lifecycle']['projects'][string]> = {};
+
+  for (const [projectSlug, rawScenario] of Object.entries(projects)) {
+    if (!rawScenario || typeof rawScenario !== 'object' || Array.isArray(rawScenario)) {
+      throw new Error(
+        `Invalid verification.lifecycle.projects entry for "${projectSlug}": scenario must be an object.`,
+      );
+    }
+
+    const scenario = rawScenario as Record<string, unknown>;
+    parsedProjects[projectSlug] = {
+      title: requireLifecycleScenarioString(projectSlug, 'title', scenario.title),
+      description: requireLifecycleScenarioString(projectSlug, 'description', scenario.description),
+    };
+  }
+
+  return {
+    timeoutMs: parseNumber(lifecycle.timeout_ms, DEFAULTS.verification!.lifecycle.timeoutMs),
+    pollIntervalMs: parseNumber(lifecycle.poll_interval_ms, DEFAULTS.verification!.lifecycle.pollIntervalMs),
+    projects: parsedProjects,
+  };
+}
+
 /**
  * Parse max_concurrent_agents_by_state map
  * Section 5.3.5: Map of state_name -> positive integer
@@ -187,6 +240,7 @@ function resolveApiKey(apiKey: string | undefined): string {
  */
 export function buildServiceConfig(workflow: WorkflowDefinition): ServiceConfig {
   const { config } = workflow;
+  const projectRoot = process.cwd();
 
   // Tracker config
   const tracker = (config.tracker as Record<string, unknown>) || {};
@@ -264,7 +318,10 @@ export function buildServiceConfig(workflow: WorkflowDefinition): ServiceConfig 
     terminalStates: parseStringArray(tracker.terminal_states, DEFAULTS.terminalStates!),
     pollIntervalMs,
     workspaceRoot,
-    projectRoot: process.cwd(),
+    projectRoot,
+    repositories: {
+      routing: parseRepositoryRouteConfigMap(workflow, projectRoot),
+    },
     hooks,
     maxConcurrentAgents,
     maxRetryBackoffMs,
@@ -282,6 +339,9 @@ export function buildServiceConfig(workflow: WorkflowDefinition): ServiceConfig 
     },
     reviewPolicy: {
       notifyLinearOnReview
+    },
+    verification: {
+      lifecycle: parseVerificationLifecycleConfig(config),
     },
     serverPort: serverPort !== null && serverPort > 0 ? serverPort : null
   };
@@ -304,11 +364,6 @@ export function validateConfigForDispatch(cfg: ServiceConfig): { valid: boolean;
   // tracker.api_key is required after $ resolution
   if (!cfg.trackerApiKey) {
     errors.push('Missing required "tracker.api_key" (or environment variable not set)');
-  }
-
-  // githubOwner is required for GitHub integration
-  if (!cfg.githubOwner) {
-    errors.push('Missing required "GITHUB_OWNER" environment variable');
   }
 
   // codex.command is required

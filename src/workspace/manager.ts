@@ -8,7 +8,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as cp from 'child_process';
-import { Workspace, Issue } from '../types';
+import { Workspace, Issue, ResolvedRepositoryRoute } from '../types';
 import { RepoCacheManager } from './repoCacheManager';
 import { IssueWorktreeManager } from './issueWorktreeManager';
 import { getIssueWorktreePath, sanitizeWorkspaceKey } from './shared';
@@ -24,7 +24,6 @@ export { sanitizeWorkspaceKey } from './shared';
 export interface WorkspaceManagerOptions {
   workspaceRoot: string;
   projectRoot: string;
-  githubOwner: string;
   githubToken: string;
   hooks: {
     after_create: string | null;
@@ -53,7 +52,6 @@ export interface WorkspaceResult {
 export class WorkspaceManager {
   private workspaceRoot: string;
   private projectRoot: string;
-  private githubOwner: string;
   private hooks: WorkspaceManagerOptions['hooks'];
   private repoCacheManager: RepoCacheManager;
   private issueWorktreeManager: IssueWorktreeManager;
@@ -61,12 +59,9 @@ export class WorkspaceManager {
   constructor(options: WorkspaceManagerOptions) {
     this.workspaceRoot = options.workspaceRoot;
     this.projectRoot = options.projectRoot;
-    this.githubOwner = options.githubOwner;
     this.hooks = options.hooks;
     this.repoCacheManager = new RepoCacheManager({
       workspaceRoot: options.workspaceRoot,
-      projectRoot: options.projectRoot,
-      githubOwner: options.githubOwner,
       githubToken: options.githubToken,
     });
     this.issueWorktreeManager = new IssueWorktreeManager({
@@ -185,15 +180,21 @@ export class WorkspaceManager {
    * Prepare workspace for an issue.
    * Kept for compatibility with older call sites.
    */
-  async prepareWorkspace(issue: Pick<Issue, 'identifier' | 'project_slug' | 'project_name'>): Promise<WorkspaceResult> {
-    return this.createForIssue(issue);
+  async prepareWorkspace(
+    issue: Pick<Issue, 'identifier' | 'project_slug' | 'project_name'>,
+    route: ResolvedRepositoryRoute,
+  ): Promise<WorkspaceResult> {
+    return this.createForIssue(issue, route);
   }
 
   /**
    * Create or reuse a workspace for an issue using a shared repo source plus git worktree.
    */
-  async createForIssue(issue: Pick<Issue, 'identifier' | 'project_slug' | 'project_name'>): Promise<WorkspaceResult> {
-    const repoResult = await this.repoCacheManager.ensureRepoSource(issue.project_slug, issue.project_name);
+  async createForIssue(
+    issue: Pick<Issue, 'identifier' | 'project_slug' | 'project_name'>,
+    route: ResolvedRepositoryRoute,
+  ): Promise<WorkspaceResult> {
+    const repoResult = await this.repoCacheManager.ensureRepoSource(route);
     if (!repoResult.success || !repoResult.sourcePath) {
       return { success: false, error: repoResult.error };
     }
@@ -201,8 +202,7 @@ export class WorkspaceManager {
     const worktreeResult = await this.issueWorktreeManager.createOrReuse(
       repoResult.sourcePath,
       issue.identifier,
-      issue.project_slug,
-      issue.project_name
+      route.cache_key,
     );
 
     if (!worktreeResult.success || !worktreeResult.workspace) {
@@ -210,17 +210,14 @@ export class WorkspaceManager {
     }
 
     if (worktreeResult.workspace.created_now && this.hooks.after_create) {
-      const repoName = issue.project_name
-        ? sanitizeWorkspaceKey(issue.project_name)
-        : (issue.project_slug ? sanitizeWorkspaceKey(issue.project_slug) : 'main');
-
       const hookResult = await this.executeHook(
         'after_create',
         this.hooks.after_create,
         worktreeResult.workspace.path,
         {
-          SYMPHONY_GITHUB_OWNER: this.githubOwner,
-          SYMPHONY_GITHUB_REPO: repoName,
+          SYMPHONY_GITHUB_OWNER: route.github_owner,
+          SYMPHONY_GITHUB_REPO: route.github_repo,
+          SYMPHONY_GITHUB_REPO_FULL: route.github_repo_full,
           SYMPHONY_ISSUE_IDENTIFIER: issue.identifier
         }
       );
@@ -267,21 +264,21 @@ export class WorkspaceManager {
   /**
    * Get workspace path for an issue identifier (without creating).
    */
-  getWorkspacePath(identifier: string, projectSlug?: string | null, projectName?: string | null): string {
-    return getIssueWorktreePath(this.workspaceRoot, identifier, projectSlug, projectName);
+  getWorkspacePath(identifier: string, route: Pick<ResolvedRepositoryRoute, 'cache_key'>): string {
+    return getIssueWorktreePath(this.workspaceRoot, identifier, route.cache_key);
   }
 
   /**
    * Get repo source path for an issue repo.
    */
-  getRepoSourcePath(projectSlug?: string | null, projectName?: string | null): string {
-    return this.repoCacheManager.getSourcePath(projectSlug, projectName);
+  getRepoSourcePath(route: Pick<ResolvedRepositoryRoute, 'cache_key'>): string {
+    return this.repoCacheManager.getSourcePath(route);
   }
 
   /**
    * Check if a workspace exists.
    */
-  async workspaceExists(identifier: string, projectSlug?: string | null, projectName?: string | null): Promise<boolean> {
-    return this.issueWorktreeManager.workspaceExists(identifier, projectSlug, projectName);
+  async workspaceExists(identifier: string, route: Pick<ResolvedRepositoryRoute, 'cache_key'>): Promise<boolean> {
+    return this.issueWorktreeManager.workspaceExists(identifier, route.cache_key);
   }
 }

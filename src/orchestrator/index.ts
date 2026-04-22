@@ -13,6 +13,8 @@ import {
   AgentTimelinePayload,
   Issue,
   PendingRuntimeRequest,
+  ResolvedRepositoryRoute,
+  RuntimeDiagnosticsSnapshot,
   ServiceConfig,
   SupervisorNextAction,
   TurnTranscriptEntry,
@@ -24,7 +26,13 @@ import {
   AgentEvent,
   CodexTotals
 } from '../types';
+import type {
+  RuntimeActionResult,
+  CreateIssueResult,
+  CreateIssueRequest,
+} from '../runtime/types';
 import { LinearClient } from '../tracker/linear-client';
+import { TrackerProjectResolutionService } from '../tracker/projectResolution';
 import { GitHubIssueClient } from '../github/issue-client';
 import { WorkspaceManager } from '../workspace/manager';
 import { sanitizeWorkspaceKey } from '../workspace/shared';
@@ -37,7 +45,8 @@ import {
   SyncEventRepository,
   WorkItemRepository
 } from '../database';
-import { buildReviewPrompt } from '../hooks/review-prompt';
+import type { ReviewDecision } from '../database/types';
+import { buildReviewPrompt, parseCanonicalReviewReport } from '../hooks/review-prompt';
 import { buildDevPrompt, judgeComplexity } from '../hooks/dev-prompt';
 import { updateHandoverNextSteps } from '../hooks/handover';
 import { GitHubMappingService } from '../github/mappingService';
@@ -49,11 +58,38 @@ import {
   AnthropicSupervisorService,
   type SupervisorService,
 } from '../agent/supervisor';
+import {
+  RepositoryRoutingError,
+  RepositoryRoutingService,
+} from '../routing/repositoryRouting';
 
-/**
- * GitHub Issue Client for E2E flow
- */
-let githubIssueClient: GitHubIssueClient | null = null;
+function splitGitHubRepoFull(
+  githubRepoFull: string,
+  fallbackOwner: string,
+): { owner: string; repo: string } {
+  const trimmed = githubRepoFull.trim();
+  const slashIndex = trimmed.indexOf('/');
+  if (slashIndex === -1) {
+    return {
+      owner: fallbackOwner,
+      repo: trimmed,
+    };
+  }
+
+  return {
+    owner: trimmed.slice(0, slashIndex),
+    repo: trimmed.slice(slashIndex + 1),
+  };
+}
+
+function createGitHubIssueClient(token: string, githubRepoFull: string, fallbackOwner: string): GitHubIssueClient {
+  const { owner, repo } = splitGitHubRepoFull(githubRepoFull, fallbackOwner);
+  return new GitHubIssueClient({
+    token,
+    owner,
+    repo,
+  });
+}
 
 /**
  * Orchestrator events
@@ -179,6 +215,7 @@ export interface OrchestratorDependencies {
   githubContextService?: GitHubContextService;
   githubSyncService?: GitHubSyncService;
   supervisor?: SupervisorService;
+  projectResolutionService?: TrackerProjectResolutionService;
 }
 
 export function parseCliCommandResult(output: string): CliCommandResult | null {
@@ -227,6 +264,8 @@ export class Orchestrator extends EventEmitter {
   private githubContextService: GitHubContextService;
   private githubSyncService: GitHubSyncService;
   private supervisor: SupervisorService;
+  private repositoryRoutingService: RepositoryRoutingService;
+  private projectResolutionService: TrackerProjectResolutionService;
 
   // Section 4.1.8: Orchestrator Runtime State
   private state: OrchestratorState;
@@ -240,6 +279,8 @@ export class Orchestrator extends EventEmitter {
   private readonly leaseHolderId = `${os.hostname()}:${process.pid}:${crypto.randomUUID()}`;
   private readonly leaseTtlMs: number;
   private hasLeadershipLease = false;
+  private manualStopIssueIds = new Set<string>();
+  private repositoryRouteFailureByIssueId = new Map<string, string>();
 
   constructor(
     config: ServiceConfig,
@@ -249,6 +290,7 @@ export class Orchestrator extends EventEmitter {
     super();
     this.config = config;
     this.workflow = workflow;
+    this.repositoryRoutingService = new RepositoryRoutingService(config.repositories.routing);
 
     // Initialize tracker client (projectSlugs empty = auto-detect from Linear)
     this.tracker = dependencies.tracker ?? new LinearClient({
@@ -260,7 +302,6 @@ export class Orchestrator extends EventEmitter {
     // Initialize workspace manager
     this.workspaceManager = dependencies.workspaceManager ?? new WorkspaceManager({
       workspaceRoot: config.workspaceRoot,
-      githubOwner: config.githubOwner,
       githubToken: config.githubToken,
       hooks: config.hooks,
       projectRoot: config.projectRoot
@@ -289,42 +330,36 @@ export class Orchestrator extends EventEmitter {
     this.githubMappingService = dependencies.githubMappingService ?? new GitHubMappingService({
       workItemRepository: this.workItemRepository,
       syncEventRepository: this.syncEventRepository,
-      githubClientFactory: (repo: string) => new GitHubIssueClient({
-        token: config.githubToken,
-        owner: config.githubOwner,
-        repo,
-      }),
+      githubClientFactory: (githubRepoFull: string) => createGitHubIssueClient(
+        config.githubToken,
+        githubRepoFull,
+        config.githubOwner,
+      ),
     });
     this.githubContextService = dependencies.githubContextService ?? new GitHubContextService({
       workItemRepository: this.workItemRepository,
       reviewEventRepository: this.reviewEventRepository,
       agentRunRepository: this.agentRunRepository,
-      githubClientFactory: (repo: string) => new GitHubIssueClient({
-        token: config.githubToken,
-        owner: config.githubOwner,
-        repo,
-      }),
+      githubClientFactory: (githubRepoFull: string) => createGitHubIssueClient(
+        config.githubToken,
+        githubRepoFull,
+        config.githubOwner,
+      ),
     });
     this.githubSyncService = dependencies.githubSyncService ?? new GitHubSyncService({
       workItemRepository: this.workItemRepository,
       syncEventRepository: this.syncEventRepository,
-      githubClientFactory: (repo: string) => new GitHubIssueClient({
-        token: config.githubToken,
-        owner: config.githubOwner,
-        repo,
-      }),
+      githubClientFactory: (githubRepoFull: string) => createGitHubIssueClient(
+        config.githubToken,
+        githubRepoFull,
+        config.githubOwner,
+      ),
     });
     this.supervisor = dependencies.supervisor ?? new AnthropicSupervisorService();
+    this.projectResolutionService =
+      dependencies.projectResolutionService ??
+      new TrackerProjectResolutionService(this.tracker, config.repositories.routing);
     this.leaseTtlMs = Math.max(this.config.pollIntervalMs * 3, 30_000);
-
-    // Initialize GitHub Issue client for E2E flow
-    if (config.githubOwner && config.githubToken) {
-      githubIssueClient = new GitHubIssueClient({
-        token: config.githubToken,
-        owner: config.githubOwner,
-        repo: '' // Will be set per-issue via project_slug
-      });
-    }
 
     // Initialize runtime state
     this.state = {
@@ -395,6 +430,24 @@ export class Orchestrator extends EventEmitter {
     };
   }
 
+  getDiagnosticsSnapshot(): RuntimeDiagnosticsSnapshot {
+    let activeSessionCount = 0;
+    for (const entry of this.state.running.values()) {
+      if (entry.session_id) {
+        activeSessionCount += 1;
+      }
+    }
+
+    return {
+      running_issue_count: this.state.running.size,
+      retry_count: this.state.retry_attempts.size,
+      worker_process_count: this.workerRegistry.size,
+      active_session_count: activeSessionCount,
+      claimed_issue_count: this.state.claimed.size,
+      leadership_lease_held: this.hasLeadershipLease,
+    };
+  }
+
   /**
    * Start the orchestrator
    * Section 16.1: Service Startup
@@ -462,10 +515,245 @@ export class Orchestrator extends EventEmitter {
     await Promise.allSettled(runningEntries.map((entry) => this.stopRunningWorker(entry)));
     this.state.running.clear();
     this.state.claimed.clear();
+    this.manualStopIssueIds.clear();
     this.emit('state:changed', this.getStateSnapshot());
     await this.releaseLeadershipLease();
 
     console.log('[orchestrator] Stopped');
+  }
+
+  async createIssue(input: CreateIssueRequest): Promise<CreateIssueResult> {
+    let resolvedProjectId = input.project_id ?? null;
+    if (input.project_slug?.trim()) {
+      const resolved = await this.projectResolutionService.resolveProjectSlug(input.project_slug.trim());
+      if (!resolved.project) {
+        return {
+          accepted: false,
+          status: 'rejected',
+          message: resolved.error || `Project slug "${input.project_slug.trim()}" could not be resolved`,
+          issue_id: null,
+          issue_identifier: null,
+          issue: null,
+        };
+      }
+      resolvedProjectId = resolved.project.project_id;
+    }
+
+    const created = await this.tracker.createIssue({
+      title: input.title,
+      description: input.description ?? null,
+      teamId: input.team_id ?? null,
+      projectId: resolvedProjectId,
+      stateId: input.state_id ?? null,
+    });
+
+    if (!created.success || !created.issue) {
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: created.error || 'Linear issue creation failed',
+        issue_id: null,
+        issue_identifier: null,
+        issue: null,
+      };
+    }
+
+    const issue = created.issue;
+    const route = this.tryResolveRepositoryRoute(issue);
+    if (route) {
+      this.githubMappingService.ensureWorkItem(issue, route.github_repo_full, 'discovering');
+    }
+
+    let message = `Created ${issue.identifier}`;
+    if (this.running) {
+      if (route && this.hasAvailableSlots() && this.shouldDispatch(issue)) {
+        await this.dispatchIssue(issue, null);
+        message = `Created ${issue.identifier} and dispatched it`;
+      } else if (!route) {
+        message = `Created ${issue.identifier}, but dispatch is blocked: repository route is not configured`;
+      } else {
+        this.scheduleTick(0);
+      }
+    } else if (!route) {
+      message = `Created ${issue.identifier}, but dispatch is blocked: repository route is not configured`;
+    }
+
+    return {
+      accepted: true,
+      status: 'accepted',
+      message,
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      issue: null,
+    };
+  }
+
+  async stopIssue(issueId: string): Promise<RuntimeActionResult> {
+    const runningEntry = this.state.running.get(issueId);
+    if (runningEntry) {
+      this.manualStopIssueIds.add(issueId);
+      void this.stopRunningWorker(runningEntry).catch((error) => {
+        console.warn(`[orchestrator] Failed to stop ${runningEntry.identifier}:`, error);
+      });
+
+      return {
+        accepted: true,
+        status: 'accepted',
+        message: `Stopping ${runningEntry.identifier}`,
+        issue_id: runningEntry.issue.id,
+        issue_identifier: runningEntry.identifier,
+      };
+    }
+
+    const retryEntry = this.state.retry_attempts.get(issueId);
+    if (retryEntry) {
+      if (retryEntry.timer_handle) {
+        clearTimeout(retryEntry.timer_handle);
+      }
+      this.state.retry_attempts.delete(issueId);
+      this.state.claimed.delete(issueId);
+
+      const workItem = this.workItemRepository.findByLinearIssueId(issueId);
+      if (workItem) {
+        this.workItemRepository.update({
+          id: workItem.id,
+          orchestrator_state: 'halted',
+        });
+      }
+
+      this.emit('state:changed', this.getStateSnapshot());
+      return {
+        accepted: true,
+        status: 'completed',
+        message: `Stopped queued retry for ${retryEntry.identifier}`,
+        issue_id: issueId,
+        issue_identifier: retryEntry.identifier,
+      };
+    }
+
+    const workItem = this.workItemRepository.findByLinearIssueId(issueId);
+    if (!workItem) {
+      return {
+        accepted: false,
+        status: 'not_found',
+        message: `Issue ${issueId} was not found`,
+        issue_id: null,
+        issue_identifier: null,
+      };
+    }
+
+    return {
+      accepted: false,
+      status: 'rejected',
+      message: `${workItem.linear_identifier} is not currently running`,
+      issue_id: workItem.linear_issue_id,
+      issue_identifier: workItem.linear_identifier,
+    };
+  }
+
+  async retryIssue(issueId: string): Promise<RuntimeActionResult> {
+    if (this.state.running.has(issueId)) {
+      const runningEntry = this.state.running.get(issueId)!;
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: `${runningEntry.identifier} is already running`,
+        issue_id: runningEntry.issue.id,
+        issue_identifier: runningEntry.identifier,
+      };
+    }
+
+    const retryEntry = this.state.retry_attempts.get(issueId);
+    if (retryEntry) {
+      return {
+        accepted: true,
+        status: 'queued',
+        message: `${retryEntry.identifier} is already queued for retry`,
+        issue_id: issueId,
+        issue_identifier: retryEntry.identifier,
+      };
+    }
+
+    const fetched = await this.tracker.fetchIssueById(issueId);
+    if (fetched.error) {
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: fetched.errorMessage || 'Failed to load current issue state from Linear',
+        issue_id: issueId,
+        issue_identifier: this.workItemRepository.findByLinearIssueId(issueId)?.linear_identifier ?? null,
+      };
+    }
+
+    const issue = fetched.issue;
+    if (!issue) {
+      return {
+        accepted: false,
+        status: 'not_found',
+        message: `Issue ${issueId} was not found in Linear`,
+        issue_id: null,
+        issue_identifier: null,
+      };
+    }
+
+    if (!this.isActiveTrackerState(issue.state)) {
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: `${issue.identifier} is in tracker state "${issue.state}" and cannot be retried`,
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+      };
+    }
+
+    this.state.completed.delete(issue.id);
+    const workItem = this.workItemRepository.findByLinearIssueId(issue.id);
+    const route = this.tryResolveRepositoryRoute(issue);
+    if (!route) {
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: `Retry blocked for ${issue.identifier}: repository route is not configured`,
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+      };
+    }
+
+    if (this.hasAvailableSlots() && this.shouldDispatch(issue)) {
+      if (workItem) {
+        this.workItemRepository.update({
+          id: workItem.id,
+          linear_state: issue.state,
+          orchestrator_state: 'discovering',
+        });
+      }
+      await this.dispatchIssue(issue, null);
+      return {
+        accepted: true,
+        status: 'accepted',
+        message: `Retrying ${issue.identifier}`,
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+      };
+    }
+
+    if (workItem) {
+      this.workItemRepository.update({
+        id: workItem.id,
+        linear_state: issue.state,
+        orchestrator_state: 'retry_scheduled',
+      });
+    }
+    await this.scheduleRetry(issue.id, issue.identifier, 1, 'Manual retry requested', 250);
+    this.emit('state:changed', this.getStateSnapshot());
+
+    return {
+      accepted: true,
+      status: 'queued',
+      message: `Queued ${issue.identifier} for retry`,
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+    };
   }
 
   private async acquireLeadershipLease(): Promise<void> {
@@ -767,6 +1055,11 @@ export class Orchestrator extends EventEmitter {
       return;
     }
 
+    const route = this.tryResolveRepositoryRoute(issue);
+    if (!route) {
+      return;
+    }
+
     // Guard: if already claimed (another dispatch in flight), skip
     if (this.state.claimed.has(issue.id)) {
       console.log(`[orchestrator] Issue ${issue.identifier} already claimed, skipping duplicate dispatch`);
@@ -786,7 +1079,7 @@ export class Orchestrator extends EventEmitter {
 
     // Spawn worker
     try {
-      const workerPromise = this.runAgentAttempt(issue, attempt).then(result => this.handleWorkerExit(issue.id, result));
+      const workerPromise = this.runAgentAttempt(issue, attempt, route).then(result => this.handleWorkerExit(issue.id, result));
 
       const runningEntry: RunningEntry = {
         worker_handle: workerPromise,
@@ -962,10 +1255,10 @@ export class Orchestrator extends EventEmitter {
       return;
     }
 
-    const sourcePath = this.workspaceManager.getRepoSourcePath(
-      params.issue.project_slug,
-      params.issue.project_name,
-    );
+    const sourcePath = this.getRouteSourcePath(params.issue);
+    if (!sourcePath) {
+      return;
+    }
     try {
       const fs = await import('fs/promises');
       await fs.access(sourcePath);
@@ -1042,24 +1335,122 @@ export class Orchestrator extends EventEmitter {
     return this.config.activeStates.some(candidate => candidate.toLowerCase() === state.toLowerCase());
   }
 
-  private resolveGitHubRepo(issue: Issue): string {
-    return issue.project_name || issue.project_slug || 'main';
+  private resolveRepositoryRoute(issue: Issue): ResolvedRepositoryRoute {
+    return this.repositoryRoutingService.resolveIssue(issue);
   }
 
-  private normalizeReviewDecision(value: string | null | undefined): 'APPROVE' | 'REQUEST_CHANGES' | 'MERGE_BLOCKED' | null {
+  private emitRepositoryRouteFailure(issue: Issue, error: RepositoryRoutingError): void {
+    const payload: AgentTimelinePayload = {
+      level: 'error',
+      category: 'diagnostic',
+      code: error.code === 'missing_tracker_project_slug'
+        ? 'missing_tracker_project_slug'
+        : 'missing_repository_route',
+      message: error.message,
+      turn: null,
+      tool_name: null,
+      detail: {
+        error_code: error.code,
+        issue_identifier: issue.identifier,
+        project_slug: issue.project_slug,
+        project_name: issue.project_name,
+      },
+    };
+
+    this.emit('session:event', issue.id, {
+      event: 'timeline',
+      timestamp: new Date(),
+      codex_app_server_pid: null,
+      payload,
+    });
+
+    const workItem = this.workItemRepository.findByLinearIssueId(issue.id);
+    if (workItem) {
+      this.workItemRepository.update({
+        id: workItem.id,
+        linear_state: issue.state,
+        orchestrator_state: 'failed',
+      });
+
+      this.syncEventRepository.create({
+        id: crypto.randomUUID(),
+        work_item_id: workItem.id,
+        target_system: 'linear',
+        action: 'repository_route_failure',
+        payload_json: {
+          issue_identifier: issue.identifier,
+          project_slug: issue.project_slug,
+          project_name: issue.project_name,
+          error_code: error.code,
+        },
+        result: 'failed',
+        error: error.message,
+      });
+    }
+  }
+
+  private tryResolveRepositoryRoute(issue: Issue): ResolvedRepositoryRoute | null {
+    try {
+      const route = this.resolveRepositoryRoute(issue);
+      this.repositoryRouteFailureByIssueId.delete(issue.id);
+      return route;
+    } catch (error) {
+      if (error instanceof RepositoryRoutingError) {
+        if (this.repositoryRouteFailureByIssueId.get(issue.id) !== error.message) {
+          this.repositoryRouteFailureByIssueId.set(issue.id, error.message);
+          console.error(`[orchestrator] Repository routing failed for ${issue.identifier}: ${error.message}`);
+          this.emitRepositoryRouteFailure(issue, error);
+          this.emit('issue:failed', issue, error.message);
+          this.emit('state:changed', this.getStateSnapshot());
+        }
+        return null;
+      }
+
+      throw error;
+    }
+  }
+
+  private getRouteWorkspacePath(issue: Issue, identifier: string = issue.identifier): string | null {
+    try {
+      const route = this.resolveRepositoryRoute(issue);
+      return this.workspaceManager.getWorkspacePath(identifier, route);
+    } catch {
+      return null;
+    }
+  }
+
+  private getRouteSourcePath(issue: Issue): string | null {
+    try {
+      const route = this.resolveRepositoryRoute(issue);
+      return this.workspaceManager.getRepoSourcePath(route);
+    } catch {
+      return null;
+    }
+  }
+
+  private normalizeReviewDecision(value: string | null | undefined): ReviewDecision | null {
     if (!value) {
       return null;
     }
 
     const normalized = value.toUpperCase();
-    if (normalized === 'APPROVED' || normalized === 'APPROVE' || normalized === 'APPROVE_MINOR') {
+    if (normalized === 'APPROVED' || normalized === 'APPROVE') {
       return 'APPROVE';
+    }
+    if (normalized === 'APPROVE_MINOR') {
+      return 'APPROVE_MINOR';
     }
     if (normalized === 'MERGE_BLOCKED') {
       return 'MERGE_BLOCKED';
     }
-    if (normalized === 'REQUEST_CHANGES' || normalized === 'REQUEST_TESTS' || normalized === 'REJECT') {
+    if (normalized === 'REQUEST_CHANGES') {
       return 'REQUEST_CHANGES';
+    }
+    if (normalized === 'REQUEST_TESTS') {
+      return 'REQUEST_TESTS';
+    }
+    if (normalized === 'REJECT') {
+      return 'REJECT';
     }
 
     return null;
@@ -1202,7 +1593,7 @@ export class Orchestrator extends EventEmitter {
       const reviewText = [artifacts.reviewReport]
         .filter((value): value is string => Boolean(value))
         .join('\n');
-      return /review decision|approve|request changes|merge blocked|looks good|reject/i.test(reviewText);
+      return parseCanonicalReviewReport(reviewText) !== null;
     }
 
     const devText = [artifacts.handover, artifacts.developmentLog]
@@ -1313,72 +1704,6 @@ export class Orchestrator extends EventEmitter {
     return turnNumber >= turnBudget;
   }
 
-  private async maybeWriteHeuristicReviewReport(params: {
-    issue: Issue;
-    workspacePath: string;
-    workspaceArtifacts: {
-      handover: string | null;
-      developmentLog: string | null;
-      reviewReport: string | null;
-    };
-  }): Promise<boolean> {
-    if (judgeComplexity(params.issue).complexity !== 'small') {
-      return false;
-    }
-
-    if (params.workspaceArtifacts.reviewReport) {
-      return false;
-    }
-
-    const supportingText = [
-      params.workspaceArtifacts.handover,
-      params.workspaceArtifacts.developmentLog,
-    ]
-      .filter((value): value is string => Boolean(value))
-      .join('\n');
-
-    if (!supportingText) {
-      return false;
-    }
-
-    const testsPassed = /test.*pass|tests passed|单元测试:\s*pass|测试情况[:：]\s*pass|pytest.*pass|\b\d+\/\d+\s+tests passed\b/i.test(
-      supportingText,
-    );
-    const knownIssuesClear =
-      /已知问题[\s\S]{0,80}(无|none|n\/a)|known issues[\s\S]{0,80}(none|n\/a)/i.test(
-        supportingText,
-      ) || !/已知问题|known issues/i.test(supportingText);
-
-    if (!testsPassed || !knownIssuesClear) {
-      return false;
-    }
-
-    const reportPath = this.getWorkflowArtifactPath(
-      params.workspacePath,
-      'REVIEW_REPORT.md',
-    );
-    const content = [
-      `# Code Review Report: ${params.issue.identifier}`,
-      '',
-      '## Review Decision: APPROVE_MINOR',
-      '',
-      '## Review Summary',
-      `This is a small change for ${params.issue.identifier}.`,
-      'The available development artifacts indicate the implementation is complete, tests passed, and no blocking issues were recorded.',
-      '',
-      '## Findings',
-      'No blocking issues identified for this small task.',
-      '',
-      '## Test Status',
-      'Available handover/development artifacts indicate passing tests.',
-    ].join('\n');
-
-    const fs = await import('fs/promises');
-    await fs.mkdir(path.dirname(reportPath), { recursive: true });
-    await fs.writeFile(reportPath, `${content}\n`, 'utf-8');
-    return true;
-  }
-
   private async decideNextSupervisorAction(params: {
     mode: 'dev' | 'review';
     issue: Issue;
@@ -1456,20 +1781,31 @@ export class Orchestrator extends EventEmitter {
 
   private buildLinearReviewComment(
     issue: Issue,
-    decision: 'APPROVE' | 'REQUEST_CHANGES' | 'MERGE_BLOCKED',
+    decision: ReviewDecision,
     content: string | null
   ): string {
     const label = {
       APPROVE: 'Approved',
+      APPROVE_MINOR: 'Approved With Minor Suggestions',
       REQUEST_CHANGES: 'Changes Requested',
+      REQUEST_TESTS: 'Tests Requested',
+      REJECT: 'Rejected',
       MERGE_BLOCKED: 'Merge Blocked',
     }[decision];
+
+    const mergeBlockedContext =
+      decision === 'MERGE_BLOCKED'
+        ? [
+            'Review passed, but the merge failed, so the issue is being sent back to development.',
+            '',
+          ].join('\n')
+        : '';
 
     return [
       `## Review Result: ${label}`,
       `Issue: ${issue.identifier}`,
       '',
-      content?.trim() || '(No detailed review summary found)',
+      `${mergeBlockedContext}${content?.trim() || '(No detailed review summary found)'}`,
     ].join('\n');
   }
 
@@ -1508,7 +1844,13 @@ export class Orchestrator extends EventEmitter {
   }
 
   private async handleReviewFeedback(workspacePath: string, cliResult: CliCommandResult): Promise<void> {
-    if (cliResult.review_decision !== 'REQUEST_CHANGES' || !cliResult.feedback) {
+    const reviewDecision = this.normalizeReviewDecision(cliResult.review_decision);
+    if (!reviewDecision || reviewDecision === 'APPROVE' || reviewDecision === 'APPROVE_MINOR') {
+      return;
+    }
+
+    const feedback = cliResult.feedback || await this.readWorkspaceFile(workspacePath, 'REVIEW_REPORT.md');
+    if (!feedback) {
       return;
     }
 
@@ -1516,7 +1858,16 @@ export class Orchestrator extends EventEmitter {
     try {
       const fs = await import('fs/promises');
       const handoverContent = await fs.readFile(handoverPath, 'utf-8');
-      const updatedHandover = updateHandoverNextSteps(handoverContent, cliResult.feedback);
+      const updatedHandover = updateHandoverNextSteps(
+        handoverContent,
+        [
+          '### Review Follow-up',
+          `- Decision: ${reviewDecision}`,
+          '',
+          '### Required Next Steps',
+          feedback.trim(),
+        ].join('\n'),
+      );
       await fs.writeFile(handoverPath, updatedHandover, 'utf-8');
       console.log('[orchestrator] Updated .symphony/HANDOVER.md with review feedback');
     } catch (err) {
@@ -1551,9 +1902,13 @@ export class Orchestrator extends EventEmitter {
       cli_result: cliResult,
     };
 
+    const normalizedReviewDecision =
+      command === 'review' ? this.normalizeReviewDecision(cliResult.review_decision) : null;
+
     if (
       command === 'review' &&
-      (cliResult.review_decision === 'REQUEST_CHANGES' || cliResult.review_decision === 'MERGE_BLOCKED')
+      normalizedReviewDecision &&
+      ['REQUEST_CHANGES', 'REQUEST_TESTS', 'REJECT', 'MERGE_BLOCKED'].includes(normalizedReviewDecision)
     ) {
       return {
         ...baseResult,
@@ -1582,11 +1937,14 @@ export class Orchestrator extends EventEmitter {
    * Run a single agent attempt
    * Section 16.5: Worker Attempt
    */
-  private async runAgentAttempt(issue: Issue, attempt: number | null): Promise<WorkerResult> {
+  private async runAgentAttempt(
+    issue: Issue,
+    attempt: number | null,
+    route: ResolvedRepositoryRoute,
+  ): Promise<WorkerResult> {
     const result = this.createWorkerResult(issue.id);
     const isReview = issue.state.toLowerCase() === 'in review';
-    const githubRepo = this.resolveGitHubRepo(issue);
-    let workItem = this.githubMappingService.ensureWorkItem(issue, githubRepo);
+    let workItem = this.githubMappingService.ensureWorkItem(issue, route.github_repo_full);
     result.work_item_id = workItem.id;
     let agentRunId: string | null = null;
 
@@ -1611,12 +1969,12 @@ export class Orchestrator extends EventEmitter {
     };
 
     try {
-      const mappingResult = await this.githubMappingService.ensureGitHubIssue(issue, githubRepo);
+      const mappingResult = await this.githubMappingService.ensureGitHubIssue(issue, route.github_repo_full);
       workItem = mappingResult.workItem;
       result.work_item_id = workItem.id;
 
       // Step 1: Create/reuse workspace
-      const workspaceResult = await this.workspaceManager.createForIssue(issue);
+      const workspaceResult = await this.workspaceManager.createForIssue(issue, route);
       if (!workspaceResult.success || !workspaceResult.workspace) {
         result.failure_reason = 'workspace_setup';
         result.error = `Workspace creation failed: ${workspaceResult.error}`;
@@ -1647,7 +2005,11 @@ export class Orchestrator extends EventEmitter {
       }
 
       // Step 2: Initialize state via dispatch command
-      const dispatchResult = await this.runCliCommand('dispatch', issue.identifier, workspace.path);
+      const dispatchResult = await this.runCliCommand('dispatch', issue.identifier, workspace.path, {
+        SYMPHONY_GITHUB_OWNER: route.github_owner,
+        SYMPHONY_GITHUB_REPO: route.github_repo,
+        SYMPHONY_GITHUB_REPO_FULL: route.github_repo_full,
+      });
       if (!dispatchResult.success) {
         result.failure_reason = 'dispatch_setup';
         result.error = `dispatch failed: ${dispatchResult.error}`;
@@ -1850,25 +2212,19 @@ export class Orchestrator extends EventEmitter {
           if (nextAction.kind === 'continue') {
             if (turnNumber >= turnBudget) {
               if (
-                isReview &&
-                await this.maybeWriteHeuristicReviewReport({
-                  issue: activeIssue,
-                  workspacePath: workspace.path,
-                  workspaceArtifacts,
-                })
+                this.artifactSuggestsCompletion(isReview ? 'review' : 'dev', workspaceArtifacts)
               ) {
-                console.log(
-                  `[orchestrator] Wrote a heuristic review report for ${activeIssue.identifier} after the review turn budget was exhausted.`,
-                );
-                sessionActive = false;
-              } else if (this.artifactSuggestsCompletion(isReview ? 'review' : 'dev', workspaceArtifacts)) {
                 console.log(
                   `[orchestrator] Forcing finish for ${activeIssue.identifier} at max turns because workspace artifacts indicate completion.`,
                 );
                 sessionActive = false;
               } else {
+                result.next_action = isReview ? 'retry_review' : 'none';
+                result.retry_delay_ms = isReview ? 1000 : undefined;
                 result.failure_reason = 'agent_turn';
-                result.error = `Supervisor requested another turn after reaching max turns (${turnBudget}).`;
+                result.error = isReview
+                  ? `Review turn budget exhausted without a canonical .symphony/REVIEW_REPORT.md for ${activeIssue.identifier}.`
+                  : `Supervisor requested another turn after reaching max turns (${turnBudget}).`;
                 sessionActive = false;
               }
             } else {
@@ -2046,9 +2402,13 @@ export class Orchestrator extends EventEmitter {
     }
 
     const reviewDecision = this.normalizeReviewDecision(result.cli_result?.review_decision) || 'REQUEST_CHANGES';
-    const reviewContent = result.workspace_path
+    const reviewContentFromArtifact = result.workspace_path
       ? await this.readWorkspaceFile(result.workspace_path, 'REVIEW_REPORT.md')
-      : result.cli_result?.feedback || null;
+      : null;
+    const reviewContent =
+      reviewDecision === 'MERGE_BLOCKED'
+        ? (result.cli_result?.feedback || reviewContentFromArtifact)
+        : (reviewContentFromArtifact || result.cli_result?.feedback || null);
     const nextRound = workItem.review_round + 1;
     const prNumber = workItem.active_pr_number;
 
@@ -2060,18 +2420,14 @@ export class Orchestrator extends EventEmitter {
         review_round: nextRound,
         decision: reviewDecision,
         summary_md: reviewContent || `${reviewDecision} for ${runningEntry.issue.identifier}`,
-        requested_changes_md: reviewDecision === 'APPROVE' ? null : (reviewContent || result.cli_result?.feedback || null),
-        merge_block_reason: reviewDecision === 'MERGE_BLOCKED' ? (reviewContent || result.cli_result?.feedback || 'Merge blocked') : null,
+        requested_changes_md:
+          reviewDecision === 'APPROVE' || reviewDecision === 'APPROVE_MINOR'
+            ? null
+            : (reviewContent || result.cli_result?.feedback || null),
+        merge_block_reason: reviewDecision === 'MERGE_BLOCKED'
+          ? (result.cli_result?.feedback || reviewContent || 'Review passed, but merge failed.')
+          : null,
       });
-
-      try {
-        await this.githubSyncService.postPullRequestComment(
-          workItem.id,
-          reviewContent || result.cli_result?.feedback || 'Review requested changes.'
-        );
-      } catch (err) {
-        console.warn('[orchestrator] Failed to post review feedback to PR:', err);
-      }
     }
 
     if (this.config.reviewPolicy.notifyLinearOnReview) {
@@ -2111,6 +2467,7 @@ export class Orchestrator extends EventEmitter {
     const reviewContent = result.workspace_path
       ? await this.readWorkspaceFile(result.workspace_path, 'REVIEW_REPORT.md')
       : null;
+    const reviewDecision = this.normalizeReviewDecision(result.cli_result?.review_decision) || 'APPROVE';
     const nextRound = workItem.review_round + 1;
 
     if (workItem.active_pr_number) {
@@ -2119,7 +2476,7 @@ export class Orchestrator extends EventEmitter {
         work_item_id: workItem.id,
         pr_number: workItem.active_pr_number,
         review_round: nextRound,
-        decision: 'APPROVE',
+        decision: reviewDecision,
         summary_md: reviewContent || `Approved ${runningEntry.issue.identifier}`,
       });
     }
@@ -2127,7 +2484,7 @@ export class Orchestrator extends EventEmitter {
     if (this.config.reviewPolicy.notifyLinearOnReview) {
       await this.postLinearComment(
         runningEntry.issue.id,
-        this.buildLinearReviewComment(runningEntry.issue, 'APPROVE', reviewContent)
+        this.buildLinearReviewComment(runningEntry.issue, reviewDecision, reviewContent)
       );
     }
 
@@ -2138,7 +2495,7 @@ export class Orchestrator extends EventEmitter {
       orchestrator_state: 'completed',
       merged_at: new Date(),
       review_round: nextRound,
-      last_review_decision: 'APPROVE',
+      last_review_decision: reviewDecision,
       last_review_summary: reviewContent,
     });
   }
@@ -2196,6 +2553,26 @@ export class Orchestrator extends EventEmitter {
     runningEntry.last_reported_output_tokens = runningEntry.codex_output_tokens;
     runningEntry.last_reported_total_tokens = runningEntry.codex_total_tokens;
 
+    if (this.manualStopIssueIds.delete(issueId)) {
+      const workItemId =
+        result.work_item_id ??
+        this.workItemRepository.findByLinearIssueId(issueId)?.id;
+      if (workItemId) {
+        await this.handleHaltedWorkItem(runningEntry, {
+          ...result,
+          work_item_id: workItemId,
+          final_state: runningEntry.issue.state,
+        });
+      }
+
+      this.setRunningStage(issueId, 'halted');
+      this.state.running.delete(issueId);
+      this.state.claimed.delete(issueId);
+      this.emit('issue:failed', runningEntry.issue, 'Stopped by user');
+      this.emit('state:changed', this.getStateSnapshot());
+      return;
+    }
+
     if (result.outcome === 'completed') {
       if (runningEntry.issue.state.toLowerCase() === 'in review') {
         await this.handleReviewCompletion(runningEntry, result);
@@ -2213,10 +2590,12 @@ export class Orchestrator extends EventEmitter {
 
       if (result.cleanup_workspace && result.workspace_path) {
         try {
-          await this.workspaceManager.removeWorkspace(result.workspace_path, runningEntry.issue.project_slug);
+          await this.workspaceManager.removeWorkspace(result.workspace_path);
         } catch (err) {
           console.warn('[orchestrator] Failed to clean workspace on completion:', err);
         }
+      }
+      if (result.cleanup_workspace) {
         try {
           await this.cleanupAllTerminalIssueBranches();
         } catch (err) {
@@ -2267,10 +2646,12 @@ export class Orchestrator extends EventEmitter {
       }
       if (result.cleanup_workspace && result.workspace_path) {
         try {
-          await this.workspaceManager.removeWorkspace(result.workspace_path, runningEntry.issue.project_slug);
+          await this.workspaceManager.removeWorkspace(result.workspace_path);
         } catch (err) {
           console.warn('[orchestrator] Failed to clean workspace on halt:', err);
         }
+      }
+      if (result.cleanup_workspace) {
         try {
           await this.cleanupAllTerminalIssueBranches();
         } catch (err) {
@@ -2313,7 +2694,7 @@ export class Orchestrator extends EventEmitter {
           identifier,
           attempt,
           result.error || result.failure_reason || 'Worker failed',
-          attempt === 2 ? 1000 : undefined
+          result.next_action === 'retry_review' ? (result.retry_delay_ms ?? 1000) : (attempt === 2 ? 1000 : undefined)
         );
         this.emit('issue:failed', runningEntry.issue, result.error || 'Worker failed');
       }
@@ -2383,7 +2764,8 @@ export class Orchestrator extends EventEmitter {
   private async runCliCommand(
     command: 'dispatch' | 'dev' | 'review',
     issueId: string,
-    workspacePath: string
+    workspacePath: string,
+    envOverrides: Record<string, string> = {},
   ): Promise<CliCommandInvocationResult> {
     // Build command with optional workspace-path
     const cmd = ['python3', './scripts/cli.py', command, issueId];
@@ -2400,6 +2782,7 @@ export class Orchestrator extends EventEmitter {
           ...process.env,
           SYMPHONY_WORKSPACE_ROOT: this.config.workspaceRoot,
           SYMPHONY_PROJECT_ROOT: this.config.projectRoot,
+          ...envOverrides,
         },
       });
 
@@ -2544,13 +2927,11 @@ export class Orchestrator extends EventEmitter {
 
         // 3. Clean up workspace
         try {
-          const workspacePath = this.workspaceManager.getWorkspacePath(
-            runningEntry.identifier,
-            runningEntry.issue.project_slug,
-            runningEntry.issue.project_name
-          );
-          await this.workspaceManager.removeWorkspace(workspacePath, runningEntry.issue.project_slug);
-          console.log(`[orchestrator] Workspace cleaned for cancelled issue: ${runningEntry.identifier}`);
+          const workspacePath = runningEntry.workspace_path ?? this.getRouteWorkspacePath(runningEntry.issue, runningEntry.identifier);
+          if (workspacePath) {
+            await this.workspaceManager.removeWorkspace(workspacePath);
+            console.log(`[orchestrator] Workspace cleaned for cancelled issue: ${runningEntry.identifier}`);
+          }
         } catch (err) {
           console.warn(`[orchestrator] Failed to clean workspace for ${runningEntry.identifier}:`, err);
         }
@@ -2615,11 +2996,13 @@ export class Orchestrator extends EventEmitter {
     this.state.claimed.delete(entry.issue.id);
 
     if (cleanupWorkspace) {
-      const workspacePath = this.workspaceManager.getWorkspacePath(entry.identifier, entry.issue.project_slug, entry.issue.project_name);
-      await this.workspaceManager.removeWorkspace(workspacePath, entry.issue.project_slug);
+      const workspacePath = entry.workspace_path ?? this.getRouteWorkspacePath(entry.issue, entry.identifier);
+      if (workspacePath) {
+        await this.workspaceManager.removeWorkspace(workspacePath);
+      }
       await this.cleanupIssueBranch({
         issue: entry.issue,
-        workspacePath: entry.workspace_path || workspacePath,
+        workspacePath: entry.workspace_path ?? workspacePath ?? undefined,
         explicitBranchName: entry.branch_name,
       });
     }
@@ -2654,11 +3037,14 @@ export class Orchestrator extends EventEmitter {
     }
 
     for (const issue of issues) {
-      const workspacePath = this.workspaceManager.getWorkspacePath(issue.identifier, issue.project_slug, issue.project_name);
+      const workItem = this.workItemRepository.findByLinearIssueId(issue.id);
+      const workspacePath = workItem?.workspace_path ?? this.getRouteWorkspacePath(issue);
+      if (!workspacePath) {
+        continue;
+      }
       try {
-        await this.workspaceManager.removeWorkspace(workspacePath, issue.project_slug);
+        await this.workspaceManager.removeWorkspace(workspacePath);
         console.log('[orchestrator] Cleaned up terminal workspace:', issue.identifier);
-        const workItem = this.workItemRepository.findByLinearIssueId(issue.id);
         if (workItem) {
           this.workItemRepository.update({
             id: workItem.id,
@@ -2718,11 +3104,13 @@ export class Orchestrator extends EventEmitter {
     }
 
     // Step 3: Clean up the workspace
-    const workspacePath = this.workspaceManager.getWorkspacePath(issue.identifier, issue.project_slug, issue.project_name);
+    const workspacePath = workItem?.workspace_path ?? this.getRouteWorkspacePath(issue);
     try {
-      await this.workspaceManager.removeWorkspace(workspacePath, issue.project_slug);
+      if (workspacePath) {
+        await this.workspaceManager.removeWorkspace(workspacePath);
+        console.log(`[orchestrator] Cleaned up workspace for merged issue: ${issue.identifier}`);
+      }
       await this.cleanupAllTerminalIssueBranches();
-      console.log(`[orchestrator] Cleaned up workspace for merged issue: ${issue.identifier}`);
     } catch (err) {
       console.warn(`[orchestrator] Failed to clean workspace for ${issue.identifier}:`, err);
       // Non-fatal, continue
@@ -2785,14 +3173,12 @@ export class Orchestrator extends EventEmitter {
 
         // Clean up workspace
         try {
-          const workspacePath = this.workspaceManager.getWorkspacePath(
-            runningEntry.identifier,
-            runningEntry.issue.project_slug,
-            runningEntry.issue.project_name
-          );
-          await this.workspaceManager.removeWorkspace(workspacePath, runningEntry.issue.project_slug);
-          cleaned.push(runningEntry.identifier);
-          console.log(`[orchestrator] Workspace cleaned for cancelled issue: ${runningEntry.identifier}`);
+          const workspacePath = runningEntry.workspace_path ?? this.getRouteWorkspacePath(runningEntry.issue, runningEntry.identifier);
+          if (workspacePath) {
+            await this.workspaceManager.removeWorkspace(workspacePath);
+            cleaned.push(runningEntry.identifier);
+            console.log(`[orchestrator] Workspace cleaned for cancelled issue: ${runningEntry.identifier}`);
+          }
         } catch (err) {
           console.warn(`[orchestrator] Failed to clean workspace for ${runningEntry.identifier}:`, err);
         }

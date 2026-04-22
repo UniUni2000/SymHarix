@@ -39,50 +39,70 @@ def make_hook(tmp_path: Path) -> ReviewHook:
     return hook
 
 
-def test_review_hook_reads_report_from_symphony_and_comments_on_pr(tmp_path):
+def test_review_hook_reads_canonical_report_from_symphony_and_submits_native_review(tmp_path):
     hook = make_hook(tmp_path)
     report_path = hook.store.symphony_dir.path / "REVIEW_REPORT.md"
     report_path.write_text(
         "## Review Decision: REQUEST_CHANGES\n\n"
+        "## Review Summary\n"
+        "Tests are missing for the changed behavior.\n\n"
         "**现状**: Missing tests\n"
         "**期望**: Add tests before merge\n"
     )
 
     assert hook.run() is True
-    hook.github.add_pull_request_comment.assert_called_once()
-    body = hook.github.add_pull_request_comment.call_args.args[1]
+    hook.github.submit_pull_request_review.assert_called_once_with(25, "REQUEST_CHANGES", body=hook.github.submit_pull_request_review.call_args.kwargs["body"])
+    body = hook.github.submit_pull_request_review.call_args.kwargs["body"]
     assert "## Automated Review: REQUEST_CHANGES" in body
+    assert "## Review Summary" in body
     assert "Missing tests" in body
     assert hook.store.get_current_state_enum().value == "IN_PROGRESS"
 
 
-def test_review_hook_accepts_bold_decision_line(tmp_path):
+def test_review_hook_rejects_legacy_bold_decision_line(tmp_path):
     hook = make_hook(tmp_path)
     report_path = hook.store.symphony_dir.path / "REVIEW_REPORT.md"
     report_path.write_text(
         "# Review Report: INT-25\n\n"
         "- **Decision**: REQUEST_CHANGES\n\n"
+        "## Review Summary\n"
+        "Need tests.\n\n"
         "**现状**: Missing tests\n"
         "**期望**: Add tests before merge\n"
     )
 
     decision, _ = hook._load_review_decision()
 
-    assert decision == "REQUEST_CHANGES"
+    assert decision is None
 
 
-def test_review_hook_accepts_final_decision_heading(tmp_path):
+def test_review_hook_rejects_legacy_final_decision_heading(tmp_path):
     hook = make_hook(tmp_path)
     report_path = hook.store.symphony_dir.path / "REVIEW_REPORT.md"
     report_path.write_text(
         "# Review Report: INT-25\n\n"
         "## 最终决定\n"
-        "**APPROVE** - Ready to merge.\n"
+        "**APPROVE** - Ready to merge.\n\n"
+        "## Review Summary\n"
+        "Legacy heading only.\n"
     )
 
     decision, _ = hook._load_review_decision()
 
-    assert decision == "APPROVE"
+    assert decision is None
+
+
+def test_review_hook_requires_review_summary_in_canonical_report(tmp_path):
+    hook = make_hook(tmp_path)
+    report_path = hook.store.symphony_dir.path / "REVIEW_REPORT.md"
+    report_path.write_text(
+        "## Review Decision: REQUEST_TESTS\n\n"
+        "**现状**: Missing regression tests\n"
+    )
+
+    decision, _ = hook._load_review_decision()
+
+    assert decision is None
 
 
 def test_review_hook_ignores_legacy_root_report_when_canonical_report_is_missing(tmp_path):
@@ -91,5 +111,37 @@ def test_review_hook_ignores_legacy_root_report_when_canonical_report_is_missing
     legacy_report_path.write_text("## Review Decision: APPROVE\n\nLegacy root report\n")
 
     assert hook.run() is False
-    hook.github.add_pull_request_comment.assert_not_called()
+    hook.github.submit_pull_request_review.assert_not_called()
     assert hook.store.get_state()["error"] == "Missing review decision"
+
+
+def test_review_hook_merges_and_closes_issue_on_approval(tmp_path):
+    hook = make_hook(tmp_path)
+    report_path = hook.store.symphony_dir.path / "REVIEW_REPORT.md"
+    report_path.write_text("## Review Decision: APPROVE\n\n## Review Summary\nLooks good to merge.\n")
+
+    state = hook.store.get_state()
+    state["metadata"]["github_issue_number"] = 88
+    hook.store.symphony_dir.write_state(state)
+    hook.github.merge_pull_request.return_value = {"merged": True}
+
+    assert hook.run() is True
+    hook.github.submit_pull_request_review.assert_called_once_with(25, "APPROVE", body=hook.github.submit_pull_request_review.call_args.kwargs["body"])
+    hook.github.merge_pull_request.assert_called_once_with(25)
+    hook.github.close_issue.assert_called_once_with(88)
+    assert hook.store.get_current_state_enum().value == "DONE"
+
+
+def test_review_hook_reports_merge_blocked_feedback_without_faking_rejection(tmp_path):
+    hook = make_hook(tmp_path)
+    report_path = hook.store.symphony_dir.path / "REVIEW_REPORT.md"
+    report_path.write_text("## Review Decision: APPROVE\n\n## Review Summary\nLooks good to merge.\n")
+    hook.github.merge_pull_request.return_value = {"merged": False, "message": "Branch protection blocked merge"}
+
+    assert hook.run() is True
+    assert hook.last_review_decision == "MERGE_BLOCKED"
+    assert hook.last_pr_status == "merge_blocked"
+    assert hook.last_review_report is not None
+    assert "Review passed, but the merge failed" in hook.last_review_report
+    assert "Branch protection blocked merge" in hook.last_review_report
+    assert hook.store.get_current_state_enum().value == "IN_PROGRESS"

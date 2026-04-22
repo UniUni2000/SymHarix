@@ -13,9 +13,9 @@ class Config:
     # Required fields (no defaults)
     linear_api_key: str
     github_token: str
-    github_owner: str
+    github_owner: Optional[str] = None
 
-    # Optional fields (can be auto-detected from Linear issue)
+    # Optional fields (prefer explicit repository routing or state metadata)
     github_repo: Optional[str] = None
 
     # Optional fields (with defaults)
@@ -43,14 +43,11 @@ def load_config() -> Config:
     if not github_token:
         raise ValueError("GITHUB_TOKEN is required")
 
-    # GitHub owner
+    # GitHub owner (optional when owner/repo is provided via route env or workspace state)
     github_owner = os.environ.get("GITHUB_OWNER") or os.environ.get("SYMPHONY_GITHUB_OWNER")
-    if not github_owner:
-        raise ValueError("GITHUB_OWNER or SYMPHONY_GITHUB_OWNER is required")
 
-    # GitHub repo (optional - can be auto-detected from Linear issue's project)
+    # GitHub repo (optional - dispatch/runtime can provide the canonical owner/repo)
     github_repo = os.environ.get("GITHUB_REPO") or os.environ.get("SYMPHONY_GITHUB_REPO")
-    # Don't require github_repo - it can be obtained from Linear issue's project name
 
     # Workspace root
     workspace_root = os.environ.get("WORKSPACE_ROOT") or os.environ.get(
