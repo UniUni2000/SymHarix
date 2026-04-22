@@ -22,6 +22,7 @@ type RuntimeController = {
   createIssue(input: CreateIssueRequest): Promise<CreateIssueResult>;
   stopIssue(issueId: string): Promise<RuntimeActionResult>;
   retryIssue(issueId: string): Promise<RuntimeActionResult>;
+  overrideGovernance(issueId: string): Promise<RuntimeActionResult>;
   on(event: string, listener: (...args: any[]) => void): unknown;
   off?(event: string, listener: (...args: any[]) => void): unknown;
 };

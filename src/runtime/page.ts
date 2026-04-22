@@ -636,6 +636,15 @@ export function renderRuntimePage(): string {
         if (state.pending.action === 'retry') {
           return 'Retrying...';
         }
+        if (state.pending.action === 'override') {
+          return 'Overriding...';
+        }
+        if (state.pending.action === 'rewrite') {
+          return 'Rewriting...';
+        }
+        if (state.pending.action === 'split') {
+          return 'Splitting...';
+        }
         return 'Working...';
       }
 
@@ -661,6 +670,15 @@ export function renderRuntimePage(): string {
           const retryBadge = issue.actions.can_stop && !issue.session ? formatBadge('queued', 'warn') : '';
           const prBadge = issue.actions.can_open_pr && issue.active_pr_number ? formatBadge('PR #' + issue.active_pr_number, '') : '';
           const stageBadge = issue.session && issue.session.stage ? formatBadge(issue.session.stage, '') : '';
+          const harnessBadge = issue.repo_harness_status
+            ? formatBadge('harness ' + issue.repo_harness_status.status, issue.repo_harness_status.status === 'formal' ? '' : 'warn')
+            : '';
+          const governanceBadge = issue.governance_status
+            ? formatBadge('governance ' + issue.governance_status, issue.governance_status === 'blocked' ? 'danger' : issue.governance_status === 'degraded' ? 'warn' : '')
+            : '';
+          const missingBadge = issue.missing_requirements && issue.missing_requirements.length
+            ? formatBadge(issue.missing_requirements.length + ' missing', 'warn')
+            : '';
           const lastTool = issue.session && issue.session.recent_tools.length
             ? issue.session.recent_tools[issue.session.recent_tools.length - 1]
             : null;
@@ -677,6 +695,9 @@ export function renderRuntimePage(): string {
             liveBadge,
             retryBadge,
             prBadge,
+            harnessBadge,
+            governanceBadge,
+            missingBadge,
             currentAction ? formatBadge(currentAction, 'warn') : '',
             '</div>',
             '<div class="issue-card-title"><strong>' + escapeHtml(issue.identifier) + '</strong> · ' + escapeHtml(issue.title) + '</div>',
@@ -725,6 +746,9 @@ export function renderRuntimePage(): string {
         const hasControlAccess = Boolean(state.manifest && state.manifest.access && state.manifest.access.can_control_issues);
         const stopDisabled = !issue.actions.can_stop || actionPending || !hasControlAccess;
         const retryDisabled = !issue.actions.can_retry || actionPending || !hasControlAccess;
+        const overrideDisabled = !issue.actions.can_override_governance || actionPending || !hasControlAccess;
+        const rewriteDisabled = !issue.actions.can_rewrite_governance || actionPending || !hasControlAccess;
+        const splitDisabled = !issue.actions.can_split_governance || actionPending || !hasControlAccess;
         const toolItems = session && session.recent_tools.length
           ? session.recent_tools.map((tool) => {
               return [
@@ -746,6 +770,20 @@ export function renderRuntimePage(): string {
               ].join('');
             })
           : [];
+        const governanceItems = buildDetailList([
+          '<div class="detail-list-item">Repo harness · <strong>' + escapeHtml(issue.repo_harness_status ? issue.repo_harness_status.status : 'missing') + '</strong>' + (issue.repo_harness_status && issue.repo_harness_status.adoption_suggested ? '<br><span class="muted">formalization suggested</span>' : '') + '</div>',
+          '<div class="detail-list-item">Constitution · <strong>' + escapeHtml(issue.constitution_status || 'missing') + '</strong></div>',
+          '<div class="detail-list-item">Decision · <strong>' + escapeHtml(issue.governance_decision || 'n/a') + '</strong></div>',
+          '<div class="detail-list-item">Status · <strong>' + escapeHtml(issue.governance_status || 'n/a') + '</strong><br><span class="muted">' + escapeHtml(issue.governance_summary || 'No governance summary yet.') + '</span></div>',
+          '<div class="detail-list-item">Override · <strong>' + escapeHtml(issue.governance_override && issue.governance_override.active ? 'approved' : 'inactive') + '</strong>' + (issue.governance_override && issue.governance_override.active ? '<br><span class="muted">' + escapeHtml((issue.governance_override.reason || 'Manual operator override') + (issue.governance_override.approved_at ? ' · ' + formatDate(issue.governance_override.approved_at) : '')) + '</span>' : '') + '</div>',
+        ], 'No governance assessment yet.');
+        const evidenceItems = buildDetailList([
+          '<div class="detail-list-item">Change pack · <strong>' + escapeHtml(issue.change_pack_summary ? ((issue.change_pack_summary.profile || 'unknown') + ' · ' + (issue.change_pack_summary.complexity || 'unknown')) : 'n/a') + '</strong></div>',
+          '<div class="detail-list-item">Tasks · <strong>' + escapeHtml(issue.task_status ? (String(issue.task_status.completed) + '/' + String(issue.task_status.total)) : '0/0') + '</strong></div>',
+          '<div class="detail-list-item">Evidence · <strong>' + escapeHtml(issue.evidence_summary ? (String(issue.evidence_summary.satisfied) + '/' + String(issue.evidence_summary.total_requirements)) : '0/0') + '</strong></div>',
+          '<div class="detail-list-item">Missing requirements · <strong>' + escapeHtml(issue.missing_requirements ? String(issue.missing_requirements.length) : '0') + '</strong>' + (issue.missing_requirements && issue.missing_requirements.length ? '<br><span class="muted">' + escapeHtml(issue.missing_requirements.map((item) => item.label).join(' · ')) + '</span>' : '') + '</div>',
+          '<div class="detail-list-item">Suggestions · <strong>' + escapeHtml(issue.active_governance_suggestions ? String(issue.active_governance_suggestions.length) : '0') + '</strong>' + (issue.active_governance_suggestions && issue.active_governance_suggestions.length ? '<br><span class="muted">' + escapeHtml(issue.active_governance_suggestions.map((item) => item.suggestion_type + ': ' + item.title).join(' · ')) + '</span>' : '') + '</div>',
+        ], 'No evidence summary yet.');
         const statusMessage = getCurrentActionLabel(issue) || 'Ready';
 
         detailCard.innerHTML = [
@@ -777,7 +815,9 @@ export function renderRuntimePage(): string {
             '<div class="detail-list-item">GitHub repo · <code>' + escapeHtml(issue.github_repo || 'n/a') + '</code></div>',
             '<div class="detail-list-item">GitHub issue · <strong>' + escapeHtml(issue.github_issue_number || 'n/a') + '</strong></div>',
             '<div class="detail-list-item">Active PR · <strong>' + escapeHtml(issue.active_pr_number || 'n/a') + '</strong></div>',
-          ], 'No linked workspace yet.') + '<div class="action-row" style="margin-top: 12px;"><button id="stop-button" class="warn" ' + (stopDisabled ? 'disabled' : '') + '>Stop</button><button id="retry-button" class="secondary" ' + (retryDisabled ? 'disabled' : '') + '>Retry</button><button id="refresh-issue-button" class="secondary">Refresh Issue</button></div></div></div>',
+          ], 'No linked workspace yet.') + '<div class="action-row" style="margin-top: 12px;"><button id="stop-button" class="warn" ' + (stopDisabled ? 'disabled' : '') + '>Stop</button><button id="retry-button" class="secondary" ' + (retryDisabled ? 'disabled' : '') + '>Retry</button><button id="override-button" class="secondary" ' + (overrideDisabled ? 'disabled' : '') + '>Override Gate</button><button id="rewrite-button" class="secondary" ' + (rewriteDisabled ? 'disabled' : '') + '>Rewrite Gate</button><button id="split-button" class="secondary" ' + (splitDisabled ? 'disabled' : '') + '>Split Gate</button><button id="refresh-issue-button" class="secondary">Refresh Issue</button></div></div></div>',
+          '<div class="detail-block"><h3>Governance</h3><div class="detail-list">' + governanceItems + '</div></div>',
+          '<div class="detail-block"><h3>Evidence</h3><div class="detail-list">' + evidenceItems + '</div></div>',
           '<div class="detail-block"><h3>Recent Tools</h3><div class="detail-list">' + buildDetailList(toolItems, 'No recent tool events yet.') + '</div></div>',
           '<div class="detail-block"><h3>Recent Files</h3><div class="detail-list">' + buildDetailList(fileItems, 'No recent file activity yet.') + '</div></div>',
           '</div>',
@@ -788,6 +828,15 @@ export function renderRuntimePage(): string {
         });
         document.getElementById('retry-button').addEventListener('click', () => {
           void postIssueAction(issue.issue_id, 'retry');
+        });
+        document.getElementById('override-button').addEventListener('click', () => {
+          void postIssueAction(issue.issue_id, 'override');
+        });
+        document.getElementById('rewrite-button').addEventListener('click', () => {
+          void postIssueAction(issue.issue_id, 'rewrite');
+        });
+        document.getElementById('split-button').addEventListener('click', () => {
+          void postIssueAction(issue.issue_id, 'split');
         });
         document.getElementById('refresh-issue-button').addEventListener('click', () => {
           void refreshSelectedIssue();
@@ -938,7 +987,14 @@ export function renderRuntimePage(): string {
         state.pending.action = action;
         renderAll();
         try {
-          const result = await fetchJson('/api/v1/runtime/issues/' + encodeURIComponent(issueId) + '/' + action, {
+          const actionPath = action === 'override'
+            ? '/api/v1/runtime/issues/' + encodeURIComponent(issueId) + '/governance/override'
+            : action === 'rewrite'
+              ? '/api/v1/runtime/issues/' + encodeURIComponent(issueId) + '/governance/rewrite'
+              : action === 'split'
+                ? '/api/v1/runtime/issues/' + encodeURIComponent(issueId) + '/governance/split'
+                : '/api/v1/runtime/issues/' + encodeURIComponent(issueId) + '/' + action;
+          const result = await fetchJson(actionPath, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
           });

@@ -88,6 +88,36 @@ describe('LinearClient', () => {
     expect(requests[1]?.variables).toEqual({ issueId: 'issue-123', stateId: 'state-2' });
   });
 
+  test('updateIssueContent uses issueUpdate with title and description fields', async () => {
+    const requests: Array<{ query: string; variables: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      const payload = JSON.parse(String(init?.body));
+      requests.push(payload);
+      return jsonResponse({ data: { issueUpdate: { success: true } } });
+    }) as unknown as typeof fetch;
+
+    const client = new LinearClient({
+      endpoint: 'https://linear.test/graphql',
+      apiKey: 'token',
+      projectSlugs: [],
+    });
+
+    const result = await client.updateIssueContent('issue-123', {
+      title: 'Clarify runtime API export flow',
+      description: 'Focus this issue on the export endpoint and add one verification command.',
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.query).toContain('mutation UpdateIssueContent');
+    expect(requests[0]?.query).toContain('issueUpdate(id: $issueId, input: { title: $title, description: $description })');
+    expect(requests[0]?.variables).toEqual({
+      issueId: 'issue-123',
+      title: 'Clarify runtime API export flow',
+      description: 'Focus this issue on the export endpoint and add one verification command.',
+    });
+  });
+
   test('graphqlQuery includes response details for HTTP failures', async () => {
     globalThis.fetch = (async () =>
       jsonResponse(

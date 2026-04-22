@@ -5,9 +5,11 @@ import * as os from 'os';
 import * as path from 'path';
 import { Orchestrator, parseCliCommandResult, type CliCommandResult, type WorkerResult } from './index';
 import type { Issue, ServiceConfig, WorkflowDefinition } from '../types';
+import { TrackerProjectResolutionService } from '../tracker/projectResolution';
 import { initializeSchema } from '../database/schema';
 import {
   AgentRunRepository,
+  GovernanceSuggestionRepository,
   ReviewEventRepository,
   SyncEventRepository,
   WorkItemRepository
@@ -109,6 +111,26 @@ function makeCliResult(overrides: Partial<CliCommandResult> = {}): CliCommandRes
   };
 }
 
+function writeWorkflowArtifacts(
+  workspacePath: string,
+  artifacts: {
+    handover?: string | null;
+    developmentLog?: string | null;
+    reviewReport?: string | null;
+  },
+): void {
+  fs.mkdirSync(path.join(workspacePath, '.symphony'), { recursive: true });
+  if (artifacts.handover !== undefined && artifacts.handover !== null) {
+    fs.writeFileSync(path.join(workspacePath, '.symphony', 'HANDOVER.md'), artifacts.handover, 'utf8');
+  }
+  if (artifacts.developmentLog !== undefined && artifacts.developmentLog !== null) {
+    fs.writeFileSync(path.join(workspacePath, '.symphony', 'DEVELOPMENT_LOG.md'), artifacts.developmentLog, 'utf8');
+  }
+  if (artifacts.reviewReport !== undefined && artifacts.reviewReport !== null) {
+    fs.writeFileSync(path.join(workspacePath, '.symphony', 'REVIEW_REPORT.md'), artifacts.reviewReport, 'utf8');
+  }
+}
+
 type TestContext = {
   db: Database;
   orchestrator: Orchestrator;
@@ -119,6 +141,7 @@ type TestContext = {
   workItemRepository: WorkItemRepository;
   reviewEventRepository: ReviewEventRepository;
   syncEventRepository: SyncEventRepository;
+  governanceSuggestionRepository: GovernanceSuggestionRepository;
   githubSyncService: Record<string, ReturnType<typeof mock>>;
 };
 
@@ -139,6 +162,7 @@ function createOrchestrator(
   const agentRunRepository = new AgentRunRepository(db);
   const reviewEventRepository = new ReviewEventRepository(db);
   const syncEventRepository = new SyncEventRepository(db);
+  const governanceSuggestionRepository = new GovernanceSuggestionRepository(db);
   const config = {
     ...makeConfig(),
     ...configOverrides,
@@ -244,27 +268,59 @@ function createOrchestrator(
     })),
   };
 
-  const orchestrator = new Orchestrator(config, makeWorkflow(), {
-    db,
-    workItemRepository,
-    agentRunRepository,
-    reviewEventRepository,
-    syncEventRepository,
-    githubMappingService: fakeMappingService as any,
-    githubContextService: fakeContextService as any,
-    githubSyncService: githubSyncService as any,
-    supervisor: supervisor as any,
-  });
-
   const tracker = {
     fetchIssueStatesByIds: mock(async () => ({ issues: [issueForRefresh], error: null })),
     fetchCandidateIssues: mock(async () => ({ issues: [issueForRefresh], error: null })),
     fetchIssuesByStates: mock(async () => ({ issues: [], error: null })),
     fetchIssueById: mock(async () => ({ issue: issueForRefresh, error: null })),
+    listProjects: mock(async () => ({
+      projects: issueForRefresh.project_slug
+        ? [{
+            project_id: `project-${issueForRefresh.project_slug}`,
+            project_slug: issueForRefresh.project_slug,
+            project_name: issueForRefresh.project_name ?? issueForRefresh.project_slug,
+          }]
+        : [],
+      error: false,
+      errorMessage: null,
+    })),
+    findProjectBySlug: mock(async (projectSlug: string) => ({
+      project:
+        issueForRefresh.project_slug === projectSlug
+          ? {
+              project_id: `project-${projectSlug}`,
+              project_slug: projectSlug,
+              project_name: issueForRefresh.project_name ?? projectSlug,
+            }
+          : null,
+      error: false,
+      errorMessage: issueForRefresh.project_slug === projectSlug ? null : 'not found',
+    })),
     postComment: mock(async () => ({ success: true })),
     updateIssueState: mock(async () => ({ success: true })),
+    updateIssueContent: mock(async () => ({ success: true })),
     createIssue: mock(async () => ({ success: true, issue: issueForRefresh })),
   };
+
+  const projectResolutionService = new TrackerProjectResolutionService(
+    tracker as any,
+    config.repositories.routing,
+  );
+
+  const orchestrator = new Orchestrator(config, makeWorkflow(), {
+    db,
+    tracker: tracker as any,
+    workItemRepository,
+    agentRunRepository,
+    reviewEventRepository,
+    syncEventRepository,
+    governanceSuggestionRepository,
+    githubMappingService: fakeMappingService as any,
+    githubContextService: fakeContextService as any,
+    githubSyncService: githubSyncService as any,
+    supervisor: supervisor as any,
+    projectResolutionService,
+  });
 
   const workspaceManager = {
     createForIssue: mock(async () => ({
@@ -296,7 +352,6 @@ function createOrchestrator(
     forceStopSession: mock(() => undefined),
   };
 
-  (orchestrator as any).tracker = tracker;
   (orchestrator as any).workspaceManager = workspaceManager;
   (orchestrator as any).agentRunner = agentRunner;
 
@@ -310,6 +365,7 @@ function createOrchestrator(
     workItemRepository,
     reviewEventRepository,
     syncEventRepository,
+    governanceSuggestionRepository,
     githubSyncService,
   };
 }
@@ -775,6 +831,11 @@ describe('Orchestrator Stability', () => {
     }));
     (orchestrator as any).agentRunner = ctx.agentRunner;
 
+    writeWorkflowArtifacts('/tmp/symphony-tests/repo/INT-1', {
+      handover: '# Handover\n单元测试: PASS (4/4 tests passed)\n实现了 fibonacci.py',
+      developmentLog: '# Development Log\n状态: Completed\n准备提交代码并创建 PR。',
+    });
+
     (orchestrator as any).readWorkspaceFile = mock(async (_workspacePath: string, filename: string) => {
       if (filename === 'HANDOVER.md') {
         return '# Handover\n单元测试: PASS (4/4 tests passed)\n实现了 fibonacci.py';
@@ -822,6 +883,11 @@ describe('Orchestrator Stability', () => {
     }));
     (orchestrator as any).agentRunner = ctx.agentRunner;
 
+    writeWorkflowArtifacts('/tmp/symphony-tests/repo/INT-1', {
+      handover: '# Handover\n开发摘要：实现了 hello world python 文件。\n测试情况：PASS',
+      developmentLog: '# Development Log\n状态: Completed',
+    });
+
     (orchestrator as any).readWorkspaceFile = mock(async (_workspacePath: string, filename: string) => {
       if (filename === 'HANDOVER.md') {
         return '# Handover\n开发摘要：实现了 hello world python 文件。\n测试情况：PASS';
@@ -866,6 +932,11 @@ describe('Orchestrator Stability', () => {
       transcript: [],
     }));
     (orchestrator as any).agentRunner = ctx.agentRunner;
+
+    writeWorkflowArtifacts('/tmp/symphony-tests/repo/INT-1', {
+      handover: '# Handover\n开发摘要：实现了随机数 python 程序。\n测试情况：PASS',
+      developmentLog: '# Development Log\n状态: Completed',
+    });
 
     (orchestrator as any).readWorkspaceFile = mock(async (_workspacePath: string, filename: string) => {
       if (filename === 'HANDOVER.md') {
@@ -1400,6 +1471,279 @@ describe('Orchestrator Stability', () => {
       projectId: 'project-1',
       stateId: null,
     });
+  });
+
+  it('createIssue records advisory governance state and skips dispatch when intake critic asks for a split first', async () => {
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-create-intake-'));
+    try {
+      fs.writeFileSync(
+        path.join(repoRoot, '.symphony-constitution.md'),
+        [
+          '# Constitution',
+          '',
+          '## Main Path',
+          '- Keep one control plane.',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const issue = makeIssue({
+        id: 'issue-created',
+        identifier: 'INT-88',
+        title: 'Refactor runtime API and redesign the web dashboard and rewrite Telegram copy',
+        description: 'Do all three in one issue and also clean related files.',
+        project_slug: 'proj',
+        project_name: 'repo',
+      });
+      const ctx = createOrchestrator(issue, {
+        repositories: {
+          routing: {
+            proj: {
+              github_owner: 'owner',
+              github_repo: 'repo',
+              local_path: repoRoot,
+            },
+          },
+        },
+      });
+      orchestrator = ctx.orchestrator;
+      ctx.tracker.createIssue = mock(async () => ({ success: true, issue }));
+      (orchestrator as any).tracker = ctx.tracker;
+
+      const result = await orchestrator.createIssue({
+        title: issue.title,
+        description: issue.description,
+        project_slug: 'proj',
+      });
+
+      const workItem = ctx.workItemRepository.findByLinearIssueId(issue.id);
+      const suggestions = ctx.governanceSuggestionRepository.findPendingByIssueId(issue.id);
+      expect(result.accepted).toBe(true);
+      expect(result.message).toContain('dispatch is blocked');
+      expect(result.message).toContain('split');
+      expect(workItem?.governance_decision).toBe('split_before_implement');
+      expect(workItem?.governance_status).toBe('advisory');
+      expect(workItem?.orchestrator_state).toBe('halted');
+      expect(suggestions).toHaveLength(1);
+      expect(suggestions[0]?.suggestion_type).toBe('architecture_alignment');
+      expect(suggestions[0]?.title).toContain('Split');
+    } finally {
+      fs.rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('overrideGovernance persists an explicit override for a blocked issue without relying on tracker labels', async () => {
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-override-intake-'));
+    try {
+      fs.writeFileSync(
+        path.join(repoRoot, '.symphony-constitution.md'),
+        [
+          '# Constitution',
+          '',
+          '## Main Path',
+          '- Keep one control plane.',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const issue = makeIssue({
+        id: 'issue-override',
+        identifier: 'INT-89',
+        title: 'Refactor runtime API and redesign the web dashboard and rewrite Telegram copy',
+        description: 'Do all three in one issue and also clean related files.',
+        project_slug: 'proj',
+        project_name: 'repo',
+        labels: [],
+      });
+      const ctx = createOrchestrator(issue, {
+        repositories: {
+          routing: {
+            proj: {
+              github_owner: 'owner',
+              github_repo: 'repo',
+              local_path: repoRoot,
+            },
+          },
+        },
+      });
+      orchestrator = ctx.orchestrator;
+      ctx.tracker.createIssue = mock(async () => ({ success: true, issue }));
+      (orchestrator as any).tracker = ctx.tracker;
+
+      await orchestrator.createIssue({
+        title: issue.title,
+        description: issue.description,
+        project_slug: 'proj',
+      });
+
+      const result = await (orchestrator as any).overrideGovernance(issue.id);
+      const workItem = ctx.workItemRepository.findByLinearIssueId(issue.id);
+
+      expect(result.accepted).toBe(true);
+      expect(result.message).toContain('Override approved');
+      expect(workItem?.governance_override_at).not.toBeNull();
+      expect((orchestrator as any).hasGovernanceOverride(issue)).toBe(true);
+    } finally {
+      fs.rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rewriteGovernance updates the Linear issue, reassesses governance, and clears the pending rewrite suggestion', async () => {
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-rewrite-intake-'));
+    try {
+      fs.writeFileSync(
+        path.join(repoRoot, '.symphony-constitution.md'),
+        [
+          '# Constitution',
+          '',
+          '## Main Path',
+          '- Keep one control plane.',
+        ].join('\n'),
+        'utf8',
+      );
+
+      let currentIssue = makeIssue({
+        id: 'issue-rewrite',
+        identifier: 'INT-90',
+        title: '优化一下 runtime API',
+        description: '处理一下就行',
+        project_slug: 'proj',
+        project_name: 'repo',
+        labels: [],
+      });
+
+      const ctx = createOrchestrator(currentIssue, {
+        repositories: {
+          routing: {
+            proj: {
+              github_owner: 'owner',
+              github_repo: 'repo',
+              local_path: repoRoot,
+            },
+          },
+        },
+      });
+      orchestrator = ctx.orchestrator;
+      ctx.tracker.createIssue = mock(async () => ({ success: true, issue: currentIssue }));
+      ctx.tracker.fetchIssueById = mock(async () => ({ issue: currentIssue, error: null }));
+      ctx.tracker.updateIssueContent = mock(async (_issueId: string, input: { title?: string | null; description?: string | null }) => {
+        currentIssue = {
+          ...currentIssue,
+          title: input.title ?? currentIssue.title,
+          description: input.description ?? currentIssue.description,
+        };
+        return { success: true };
+      });
+      (orchestrator as any).tracker = ctx.tracker;
+
+      await orchestrator.createIssue({
+        title: currentIssue.title,
+        description: currentIssue.description,
+        project_slug: 'proj',
+      });
+
+      const result = await (orchestrator as any).rewriteGovernance(currentIssue.id);
+      const workItem = ctx.workItemRepository.findByLinearIssueId(currentIssue.id);
+      const pendingSuggestions = ctx.governanceSuggestionRepository.findPendingByIssueId(currentIssue.id);
+
+      expect(result.accepted).toBe(true);
+      expect(result.message).toContain('Rewrite applied');
+      expect(ctx.tracker.updateIssueContent).toHaveBeenCalledTimes(1);
+      expect(currentIssue.title).not.toContain('优化一下');
+      expect(workItem?.governance_decision).toBe('accept');
+      expect(workItem?.orchestrator_state).not.toBe('halted');
+      expect(pendingSuggestions).toHaveLength(0);
+    } finally {
+      fs.rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('splitGovernance rewrites the original issue and creates follow-up Linear issues for the remaining slices', async () => {
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-split-intake-'));
+    try {
+      fs.writeFileSync(
+        path.join(repoRoot, '.symphony-constitution.md'),
+        [
+          '# Constitution',
+          '',
+          '## Main Path',
+          '- Keep one control plane.',
+        ].join('\n'),
+        'utf8',
+      );
+
+      let currentIssue = makeIssue({
+        id: 'issue-split',
+        identifier: 'INT-91',
+        title: 'Refactor runtime API and redesign the web dashboard and rewrite Telegram copy',
+        description: 'Do all three in one issue and also clean related files.',
+        project_slug: 'proj',
+        project_name: 'repo',
+        labels: [],
+      });
+
+      const childIssues: Issue[] = [];
+      const ctx = createOrchestrator(currentIssue, {
+        repositories: {
+          routing: {
+            proj: {
+              github_owner: 'owner',
+              github_repo: 'repo',
+              local_path: repoRoot,
+            },
+          },
+        },
+      });
+      orchestrator = ctx.orchestrator;
+      ctx.tracker.createIssue = mock(async (input: { title: string; description?: string | null }) => {
+        if (input.title === currentIssue.title) {
+          return { success: true, issue: currentIssue };
+        }
+
+        const childIssue: Issue = {
+          ...makeIssue({
+            id: `child-${childIssues.length + 1}`,
+            identifier: `INT-91${childIssues.length + 2}`,
+            title: input.title,
+            description: input.description ?? null,
+            project_slug: 'proj',
+            project_name: 'repo',
+          }),
+        };
+        childIssues.push(childIssue);
+        return { success: true, issue: childIssue };
+      });
+      ctx.tracker.fetchIssueById = mock(async () => ({ issue: currentIssue, error: null }));
+      ctx.tracker.updateIssueContent = mock(async (_issueId: string, input: { title?: string | null; description?: string | null }) => {
+        currentIssue = {
+          ...currentIssue,
+          title: input.title ?? currentIssue.title,
+          description: input.description ?? currentIssue.description,
+        };
+        return { success: true };
+      });
+      (orchestrator as any).tracker = ctx.tracker;
+
+      await orchestrator.createIssue({
+        title: currentIssue.title,
+        description: currentIssue.description,
+        project_slug: 'proj',
+      });
+
+      const result = await (orchestrator as any).splitGovernance(currentIssue.id);
+      const workItem = ctx.workItemRepository.findByLinearIssueId(currentIssue.id);
+      const pendingSuggestions = ctx.governanceSuggestionRepository.findPendingByIssueId(currentIssue.id);
+
+      expect(result.accepted).toBe(true);
+      expect(result.message).toContain('Split applied');
+      expect(childIssues.length).toBeGreaterThanOrEqual(1);
+      expect(ctx.tracker.updateIssueContent).toHaveBeenCalledTimes(1);
+      expect(workItem?.governance_decision).toBe('accept');
+      expect(workItem?.orchestrator_state).not.toBe('halted');
+      expect(pendingSuggestions).toHaveLength(0);
+    } finally {
+      fs.rmSync(repoRoot, { recursive: true, force: true });
+    }
   });
 
   it('retryIssue queues an idle active issue when no execution slots are available', async () => {

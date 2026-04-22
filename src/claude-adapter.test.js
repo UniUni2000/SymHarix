@@ -8,7 +8,7 @@ const {
   createTimelineState,
   formatTurnCompletedMessage,
   startAdapter,
-} = require('./claude-adapter.cjs');
+} = require('../scripts/claude-adapter.cjs');
 
 function createFakeClaudeProcess() {
   const child = new EventEmitter();

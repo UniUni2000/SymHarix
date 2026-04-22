@@ -121,3 +121,6 @@ export { ServiceLeaseRepository } from './repositories/serviceLeaseRepository';
 export { BotWatchSubscriptionRepository } from './repositories/botWatchSubscriptionRepository';
 export { BotConversationPreferenceRepository } from './repositories/botConversationPreferenceRepository';
 export { BotPendingActionRepository } from './repositories/botPendingActionRepository';
+export { ShadowHarnessRepository } from './repositories/shadowHarnessRepository';
+export { GovernanceAssessmentRepository } from './repositories/governanceAssessmentRepository';
+export { GovernanceSuggestionRepository } from './repositories/governanceSuggestionRepository';

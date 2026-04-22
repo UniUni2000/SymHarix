@@ -11,3 +11,6 @@ export { ServiceLeaseRepository } from './serviceLeaseRepository';
 export { BotWatchSubscriptionRepository } from './botWatchSubscriptionRepository';
 export { BotConversationPreferenceRepository } from './botConversationPreferenceRepository';
 export { BotPendingActionRepository } from './botPendingActionRepository';
+export { ShadowHarnessRepository } from './shadowHarnessRepository';
+export { GovernanceAssessmentRepository } from './governanceAssessmentRepository';
+export { GovernanceSuggestionRepository } from './governanceSuggestionRepository';

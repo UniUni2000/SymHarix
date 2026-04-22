@@ -27,6 +27,9 @@ describe('SymphonyServer', () => {
   let createIssueCalls: Array<Record<string, unknown>> = [];
   let stopIssueCalls: string[] = [];
   let retryIssueCalls: string[] = [];
+  let overrideGovernanceCalls: string[] = [];
+  let rewriteGovernanceCalls: string[] = [];
+  let splitGovernanceCalls: string[] = [];
   let telegramWebhookCalls = 0;
   let discordInteractionCalls = 0;
 
@@ -79,6 +82,9 @@ describe('SymphonyServer', () => {
             actions: {
               can_stop: true,
               can_retry: false,
+              can_override_governance: true,
+              can_rewrite_governance: true,
+              can_split_governance: true,
               can_open_pr: true,
             },
             created_at: '2026-01-01T00:00:00.000Z',
@@ -160,6 +166,36 @@ describe('SymphonyServer', () => {
           issue_identifier: 'INT-RT-1',
         };
       },
+      overrideGovernance: async (id: string) => {
+        overrideGovernanceCalls.push(id);
+        return {
+          accepted: true,
+          status: 'accepted',
+          message: `Override approved for ${id}`,
+          issue_id: id,
+          issue_identifier: 'INT-RT-1',
+        };
+      },
+      rewriteGovernance: async (id: string) => {
+        rewriteGovernanceCalls.push(id);
+        return {
+          accepted: true,
+          status: 'accepted',
+          message: `Rewrite applied for ${id}`,
+          issue_id: id,
+          issue_identifier: 'INT-RT-1',
+        };
+      },
+      splitGovernance: async (id: string) => {
+        splitGovernanceCalls.push(id);
+        return {
+          accepted: true,
+          status: 'accepted',
+          message: `Split applied for ${id}`,
+          issue_id: id,
+          issue_identifier: 'INT-RT-1',
+        };
+      },
       createStream: () =>
         new ReadableStream<Uint8Array>({
           start(controller) {
@@ -193,7 +229,7 @@ describe('SymphonyServer', () => {
             inbound_path: '/api/v1/bots/discord/interactions',
           },
         },
-        commands: ['help', 'status', 'new', 'watch', 'unwatch', 'stop', 'retry'],
+        commands: ['help', 'status', 'new', 'watch', 'unwatch', 'stop', 'retry', 'override', 'rewrite', 'split'],
         watch_presets: ['default', 'verbose', 'failures', 'status'],
         assistant: {
           provider: null,
@@ -239,6 +275,9 @@ describe('SymphonyServer', () => {
     createIssueCalls = [];
     stopIssueCalls = [];
     retryIssueCalls = [];
+    overrideGovernanceCalls = [];
+    rewriteGovernanceCalls = [];
+    splitGovernanceCalls = [];
     telegramWebhookCalls = 0;
     discordInteractionCalls = 0;
   });
@@ -464,6 +503,42 @@ describe('SymphonyServer', () => {
     expect(payload.success).toBe(true);
     expect(payload.data.message).toContain('Queued INT-RT-1');
     expect(retryIssueCalls).toEqual(['INT-RT-1']);
+  });
+
+  test('POST /api/v1/runtime/issues/:id/governance/override proxies governance override actions', async () => {
+    const response = await request('/api/v1/runtime/issues/INT-RT-1/governance/override', {
+      method: 'POST',
+    });
+
+    expect(response.status).toBe(202);
+    const payload = await readJson<any>(response);
+    expect(payload.success).toBe(true);
+    expect(payload.data.message).toContain('Override approved');
+    expect(overrideGovernanceCalls).toEqual(['INT-RT-1']);
+  });
+
+  test('POST /api/v1/runtime/issues/:id/governance/rewrite proxies governance rewrite actions', async () => {
+    const response = await request('/api/v1/runtime/issues/INT-RT-1/governance/rewrite', {
+      method: 'POST',
+    });
+
+    expect(response.status).toBe(202);
+    const payload = await readJson<any>(response);
+    expect(payload.success).toBe(true);
+    expect(payload.data.message).toContain('Rewrite applied');
+    expect(rewriteGovernanceCalls).toEqual(['INT-RT-1']);
+  });
+
+  test('POST /api/v1/runtime/issues/:id/governance/split proxies governance split actions', async () => {
+    const response = await request('/api/v1/runtime/issues/INT-RT-1/governance/split', {
+      method: 'POST',
+    });
+
+    expect(response.status).toBe(202);
+    const payload = await readJson<any>(response);
+    expect(payload.success).toBe(true);
+    expect(payload.data.message).toContain('Split applied');
+    expect(splitGovernanceCalls).toEqual(['INT-RT-1']);
   });
 
   test('GET /api/v1/runtime/stream returns SSE snapshot', async () => {
