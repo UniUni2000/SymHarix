@@ -66,6 +66,16 @@ class FakeOrchestrator extends EventEmitter {
     };
   }
 
+  async overrideGovernance() {
+    return {
+      accepted: true as const,
+      status: 'accepted' as const,
+      message: `override approved by ${this.label}`,
+      issue_id: null,
+      issue_identifier: null,
+    };
+  }
+
   getDiagnosticsSnapshot() {
     return {
       running_issue_count: 0,

@@ -3,3 +3,6 @@ registry = "https://registry.npmjs.org"
 
 [run]
 shell = "system"
+
+[test]
+root = "src"

@@ -9,9 +9,12 @@ import {
   BotConversationPreferenceRepository,
   BotPendingActionRepository,
   BotWatchSubscriptionRepository,
+  GovernanceAssessmentRepository,
+  GovernanceSuggestionRepository,
   RepoCacheRepository,
   ReviewEventRepository,
   ServiceLeaseRepository,
+  ShadowHarnessRepository,
   SyncEventRepository,
   WorkItemRepository,
 } from './index';
@@ -40,6 +43,12 @@ describe('database schema', () => {
     expect(tableNames).toContain('bot_watch_subscriptions');
     expect(tableNames).toContain('bot_conversation_preferences');
     expect(tableNames).toContain('bot_pending_actions');
+    expect(tableNames).toContain('shadow_harnesses');
+    expect(tableNames).toContain('governance_assessments');
+    expect(tableNames).toContain('decision_memories');
+    expect(tableNames).toContain('conflict_memories');
+    expect(tableNames).toContain('debt_signals');
+    expect(tableNames).toContain('governance_suggestions');
     expect(tableNames).not.toContain('tasks');
     expect(tableNames).not.toContain('execution_events');
   });
@@ -95,6 +104,31 @@ describe('RepoCacheRepository', () => {
     const cache = repository.findByGitHubRepo('acme/repo');
     expect(cache?.local_source_path).toBe('/tmp/cache/repo/source');
     expect(cache?.last_fetch_commit).toBe('abc123');
+  });
+});
+
+describe('ShadowHarnessRepository', () => {
+  test('stores provisional repo harness metadata by repo key', () => {
+    const repository = new ShadowHarnessRepository(db);
+
+    repository.upsert({
+      repo_key: 'acme/repo',
+      source: 'shadow',
+      config_json: {
+        commands: {
+          test: 'bun test',
+        },
+      },
+      inference_details_json: {
+        inferred_from: ['package.json'],
+      },
+      successful_runs: 1,
+      failed_runs: 0,
+    });
+
+    const stored = repository.findByRepoKey('acme/repo');
+    expect(stored?.config_json.commands?.test).toBe('bun test');
+    expect(stored?.inference_details_json.inferred_from).toEqual(['package.json']);
   });
 });
 
@@ -258,6 +292,48 @@ describe('ServiceLeaseRepository', () => {
 
     expect(takeover.acquired).toBe(true);
     expect(takeover.lease?.holder_id).toBe('holder-b');
+  });
+});
+
+describe('Governance repositories', () => {
+  test('store governance assessments and suggestions', () => {
+    const workItems = new WorkItemRepository(db);
+    const assessmentRepository = new GovernanceAssessmentRepository(db);
+    const suggestionRepository = new GovernanceSuggestionRepository(db);
+
+    workItems.create({
+      id: 'wi-governance',
+      linear_issue_id: 'linear-governance',
+      linear_identifier: 'INT-GOV',
+      linear_title: 'Governance item',
+      linear_state: 'Todo',
+      github_repo: 'acme/repo',
+    });
+
+    assessmentRepository.create({
+      id: 'assessment-1',
+      work_item_id: 'wi-governance',
+      issue_id: 'linear-governance',
+      decision: 'accept_with_rewrite',
+      status: 'advisory',
+      summary: 'Prefer consolidating this path into the existing runtime control plane.',
+      constitution_hits_json: [{ section: 'Preferred Directions', phrase: 'single runtime control plane' }],
+      detail_json: { source: 'test' },
+    });
+
+    suggestionRepository.create({
+      id: 'suggestion-1',
+      work_item_id: 'wi-governance',
+      issue_id: 'linear-governance',
+      suggestion_type: 'cleanup',
+      status: 'pending',
+      title: '[GOVERNANCE] Clean up duplicate runtime paths',
+      summary: 'The runtime control plane is starting to split.',
+      detail_json: { severity: 'medium' },
+    });
+
+    expect(assessmentRepository.findLatestByWorkItemId('wi-governance')?.decision).toBe('accept_with_rewrite');
+    expect(suggestionRepository.findPendingByIssueId('linear-governance')).toHaveLength(1);
   });
 });
 

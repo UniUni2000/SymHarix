@@ -132,9 +132,11 @@ ${judgment.complexity === 'small' ? '- **Execution Style**: Prefer finishing in 
 ## Your Responsibilities
 1. Analyze the issue and implement the required changes
 2. Write and run tests (required for ${judgment.complexity} complexity)
-3. Update \`.symphony/DEVELOPMENT_LOG.md\` after each significant step
-4. **When done: create \`.symphony/HANDOVER.md\` with development summary**
-5. Commit changes, push, and create PR
+3. Read repo-local contracts if present: \`.symphony-repo.yaml\` and \`.symphony-constitution.md\`
+4. Keep \`.symphony/change-pack/tasks.md\` and \`.symphony/change-pack/evidence.json\` aligned with the real state of the work
+5. Update \`.symphony/DEVELOPMENT_LOG.md\` after each significant step
+6. **When done: create \`.symphony/HANDOVER.md\` with development summary**
+7. Commit changes, push, and create PR
 
 ## \`.symphony/HANDOVER.md\` Template (required when completing)
 \`\`\`markdown
@@ -166,6 +168,7 @@ ${existingLog ? `## Existing Progress\n${existingLog}\n---\nContinue from where 
 - For SMALL issues, avoid unnecessary multi-turn exploration. If the implementation and verification are already complete, finish the turn cleanly.
 - If review feedback already exists, address it in the same branch and same worktree unless the context explicitly says otherwise
 - If you discover the issue description is unclear, document it in \`.symphony/HANDOVER.md\` "已知问题" and continue with your best judgment
+- Treat \`.symphony/change-pack/evidence.json\` as a proof-of-work checklist. Do not end the turn while required evidence is still missing.
 - Workflow/process artifacts are never product files. Never stage or commit \`DEVELOPMENT_LOG.md\`, \`HANDOVER.md\`, \`REVIEW_REPORT.md\`, anything under \`.symphony/\`, or similar review/dev process notes.
 - When complete: commit, push, create PR, create \`.symphony/HANDOVER.md\`
 `;

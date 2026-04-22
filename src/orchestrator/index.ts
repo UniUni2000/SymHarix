@@ -11,9 +11,17 @@ import * as path from 'path';
 import type { Database } from 'bun:sqlite';
 import {
   AgentTimelinePayload,
+  ChangePackSummary,
+  ChangePackTaskStatus,
+  CompletionRequirement,
+  ConstitutionHit,
+  EvidenceSummary,
+  FitnessSignal,
+  IntakeCriticAssessment,
   Issue,
   PendingRuntimeRequest,
   ResolvedRepositoryRoute,
+  ResolvedRepositoryHarness,
   RuntimeDiagnosticsSnapshot,
   ServiceConfig,
   SupervisorNextAction,
@@ -40,12 +48,16 @@ import { AgentRunner } from '../agent/runner';
 import { createDatabase } from '../database';
 import {
   AgentRunRepository,
+  GovernanceAssessmentRepository,
+  GovernanceSuggestionRepository,
   ReviewEventRepository,
   ServiceLeaseRepository,
+  ShadowHarnessRepository,
   SyncEventRepository,
   WorkItemRepository
 } from '../database';
 import type { ReviewDecision } from '../database/types';
+import type { WorkItem } from '../database/types';
 import { buildReviewPrompt, parseCanonicalReviewReport } from '../hooks/review-prompt';
 import { buildDevPrompt, judgeComplexity } from '../hooks/dev-prompt';
 import { updateHandoverNextSteps } from '../hooks/handover';
@@ -62,6 +74,17 @@ import {
   RepositoryRoutingError,
   RepositoryRoutingService,
 } from '../routing/repositoryRouting';
+import {
+  inferShadowHarness,
+  loadRepositoryConstitution,
+  loadRepositoryHarness,
+  suggestHarnessAdoption,
+} from '../contracts/repositoryContracts';
+import { assessIntakeCritic } from '../governance/intakeCritic';
+import {
+  evaluateChangePackState,
+  initializeChangePack,
+} from '../change-pack/service';
 
 function splitGitHubRepoFull(
   githubRepoFull: string,
@@ -199,6 +222,18 @@ interface CliCommandInvocationResult {
   error?: string;
 }
 
+interface GovernedExecutionState {
+  harness: ResolvedRepositoryHarness;
+  constitutionStatus: 'present' | 'missing';
+  governance: IntakeCriticAssessment;
+  changePackSummary: ChangePackSummary | null;
+  taskStatus: ChangePackTaskStatus | null;
+  evidenceSummary: EvidenceSummary | null;
+  missingRequirements: CompletionRequirement[];
+  constitutionHits: ConstitutionHit[];
+  fitnessSignals: FitnessSignal[];
+}
+
 const CLI_RESULT_PREFIX = 'SYMPHONY_RESULT:';
 
 export interface OrchestratorDependencies {
@@ -211,6 +246,9 @@ export interface OrchestratorDependencies {
   reviewEventRepository?: ReviewEventRepository;
   syncEventRepository?: SyncEventRepository;
   serviceLeaseRepository?: ServiceLeaseRepository;
+  shadowHarnessRepository?: ShadowHarnessRepository;
+  governanceAssessmentRepository?: GovernanceAssessmentRepository;
+  governanceSuggestionRepository?: GovernanceSuggestionRepository;
   githubMappingService?: GitHubMappingService;
   githubContextService?: GitHubContextService;
   githubSyncService?: GitHubSyncService;
@@ -260,6 +298,9 @@ export class Orchestrator extends EventEmitter {
   private reviewEventRepository: ReviewEventRepository;
   private syncEventRepository: SyncEventRepository;
   private serviceLeaseRepository: ServiceLeaseRepository;
+  private shadowHarnessRepository: ShadowHarnessRepository;
+  private governanceAssessmentRepository: GovernanceAssessmentRepository;
+  private governanceSuggestionRepository: GovernanceSuggestionRepository;
   private githubMappingService: GitHubMappingService;
   private githubContextService: GitHubContextService;
   private githubSyncService: GitHubSyncService;
@@ -327,6 +368,11 @@ export class Orchestrator extends EventEmitter {
     this.reviewEventRepository = dependencies.reviewEventRepository ?? new ReviewEventRepository(this.db);
     this.syncEventRepository = dependencies.syncEventRepository ?? new SyncEventRepository(this.db);
     this.serviceLeaseRepository = dependencies.serviceLeaseRepository ?? new ServiceLeaseRepository(this.db);
+    this.shadowHarnessRepository = dependencies.shadowHarnessRepository ?? new ShadowHarnessRepository(this.db);
+    this.governanceAssessmentRepository =
+      dependencies.governanceAssessmentRepository ?? new GovernanceAssessmentRepository(this.db);
+    this.governanceSuggestionRepository =
+      dependencies.governanceSuggestionRepository ?? new GovernanceSuggestionRepository(this.db);
     this.githubMappingService = dependencies.githubMappingService ?? new GitHubMappingService({
       workItemRepository: this.workItemRepository,
       syncEventRepository: this.syncEventRepository,
@@ -524,6 +570,7 @@ export class Orchestrator extends EventEmitter {
 
   async createIssue(input: CreateIssueRequest): Promise<CreateIssueResult> {
     let resolvedProjectId = input.project_id ?? null;
+    let resolvedRoute: ResolvedRepositoryRoute | null = null;
     if (input.project_slug?.trim()) {
       const resolved = await this.projectResolutionService.resolveProjectSlug(input.project_slug.trim());
       if (!resolved.project) {
@@ -537,6 +584,7 @@ export class Orchestrator extends EventEmitter {
         };
       }
       resolvedProjectId = resolved.project.project_id;
+      resolvedRoute = resolved.route;
     }
 
     const created = await this.tracker.createIssue({
@@ -559,14 +607,70 @@ export class Orchestrator extends EventEmitter {
     }
 
     const issue = created.issue;
-    const route = this.tryResolveRepositoryRoute(issue);
+    const route = resolvedRoute ?? this.tryResolveRepositoryRoute(issue);
+    let governance: IntakeCriticAssessment | null = null;
     if (route) {
-      this.githubMappingService.ensureWorkItem(issue, route.github_repo_full, 'discovering');
+      const workItem = this.githubMappingService.ensureWorkItem(issue, route.github_repo_full, 'discovering');
+      governance = await assessIntakeCritic({
+        issue,
+        route,
+        repositoryRoot: route.local_path,
+      });
+      this.workItemRepository.update({
+        id: workItem.id,
+        repo_harness_status: governance.repo_harness_status,
+        constitution_status: governance.constitution_status,
+        governance_status: governance.status,
+        governance_decision: governance.decision,
+        governance_summary: governance.summary,
+        constitution_hits: governance.constitution_hits,
+        orchestrator_state:
+          governance.blocks_dispatch && !this.hasGovernanceOverride(issue)
+            ? 'halted'
+            : workItem.orchestrator_state,
+      });
+      this.governanceAssessmentRepository.create({
+        id: crypto.randomUUID(),
+        work_item_id: workItem.id,
+        issue_id: issue.id,
+        decision: governance.decision,
+        status: governance.status,
+        summary: governance.summary,
+        constitution_hits_json: governance.constitution_hits,
+        detail_json: {
+          phase: 'intake',
+          repo_harness_status: governance.repo_harness_status,
+          constitution_status: governance.constitution_status,
+          rewrite_title: governance.rewrite_title,
+          rewrite_description: governance.rewrite_description,
+          split_suggestions: governance.split_suggestions,
+          blocks_dispatch: governance.blocks_dispatch,
+        },
+      });
+      this.ensureGovernanceSuggestions(issue, workItem.id, route, governance);
+      this.emitTimelineEvent(issue, {
+        level: governance.blocks_dispatch ? 'warn' : 'info',
+        category: 'diagnostic',
+        code: governance.blocks_dispatch ? 'governance_blocked' : 'governance_assessed',
+        message: governance.summary,
+        turn: null,
+        tool_name: null,
+        detail: {
+          decision: governance.decision,
+          status: governance.status,
+          constitution_hits: governance.constitution_hits,
+          split_suggestions: governance.split_suggestions,
+          rewrite_title: governance.rewrite_title,
+        },
+      });
     }
 
     let message = `Created ${issue.identifier}`;
     if (this.running) {
-      if (route && this.hasAvailableSlots() && this.shouldDispatch(issue)) {
+      if (route && governance?.blocks_dispatch && !this.hasGovernanceOverride(issue)) {
+        message = `Created ${issue.identifier}, but dispatch is blocked: ${governance.summary}`;
+        this.scheduleTick(0);
+      } else if (route && this.hasAvailableSlots() && this.shouldDispatch(issue)) {
         await this.dispatchIssue(issue, null);
         message = `Created ${issue.identifier} and dispatched it`;
       } else if (!route) {
@@ -576,6 +680,8 @@ export class Orchestrator extends EventEmitter {
       }
     } else if (!route) {
       message = `Created ${issue.identifier}, but dispatch is blocked: repository route is not configured`;
+    } else if (governance?.blocks_dispatch && !this.hasGovernanceOverride(issue)) {
+      message = `Created ${issue.identifier}, but dispatch is blocked: ${governance.summary}`;
     }
 
     return {
@@ -753,6 +859,438 @@ export class Orchestrator extends EventEmitter {
       message: `Queued ${issue.identifier} for retry`,
       issue_id: issue.id,
       issue_identifier: issue.identifier,
+    };
+  }
+
+  async overrideGovernance(issueId: string): Promise<RuntimeActionResult> {
+    const workItem =
+      this.workItemRepository.findByLinearIssueId(issueId) ??
+      this.workItemRepository.findByIdentifier(issueId);
+    if (!workItem) {
+      return {
+        accepted: false,
+        status: 'not_found',
+        message: `Issue ${issueId} was not found`,
+        issue_id: null,
+        issue_identifier: null,
+      };
+    }
+
+    if (workItem.governance_override_at) {
+      return {
+        accepted: true,
+        status: 'completed',
+        message: `Override already approved for ${workItem.linear_identifier}`,
+        issue_id: workItem.linear_issue_id,
+        issue_identifier: workItem.linear_identifier,
+      };
+    }
+
+    const requiresOverride =
+      workItem.orchestrator_state === 'halted' &&
+      Boolean(workItem.governance_decision && workItem.governance_decision !== 'accept');
+    if (!requiresOverride) {
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: `${workItem.linear_identifier} does not currently require a governance override`,
+        issue_id: workItem.linear_issue_id,
+        issue_identifier: workItem.linear_identifier,
+      };
+    }
+
+    const fetched = await this.tracker.fetchIssueById(workItem.linear_issue_id);
+    if (fetched.error && !fetched.issue) {
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: fetched.errorMessage || `Failed to load current issue state for ${workItem.linear_identifier}`,
+        issue_id: workItem.linear_issue_id,
+        issue_identifier: workItem.linear_identifier,
+      };
+    }
+
+    const issue = fetched.issue ?? this.buildSyntheticIssueFromWorkItem(workItem);
+    if (!this.isActiveTrackerState(issue.state)) {
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: `${issue.identifier} is in tracker state "${issue.state}" and cannot be overridden`,
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+      };
+    }
+
+    const overrideAt = new Date();
+    const overrideReason = 'Manual operator override';
+    this.workItemRepository.update({
+      id: workItem.id,
+      linear_state: issue.state,
+      governance_override_at: overrideAt,
+      governance_override_reason: overrideReason,
+      orchestrator_state: 'discovering',
+    });
+    this.governanceAssessmentRepository.create({
+      id: crypto.randomUUID(),
+      work_item_id: workItem.id,
+      issue_id: issue.id,
+      decision: workItem.governance_decision ?? 'accept',
+      status: 'advisory',
+      summary: `Governance override approved for ${issue.identifier}; dispatch may continue despite the ${workItem.governance_decision ?? 'previous'} intake gate.`,
+      constitution_hits_json: workItem.constitution_hits,
+      detail_json: {
+        event: 'override_approved',
+        reason: overrideReason,
+        previous_decision: workItem.governance_decision,
+        previous_status: workItem.governance_status,
+      },
+    });
+    this.emitTimelineEvent(issue, {
+      level: 'warn',
+      category: 'diagnostic',
+      code: 'governance_override_approved',
+      message: `Governance override approved for ${issue.identifier}; continuing despite the ${workItem.governance_decision ?? 'previous'} intake gate.`,
+      turn: null,
+      tool_name: null,
+      detail: {
+        issue_identifier: issue.identifier,
+        governance_decision: workItem.governance_decision,
+        reason: overrideReason,
+      },
+    });
+
+    const route = this.tryResolveRepositoryRoute(issue);
+    if (!route) {
+      this.emit('state:changed', this.getStateSnapshot());
+      return {
+        accepted: true,
+        status: 'accepted',
+        message: `Override approved for ${issue.identifier}, but dispatch is still blocked: repository route is not configured`,
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+      };
+    }
+
+    if (this.running && this.hasAvailableSlots() && this.shouldDispatch(issue)) {
+      await this.dispatchIssue(issue, null);
+      return {
+        accepted: true,
+        status: 'accepted',
+        message: `Override approved for ${issue.identifier} and dispatched it`,
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+      };
+    }
+
+    this.emit('state:changed', this.getStateSnapshot());
+    if (this.running) {
+      this.scheduleTick(0);
+    }
+
+    return {
+      accepted: true,
+      status: 'accepted',
+      message: `Override approved for ${issue.identifier}`,
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+    };
+  }
+
+  async rewriteGovernance(issueId: string): Promise<RuntimeActionResult> {
+    const workItem =
+      this.workItemRepository.findByLinearIssueId(issueId) ??
+      this.workItemRepository.findByIdentifier(issueId);
+    if (!workItem) {
+      return {
+        accepted: false,
+        status: 'not_found',
+        message: `Issue ${issueId} was not found`,
+        issue_id: null,
+        issue_identifier: null,
+      };
+    }
+
+    if (
+      workItem.orchestrator_state !== 'halted' ||
+      workItem.governance_decision !== 'accept_with_rewrite'
+    ) {
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: `${workItem.linear_identifier} is not currently waiting on a governance rewrite`,
+        issue_id: workItem.linear_issue_id,
+        issue_identifier: workItem.linear_identifier,
+      };
+    }
+
+    const issueResult = await this.loadGovernanceActionIssue(workItem);
+    if ('accepted' in issueResult) {
+      return issueResult;
+    }
+    const issue = issueResult.issue;
+    const route = this.tryResolveRepositoryRoute(issue);
+    if (!route) {
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: `Rewrite is blocked because ${issue.identifier} does not have a configured repository route`,
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+      };
+    }
+
+    const governance = await this.reassessIntakeGovernance(issue, route);
+    if (governance.decision !== 'accept_with_rewrite') {
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: `${issue.identifier} no longer requires a governance rewrite`,
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+      };
+    }
+
+    const title = governance.rewrite_title?.trim() || issue.title;
+    const description = governance.rewrite_description?.trim() || issue.description;
+    const updated = await this.tracker.updateIssueContent(issue.id, {
+      title,
+      description,
+    });
+    if (!updated.success) {
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: updated.error || `Failed to update ${issue.identifier} in Linear`,
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+      };
+    }
+
+    const refreshedIssueResult = await this.tracker.fetchIssueById(issue.id);
+    const refreshedIssue = refreshedIssueResult.issue ?? {
+      ...issue,
+      title,
+      description,
+    };
+    const refreshedGovernance = await this.reassessIntakeGovernance(refreshedIssue, route);
+
+    this.acceptGovernanceSuggestions(issue.id, 'accept_with_rewrite');
+    this.refreshWorkItemGovernanceState(workItem.id, refreshedIssue, refreshedGovernance);
+    this.recordGovernanceAssessment(workItem.id, refreshedIssue.id, refreshedGovernance, {
+      event: 'rewrite_applied',
+      previous_decision: workItem.governance_decision,
+      previous_summary: workItem.governance_summary,
+      rewrite_title: title,
+      rewrite_description: description,
+    });
+    this.ensureGovernanceSuggestions(refreshedIssue, workItem.id, route, refreshedGovernance);
+    this.emitTimelineEvent(refreshedIssue, {
+      level: refreshedGovernance.blocks_dispatch ? 'warn' : 'info',
+      category: 'diagnostic',
+      code: 'governance_rewrite_applied',
+      message: `Governance rewrite applied to ${refreshedIssue.identifier}.`,
+      turn: null,
+      tool_name: null,
+      detail: {
+        previous_decision: workItem.governance_decision,
+        governance_decision: refreshedGovernance.decision,
+        rewrite_title: title,
+      },
+    });
+
+    if (!refreshedGovernance.blocks_dispatch && this.running && this.hasAvailableSlots() && this.shouldDispatch(refreshedIssue)) {
+      await this.dispatchIssue(refreshedIssue, null);
+      return {
+        accepted: true,
+        status: 'accepted',
+        message: `Rewrite applied for ${refreshedIssue.identifier} and dispatched it`,
+        issue_id: refreshedIssue.id,
+        issue_identifier: refreshedIssue.identifier,
+      };
+    }
+
+    this.emit('state:changed', this.getStateSnapshot());
+    if (this.running) {
+      this.scheduleTick(0);
+    }
+
+    return {
+      accepted: true,
+      status: 'accepted',
+      message: refreshedGovernance.blocks_dispatch
+        ? `Rewrite applied for ${refreshedIssue.identifier}, but dispatch is still blocked: ${refreshedGovernance.summary}`
+        : `Rewrite applied for ${refreshedIssue.identifier}`,
+      issue_id: refreshedIssue.id,
+      issue_identifier: refreshedIssue.identifier,
+    };
+  }
+
+  async splitGovernance(issueId: string): Promise<RuntimeActionResult> {
+    const workItem =
+      this.workItemRepository.findByLinearIssueId(issueId) ??
+      this.workItemRepository.findByIdentifier(issueId);
+    if (!workItem) {
+      return {
+        accepted: false,
+        status: 'not_found',
+        message: `Issue ${issueId} was not found`,
+        issue_id: null,
+        issue_identifier: null,
+      };
+    }
+
+    if (
+      workItem.orchestrator_state !== 'halted' ||
+      workItem.governance_decision !== 'split_before_implement'
+    ) {
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: `${workItem.linear_identifier} is not currently waiting on a governance split`,
+        issue_id: workItem.linear_issue_id,
+        issue_identifier: workItem.linear_identifier,
+      };
+    }
+
+    const issueResult = await this.loadGovernanceActionIssue(workItem);
+    if ('accepted' in issueResult) {
+      return issueResult;
+    }
+    const issue = issueResult.issue;
+    const route = this.tryResolveRepositoryRoute(issue);
+    if (!route) {
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: `Split is blocked because ${issue.identifier} does not have a configured repository route`,
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+      };
+    }
+
+    const governance = await this.reassessIntakeGovernance(issue, route);
+    if (governance.decision !== 'split_before_implement') {
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: `${issue.identifier} no longer requires a governance split`,
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+      };
+    }
+
+    if (!issue.project_slug?.trim()) {
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: `${issue.identifier} does not have a project_slug, so Symphony cannot create split follow-up issues`,
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+      };
+    }
+
+    const splitSuggestions = governance.split_suggestions.filter((suggestion) => suggestion.trim());
+    if (splitSuggestions.length < 2) {
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: `${issue.identifier} does not yet have enough concrete split suggestions to execute safely`,
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+      };
+    }
+
+    const createdIdentifiers: string[] = [];
+    for (let index = 1; index < splitSuggestions.length; index += 1) {
+      const childDraft = this.buildGovernanceSplitDraft(issue, splitSuggestions[index]!, index, splitSuggestions.length);
+      const created = await this.createIssue({
+        title: childDraft.title,
+        description: childDraft.description,
+        project_slug: issue.project_slug,
+      });
+      if (!created.accepted || !created.issue_identifier) {
+        return {
+          accepted: false,
+          status: 'rejected',
+          message: created.message || `Failed to create a split follow-up issue for ${issue.identifier}`,
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+        };
+      }
+      createdIdentifiers.push(created.issue_identifier);
+    }
+
+    const primaryDraft = this.buildGovernanceSplitDraft(issue, splitSuggestions[0]!, 0, splitSuggestions.length);
+    const updated = await this.tracker.updateIssueContent(issue.id, {
+      title: primaryDraft.title,
+      description: primaryDraft.description,
+    });
+    if (!updated.success) {
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: updated.error || `Failed to update ${issue.identifier} in Linear`,
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+      };
+    }
+
+    const refreshedIssueResult = await this.tracker.fetchIssueById(issue.id);
+    const refreshedIssue = refreshedIssueResult.issue ?? {
+      ...issue,
+      title: primaryDraft.title,
+      description: primaryDraft.description,
+    };
+    const refreshedGovernance = await this.reassessIntakeGovernance(refreshedIssue, route);
+
+    this.acceptGovernanceSuggestions(issue.id, 'split_before_implement');
+    this.refreshWorkItemGovernanceState(workItem.id, refreshedIssue, refreshedGovernance);
+    this.recordGovernanceAssessment(workItem.id, refreshedIssue.id, refreshedGovernance, {
+      event: 'split_applied',
+      previous_decision: workItem.governance_decision,
+      previous_summary: workItem.governance_summary,
+      created_issue_identifiers: createdIdentifiers,
+      rewritten_title: primaryDraft.title,
+    });
+    this.ensureGovernanceSuggestions(refreshedIssue, workItem.id, route, refreshedGovernance);
+    this.emitTimelineEvent(refreshedIssue, {
+      level: refreshedGovernance.blocks_dispatch ? 'warn' : 'info',
+      category: 'diagnostic',
+      code: 'governance_split_applied',
+      message: `Governance split applied to ${refreshedIssue.identifier}.`,
+      turn: null,
+      tool_name: null,
+      detail: {
+        previous_decision: workItem.governance_decision,
+        governance_decision: refreshedGovernance.decision,
+        created_issue_identifiers: createdIdentifiers,
+      },
+    });
+
+    if (!refreshedGovernance.blocks_dispatch && this.running && this.hasAvailableSlots() && this.shouldDispatch(refreshedIssue)) {
+      await this.dispatchIssue(refreshedIssue, null);
+      return {
+        accepted: true,
+        status: 'accepted',
+        message: `Split applied for ${refreshedIssue.identifier}, created ${createdIdentifiers.join(', ')}, and dispatched the rewritten issue`,
+        issue_id: refreshedIssue.id,
+        issue_identifier: refreshedIssue.identifier,
+      };
+    }
+
+    this.emit('state:changed', this.getStateSnapshot());
+    if (this.running) {
+      this.scheduleTick(0);
+    }
+
+    return {
+      accepted: true,
+      status: 'accepted',
+      message: refreshedGovernance.blocks_dispatch
+        ? `Split applied for ${refreshedIssue.identifier}, created ${createdIdentifiers.join(', ')}, but dispatch is still blocked: ${refreshedGovernance.summary}`
+        : `Split applied for ${refreshedIssue.identifier}${createdIdentifiers.length ? `; created ${createdIdentifiers.join(', ')}` : ''}`,
+      issue_id: refreshedIssue.id,
+      issue_identifier: refreshedIssue.identifier,
     };
   }
 
@@ -1389,6 +1927,461 @@ export class Orchestrator extends EventEmitter {
     }
   }
 
+  private emitTimelineEvent(issue: Issue, payload: AgentTimelinePayload): void {
+    this.emit('session:event', issue.id, {
+      event: 'timeline',
+      timestamp: new Date(),
+      codex_app_server_pid: null,
+      payload,
+    });
+  }
+
+  private buildSyntheticIssueFromWorkItem(workItem: WorkItem): Issue {
+    return {
+      id: workItem.linear_issue_id,
+      identifier: workItem.linear_identifier,
+      title: workItem.linear_title,
+      description: null,
+      priority: null,
+      state: workItem.linear_state,
+      project_slug: null,
+      project_name: null,
+      branch_name: workItem.branch_name,
+      url: null,
+      labels: [],
+      blocked_by: [],
+      created_at: workItem.created_at,
+      updated_at: workItem.updated_at,
+    };
+  }
+
+  private hasGovernanceOverride(issue: Issue): boolean {
+    const workItem = this.workItemRepository.findByLinearIssueId(issue.id);
+    if (workItem?.governance_override_at) {
+      return true;
+    }
+    return issue.labels.some((label) => {
+      const normalized = label.toLowerCase();
+      return normalized.includes('governance-override') || normalized.includes('symphony-override');
+    });
+  }
+
+  private async loadGovernanceActionIssue(
+    workItem: WorkItem,
+  ): Promise<{ issue: Issue } | RuntimeActionResult> {
+    const fetched = await this.tracker.fetchIssueById(workItem.linear_issue_id);
+    if (fetched.error && !fetched.issue) {
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: fetched.errorMessage || `Failed to load current issue state for ${workItem.linear_identifier}`,
+        issue_id: workItem.linear_issue_id,
+        issue_identifier: workItem.linear_identifier,
+      };
+    }
+
+    const issue = fetched.issue ?? this.buildSyntheticIssueFromWorkItem(workItem);
+    if (!this.isActiveTrackerState(issue.state)) {
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: `${issue.identifier} is in tracker state "${issue.state}" and cannot accept governance actions`,
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+      };
+    }
+
+    return { issue };
+  }
+
+  private async reassessIntakeGovernance(
+    issue: Issue,
+    route: ResolvedRepositoryRoute,
+  ): Promise<IntakeCriticAssessment> {
+    return assessIntakeCritic({
+      issue,
+      route,
+      repositoryRoot: route.local_path,
+    });
+  }
+
+  private refreshWorkItemGovernanceState(
+    workItemId: string,
+    issue: Issue,
+    governance: IntakeCriticAssessment,
+  ): void {
+    this.workItemRepository.update({
+      id: workItemId,
+      linear_title: issue.title,
+      linear_state: issue.state,
+      repo_harness_status: governance.repo_harness_status,
+      constitution_status: governance.constitution_status,
+      governance_status: governance.status,
+      governance_decision: governance.decision,
+      governance_summary: governance.summary,
+      constitution_hits: governance.constitution_hits,
+      orchestrator_state:
+        governance.blocks_dispatch && !this.hasGovernanceOverride(issue)
+          ? 'halted'
+          : 'discovering',
+    });
+  }
+
+  private recordGovernanceAssessment(
+    workItemId: string,
+    issueId: string,
+    governance: IntakeCriticAssessment,
+    detail_json: Record<string, unknown>,
+  ): void {
+    this.governanceAssessmentRepository.create({
+      id: crypto.randomUUID(),
+      work_item_id: workItemId,
+      issue_id: issueId,
+      decision: governance.decision,
+      status: governance.status,
+      summary: governance.summary,
+      constitution_hits_json: governance.constitution_hits,
+      detail_json,
+    });
+  }
+
+  private acceptGovernanceSuggestions(issueId: string, decision: IntakeCriticAssessment['decision']): void {
+    const suggestions = this.governanceSuggestionRepository.findPendingByIssueId(issueId);
+    for (const suggestion of suggestions) {
+      const suggestionDecision = typeof suggestion.detail_json?.decision === 'string'
+        ? suggestion.detail_json.decision
+        : null;
+      const title = suggestion.title.toLowerCase();
+      const matchesDecision =
+        suggestionDecision === decision ||
+        (decision === 'accept_with_rewrite' && title.includes('rewrite')) ||
+        (decision === 'split_before_implement' && title.includes('split'));
+      if (matchesDecision) {
+        this.governanceSuggestionRepository.updateStatus(suggestion.id, 'accepted');
+      }
+    }
+  }
+
+  private buildGovernanceSplitDraft(
+    issue: Issue,
+    suggestion: string,
+    index: number,
+    total: number,
+  ): { title: string; description: string } {
+    const normalizedSuggestion = suggestion.replace(/\s+/g, ' ').trim();
+    const shortTitle = normalizedSuggestion
+      .replace(/^(先|将|把)\s*/u, '')
+      .replace(/^先拆出\s*/u, '')
+      .replace(/[，,。.!].*$/u, '')
+      .trim();
+    const title = shortTitle && shortTitle.length <= 120
+      ? shortTitle
+      : `${issue.title} · Slice ${index + 1}`;
+
+    const description = [
+      `Split from ${issue.identifier}.`,
+      `Focused slice ${index + 1} of ${total}: ${normalizedSuggestion}`,
+      'Keep this issue limited to one concrete, verifiable task.',
+    ].join('\n');
+
+    return {
+      title,
+      description,
+    };
+  }
+
+  private ensureGovernanceSuggestions(
+    issue: Issue,
+    workItemId: string,
+    route: ResolvedRepositoryRoute,
+    governance: IntakeCriticAssessment,
+  ): void {
+    const existing = this.governanceSuggestionRepository.findPendingByIssueId(issue.id);
+    const suggestions: Array<{
+      suggestion_type: 'architecture_alignment' | 'harness_adoption';
+      title: string;
+      summary: string;
+      detail_json: Record<string, unknown>;
+    }> = [];
+
+    if (governance.decision === 'split_before_implement') {
+      suggestions.push({
+        suggestion_type: 'architecture_alignment',
+        title: `[GOVERNANCE] Split ${issue.identifier} before implementation`,
+        summary: governance.split_suggestions[0] || governance.summary,
+        detail_json: {
+          decision: governance.decision,
+          summary: governance.summary,
+          split_suggestions: governance.split_suggestions,
+          github_repo: route.github_repo_full,
+        },
+      });
+    } else if (governance.decision === 'accept_with_rewrite') {
+      suggestions.push({
+        suggestion_type: 'architecture_alignment',
+        title: `[GOVERNANCE] Rewrite ${issue.identifier} into one concrete task`,
+        summary: governance.rewrite_description || governance.summary,
+        detail_json: {
+          decision: governance.decision,
+          summary: governance.summary,
+          rewrite_title: governance.rewrite_title,
+          rewrite_description: governance.rewrite_description,
+          github_repo: route.github_repo_full,
+        },
+      });
+    } else if (governance.decision === 'defer' && route.require_repo_harness) {
+      suggestions.push({
+        suggestion_type: 'harness_adoption',
+        title: `[GOVERNANCE] Adopt formal repo harness for ${route.github_repo_full}`,
+        summary: governance.summary,
+        detail_json: {
+          decision: governance.decision,
+          summary: governance.summary,
+          github_repo: route.github_repo_full,
+        },
+      });
+    } else if (governance.decision === 'reject_conflicting') {
+      suggestions.push({
+        suggestion_type: 'architecture_alignment',
+        title: `[GOVERNANCE] Realign ${issue.identifier} with the project constitution`,
+        summary: governance.summary,
+        detail_json: {
+          decision: governance.decision,
+          summary: governance.summary,
+          constitution_hits: governance.constitution_hits,
+          github_repo: route.github_repo_full,
+        },
+      });
+    }
+
+    for (const suggestion of suggestions) {
+      const duplicate = existing.some((record) => (
+        record.suggestion_type === suggestion.suggestion_type &&
+        record.title === suggestion.title
+      ));
+      if (duplicate) {
+        continue;
+      }
+
+      this.governanceSuggestionRepository.create({
+        id: crypto.randomUUID(),
+        work_item_id: workItemId,
+        issue_id: issue.id,
+        suggestion_type: suggestion.suggestion_type,
+        title: suggestion.title,
+        summary: suggestion.summary,
+        detail_json: suggestion.detail_json,
+      });
+      this.emitTimelineEvent(issue, {
+        level: 'info',
+        category: 'diagnostic',
+        code: 'governance_suggestion_created',
+        message: suggestion.title,
+        turn: null,
+        tool_name: null,
+        detail: {
+          suggestion_type: suggestion.suggestion_type,
+          summary: suggestion.summary,
+        },
+      });
+    }
+  }
+
+  private async prepareGovernedExecutionState(
+    issue: Issue,
+    workItemId: string,
+    workspacePath: string,
+    route: ResolvedRepositoryRoute,
+    mode: 'dev' | 'review',
+  ): Promise<GovernedExecutionState> {
+    let harness = await loadRepositoryHarness(workspacePath);
+    const shouldEmitMissingHarness = harness.status === 'missing';
+
+    if (harness.status === 'missing') {
+      harness = await inferShadowHarness({
+        workspacePath,
+        repoKey: route.github_repo_full,
+        repository: this.shadowHarnessRepository,
+      });
+    }
+
+    const constitution = await loadRepositoryConstitution(workspacePath);
+    const governance = await assessIntakeCritic({
+      issue,
+      route,
+      repositoryRoot: workspacePath,
+      resolvedHarness: harness,
+      resolvedConstitution: constitution,
+    });
+
+    await initializeChangePack({
+      workspacePath,
+      issue,
+      mode,
+      profile: mode === 'review' ? 'review' : undefined,
+      harness: harness.config,
+      governanceSummary: governance.summary,
+    });
+
+    const changePackState = await evaluateChangePackState({
+      workspacePath,
+      issue,
+      mode,
+    });
+
+    const fitnessSignals: FitnessSignal[] = [];
+    if (governance.status === 'blocked') {
+      fitnessSignals.push({
+        code: 'constitution_violation',
+        summary: governance.summary,
+        severity: 'high',
+      });
+    }
+
+    this.workItemRepository.update({
+      id: workItemId,
+      repo_harness_status: harness.status,
+      constitution_status: constitution.status,
+      governance_status: governance.status,
+      governance_decision: governance.decision,
+      governance_summary: governance.summary,
+      change_pack_summary: changePackState.summary,
+      task_status: changePackState.task_status,
+      evidence_summary: changePackState.evidence_summary,
+      missing_requirements: changePackState.missing_requirements,
+      constitution_hits: governance.constitution_hits,
+      fitness_signals: fitnessSignals,
+    });
+
+    this.governanceAssessmentRepository.create({
+      id: crypto.randomUUID(),
+      work_item_id: workItemId,
+      issue_id: issue.id,
+      decision: governance.decision,
+      status: governance.status,
+      summary: governance.summary,
+      constitution_hits_json: governance.constitution_hits,
+      detail_json: {
+        mode,
+        repo_harness_status: harness.status,
+        constitution_status: constitution.status,
+        missing_requirements: changePackState.missing_requirements,
+      },
+    });
+    this.ensureGovernanceSuggestions(issue, workItemId, route, governance);
+
+    if (shouldEmitMissingHarness) {
+      this.emitTimelineEvent(issue, {
+        level: 'warn',
+        category: 'diagnostic',
+        code: 'repo_harness_missing',
+        message: `No .symphony-repo.yaml found for ${route.github_repo_full}; using a shadow harness.`,
+        turn: null,
+        tool_name: null,
+        detail: {
+          github_repo: route.github_repo_full,
+          repo_harness_status: harness.status,
+        },
+      });
+      this.emitTimelineEvent(issue, {
+        level: 'info',
+        category: 'diagnostic',
+        code: 'shadow_harness_updated',
+        message: `Shadow harness prepared for ${route.github_repo_full}.`,
+        turn: null,
+        tool_name: null,
+        detail: {
+          github_repo: route.github_repo_full,
+          inferred_from: harness.inferred_from,
+        },
+      });
+    }
+
+    if (constitution.status === 'missing') {
+      this.emitTimelineEvent(issue, {
+        level: 'warn',
+        category: 'diagnostic',
+        code: 'constitution_missing',
+        message: `No .symphony-constitution.md found for ${route.github_repo_full}; governance is degraded.`,
+        turn: null,
+        tool_name: null,
+        detail: {
+          github_repo: route.github_repo_full,
+        },
+      });
+    }
+
+    this.emitTimelineEvent(issue, {
+      level: 'info',
+      category: 'diagnostic',
+      code: 'change_pack_initialized',
+      message: `Initialized change pack for ${issue.identifier}.`,
+      turn: null,
+      tool_name: null,
+      detail: {
+        profile: changePackState.summary.profile,
+        complexity: changePackState.summary.complexity,
+      },
+    });
+
+    this.emitTimelineEvent(issue, {
+      level: governance.blocks_dispatch ? 'warn' : 'info',
+      category: 'diagnostic',
+      code: governance.blocks_dispatch ? 'governance_blocked' : 'governance_assessed',
+      message: governance.summary,
+      turn: null,
+      tool_name: null,
+      detail: {
+        decision: governance.decision,
+        status: governance.status,
+        constitution_hits: governance.constitution_hits,
+        split_suggestions: governance.split_suggestions,
+        rewrite_title: governance.rewrite_title,
+      },
+    });
+
+    if (changePackState.missing_requirements.length > 0) {
+      this.emitTimelineEvent(issue, {
+        level: 'info',
+        category: 'diagnostic',
+        code: 'completion_blocked',
+        message: `${issue.identifier} still needs ${changePackState.missing_requirements.length} completion requirement(s).`,
+        turn: null,
+        tool_name: null,
+        detail: {
+          missing_requirements: changePackState.missing_requirements,
+        },
+      });
+    }
+
+    if (route.require_repo_harness && harness.status !== 'formal') {
+      this.emitTimelineEvent(issue, {
+        level: 'error',
+        category: 'diagnostic',
+        code: 'repo_harness_missing',
+        message: `${issue.identifier} requires a formal .symphony-repo.yaml before dispatch can continue.`,
+        turn: null,
+        tool_name: null,
+        detail: {
+          github_repo: route.github_repo_full,
+          required: true,
+        },
+      });
+    }
+
+    return {
+      harness,
+      constitutionStatus: constitution.status,
+      governance,
+      changePackSummary: changePackState.summary,
+      taskStatus: changePackState.task_status,
+      evidenceSummary: changePackState.evidence_summary,
+      missingRequirements: changePackState.missing_requirements,
+      constitutionHits: governance.constitution_hits,
+      fitnessSignals,
+    };
+  }
+
   private tryResolveRepositoryRoute(issue: Issue): ResolvedRepositoryRoute | null {
     try {
       const route = this.resolveRepositoryRoute(issue);
@@ -1689,9 +2682,16 @@ export class Orchestrator extends EventEmitter {
       developmentLog: string | null;
       reviewReport: string | null;
     },
+    missingRequirements: CompletionRequirement[],
   ): boolean {
     const complexity = judgeComplexity(issue).complexity;
-    const hasCompletionEvidence = this.artifactSuggestsCompletion(mode, workspaceArtifacts);
+    const artifactCompletion = this.artifactSuggestsCompletion(mode, workspaceArtifacts);
+    const onlyLightweightFallbackRequirements =
+      missingRequirements.length > 0 &&
+      missingRequirements.every((requirement) => ['handover', 'verification'].includes(requirement.key));
+    const hasCompletionEvidence =
+      artifactCompletion &&
+      (missingRequirements.length === 0 || (mode === 'dev' && onlyLightweightFallbackRequirements));
 
     if (!hasCompletionEvidence) {
       return false;
@@ -1702,6 +2702,41 @@ export class Orchestrator extends EventEmitter {
     }
 
     return turnNumber >= turnBudget;
+  }
+
+  private reconcileMissingRequirementsWithArtifacts(
+    mode: 'dev' | 'review',
+    missingRequirements: CompletionRequirement[],
+    workspaceArtifacts: {
+      handover: string | null;
+      developmentLog: string | null;
+      reviewReport: string | null;
+    },
+  ): CompletionRequirement[] {
+    return missingRequirements.filter((requirement) => {
+      if (requirement.key === 'handover' && workspaceArtifacts.handover) {
+        return false;
+      }
+
+      if (
+        requirement.key === 'review_report' &&
+        mode === 'review' &&
+        workspaceArtifacts.reviewReport &&
+        parseCanonicalReviewReport(workspaceArtifacts.reviewReport)
+      ) {
+        return false;
+      }
+
+      if (
+        requirement.key === 'verification' &&
+        mode === 'dev' &&
+        this.artifactSuggestsCompletion(mode, workspaceArtifacts)
+      ) {
+        return false;
+      }
+
+      return true;
+    });
   }
 
   private async decideNextSupervisorAction(params: {
@@ -1716,6 +2751,9 @@ export class Orchestrator extends EventEmitter {
       handover: string | null;
       developmentLog: string | null;
       reviewReport: string | null;
+    };
+    completionContext: {
+      missing_requirements: CompletionRequirement[];
     };
     transcript: TurnTranscriptEntry[];
     timeline: AgentTimelinePayload[];
@@ -2020,6 +3058,60 @@ export class Orchestrator extends EventEmitter {
         return result;
       }
 
+      let governedState = await this.prepareGovernedExecutionState(
+        issue,
+        workItem.id,
+        workspace.path,
+        route,
+        isReview ? 'review' : 'dev',
+      );
+
+      if (route.require_repo_harness && governedState.harness.status !== 'formal') {
+        result.failure_reason = 'dispatch_setup';
+        result.outcome = 'halted';
+        result.next_action = 'stop';
+        result.final_state = issue.state;
+        result.error = `Formal repo harness required before dispatch for ${route.github_repo_full}.`;
+        this.workItemRepository.update({
+          id: workItem.id,
+          orchestrator_state: 'halted',
+        });
+        return result;
+      }
+
+      if (
+        governedState.governance.blocks_dispatch &&
+        !this.hasGovernanceOverride(issue)
+      ) {
+        result.failure_reason = 'dispatch_setup';
+        result.outcome = 'halted';
+        result.next_action = 'stop';
+        result.final_state = issue.state;
+        result.error = governedState.governance.summary;
+        this.workItemRepository.update({
+          id: workItem.id,
+          orchestrator_state: 'halted',
+        });
+        return result;
+      }
+      if (
+        governedState.governance.blocks_dispatch &&
+        this.hasGovernanceOverride(issue)
+      ) {
+        this.emitTimelineEvent(issue, {
+          level: 'warn',
+          category: 'diagnostic',
+          code: 'governance_override_approved',
+          message: `Governance override detected for ${issue.identifier}; continuing despite the ${governedState.governance.decision} intake gate.`,
+          turn: null,
+          tool_name: null,
+          detail: {
+            issue_identifier: issue.identifier,
+            governance_decision: governedState.governance.decision,
+          },
+        });
+      }
+
       // Step 3: Build prompt - use review-specific prompt for "In Review" state
       const cliCommand = isReview ? 'review' : 'dev';
       const promptIssue = !isReview && issue.state.toLowerCase() === 'todo'
@@ -2180,6 +3272,37 @@ export class Orchestrator extends EventEmitter {
             activeIssue.identifier,
             isReview ? 'review' : 'dev',
           );
+          governedState = await this.prepareGovernedExecutionState(
+            activeIssue,
+            workItem.id,
+            workspace.path,
+            route,
+            isReview ? 'review' : 'dev',
+          );
+          const hasExplicitHarnessRequirements = Boolean(
+            governedState.harness.config?.verification?.required_commands?.length ||
+            governedState.harness.config?.verification?.required_artifacts?.length,
+          );
+          const simpleArtifactCompleteWithoutFormalHarness =
+            !isReview &&
+            (
+              judgeComplexity(activeIssue).complexity === 'small' ||
+              turnNumber >= turnBudget
+            ) &&
+            this.artifactSuggestsCompletion('dev', workspaceArtifacts) &&
+            !hasExplicitHarnessRequirements;
+          const effectiveMissingRequirements = this.reconcileMissingRequirementsWithArtifacts(
+            isReview ? 'review' : 'dev',
+            governedState.missingRequirements,
+            workspaceArtifacts,
+          );
+          if (simpleArtifactCompleteWithoutFormalHarness) {
+            console.log(
+              `[orchestrator] Finishing ${activeIssue.identifier} after turn ${turnNumber} because a simple task already has sufficient completion evidence.`,
+            );
+            sessionActive = false;
+            continue;
+          }
           if (
             this.shouldAutoFinishAfterTurn(
               isReview ? 'review' : 'dev',
@@ -2187,6 +3310,7 @@ export class Orchestrator extends EventEmitter {
               turnNumber,
               turnBudget,
               workspaceArtifacts,
+              effectiveMissingRequirements,
             )
           ) {
             console.log(
@@ -2205,6 +3329,9 @@ export class Orchestrator extends EventEmitter {
             prompt: currentPrompt,
             workspacePath: workspace.path,
             workspaceArtifacts,
+            completionContext: {
+              missing_requirements: effectiveMissingRequirements,
+            },
             transcript: turnResult.transcript,
             timeline: turnResult.timeline,
           });
@@ -2212,7 +3339,7 @@ export class Orchestrator extends EventEmitter {
           if (nextAction.kind === 'continue') {
             if (turnNumber >= turnBudget) {
               if (
-                this.artifactSuggestsCompletion(isReview ? 'review' : 'dev', workspaceArtifacts)
+                effectiveMissingRequirements.length === 0
               ) {
                 console.log(
                   `[orchestrator] Forcing finish for ${activeIssue.identifier} at max turns because workspace artifacts indicate completion.`,
@@ -2574,6 +3701,47 @@ export class Orchestrator extends EventEmitter {
     }
 
     if (result.outcome === 'completed') {
+      const workItemForCompletion =
+        result.work_item_id ? this.workItemRepository.findById(result.work_item_id) : null;
+      if (workItemForCompletion?.repo_harness_status === 'shadow') {
+        const shadowRecord = this.shadowHarnessRepository.markRunOutcome(
+          workItemForCompletion.github_repo,
+          true,
+        );
+        if (
+          shadowRecord &&
+          !shadowRecord.adoption_suggested_at &&
+          suggestHarnessAdoption({
+            successfulRuns: shadowRecord.successful_runs,
+            failedRuns: shadowRecord.failed_runs,
+          })
+        ) {
+          this.shadowHarnessRepository.markAdoptionSuggested(workItemForCompletion.github_repo);
+          this.governanceSuggestionRepository.create({
+            id: crypto.randomUUID(),
+            work_item_id: workItemForCompletion.id,
+            issue_id: workItemForCompletion.linear_issue_id,
+            suggestion_type: 'harness_adoption',
+            title: `[GOVERNANCE] Adopt formal repo harness for ${workItemForCompletion.github_repo}`,
+            summary: 'This repository has completed several successful runs with the shadow harness. Consider promoting it to a formal .symphony-repo.yaml.',
+            detail_json: {
+              github_repo: workItemForCompletion.github_repo,
+            },
+          });
+          this.emitTimelineEvent(runningEntry.issue, {
+            level: 'info',
+            category: 'diagnostic',
+            code: 'repo_harness_adoption_suggested',
+            message: `Shadow harness for ${workItemForCompletion.github_repo} is stable enough to promote.`,
+            turn: null,
+            tool_name: null,
+            detail: {
+              github_repo: workItemForCompletion.github_repo,
+            },
+          });
+        }
+      }
+
       if (runningEntry.issue.state.toLowerCase() === 'in review') {
         await this.handleReviewCompletion(runningEntry, result);
       } else {
@@ -2659,6 +3827,11 @@ export class Orchestrator extends EventEmitter {
         }
       }
     } else {
+      const workItemForFailure =
+        result.work_item_id ? this.workItemRepository.findById(result.work_item_id) : null;
+      if (workItemForFailure?.repo_harness_status === 'shadow') {
+        this.shadowHarnessRepository.markRunOutcome(workItemForFailure.github_repo, false);
+      }
       this.setRunningStage(issueId, 'failed');
       console.error('[orchestrator] Worker failed:', identifier, result.error);
       const attempt = (runningEntry.retry_attempt || 0) + 1;

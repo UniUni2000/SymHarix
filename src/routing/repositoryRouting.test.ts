@@ -60,11 +60,13 @@ describe('RepositoryRoutingService', () => {
       github_owner: 'acme',
       github_repo: 'repo-a',
       local_path: path.resolve(projectRoot, 'repos/repo-a'),
+      require_repo_harness: false,
     });
     expect(routes['backend-core']).toEqual({
       github_owner: 'acme-platform',
       github_repo: 'backend',
       local_path: null,
+      require_repo_harness: false,
     });
 
     const resolved = service.resolveIssue(makeIssue());
@@ -76,6 +78,7 @@ describe('RepositoryRoutingService', () => {
       github_repo_full: 'acme/repo-a',
       local_path: path.resolve(projectRoot, 'repos/repo-a'),
       cache_key: 'acme__repo-a',
+      require_repo_harness: false,
     });
   });
 

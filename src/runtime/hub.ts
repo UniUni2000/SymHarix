@@ -1,5 +1,12 @@
 import type { Database } from 'bun:sqlite';
-import { AgentRunRepository, ReviewEventRepository, SyncEventRepository, WorkItemRepository } from '../database';
+import {
+  AgentRunRepository,
+  GovernanceAssessmentRepository,
+  GovernanceSuggestionRepository,
+  ReviewEventRepository,
+  SyncEventRepository,
+  WorkItemRepository,
+} from '../database';
 import type { WorkItem } from '../database/types';
 import type { OrchestratorStateSnapshot } from '../orchestrator';
 import type { AgentEvent, AgentTimelinePayload, Issue } from '../types';
@@ -26,6 +33,9 @@ interface RuntimeHubController {
   createIssue(input: CreateIssueRequest): Promise<CreateIssueResult>;
   stopIssue(issueId: string): Promise<RuntimeActionResult>;
   retryIssue(issueId: string): Promise<RuntimeActionResult>;
+  overrideGovernance(issueId: string): Promise<RuntimeActionResult>;
+  rewriteGovernance(issueId: string): Promise<RuntimeActionResult>;
+  splitGovernance(issueId: string): Promise<RuntimeActionResult>;
   on(event: string, listener: (...args: any[]) => void): this;
   off?(event: string, listener: (...args: any[]) => void): this;
 }
@@ -94,8 +104,10 @@ function normalizeSummary(value: string | null | undefined, fallback: string, ma
 export class RuntimeHub implements RuntimeControlPlane {
   private readonly workItemRepository: WorkItemRepository;
   private readonly agentRunRepository: AgentRunRepository;
+  private readonly governanceAssessmentRepository: GovernanceAssessmentRepository;
   private readonly reviewEventRepository: ReviewEventRepository;
   private readonly syncEventRepository: SyncEventRepository;
+  private readonly governanceSuggestionRepository: GovernanceSuggestionRepository;
   private readonly timelineHistoryLimit: number;
   private readonly issueCacheById = new Map<string, Issue>();
   private readonly timelineByIssueId = new Map<string, RuntimeTimelineEvent[]>();
@@ -111,8 +123,10 @@ export class RuntimeHub implements RuntimeControlPlane {
   ) {
     this.workItemRepository = new WorkItemRepository(db);
     this.agentRunRepository = new AgentRunRepository(db);
+    this.governanceAssessmentRepository = new GovernanceAssessmentRepository(db);
     this.reviewEventRepository = new ReviewEventRepository(db);
     this.syncEventRepository = new SyncEventRepository(db);
+    this.governanceSuggestionRepository = new GovernanceSuggestionRepository(db);
     this.timelineHistoryLimit = Math.max(10, options.timelineHistoryLimit ?? 200);
     this.controller = controller;
     this.bindControllerListeners();
@@ -226,6 +240,39 @@ export class RuntimeHub implements RuntimeControlPlane {
     const workItem = this.resolveWorkItem(id);
     const issueId = workItem?.linear_issue_id ?? id;
     const result = await this.controller.retryIssue(issueId);
+    this.publishOverview();
+    if (result.issue_id) {
+      this.publishIssue(result.issue_id);
+    }
+    return result;
+  }
+
+  async overrideGovernance(id: string): Promise<RuntimeActionResult> {
+    const workItem = this.resolveWorkItem(id);
+    const issueId = workItem?.linear_issue_id ?? id;
+    const result = await this.controller.overrideGovernance(issueId);
+    this.publishOverview();
+    if (result.issue_id) {
+      this.publishIssue(result.issue_id);
+    }
+    return result;
+  }
+
+  async rewriteGovernance(id: string): Promise<RuntimeActionResult> {
+    const workItem = this.resolveWorkItem(id);
+    const issueId = workItem?.linear_issue_id ?? id;
+    const result = await this.controller.rewriteGovernance(issueId);
+    this.publishOverview();
+    if (result.issue_id) {
+      this.publishIssue(result.issue_id);
+    }
+    return result;
+  }
+
+  async splitGovernance(id: string): Promise<RuntimeActionResult> {
+    const workItem = this.resolveWorkItem(id);
+    const issueId = workItem?.linear_issue_id ?? id;
+    const result = await this.controller.splitGovernance(issueId);
     this.publishOverview();
     if (result.issue_id) {
       this.publishIssue(result.issue_id);
@@ -429,6 +476,20 @@ export class RuntimeHub implements RuntimeControlPlane {
       (entry) => entry.issue_id === workItem.linear_issue_id,
     ) ?? null;
     const timeline = this.timelineByIssueId.get(workItem.linear_issue_id) ?? [];
+    const hasOverride = Boolean(workItem.governance_override_at);
+    const canOverrideGovernance =
+      !hasOverride &&
+      !running &&
+      !retrying &&
+      workItem.orchestrator_state === 'halted' &&
+      Boolean(workItem.governance_decision && workItem.governance_decision !== 'accept') &&
+      !this.isTerminalState(workItem.linear_state);
+    const canRewriteGovernance =
+      canOverrideGovernance &&
+      workItem.governance_decision === 'accept_with_rewrite';
+    const canSplitGovernance =
+      canOverrideGovernance &&
+      workItem.governance_decision === 'split_before_implement';
 
     return {
       issue_id: workItem.linear_issue_id,
@@ -444,6 +505,38 @@ export class RuntimeHub implements RuntimeControlPlane {
       github_issue_number: workItem.github_issue_number,
       active_pr_number: workItem.active_pr_number,
       session: running ? this.buildSessionView(running, timeline) : null,
+      repo_harness_status: workItem.repo_harness_status
+        ? {
+            status: workItem.repo_harness_status,
+            adoption_suggested: this.governanceSuggestionRepository
+              .findPendingByIssueId(workItem.linear_issue_id)
+              .some((suggestion) => suggestion.suggestion_type === 'harness_adoption'),
+          }
+        : null,
+      constitution_status: workItem.constitution_status,
+      change_pack_summary: workItem.change_pack_summary,
+      task_status: workItem.task_status,
+      evidence_summary: workItem.evidence_summary,
+      missing_requirements: workItem.missing_requirements,
+      governance_status: workItem.governance_status,
+      governance_decision: workItem.governance_decision,
+      governance_summary: workItem.governance_summary,
+      constitution_hits: workItem.constitution_hits,
+      fitness_signals: workItem.fitness_signals,
+      active_governance_suggestions: this.governanceSuggestionRepository
+        .findPendingByIssueId(workItem.linear_issue_id)
+        .map((suggestion) => ({
+          id: suggestion.id,
+          suggestion_type: suggestion.suggestion_type,
+          status: suggestion.status,
+          title: suggestion.title,
+          summary: suggestion.summary,
+        })),
+      governance_override: {
+        active: hasOverride,
+        approved_at: toIso(workItem.governance_override_at),
+        reason: workItem.governance_override_reason,
+      },
       actions: {
         can_stop: Boolean(running || retrying),
         can_retry:
@@ -451,6 +544,9 @@ export class RuntimeHub implements RuntimeControlPlane {
           !retrying &&
           !this.isTerminalState(workItem.linear_state) &&
           !['discovering', 'mapping', 'workspace_ready'].includes(workItem.orchestrator_state),
+        can_override_governance: canOverrideGovernance,
+        can_rewrite_governance: canRewriteGovernance,
+        can_split_governance: canSplitGovernance,
         can_open_pr: workItem.active_pr_number !== null,
       },
       created_at: toIso(workItem.created_at),
@@ -484,9 +580,25 @@ export class RuntimeHub implements RuntimeControlPlane {
       github_issue_number: null,
       active_pr_number: null,
       session: running ? this.buildSessionView(running, timeline) : null,
+      repo_harness_status: null,
+      constitution_status: null,
+      change_pack_summary: null,
+      task_status: null,
+      evidence_summary: null,
+      missing_requirements: [],
+      governance_status: null,
+      governance_decision: null,
+      governance_summary: null,
+      constitution_hits: [],
+      fitness_signals: [],
+      active_governance_suggestions: [],
+      governance_override: null,
       actions: {
         can_stop: Boolean(running || retrying),
         can_retry: !running && !retrying && !this.isTerminalState(issue.state),
+        can_override_governance: false,
+        can_rewrite_governance: false,
+        can_split_governance: false,
         can_open_pr: false,
       },
       created_at: toIso(issue.created_at),
@@ -601,6 +713,48 @@ export class RuntimeHub implements RuntimeControlPlane {
           decision: review.decision,
           requested_changes_md: review.requested_changes_md,
           merge_block_reason: review.merge_block_reason,
+        },
+      });
+    }
+
+    for (const assessment of this.governanceAssessmentRepository.findByWorkItemId(workItem.id)) {
+      entries.push({
+        id: `governance-assessment:${assessment.id}`,
+        issue_id: workItem.linear_issue_id,
+        issue_identifier: workItem.linear_identifier,
+        source: 'governance',
+        title: `Governance assessment · ${assessment.decision}`,
+        summary: normalizeSummary(
+          assessment.summary,
+          `${assessment.decision} for ${workItem.linear_identifier}.`,
+        ),
+        timestamp: assessment.created_at.toISOString(),
+        detail: {
+          decision: assessment.decision,
+          status: assessment.status,
+          constitution_hits: assessment.constitution_hits_json,
+          detail: assessment.detail_json,
+        },
+      });
+    }
+
+    for (const suggestion of this.governanceSuggestionRepository.findByIssueId(workItem.linear_issue_id)) {
+      entries.push({
+        id: `governance-suggestion:${suggestion.id}`,
+        issue_id: workItem.linear_issue_id,
+        issue_identifier: workItem.linear_identifier,
+        source: 'governance',
+        title: `Governance suggestion · ${suggestion.suggestion_type}`,
+        summary: normalizeSummary(
+          suggestion.summary,
+          `${suggestion.suggestion_type} suggested for ${workItem.linear_identifier}.`,
+        ),
+        timestamp: suggestion.created_at.toISOString(),
+        detail: {
+          suggestion_type: suggestion.suggestion_type,
+          status: suggestion.status,
+          title: suggestion.title,
+          detail: suggestion.detail_json,
         },
       });
     }

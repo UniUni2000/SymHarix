@@ -36,6 +36,9 @@ function listCommands(): string {
     'unwatch <ISSUE-ID>',
     'stop <ISSUE-ID>',
     'retry <ISSUE-ID>',
+    'override <ISSUE-ID>',
+    'rewrite <ISSUE-ID>',
+    'split <ISSUE-ID>',
   ].join('\n');
 }
 
@@ -159,6 +162,12 @@ export function parseTextCommand(text: string): BotCommandRequest {
       return { command: 'stop', issue_id: readIssueArg(), raw_text: text };
     case 'retry':
       return { command: 'retry', issue_id: readIssueArg(), raw_text: text };
+    case 'override':
+      return { command: 'override', issue_id: readIssueArg(), raw_text: text };
+    case 'rewrite':
+      return { command: 'rewrite', issue_id: readIssueArg(), raw_text: text };
+    case 'split':
+      return { command: 'split', issue_id: readIssueArg(), raw_text: text };
     case 'watch':
       if (inlineArgs.toLowerCase().startsWith('off ')) {
         return { command: 'unwatch', issue_id: inlineArgs.slice(4).trim() || null, raw_text: text };
@@ -230,6 +239,12 @@ export class BotCommandService {
         return this.handleStop(context, request.issue_id);
       case 'retry':
         return this.handleRetry(context, request.issue_id);
+      case 'override':
+        return this.handleOverride(context, request.issue_id);
+      case 'rewrite':
+        return this.handleRewrite(context, request.issue_id);
+      case 'split':
+        return this.handleSplit(context, request.issue_id);
       case 'help':
       default:
         return { message: listCommands() };
@@ -503,6 +518,75 @@ export class BotCommandService {
     }
 
     const result = await this.runtime.retryIssue(issueId);
+    return {
+      message: result.message,
+      issue_id: result.issue_id,
+    };
+  }
+
+  private async handleOverride(
+    context: BotCommandContext,
+    issueId?: string | null,
+  ): Promise<BotCommandResponse> {
+    if (!this.canWrite(context)) {
+      return {
+        message: `${context.transport} is configured as read-only for this user. Allowed commands: help, status, watch, unwatch.`,
+      };
+    }
+
+    if (!issueId) {
+      return {
+        message: `Issue id is required.\n${listCommands()}`,
+      };
+    }
+
+    const result = await this.runtime.overrideGovernance(issueId);
+    return {
+      message: result.message,
+      issue_id: result.issue_id,
+    };
+  }
+
+  private async handleRewrite(
+    context: BotCommandContext,
+    issueId?: string | null,
+  ): Promise<BotCommandResponse> {
+    if (!this.canWrite(context)) {
+      return {
+        message: `${context.transport} is configured as read-only for this user. Allowed commands: help, status, watch, unwatch.`,
+      };
+    }
+
+    if (!issueId) {
+      return {
+        message: `Issue id is required.\n${listCommands()}`,
+      };
+    }
+
+    const result = await this.runtime.rewriteGovernance(issueId);
+    return {
+      message: result.message,
+      issue_id: result.issue_id,
+    };
+  }
+
+  private async handleSplit(
+    context: BotCommandContext,
+    issueId?: string | null,
+  ): Promise<BotCommandResponse> {
+    if (!this.canWrite(context)) {
+      return {
+        message: `${context.transport} is configured as read-only for this user. Allowed commands: help, status, watch, unwatch.`,
+      };
+    }
+
+    if (!issueId) {
+      return {
+        message: `Issue id is required.\n${listCommands()}`,
+      };
+    }
+
+    const result = await this.runtime.splitGovernance(issueId);
     return {
       message: result.message,
       issue_id: result.issue_id,

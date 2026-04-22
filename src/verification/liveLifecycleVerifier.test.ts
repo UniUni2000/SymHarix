@@ -159,6 +159,8 @@ describe('LiveLifecycleVerifier', () => {
       createIssue: async () => ({ accepted: true, status: 'accepted', message: 'created', issue_id: 'issue-1', issue_identifier: 'INT-1', issue: null }),
       stopIssue: async () => ({ accepted: true, status: 'accepted', message: 'stopped', issue_id: 'issue-1', issue_identifier: 'INT-1' }),
       retryIssue: async () => ({ accepted: true, status: 'queued', message: 'retried', issue_id: 'issue-1', issue_identifier: 'INT-1' }),
+      rewriteGovernance: async () => ({ accepted: true, status: 'accepted', message: 'rewritten', issue_id: 'issue-1', issue_identifier: 'INT-1' }),
+      splitGovernance: async () => ({ accepted: true, status: 'accepted', message: 'split', issue_id: 'issue-1', issue_identifier: 'INT-1' }),
       createStream: () => new ReadableStream(),
       subscribe: () => () => undefined,
     };
@@ -283,6 +285,8 @@ describe('LiveLifecycleVerifier', () => {
       }),
       stopIssue: async () => ({ accepted: true, status: 'accepted', message: 'stopped', issue_id: 'issue-1', issue_identifier: 'INT-1' }),
       retryIssue: async () => ({ accepted: true, status: 'queued', message: 'retried', issue_id: 'issue-1', issue_identifier: 'INT-1' }),
+      rewriteGovernance: async () => ({ accepted: true, status: 'accepted', message: 'rewritten', issue_id: 'issue-1', issue_identifier: 'INT-1' }),
+      splitGovernance: async () => ({ accepted: true, status: 'accepted', message: 'split', issue_id: 'issue-1', issue_identifier: 'INT-1' }),
       createStream: () => new ReadableStream(),
       subscribe: () => () => undefined,
     };
@@ -378,6 +382,8 @@ describe('LiveLifecycleVerifier', () => {
       }),
       stopIssue: async () => ({ accepted: true, status: 'accepted', message: 'stopped', issue_id: 'issue-1', issue_identifier: 'INT-1' }),
       retryIssue: async () => ({ accepted: true, status: 'queued', message: 'retried', issue_id: 'issue-1', issue_identifier: 'INT-1' }),
+      rewriteGovernance: async () => ({ accepted: true, status: 'accepted', message: 'rewritten', issue_id: 'issue-1', issue_identifier: 'INT-1' }),
+      splitGovernance: async () => ({ accepted: true, status: 'accepted', message: 'split', issue_id: 'issue-1', issue_identifier: 'INT-1' }),
       createStream: () => new ReadableStream(),
       subscribe: () => () => undefined,
     };

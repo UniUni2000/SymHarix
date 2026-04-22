@@ -72,6 +72,20 @@ function createRuntimeControlPlane(): RuntimeControlPlane {
       issue_id: id,
       issue_identifier: 'INT-1',
     }),
+    rewriteGovernance: async (id: string) => ({
+      accepted: true,
+      status: 'accepted',
+      message: `Rewrite applied for ${id}`,
+      issue_id: id,
+      issue_identifier: 'INT-1',
+    }),
+    splitGovernance: async (id: string) => ({
+      accepted: true,
+      status: 'accepted',
+      message: `Split applied for ${id}`,
+      issue_id: id,
+      issue_identifier: 'INT-1',
+    }),
     createStream: () => new ReadableStream<Uint8Array>(),
     subscribe: () => () => undefined,
   };
@@ -133,7 +147,7 @@ describe('DefaultBotGateway', () => {
           inbound_path: '/api/v1/bots/discord/interactions',
         },
       },
-      commands: ['help', 'status', 'new', 'project', 'watch', 'unwatch', 'stop', 'retry'],
+      commands: ['help', 'status', 'new', 'project', 'watch', 'unwatch', 'stop', 'retry', 'override', 'rewrite', 'split'],
       watch_presets: ['default', 'verbose', 'failures', 'status'],
       assistant: {
         provider: null,
