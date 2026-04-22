@@ -111,6 +111,7 @@ describe('Config Layer', () => {
                 github_owner: 'acme',
                 github_repo: 'repo-a',
                 local_path: './repos/repo-a',
+                require_repo_harness: true,
               },
             },
           },
@@ -124,6 +125,7 @@ describe('Config Layer', () => {
           github_owner: 'acme',
           github_repo: 'repo-a',
           local_path: expect.stringMatching(/repos\/repo-a$/),
+          require_repo_harness: true,
         },
       });
     });

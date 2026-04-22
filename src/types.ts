@@ -52,6 +52,7 @@ export interface RepositoryRouteConfig {
   github_owner: string;
   github_repo: string;
   local_path: string | null;
+  require_repo_harness?: boolean;
 }
 
 export interface ResolvedRepositoryRoute {
@@ -62,6 +63,115 @@ export interface ResolvedRepositoryRoute {
   github_repo_full: string;
   local_path: string | null;
   cache_key: string;
+  require_repo_harness: boolean;
+}
+
+export type RepositoryHarnessStatus = 'formal' | 'shadow' | 'missing';
+export type ConstitutionStatus = 'present' | 'missing';
+export type GovernanceDecision =
+  | 'accept'
+  | 'accept_with_rewrite'
+  | 'split_before_implement'
+  | 'defer'
+  | 'reject_conflicting';
+export type GovernanceStatus = 'clear' | 'advisory' | 'blocked' | 'degraded';
+export type CompletionRequirementKind =
+  | 'artifact'
+  | 'verification'
+  | 'governance'
+  | 'review';
+
+export interface RepositoryHarnessConfig {
+  profiles?: Array<'coding' | 'research' | 'ui' | 'review'>;
+  commands?: Record<string, string>;
+  artifacts?: string[];
+  verification?: {
+    required_commands?: string[];
+    required_artifacts?: string[];
+  };
+  runtime_hints?: Record<string, string | string[]>;
+}
+
+export interface ResolvedRepositoryHarness {
+  status: RepositoryHarnessStatus;
+  path: string | null;
+  config: RepositoryHarnessConfig | null;
+  inferred_from: string[];
+  adoption_suggested: boolean;
+}
+
+export interface ResolvedRepositoryConstitution {
+  status: ConstitutionStatus;
+  path: string | null;
+  sections: Record<string, string[]>;
+}
+
+export interface ConstitutionHit {
+  section: string;
+  phrase: string;
+}
+
+export interface ChangePackSummary {
+  profile: 'coding' | 'research' | 'ui' | 'review' | null;
+  complexity: 'small' | 'medium' | 'large' | null;
+  files: string[];
+  overview: string | null;
+}
+
+export interface ChangePackTaskStatus {
+  total: number;
+  completed: number;
+  open: number;
+}
+
+export interface CompletionRequirement {
+  key: string;
+  label: string;
+  reason: string;
+  kind: CompletionRequirementKind;
+}
+
+export interface EvidenceSummary {
+  total_requirements: number;
+  satisfied: number;
+  missing: number;
+  notes: string[];
+}
+
+export interface GovernanceAssessment {
+  decision: GovernanceDecision;
+  status: GovernanceStatus;
+  summary: string;
+  constitution_hits: ConstitutionHit[];
+}
+
+export interface IntakeCriticAssessment extends GovernanceAssessment {
+  repo_harness_status: RepositoryHarnessStatus;
+  constitution_status: ConstitutionStatus;
+  blocks_dispatch: boolean;
+  requires_override: boolean;
+  rewrite_title: string | null;
+  rewrite_description: string | null;
+  split_suggestions: string[];
+}
+
+export interface FitnessSignal {
+  code: string;
+  summary: string;
+  severity: 'low' | 'medium' | 'high';
+}
+
+export interface GovernanceSuggestion {
+  id: string;
+  suggestion_type:
+    | 'cleanup'
+    | 'consolidation'
+    | 'architecture_alignment'
+    | 'constitution_update'
+    | 'harness_adoption';
+  status: 'pending' | 'accepted' | 'dismissed';
+  title: string;
+  summary: string;
 }
 
 export interface ResolvedTrackerProject {
@@ -324,7 +434,23 @@ export type AgentTimelineCode =
   | 'turn_failed'
   | 'turn_cancelled'
   | 'missing_repository_route'
-  | 'missing_tracker_project_slug';
+  | 'missing_tracker_project_slug'
+  | 'repo_harness_missing'
+  | 'shadow_harness_updated'
+  | 'repo_harness_adoption_suggested'
+  | 'constitution_missing'
+  | 'governance_assessed'
+  | 'governance_blocked'
+  | 'governance_override_approved'
+  | 'governance_rewrite_applied'
+  | 'governance_split_applied'
+  | 'change_pack_initialized'
+  | 'change_pack_updated'
+  | 'evidence_collected'
+  | 'completion_blocked'
+  | 'fitness_signal_recorded'
+  | 'governance_suggestion_created'
+  | 'constitution_update_suggested';
 
 export interface AgentTimelinePayload {
   level: AgentTimelineLevel;

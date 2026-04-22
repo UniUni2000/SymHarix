@@ -218,5 +218,74 @@ export function createRuntimeRoutes(
       buildActionStatus(result),
     );
   });
+
+  runtime.post('/issues/:id/governance/override', async (c) => {
+    const access = accessController.authorizeMutation(c.req.raw.headers);
+    if (!access.allowed) {
+      return c.json(
+        {
+          success: false,
+          error: 'Write access requires an operator token.',
+        },
+        403,
+      );
+    }
+
+    const result = await controlPlane.overrideGovernance(c.req.param('id'));
+    return c.json(
+      {
+        success: result.accepted,
+        data: result,
+        error: result.accepted ? undefined : result.message,
+      },
+      buildActionStatus(result),
+    );
+  });
+
+  runtime.post('/issues/:id/governance/rewrite', async (c) => {
+    const access = accessController.authorizeMutation(c.req.raw.headers);
+    if (!access.allowed) {
+      return c.json(
+        {
+          success: false,
+          error: 'Write access requires an operator token.',
+        },
+        403,
+      );
+    }
+
+    const result = await controlPlane.rewriteGovernance(c.req.param('id'));
+    return c.json(
+      {
+        success: result.accepted,
+        data: result,
+        error: result.accepted ? undefined : result.message,
+      },
+      buildActionStatus(result),
+    );
+  });
+
+  runtime.post('/issues/:id/governance/split', async (c) => {
+    const access = accessController.authorizeMutation(c.req.raw.headers);
+    if (!access.allowed) {
+      return c.json(
+        {
+          success: false,
+          error: 'Write access requires an operator token.',
+        },
+        403,
+      );
+    }
+
+    const result = await controlPlane.splitGovernance(c.req.param('id'));
+    return c.json(
+      {
+        success: result.accepted,
+        data: result,
+        error: result.accepted ? undefined : result.message,
+      },
+      buildActionStatus(result),
+    );
+  });
   return runtime;
 }

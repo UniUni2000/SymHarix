@@ -221,6 +221,12 @@ function buildDiscordCommandRequest(interaction: DiscordInteraction): BotCommand
       return { command: 'stop', issue_id: values.issue || null };
     case 'retry':
       return { command: 'retry', issue_id: values.issue || null };
+    case 'override':
+      return { command: 'override', issue_id: values.issue || null };
+    case 'rewrite':
+      return { command: 'rewrite', issue_id: values.issue || null };
+    case 'split':
+      return { command: 'split', issue_id: values.issue || null };
     case 'watch':
       return {
         command: 'watch',
@@ -327,7 +333,7 @@ export class DefaultBotGateway implements BotGateway {
           inbound_path: '/api/v1/bots/discord/interactions',
         },
       },
-      commands: ['help', 'status', 'new', 'project', 'watch', 'unwatch', 'stop', 'retry'],
+      commands: ['help', 'status', 'new', 'project', 'watch', 'unwatch', 'stop', 'retry', 'override', 'rewrite', 'split'],
       watch_presets: ['default', 'verbose', 'failures', 'status'],
       assistant: this.assistantService.getDiagnostics(),
       natural_language_enabled: true,

@@ -860,6 +860,48 @@ export class LinearClient {
     };
   }
 
+  async updateIssueContent(
+    issueId: string,
+    input: {
+      title?: string | null;
+      description?: string | null;
+    },
+  ): Promise<{ success: boolean; error?: string }> {
+    const title = input.title?.trim() ?? null;
+    const description = input.description?.trim() ?? null;
+    if (!title && !description) {
+      return {
+        success: false,
+        error: 'Either title or description is required to update a Linear issue',
+      };
+    }
+
+    const mutation = `
+      mutation UpdateIssueContent($issueId: String!, $title: String, $description: String) {
+        issueUpdate(id: $issueId, input: { title: $title, description: $description }) {
+          success
+        }
+      }
+    `;
+
+    const result = await this.graphqlQuery<{ issueUpdate: { success: boolean } }>(mutation, {
+      issueId,
+      title,
+      description,
+    });
+
+    if (result.error) {
+      return {
+        success: false,
+        error: result.errorMessage || 'Linear issue update failed',
+      };
+    }
+
+    return {
+      success: result.data?.issueUpdate?.success || false,
+    };
+  }
+
   /**
    * Update an issue's state (e.g., to Done)
    */

@@ -26,6 +26,7 @@ function toResolvedRoute(
     github_repo_full: `${route.github_owner}/${route.github_repo}`,
     local_path: route.local_path,
     cache_key: buildCacheKey(route.github_owner, route.github_repo),
+    require_repo_harness: Boolean(route.require_repo_harness),
   };
 }
 

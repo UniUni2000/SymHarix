@@ -63,6 +63,21 @@ function resolveOptionalLocalPath(projectRoot: string, routeKey: string, value: 
     : path.resolve(projectRoot, trimmed);
 }
 
+function resolveRequireRepoHarness(routeKey: string, value: unknown): boolean {
+  if (value === undefined) {
+    return false;
+  }
+
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  throw new RepositoryRoutingError(
+    'invalid_repository_route_config',
+    `Invalid repositories.routing entry for "${routeKey}": require_repo_harness must be a boolean when provided.`,
+  );
+}
+
 export function parseRepositoryRouteConfigMap(
   workflow: WorkflowDefinition,
   projectRoot: string,
@@ -91,6 +106,7 @@ export function parseRepositoryRouteConfigMap(
       github_owner: requireNonEmptyString(projectSlug, 'github_owner', rawEntry.github_owner),
       github_repo: requireNonEmptyString(projectSlug, 'github_repo', rawEntry.github_repo),
       local_path: resolveOptionalLocalPath(projectRoot, projectSlug, rawEntry.local_path),
+      require_repo_harness: resolveRequireRepoHarness(projectSlug, rawEntry.require_repo_harness),
     };
   }
 
@@ -134,6 +150,7 @@ export class RepositoryRoutingService {
       github_repo_full: `${route.github_owner}/${route.github_repo}`,
       local_path: route.local_path,
       cache_key: buildCacheKey(route.github_owner, route.github_repo),
+      require_repo_harness: Boolean(route.require_repo_harness),
     };
   }
 }

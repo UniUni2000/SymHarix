@@ -72,6 +72,20 @@ function createRuntimeControlPlane(): RuntimeControlPlane & { emit: (event: Runt
       issue_id: 'issue-1',
       issue_identifier: 'INT-1',
     }),
+    rewriteGovernance: async () => ({
+      accepted: true,
+      status: 'accepted',
+      message: 'Rewritten',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+    }),
+    splitGovernance: async () => ({
+      accepted: true,
+      status: 'accepted',
+      message: 'Split',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+    }),
     createStream: () => new ReadableStream<Uint8Array>(),
     subscribe: (listener) => {
       listeners.add(listener);

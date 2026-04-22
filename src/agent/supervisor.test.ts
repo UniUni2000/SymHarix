@@ -92,6 +92,39 @@ describe('AnthropicSupervisorService', () => {
     expect(result.message).toContain('INT-25');
   });
 
+  test('uses deterministic missing-requirements guidance for dev turns before calling the provider', async () => {
+    const service = new AnthropicSupervisorService('test-model');
+    const create = mock(async () => ({
+      content: [],
+    }));
+    (service as any).client = { messages: { create } };
+
+    const result = await service.decideNextAction({
+      ...decisionContext,
+      completionContext: {
+        missing_requirements: [
+          {
+            key: 'handover',
+            label: 'Write .symphony/HANDOVER.md',
+            reason: 'Completion requires a handover artifact.',
+            kind: 'artifact',
+          },
+          {
+            key: 'verification',
+            label: 'Record verification evidence in .symphony/change-pack/evidence.json',
+            reason: 'Need explicit proof-of-work before ending the turn.',
+            kind: 'verification',
+          },
+        ],
+      },
+    });
+
+    expect(create).not.toHaveBeenCalled();
+    expect(result.kind).toBe('continue');
+    expect(String(result.message || '')).toContain('HANDOVER');
+    expect(String(result.message || '')).toContain('evidence');
+  });
+
   test('uses a deterministic review nudge when the canonical review report is still missing', async () => {
     const service = new AnthropicSupervisorService('test-model');
     const create = mock(async () => {
