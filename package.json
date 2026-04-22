@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "build": "bun build src/cli/index.ts --outdir dist",
+    "build": "bun build --target bun src/cli/index.ts --outdir dist",
     "start": "bun --env-file=.env run src/cli/index.ts",
     "dev": "bun --watch src/cli/index.ts",
     "test": "bun test",

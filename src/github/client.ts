@@ -3,6 +3,10 @@ export interface GitHubClientOptions {
   owner: string;
 }
 
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export class GitHubClient {
   private token: string;
   private owner: string;
@@ -32,8 +36,8 @@ export class GitHubClient {
 
       const error = await response.text();
       return { exists: false, error: `GitHub API error: ${response.status} - ${error}` };
-    } catch (err: any) {
-      return { exists: false, error: `Request failed: ${err.message}` };
+    } catch (err) {
+      return { exists: false, error: `Request failed: ${getErrorMessage(err)}` };
     }
   }
 
@@ -57,8 +61,10 @@ export class GitHubClient {
       return { success: true };
     }
 
-    const error = await response.json().catch(() => ({ message: 'Unknown error' }));
-    return { success: false, error: error.message };
+    const error = await response
+      .json()
+      .catch(() => ({ message: 'Unknown error' })) as { message?: string };
+    return { success: false, error: error.message || 'Unknown error' };
   }
 
   async getDefaultBranch(repo: string): Promise<string> {
@@ -74,7 +80,7 @@ export class GitHubClient {
       return 'main';
     }
 
-    const data = await response.json();
+    const data = (await response.json()) as { default_branch?: string };
     return data.default_branch || 'main';
   }
 }

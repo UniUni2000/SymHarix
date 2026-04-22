@@ -9,6 +9,9 @@ export type RuntimeCommandStatus =
   | 'completed'
   | 'rejected'
   | 'not_found';
+export type RuntimeAccessMode = 'open' | 'token';
+export type RuntimeViewerRole = 'operator' | 'viewer';
+export type RuntimeHistoryEntrySource = 'agent_run' | 'review' | 'work_item' | 'sync_event';
 
 export interface RuntimeActionState {
   can_stop: boolean;
@@ -75,6 +78,48 @@ export interface RuntimeTimelineEvent extends AgentTimelinePayload {
   timestamp: string;
 }
 
+export interface RuntimeIssueDigest {
+  headline: string;
+  detail: string;
+  history_blurb: string | null;
+  updated_at: string | null;
+}
+
+export interface RuntimeHistoryEntry {
+  id: string;
+  issue_id: string;
+  issue_identifier: string | null;
+  source: RuntimeHistoryEntrySource;
+  title: string;
+  summary: string;
+  timestamp: string;
+  detail: Record<string, unknown> | null;
+}
+
+export interface RuntimeIssueHistoryView {
+  issue_id: string;
+  issue_identifier: string | null;
+  digest: RuntimeIssueDigest;
+  entries: RuntimeHistoryEntry[];
+}
+
+export interface RuntimeAccessView {
+  mode: RuntimeAccessMode;
+  viewer_role: RuntimeViewerRole;
+  can_create_issue: boolean;
+  can_control_issues: boolean;
+  token_required: boolean;
+}
+
+export interface RuntimeManifest {
+  access: RuntimeAccessView;
+  features: {
+    history_replay: boolean;
+    message_summaries: boolean;
+    subscription_preferences: boolean;
+  };
+}
+
 export interface RuntimeOverview {
   generated_at: string;
   counts: {
@@ -89,6 +134,7 @@ export interface CreateIssueRequest {
   title: string;
   description?: string | null;
   team_id?: string | null;
+  project_slug?: string | null;
   project_id?: string | null;
   state_id?: string | null;
 }
@@ -105,17 +151,28 @@ export interface CreateIssueResult extends RuntimeActionResult {
   issue: RuntimeIssueView | null;
 }
 
-export interface RuntimeStreamEvent {
-  type: RuntimeStreamEventType;
-  data: RuntimeOverview | RuntimeIssueView | RuntimeTimelineEvent;
-}
+export type RuntimeStreamEvent =
+  | {
+      type: 'snapshot' | 'overview';
+      data: RuntimeOverview;
+    }
+  | {
+      type: 'issue';
+      data: RuntimeIssueView;
+    }
+  | {
+      type: 'timeline';
+      data: RuntimeTimelineEvent;
+    };
 
 export interface RuntimeControlPlane {
   getOverview(): RuntimeOverview;
   getIssue(id: string): RuntimeIssueView | null;
   getTimeline(id: string, limit?: number): RuntimeTimelineEvent[];
+  getHistoryView(id: string, limit?: number): RuntimeIssueHistoryView | null;
   createIssue(input: CreateIssueRequest): Promise<CreateIssueResult>;
   stopIssue(id: string): Promise<RuntimeActionResult>;
   retryIssue(id: string): Promise<RuntimeActionResult>;
   createStream(): ReadableStream<Uint8Array>;
+  subscribe(listener: (event: RuntimeStreamEvent) => void): () => void;
 }

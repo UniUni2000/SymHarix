@@ -1,5 +1,5 @@
 import type { Database } from 'bun:sqlite';
-import { WorkItemRepository } from '../database';
+import { AgentRunRepository, ReviewEventRepository, SyncEventRepository, WorkItemRepository } from '../database';
 import type { WorkItem } from '../database/types';
 import type { OrchestratorStateSnapshot } from '../orchestrator';
 import type { AgentEvent, AgentTimelinePayload, Issue } from '../types';
@@ -9,10 +9,14 @@ import type {
   RuntimeActionResult,
   RuntimeControlPlane,
   RuntimeFileActivity,
+  RuntimeHistoryEntry,
+  RuntimeIssueDigest,
+  RuntimeIssueHistoryView,
   RuntimeIssueView,
   RuntimeOverview,
   RuntimeSessionView,
   RuntimeStreamEvent,
+  RuntimeStreamEventType,
   RuntimeTimelineEvent,
   RuntimeToolActivity,
 } from './types';
@@ -22,8 +26,8 @@ interface RuntimeHubController {
   createIssue(input: CreateIssueRequest): Promise<CreateIssueResult>;
   stopIssue(issueId: string): Promise<RuntimeActionResult>;
   retryIssue(issueId: string): Promise<RuntimeActionResult>;
-  on(event: string, listener: (...args: unknown[]) => void): this;
-  off?(event: string, listener: (...args: unknown[]) => void): this;
+  on(event: string, listener: (...args: any[]) => void): this;
+  off?(event: string, listener: (...args: any[]) => void): this;
 }
 
 interface RuntimeHubOptions {
@@ -79,56 +83,55 @@ function inferFileOperation(toolName: string | null): 'read' | 'write' | 'edit' 
   }
 }
 
+function normalizeSummary(value: string | null | undefined, fallback: string, maxLength = 180): string {
+  const normalized = (value || '').replace(/\s+/g, ' ').trim() || fallback;
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxLength - 3)}...`;
+}
+
 export class RuntimeHub implements RuntimeControlPlane {
   private readonly workItemRepository: WorkItemRepository;
+  private readonly agentRunRepository: AgentRunRepository;
+  private readonly reviewEventRepository: ReviewEventRepository;
+  private readonly syncEventRepository: SyncEventRepository;
   private readonly timelineHistoryLimit: number;
+  private readonly issueCacheById = new Map<string, Issue>();
   private readonly timelineByIssueId = new Map<string, RuntimeTimelineEvent[]>();
   private readonly subscribers = new Map<number, (event: RuntimeStreamEvent) => void>();
-  private readonly listeners: Array<{ event: string; listener: (...args: unknown[]) => void }> = [];
+  private readonly listeners: Array<{ event: string; listener: (...args: any[]) => void }> = [];
   private nextSubscriberId = 1;
+  private controller: RuntimeHubController;
 
   constructor(
     db: Database,
-    private readonly controller: RuntimeHubController,
+    controller: RuntimeHubController,
     options: RuntimeHubOptions = {},
   ) {
     this.workItemRepository = new WorkItemRepository(db);
+    this.agentRunRepository = new AgentRunRepository(db);
+    this.reviewEventRepository = new ReviewEventRepository(db);
+    this.syncEventRepository = new SyncEventRepository(db);
     this.timelineHistoryLimit = Math.max(10, options.timelineHistoryLimit ?? 200);
-
-    this.bind('state:changed', () => {
-      this.publishOverview();
-    });
-    this.bind('issue:dispatched', (issue: Issue) => {
-      this.publishIssue(issue.id);
-      this.publishOverview();
-    });
-    this.bind('issue:completed', (issue: Issue) => {
-      this.publishIssue(issue.id);
-      this.publishOverview();
-    });
-    this.bind('issue:failed', (issue: Issue) => {
-      this.publishIssue(issue.id);
-      this.publishOverview();
-    });
-    this.bind('issue:retrying', (issue: Issue) => {
-      this.publishIssue(issue.id);
-      this.publishOverview();
-    });
-    this.bind('issue:reconciled', (issue: Issue) => {
-      this.publishIssue(issue.id);
-      this.publishOverview();
-    });
-    this.bind('session:event', (issueId: string, event: AgentEvent) => {
-      this.handleSessionEvent(issueId, event);
-    });
+    this.controller = controller;
+    this.bindControllerListeners();
   }
 
   dispose(): void {
-    for (const { event, listener } of this.listeners) {
-      this.controller.off?.(event, listener);
-    }
-    this.listeners.length = 0;
+    this.unbindControllerListeners();
     this.subscribers.clear();
+  }
+
+  setController(controller: RuntimeHubController): void {
+    if (controller === this.controller) {
+      return;
+    }
+
+    this.unbindControllerListeners();
+    this.controller = controller;
+    this.bindControllerListeners();
+    this.publishOverview();
   }
 
   getOverview(): RuntimeOverview {
@@ -136,6 +139,11 @@ export class RuntimeHub implements RuntimeControlPlane {
     const workItems = this.workItemRepository.findAll();
     const issues = workItems
       .map((workItem) => this.buildIssueView(workItem, snapshot))
+      .concat(
+        [...this.issueCacheById.values()]
+          .filter((issue) => !workItems.some((workItem) => workItem.linear_issue_id === issue.id))
+          .map((issue) => this.buildIssueViewFromIssue(issue, snapshot)),
+      )
       .sort((left, right) => this.compareIssueViews(left, right));
 
     return {
@@ -151,19 +159,42 @@ export class RuntimeHub implements RuntimeControlPlane {
 
   getIssue(id: string): RuntimeIssueView | null {
     const workItem = this.resolveWorkItem(id);
-    if (!workItem) {
+    if (workItem) {
+      return this.buildIssueView(workItem, this.controller.getStateSnapshot());
+    }
+
+    const cachedIssue = this.resolveCachedIssue(id);
+    if (!cachedIssue) {
       return null;
     }
 
-    return this.buildIssueView(workItem, this.controller.getStateSnapshot());
+    return this.buildIssueViewFromIssue(cachedIssue, this.controller.getStateSnapshot());
   }
 
   getTimeline(id: string, limit = 100): RuntimeTimelineEvent[] {
     const workItem = this.resolveWorkItem(id);
-    const issueId = workItem?.linear_issue_id ?? id;
+    const cachedIssue = this.resolveCachedIssue(id);
+    const issueId = workItem?.linear_issue_id ?? cachedIssue?.id ?? id;
     const events = this.timelineByIssueId.get(issueId) ?? [];
     const bounded = Math.max(1, limit);
     return events.slice(-bounded);
+  }
+
+  getHistoryView(id: string, limit = 20): RuntimeIssueHistoryView | null {
+    const workItem = this.resolveWorkItem(id);
+    if (!workItem) {
+      return null;
+    }
+
+    const issueView = this.buildIssueView(workItem, this.controller.getStateSnapshot());
+    const entries = this.buildHistoryEntries(workItem, limit);
+
+    return {
+      issue_id: issueView.issue_id,
+      issue_identifier: issueView.identifier,
+      digest: this.buildIssueDigest(issueView, entries),
+      entries,
+    };
   }
 
   async createIssue(input: CreateIssueRequest): Promise<CreateIssueResult> {
@@ -202,10 +233,17 @@ export class RuntimeHub implements RuntimeControlPlane {
     return result;
   }
 
+  subscribe(listener: (event: RuntimeStreamEvent) => void): () => void {
+    const subscriberId = this.subscribeInternal(listener);
+    return () => {
+      this.subscribers.delete(subscriberId);
+    };
+  }
+
   createStream(): ReadableStream<Uint8Array> {
     const encoder = new TextEncoder();
     let subscriberId: number | null = null;
-    let heartbeat: Timer | null = null;
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
 
     const encode = (event: RuntimeStreamEventType, data: unknown): Uint8Array => {
       return encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -213,7 +251,7 @@ export class RuntimeHub implements RuntimeControlPlane {
 
     return new ReadableStream<Uint8Array>({
       start: (controller) => {
-        subscriberId = this.subscribe((event) => {
+        subscriberId = this.subscribeInternal((event) => {
           controller.enqueue(encode(event.type, event.data));
         });
 
@@ -234,12 +272,53 @@ export class RuntimeHub implements RuntimeControlPlane {
     });
   }
 
-  private bind(event: string, listener: (...args: unknown[]) => void): void {
+  private bind(event: string, listener: (...args: any[]) => void): void {
     this.controller.on(event, listener);
     this.listeners.push({ event, listener });
   }
 
-  private subscribe(listener: (event: RuntimeStreamEvent) => void): number {
+  private bindControllerListeners(): void {
+    this.bind('state:changed', () => {
+      this.publishOverview();
+    });
+    this.bind('issue:dispatched', (issue: Issue) => {
+      this.issueCacheById.set(issue.id, issue);
+      this.publishIssue(issue.id);
+      this.publishOverview();
+    });
+    this.bind('issue:completed', (issue: Issue) => {
+      this.issueCacheById.set(issue.id, issue);
+      this.publishIssue(issue.id);
+      this.publishOverview();
+    });
+    this.bind('issue:failed', (issue: Issue) => {
+      this.issueCacheById.set(issue.id, issue);
+      this.publishIssue(issue.id);
+      this.publishOverview();
+    });
+    this.bind('issue:retrying', (issue: Issue) => {
+      this.issueCacheById.set(issue.id, issue);
+      this.publishIssue(issue.id);
+      this.publishOverview();
+    });
+    this.bind('issue:reconciled', (issue: Issue) => {
+      this.issueCacheById.set(issue.id, issue);
+      this.publishIssue(issue.id);
+      this.publishOverview();
+    });
+    this.bind('session:event', (issueId: string, event: AgentEvent) => {
+      this.handleSessionEvent(issueId, event);
+    });
+  }
+
+  private unbindControllerListeners(): void {
+    for (const { event, listener } of this.listeners) {
+      this.controller.off?.(event, listener);
+    }
+    this.listeners.length = 0;
+  }
+
+  private subscribeInternal(listener: (event: RuntimeStreamEvent) => void): number {
     const id = this.nextSubscriberId++;
     this.subscribers.set(id, listener);
     return id;
@@ -324,6 +403,21 @@ export class RuntimeHub implements RuntimeControlPlane {
     );
   }
 
+  private resolveCachedIssue(id: string): Issue | null {
+    const target = id.trim();
+    if (!target) {
+      return null;
+    }
+
+    for (const issue of this.issueCacheById.values()) {
+      if (issue.id === target || issue.identifier === target) {
+        return issue;
+      }
+    }
+
+    return null;
+  }
+
   private buildIssueView(
     workItem: WorkItem,
     snapshot: OrchestratorStateSnapshot,
@@ -364,6 +458,42 @@ export class RuntimeHub implements RuntimeControlPlane {
     };
   }
 
+  private buildIssueViewFromIssue(
+    issue: Issue,
+    snapshot: OrchestratorStateSnapshot,
+  ): RuntimeIssueView {
+    const running = snapshot.running.find(
+      (entry) => entry.issue_id === issue.id,
+    ) ?? null;
+    const retrying = snapshot.retrying.find(
+      (entry) => entry.issue_id === issue.id,
+    ) ?? null;
+    const timeline = this.timelineByIssueId.get(issue.id) ?? [];
+
+    return {
+      issue_id: issue.id,
+      work_item_id: null,
+      identifier: issue.identifier,
+      title: issue.title,
+      phase: derivePhase(issue.state),
+      tracker_state: issue.state,
+      orchestrator_state: running ? null : 'failed',
+      workspace_path: null,
+      branch_name: issue.branch_name,
+      github_repo: null,
+      github_issue_number: null,
+      active_pr_number: null,
+      session: running ? this.buildSessionView(running, timeline) : null,
+      actions: {
+        can_stop: Boolean(running || retrying),
+        can_retry: !running && !retrying && !this.isTerminalState(issue.state),
+        can_open_pr: false,
+      },
+      created_at: toIso(issue.created_at),
+      updated_at: toIso(issue.updated_at),
+    };
+  }
+
   private buildSessionView(
     running: OrchestratorStateSnapshot['running'][number],
     timeline: RuntimeTimelineEvent[],
@@ -380,6 +510,163 @@ export class RuntimeHub implements RuntimeControlPlane {
       recent_tools: this.extractRecentTools(timeline),
       recent_files: this.extractRecentFiles(timeline),
     };
+  }
+
+  private buildIssueDigest(
+    issue: RuntimeIssueView,
+    entries: RuntimeHistoryEntry[],
+  ): RuntimeIssueDigest {
+    const headlineParts = [
+      `${issue.identifier} · ${issue.phase}`,
+      issue.tracker_state,
+    ];
+    if (issue.session?.stage) {
+      headlineParts.push(`live ${issue.session.stage}`);
+    } else if (issue.orchestrator_state) {
+      headlineParts.push(issue.orchestrator_state);
+    }
+
+    const latestTool = issue.session?.recent_tools[issue.session.recent_tools.length - 1] ?? null;
+    const latestFile = issue.session?.recent_files[issue.session.recent_files.length - 1] ?? null;
+    const latestHistory = entries[0] ?? null;
+    const detail =
+      latestTool
+        ? normalizeSummary(
+            `${latestTool.tool_name} ${latestTool.status}${latestTool.summary ? ` · ${latestTool.summary}` : ''}`,
+            'Latest live tool activity.',
+          )
+        : latestFile
+          ? normalizeSummary(
+              `${latestFile.operation} · ${latestFile.path}`,
+              'Latest live file activity.',
+            )
+          : latestHistory
+            ? normalizeSummary(
+                `${latestHistory.title} · ${latestHistory.summary}`,
+                'Recent orchestration history is available.',
+              )
+            : normalizeSummary(issue.session?.last_message, 'No recent live or historical updates yet.');
+
+    return {
+      headline: headlineParts.join(' · '),
+      detail,
+      history_blurb: latestHistory ? `${latestHistory.title} · ${latestHistory.summary}` : null,
+      updated_at: issue.session?.last_event_at ?? issue.updated_at,
+    };
+  }
+
+  private buildHistoryEntries(
+    workItem: WorkItem,
+    limit: number,
+  ): RuntimeHistoryEntry[] {
+    const entries: RuntimeHistoryEntry[] = [];
+    const bounded = Math.max(1, limit);
+
+    for (const run of this.agentRunRepository.findByWorkItemId(workItem.id)) {
+      const timestamp = run.finished_at ?? run.started_at;
+      entries.push({
+        id: `agent-run:${run.id}`,
+        issue_id: workItem.linear_issue_id,
+        issue_identifier: workItem.linear_identifier,
+        source: 'agent_run',
+        title: `${run.agent_type === 'review' ? 'Review' : 'Dev'} run ${run.run_status}`,
+        summary: normalizeSummary(
+          run.output_summary ?? run.error ?? run.decision ?? run.input_summary,
+          `${run.phase} run ${run.run_status}.`,
+        ),
+        timestamp: timestamp.toISOString(),
+        detail: {
+          phase: run.phase,
+          run_status: run.run_status,
+          decision: run.decision,
+          error: run.error,
+        },
+      });
+    }
+
+    for (const review of this.reviewEventRepository.findByWorkItemId(workItem.id)) {
+      entries.push({
+        id: `review:${review.id}`,
+        issue_id: workItem.linear_issue_id,
+        issue_identifier: workItem.linear_identifier,
+        source: 'review',
+        title: `Review round ${review.review_round} · ${review.decision}`,
+        summary: normalizeSummary(
+          review.summary_md,
+          `${review.decision} for ${workItem.linear_identifier}.`,
+        ),
+        timestamp: review.created_at.toISOString(),
+        detail: {
+          pr_number: review.pr_number,
+          decision: review.decision,
+          requested_changes_md: review.requested_changes_md,
+          merge_block_reason: review.merge_block_reason,
+        },
+      });
+    }
+
+    for (const syncEvent of this.syncEventRepository.findByWorkItemId(workItem.id)) {
+      const payloadSummary = Object.entries(syncEvent.payload_json)
+        .slice(0, 3)
+        .map(([key, value]) => `${key}=${String(value)}`)
+        .join(', ');
+      entries.push({
+        id: `sync-event:${syncEvent.id}`,
+        issue_id: workItem.linear_issue_id,
+        issue_identifier: workItem.linear_identifier,
+        source: 'sync_event',
+        title: `Sync ${syncEvent.target_system} · ${syncEvent.action} · ${syncEvent.result}`,
+        summary: normalizeSummary(
+          syncEvent.error || payloadSummary,
+          `${syncEvent.target_system} ${syncEvent.action} ${syncEvent.result}.`,
+        ),
+        timestamp: syncEvent.created_at.toISOString(),
+        detail: {
+          target_system: syncEvent.target_system,
+          action: syncEvent.action,
+          result: syncEvent.result,
+          error: syncEvent.error,
+          payload: syncEvent.payload_json,
+        },
+      });
+    }
+
+    if (workItem.merged_at) {
+      entries.push({
+        id: `work-item:${workItem.id}:merged`,
+        issue_id: workItem.linear_issue_id,
+        issue_identifier: workItem.linear_identifier,
+        source: 'work_item',
+        title: 'Merged',
+        summary: normalizeSummary(
+          workItem.last_review_summary,
+          `${workItem.linear_identifier} reached terminal state ${workItem.linear_state}.`,
+        ),
+        timestamp: workItem.merged_at.toISOString(),
+        detail: {
+          linear_state: workItem.linear_state,
+        },
+      });
+    }
+
+    if (workItem.cancelled_at) {
+      entries.push({
+        id: `work-item:${workItem.id}:cancelled`,
+        issue_id: workItem.linear_issue_id,
+        issue_identifier: workItem.linear_identifier,
+        source: 'work_item',
+        title: 'Cancelled',
+        summary: `${workItem.linear_identifier} was cancelled.`,
+        timestamp: workItem.cancelled_at.toISOString(),
+        detail: {
+          linear_state: workItem.linear_state,
+        },
+      });
+    }
+
+    return entries
+      .sort((left, right) => right.timestamp.localeCompare(left.timestamp) || left.id.localeCompare(right.id))
+      .slice(0, bounded);
   }
 
   private extractRecentTools(timeline: RuntimeTimelineEvent[]): RuntimeToolActivity[] {

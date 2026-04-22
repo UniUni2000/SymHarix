@@ -91,6 +91,13 @@ class GitHubClient:
         """Post a timeline comment to a pull request."""
         return self._post(f"/issues/{pr_number}/comments", {"body": body})
 
+    def submit_pull_request_review(self, pr_number: int, event: str, body: Optional[str] = None) -> dict:
+        """Submit a native GitHub pull request review."""
+        data = {"event": event}
+        if body is not None:
+            data["body"] = body
+        return self._post(f"/pulls/{pr_number}/reviews", data)
+
     def merge_pull_request(
         self,
         pr_number: int,

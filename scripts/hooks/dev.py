@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import requests
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lib.config import Config
@@ -214,6 +216,17 @@ Agent completed the task for issue [{self.issue_id}](https://linear.app/inteliwa
             )
             print(f"[DEV] PR created: {pr['html_url']}")
             return {"url": pr["html_url"], "number": pr["number"]}
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 422:
+                recovered = self.github.get_pull_request_by_branch(self.branch, state="open")
+                if recovered:
+                    print(f"[DEV] Recovered existing PR after create conflict: {recovered['html_url']}")
+                    return {"url": recovered["html_url"], "number": recovered["number"]}
+                recovered = self.github.get_pull_request_by_branch(self.branch, state="all")
+                if recovered:
+                    print(f"[DEV] Recovered existing PR after create conflict: {recovered['html_url']}")
+                    return {"url": recovered["html_url"], "number": recovered["number"]}
+            raise RuntimeError(f"ERROR creating PR: {e}") from e
         except Exception as e:
             raise RuntimeError(f"ERROR creating PR: {e}") from e
 

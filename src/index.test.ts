@@ -97,6 +97,122 @@ describe('Config Layer', () => {
       delete process.env.TEST_API_KEY;
     });
 
+    it('should parse repositories.routing into formal repository routes', () => {
+      const workflow = {
+        config: {
+          tracker: {
+            kind: 'linear',
+            api_key: 'test',
+            project_slug: 'TEST'
+          },
+          repositories: {
+            routing: {
+              test: {
+                github_owner: 'acme',
+                github_repo: 'repo-a',
+                local_path: './repos/repo-a',
+              },
+            },
+          },
+        },
+        prompt_template: 'test'
+      };
+
+      const config = buildServiceConfig(workflow);
+      expect(config.repositories.routing).toEqual({
+        test: {
+          github_owner: 'acme',
+          github_repo: 'repo-a',
+          local_path: expect.stringMatching(/repos\/repo-a$/),
+        },
+      });
+    });
+
+    it('should parse verification.lifecycle project scenarios keyed by project_slug', () => {
+      const workflow = {
+        config: {
+          tracker: {
+            kind: 'linear',
+            api_key: 'test',
+            project_slug: 'TEST'
+          },
+          verification: {
+            lifecycle: {
+              timeout_ms: 1800000,
+              poll_interval_ms: 5000,
+              projects: {
+                test2: {
+                  title: 'Lifecycle smoke test',
+                  description: 'Create a tiny change and verify the full lifecycle.',
+                },
+              },
+            },
+          },
+        },
+        prompt_template: 'test'
+      };
+
+      const config = buildServiceConfig(workflow);
+      expect(config.verification.lifecycle.timeoutMs).toBe(1800000);
+      expect(config.verification.lifecycle.pollIntervalMs).toBe(5000);
+      expect(config.verification.lifecycle.projects).toEqual({
+        test2: {
+          title: 'Lifecycle smoke test',
+          description: 'Create a tiny change and verify the full lifecycle.',
+        },
+      });
+    });
+
+    it('should fail fast when verification.lifecycle scenario is missing title or description', () => {
+      const workflow = {
+        config: {
+          tracker: {
+            kind: 'linear',
+            api_key: 'test',
+            project_slug: 'TEST'
+          },
+          verification: {
+            lifecycle: {
+              projects: {
+                broken: {
+                  title: 'Incomplete scenario',
+                },
+              },
+            },
+          },
+        },
+        prompt_template: 'test'
+      };
+
+      expect(() => buildServiceConfig(workflow)).toThrow(
+        'Invalid verification.lifecycle.projects entry for "broken": description is required.',
+      );
+    });
+
+    it('should fail fast on malformed repositories.routing entries', () => {
+      const workflow = {
+        config: {
+          tracker: {
+            kind: 'linear',
+            api_key: 'test',
+            project_slug: 'TEST'
+          },
+          repositories: {
+            routing: {
+              broken: {
+                github_owner: 'acme',
+              },
+            },
+          },
+        },
+        prompt_template: 'test'
+      };
+
+      expect(() => buildServiceConfig(workflow)).toThrow(
+        'Invalid repositories.routing entry for "broken": github_repo is required.',
+      );
+    });
+
     it('should validate required fields for dispatch', () => {
       const workflow = {
         config: {
@@ -211,6 +327,27 @@ describe('Complexity Judgment', () => {
       state: 'Todo',
       project_slug: null,
       project_name: null,
+      branch_name: null,
+      url: null,
+      labels: [],
+      blocked_by: [],
+      created_at: new Date(),
+      updated_at: new Date(),
+    });
+
+    expect(result.complexity).toBe('small');
+  });
+
+  it('classifies simple python program tasks as small', () => {
+    const result = judgeComplexity({
+      id: 'issue-4',
+      identifier: 'INT-30',
+      title: '写一个生成随机数的python 程序',
+      description: '生成一个简单随机数并打印出来。',
+      priority: 1,
+      state: 'Todo',
+      project_slug: 'proj',
+      project_name: 'repo',
       branch_name: null,
       url: null,
       labels: [],

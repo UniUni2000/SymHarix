@@ -15,6 +15,12 @@ export type ReviewDecision =
   | 'REQUEST_TESTS'     // Must add tests before approval
   | 'REJECT';           // Completely wrong approach
 
+export interface ParsedCanonicalReviewReport {
+  decision: ReviewDecision;
+  summary: string;
+  content: string;
+}
+
 /**
  * Structured review report
  */
@@ -71,7 +77,7 @@ ${githubContext || ''}
 5. **Give feedback in "现状+期望" format** — Do NOT give solutions
 6. Put the final decision in \`.symphony/REVIEW_REPORT.md\` so the orchestrator and review executor can act on it
 7. For straightforward small diffs, prefer completing the review in a single focused pass and writing the report in the same turn
-8. Treat the review as incomplete until \`.symphony/REVIEW_REPORT.md\` exists with the final decision line
+8. Treat the review as incomplete until \`.symphony/REVIEW_REPORT.md\` exists with the final decision line and review summary section
 
 ## Required Decision Line
 Include one exact machine-readable line near the top of \`.symphony/REVIEW_REPORT.md\`:
@@ -81,7 +87,10 @@ Include one exact machine-readable line near the top of \`.symphony/REVIEW_REPOR
 - \`## Review Decision: REQUEST_TESTS\`
 - \`## Review Decision: REJECT\`
 
-Do not rely on only prose headings like “最终决定”; include the exact line above as well.
+Also include a non-empty canonical summary section:
+- \`## Review Summary\`
+
+Do not rely on only prose headings like “最终决定”; only the exact decision line above plus \`## Review Summary\` count as a valid review artifact.
 
 ## Feedback Format (MUST follow)
 For each issue found:
@@ -116,32 +125,42 @@ ${historySection}
 }
 
 /**
- * Parse review decision from report content
+ * Parse a canonical review report from report content
  */
-export function parseReviewDecision(reportContent: string): ReviewDecision {
-  const patterns = [
-    /^##\s*评审结果[:：]\s*([A-Z_]+)\s*$/m,
-    /^##\s*Review Decision[:：]\s*([A-Z_]+)\s*$/m,
-    /^\s*[-*]?\s*\*\*Decision\*\*[:：]\s*([A-Z_]+)\s*$/m,
-    /^\s*[-*]?\s*\*\*决策\*\*[:：]\s*([A-Z_]+)\s*$/m,
-    /^##\s*最终决定\s*$[\r\n]+\s*(?:\*\*)?([A-Z_]+)(?:\*\*)?/m,
-    /^##\s*Final Decision\s*$[\r\n]+\s*(?:\*\*)?([A-Z_]+)(?:\*\*)?/m,
-  ];
-
-  for (const pattern of patterns) {
-    const match = reportContent.match(pattern);
-    if (!match?.[1]) {
-      continue;
-    }
-
-    const decision = match[1].trim().toUpperCase().replace(/ /g, '_');
-    if (decision === 'APPROVE') return 'APPROVE';
-    if (decision === 'APPROVE_MINOR') return 'APPROVE_MINOR';
-    if (decision === 'REQUEST_CHANGES') return 'REQUEST_CHANGES';
-    if (decision === 'REQUEST_TESTS') return 'REQUEST_TESTS';
-    if (decision === 'REJECT') return 'REJECT';
+export function parseCanonicalReviewReport(reportContent: string): ParsedCanonicalReviewReport | null {
+  const content = reportContent.trim();
+  if (!content) {
+    return null;
   }
-  return 'APPROVE'; // default to approve if can't parse
+
+  const decisionMatch = content.match(/^## Review Decision:\s*(APPROVE|APPROVE_MINOR|REQUEST_CHANGES|REQUEST_TESTS|REJECT)\s*$/m);
+  if (!decisionMatch?.[1]) {
+    return null;
+  }
+
+  const summaryHeading = /^## Review Summary\s*$/m;
+  const summaryMatch = summaryHeading.exec(content);
+  if (!summaryMatch) {
+    return null;
+  }
+
+  const summaryStart = summaryMatch.index + summaryMatch[0].length;
+  const remaining = content.slice(summaryStart).replace(/^\s+/, '');
+  const nextHeadingMatch = remaining.match(/^##\s+/m);
+  const summary = (nextHeadingMatch ? remaining.slice(0, nextHeadingMatch.index) : remaining).trim();
+  if (!summary) {
+    return null;
+  }
+
+  return {
+    decision: decisionMatch[1] as ReviewDecision,
+    summary,
+    content,
+  };
+}
+
+export function parseReviewDecision(reportContent: string): ReviewDecision | null {
+  return parseCanonicalReviewReport(reportContent)?.decision ?? null;
 }
 
 /**

@@ -216,3 +216,17 @@ def test_add_pull_request_comment(mock_post):
 
     assert result["body"] == "review"
     mock_post.assert_called_once()
+
+
+@patch("scripts.lib.github_client.requests.post")
+def test_submit_pull_request_review(mock_post):
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"id": 789, "state": "APPROVED"}
+    mock_post.return_value = mock_response
+
+    client = GitHubClient(token="ghp_test", owner="owner", repo="repo")
+    result = client.submit_pull_request_review(42, "APPROVE", body="native review")
+
+    assert result["state"] == "APPROVED"
+    _, kwargs = mock_post.call_args
+    assert kwargs["json"] == {"event": "APPROVE", "body": "native review"}

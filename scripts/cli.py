@@ -2,8 +2,11 @@
 """Symphony CLI - Unified entry point for all commands."""
 
 import json
+import os
+import re
 import sys
 from pathlib import Path
+from typing import Dict, Optional, Tuple
 
 import click
 
@@ -24,13 +27,59 @@ WORKFLOW_ARTIFACT_FILES = (
 )
 
 
+def sanitize_repo_cache_key(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]", "_", value)
+
+
+def resolve_dispatch_github_repo(
+    *,
+    issue: dict,
+    default_owner: str,
+    default_repo: Optional[str],
+    env: Optional[Dict[str, str]] = None,
+) -> Tuple[str, str, str]:
+    env = env or os.environ
+    github_repo_full = (env.get("SYMPHONY_GITHUB_REPO_FULL") or "").strip()
+    if github_repo_full:
+        if "/" not in github_repo_full:
+            raise ValueError("SYMPHONY_GITHUB_REPO_FULL must be in owner/repo format")
+        owner, repo = github_repo_full.split("/", 1)
+        return owner, repo, github_repo_full
+
+    owner = (env.get("SYMPHONY_GITHUB_OWNER") or default_owner or "").strip()
+    repo = (env.get("SYMPHONY_GITHUB_REPO") or default_repo or "").strip()
+    if not owner or not repo:
+        issue_identifier = issue.get("identifier", "unknown issue")
+        raise ValueError(
+            f"Dispatch for {issue_identifier} requires an explicit repository route via "
+            "SYMPHONY_GITHUB_REPO_FULL or SYMPHONY_GITHUB_OWNER/SYMPHONY_GITHUB_REPO",
+        )
+
+    return owner, repo, f"{owner}/{repo}"
+
+
+def resolve_dispatch_workspace_path(
+    *,
+    workspace_root: Path,
+    issue_id: str,
+    github_repo_full: str,
+    workspace_path_opt: Optional[str],
+) -> Path:
+    if workspace_path_opt:
+        return Path(workspace_path_opt)
+
+    owner, repo = github_repo_full.split("/", 1)
+    cache_key = f"{sanitize_repo_cache_key(owner.lower())}__{sanitize_repo_cache_key(repo.lower())}"
+    return workspace_root / cache_key / "worktrees" / issue_id
+
+
 def emit_result(
     *,
     ok: bool = True,
     final_state: str = "unknown",
-    review_decision: str | None = None,
-    feedback: str | None = None,
-    retry_hint: str | None = None,
+    review_decision: Optional[str] = None,
+    feedback: Optional[str] = None,
+    retry_hint: Optional[str] = None,
     linear_api_calls: int = 0,
     github_api_calls: int = 0,
 ):
@@ -93,15 +142,20 @@ def dispatch(ctx, issue_id, workspace_path_opt):
         click.echo(f"Issue {issue_id} not found in Linear", err=True)
         sys.exit(1)
 
-    # Get project name from Linear issue - this is the GitHub repo name
-    project_name = issue.get("project", {}).get("name", config.github_repo)
+    try:
+        gh_owner, gh_repo, github_repo_full = resolve_dispatch_github_repo(
+            issue=issue,
+            default_owner=config.github_owner,
+            default_repo=config.github_repo,
+        )
+    except ValueError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
 
-    # Create GitHub repo full name (owner/project)
-    github_repo_full = f"{config.github_owner}/{project_name}"
     github = GitHubClient(
         token=config.github_token,
-        owner=config.github_owner,
-        repo=project_name,
+        owner=gh_owner,
+        repo=gh_repo,
         default_branch=config.github_default_branch,
     )
     mapped_issue = github.find_issue_by_identifier(issue["identifier"])
@@ -110,15 +164,12 @@ def dispatch(ctx, issue_id, workspace_path_opt):
     # Create branch name (use feature/ prefix like the original system)
     branch = f"feature/{issue['identifier'].lower()}"
 
-    # Use workspace_path if provided, otherwise compute it
-    # The orchestrator creates git worktree at workspace_root/project_name/issue_id
-    # But for state, we use workspace_root/project_name/issue_id/.symphony (inside worktree)
-    if workspace_path_opt:
-        # Orchestrator provided workspace path - state goes inside it
-        workspace_path = Path(workspace_path_opt)
-    else:
-        # Fallback for standalone use
-        workspace_path = config.workspace_root / project_name / issue_id
+    workspace_path = resolve_dispatch_workspace_path(
+        workspace_root=config.workspace_root,
+        issue_id=issue_id,
+        github_repo_full=github_repo_full,
+        workspace_path_opt=workspace_path_opt,
+    )
 
     # Initialize state INSIDE the workspace (git worktree), not outside
     # StateStore expects: workspace_root / issue_id / .symphony
@@ -323,16 +374,12 @@ def review(ctx, issue_id, workspace_path_opt):
     if success:
         click.echo(f"Review phase completed for {issue_id}")
         final_state = store.get_current_state_enum()
-        review_decision = None
+        review_decision = hook.last_review_decision
         retry_hint = None
-        if hook.last_pr_status == "changes_requested":
-            review_decision = "REQUEST_CHANGES"
+        if review_decision in ("REQUEST_CHANGES", "REQUEST_TESTS", "REJECT"):
             retry_hint = "retry_dev"
-        elif hook.last_pr_status == "merge_blocked":
-            review_decision = "MERGE_BLOCKED"
+        elif review_decision == "MERGE_BLOCKED":
             retry_hint = "retry_dev"
-        elif hook.last_pr_status in ("approved", "merged"):
-            review_decision = "APPROVED"
 
         state_name = final_state.value if final_state else "unknown"
         final_state_label = {
@@ -347,6 +394,7 @@ def review(ctx, issue_id, workspace_path_opt):
         emit_result(
             final_state=final_state_label,
             review_decision=review_decision,
+            feedback=hook.last_review_report,
             retry_hint=retry_hint,
         )
     else:
