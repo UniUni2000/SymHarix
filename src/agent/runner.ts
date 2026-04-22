@@ -881,7 +881,7 @@ export class AgentRunner extends EventEmitter {
           const eventType = this.determineEventType(msg);
           if (eventType) {
             if (eventType === 'timeline' && msg.method === 'agent/timeline') {
-              timeline.push((msg.params || {}) as AgentTimelinePayload);
+              timeline.push((msg.params || {}) as unknown as AgentTimelinePayload);
             }
             const event: AgentEvent = {
               event: eventType,

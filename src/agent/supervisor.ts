@@ -7,6 +7,7 @@ import type {
   SupervisorNextAction,
   TurnTranscriptEntry,
 } from '../types';
+import { parseCanonicalReviewReport } from '../hooks/review-prompt';
 
 const DEFAULT_SUPERVISOR_MODEL =
   process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5';
@@ -52,7 +53,7 @@ function extractMessageText(
   return content
     .filter(
       (block): block is { type: 'text'; text: string } =>
-        Boolean(block) &&
+        block !== null &&
         typeof block === 'object' &&
         'type' in block &&
         (block as { type?: unknown }).type === 'text' &&
@@ -102,28 +103,16 @@ function buildDefaultContinueMessage(
 }
 
 function reviewReportHasDecision(reviewReport: string | null | undefined): boolean {
-  if (!reviewReport) {
-    return false;
-  }
-
-  const patterns = [
-    /^##\s*评审结果[:：]\s*([A-Z_]+)\s*$/im,
-    /^##\s*Review Decision[:：]\s*([A-Z_]+)\s*$/im,
-    /^\s*[-*]?\s*\*\*Decision\*\*[:：]\s*([A-Z_]+)\s*$/im,
-    /^\s*[-*]?\s*\*\*决策\*\*[:：]\s*([A-Z_]+)\s*$/im,
-    /^##\s*最终决定\s*$[\r\n]+\s*(?:\*\*)?([A-Z_]+)(?:\*\*)?/im,
-    /^##\s*Final Decision\s*$[\r\n]+\s*(?:\*\*)?([A-Z_]+)(?:\*\*)?/im,
-  ];
-
-  return patterns.some((pattern) => pattern.test(reviewReport));
+  return Boolean(reviewReport && parseCanonicalReviewReport(reviewReport));
 }
 
 function buildReviewReportNudge(issue: Issue): string {
   return [
-    `Review ${issue.identifier} is not complete yet because .symphony/REVIEW_REPORT.md is still missing or lacks a final decision.`,
+    `Review ${issue.identifier} is not complete yet because .symphony/REVIEW_REPORT.md is still missing or lacks the canonical decision line and summary section.`,
     'In this turn, do only the minimum remaining review work, then overwrite .symphony/REVIEW_REPORT.md from scratch.',
     'Include one exact machine-readable line near the top:',
     '## Review Decision: APPROVE or APPROVE_MINOR or REQUEST_CHANGES or REQUEST_TESTS or REJECT',
+    'Also include a non-empty ## Review Summary section.',
     'End the turn only after the final .symphony/REVIEW_REPORT.md exists.',
   ].join(' ');
 }

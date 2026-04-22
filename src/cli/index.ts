@@ -15,24 +15,47 @@ if (fs.existsSync(envPath)) {
 }
 
 import { Orchestrator } from '../orchestrator';
+import { createDatabase } from '../database';
 import { WorkflowWatcher } from '../workflow/watcher';
 import { loadWorkflow, resolveWorkflowPath } from '../workflow/loader';
 import { buildServiceConfig, validateConfigForDispatch } from '../config/loader';
 import { logger } from '../logging';
 import { Issue, AgentEvent, WorkflowDefinition, ServiceConfig } from '../types';
+import { RuntimeHost } from './runtimeHost';
 import {
   consumeTimelineEventForCli,
   createCliTimelineRenderState,
   flushCliTimelineState,
   shouldLogStructuredAgentEvent,
 } from './timeline';
+import { parseVerifyLiveLifecycleArgs, type VerifyLiveLifecycleCommand } from '../verification/cli';
+import { LiveLifecycleVerifier } from '../verification/liveLifecycleVerifier';
 
 /**
  * Parse command line arguments
  */
-function parseArgs(): { workflowPath?: string; port?: number; kill?: boolean } {
+function parseArgs(): {
+  workflowPath?: string;
+  port?: number;
+  kill?: boolean;
+  verifyLiveLifecycle?: VerifyLiveLifecycleCommand;
+} {
   const args = process.argv.slice(2);
-  const result: { workflowPath?: string; port?: number; kill?: boolean } = {};
+  const result: {
+    workflowPath?: string;
+    port?: number;
+    kill?: boolean;
+    verifyLiveLifecycle?: VerifyLiveLifecycleCommand;
+  } = {};
+
+  if (args[0] === 'verify-live-lifecycle') {
+    const parsed = parseVerifyLiveLifecycleArgs(args.slice(1));
+    if (!parsed.ok) {
+      throw new Error(parsed.error);
+    }
+    result.verifyLiveLifecycle = parsed.command;
+    return result;
+  }
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -65,6 +88,7 @@ Usage: symphony [options] [workflow-path]
 Options:
   --port <number>    Enable HTTP server on specified port
   --kill             Stop all running symphony agent processes
+  verify-live-lifecycle --project-slug <slug> [--timeout-ms <n>] [--json] [--title-suffix <text>]
   --help             Show this help message
 
 Arguments:
@@ -75,6 +99,7 @@ Examples:
   symphony path/to/WORKFLOW.md    # Use specified workflow file
   symphony --port 3000            # Enable HTTP server on port 3000
   symphony --kill                 # Stop all running agents
+  symphony verify-live-lifecycle --project-slug 1d3a3f95809d
 `);
 }
 
@@ -111,11 +136,113 @@ async function killKnownSymphonyProcesses(currentPid?: number): Promise<void> {
   } catch {}
 }
 
+function attachCliObservers(
+  orchestrator: Orchestrator,
+  timelineRenderStateByIssue: Map<string, ReturnType<typeof createCliTimelineRenderState>>,
+): () => void {
+  const listeners: Array<{ event: string; listener: (...args: any[]) => void }> = [];
+  const bind = (event: string, listener: (...args: any[]) => void) => {
+    orchestrator.on(event as any, listener);
+    listeners.push({ event, listener });
+  };
+
+  bind('issue:dispatched', (issue: Issue) => {
+    logger.info('Issue dispatched', {
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      title: issue.title,
+      state: issue.state,
+      phase: issue.state.toLowerCase() === 'in review' ? 'REVIEW' : 'DEV'
+    });
+  });
+
+  bind('issue:completed', (issue: Issue, success: boolean) => {
+    const timelineState = timelineRenderStateByIssue.get(issue.id);
+    if (timelineState) {
+      for (const message of flushCliTimelineState(timelineState)) {
+        console.log(`[agent] ${message}`);
+      }
+      timelineRenderStateByIssue.delete(issue.id);
+    }
+    logger.info('Issue completed', {
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      success
+    });
+  });
+
+  bind('issue:failed', (issue: Issue, error: string) => {
+    const timelineState = timelineRenderStateByIssue.get(issue.id);
+    if (timelineState) {
+      for (const message of flushCliTimelineState(timelineState)) {
+        console.log(`[agent] ${message}`);
+      }
+      timelineRenderStateByIssue.delete(issue.id);
+    }
+    logger.error('Issue failed', {
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      error
+    });
+  });
+
+  bind('issue:retrying', (issue: Issue, attempt: number, delay: number) => {
+    logger.info('Issue retrying', {
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      attempt,
+      delay_ms: delay
+    });
+  });
+
+  bind('session:event', (issueId: string, event: AgentEvent) => {
+    let timelineState = timelineRenderStateByIssue.get(issueId);
+    if (!timelineState) {
+      timelineState = createCliTimelineRenderState();
+      timelineRenderStateByIssue.set(issueId, timelineState);
+    }
+
+    const timelineMessages = consumeTimelineEventForCli(event, timelineState);
+    if (timelineMessages.length > 0) {
+      for (const message of timelineMessages) {
+        console.log(`[agent] ${message}`);
+      }
+      return;
+    }
+    if (!shouldLogStructuredAgentEvent(event)) {
+      return;
+    }
+
+    logger.info('Agent event', {
+      issue_id: issueId,
+      event: event.event,
+      payload: event.payload,
+      timestamp: event.timestamp.toISOString()
+    });
+  });
+
+  bind('error', (error: Error) => {
+    logger.error('Orchestrator error', {}, error);
+  });
+
+  return () => {
+    for (const { event, listener } of listeners) {
+      orchestrator.off(event as any, listener);
+    }
+  };
+}
+
 /**
  * Main entry point
  */
 async function main(): Promise<void> {
-  const args = parseArgs();
+  let args;
+  try {
+    args = parseArgs();
+  } catch (error) {
+    console.error('[symphony] ERROR:', (error as Error).message);
+    process.exit(1);
+  }
 
   // Handle --help
   if (process.argv.includes('--help')) {
@@ -163,7 +290,13 @@ async function main(): Promise<void> {
   }
 
   // Build service config
-  let config = buildServiceConfig(loadResult.definition!);
+  let config: ServiceConfig;
+  try {
+    config = buildServiceConfig(loadResult.definition!);
+  } catch (error) {
+    console.error('[symphony] ERROR: Failed to build config:', (error as Error).message);
+    process.exit(1);
+  }
 
   // Override port from CLI if specified
   // Section 13.7: CLI --port overrides server.port
@@ -181,103 +314,100 @@ async function main(): Promise<void> {
 
   console.log('[symphony] Configuration valid');
   console.log('[symphony] Tracker:', config.trackerKind);
-  console.log('[symphony] Project:', config.trackerProjectSlug);
+  console.log('[symphony] Project root:', config.projectRoot);
   console.log('[symphony] Poll interval:', config.pollIntervalMs, 'ms');
   console.log('[symphony] Max concurrent agents:', config.maxConcurrentAgents);
 
-  // Create orchestrator
-  const orchestrator = new Orchestrator(config, loadResult.definition!);
+  const db = createDatabase({
+    path: path.join(config.projectRoot, 'symphony.db'),
+  });
+
+  if (args.verifyLiveLifecycle) {
+    const verifyConfig: ServiceConfig = {
+      ...config,
+      serverPort: null,
+    };
+    const verifier = new LiveLifecycleVerifier({
+      db,
+      config: verifyConfig,
+      workflow: loadResult.definition!,
+      runtimeHostFactory: async () => new RuntimeHost({
+        db,
+        initialConfig: verifyConfig,
+        initialDefinition: loadResult.definition!,
+      }),
+    });
+
+    const result = await verifier.verify({
+      projectSlug: args.verifyLiveLifecycle.projectSlug,
+      timeoutMs: args.verifyLiveLifecycle.timeoutMs,
+      titleSuffix: args.verifyLiveLifecycle.titleSuffix,
+      reporter: (message) => {
+        if (!args.verifyLiveLifecycle?.json) {
+          console.log(`[verify] ${message}`);
+        }
+      },
+    });
+
+    if (args.verifyLiveLifecycle.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(`[verify] ${result.success ? 'PASS' : 'FAIL'} ${result.message}`);
+      console.log(`[verify] Project: ${result.project_slug}`);
+      if (result.issue_identifier) {
+        console.log(`[verify] Issue: ${result.issue_identifier}`);
+      }
+      if (result.pull_request_number) {
+        console.log(`[verify] PR: #${result.pull_request_number}`);
+      }
+      if (result.review_decision) {
+        console.log(`[verify] Review: ${result.review_decision}`);
+      }
+      for (const checkpoint of result.checkpoints) {
+        const marker = checkpoint.status === 'passed' ? 'OK' : checkpoint.status === 'failed' ? 'FAIL' : 'WAIT';
+        console.log(`[verify] ${marker} ${checkpoint.label}${checkpoint.detail ? ` · ${checkpoint.detail}` : ''}`);
+      }
+      if (!result.success && result.last_timeline_message) {
+        console.log(`[verify] Last timeline: ${result.last_timeline_message}`);
+      }
+    }
+
+    process.exit(result.success ? 0 : 1);
+  }
+
   const timelineRenderStateByIssue = new Map<string, ReturnType<typeof createCliTimelineRenderState>>();
-
-  // Set up event handlers
-  orchestrator.on('issue:dispatched', (issue: Issue) => {
-    logger.info('Issue dispatched', {
-      issue_id: issue.id,
-      issue_identifier: issue.identifier,
-      title: issue.title,
-      state: issue.state,
-      phase: issue.state.toLowerCase() === 'in review' ? 'REVIEW' : 'DEV'
-    });
-  });
-
-  orchestrator.on('issue:completed', (issue: Issue, success: boolean) => {
-    const timelineState = timelineRenderStateByIssue.get(issue.id);
-    if (timelineState) {
-      for (const message of flushCliTimelineState(timelineState)) {
-        console.log(`[agent] ${message}`);
-      }
-      timelineRenderStateByIssue.delete(issue.id);
-    }
-    logger.info('Issue completed', {
-      issue_id: issue.id,
-      issue_identifier: issue.identifier,
-      success
-    });
-  });
-
-  orchestrator.on('issue:failed', (issue: Issue, error: string) => {
-    const timelineState = timelineRenderStateByIssue.get(issue.id);
-    if (timelineState) {
-      for (const message of flushCliTimelineState(timelineState)) {
-        console.log(`[agent] ${message}`);
-      }
-      timelineRenderStateByIssue.delete(issue.id);
-    }
-    logger.error('Issue failed', {
-      issue_id: issue.id,
-      issue_identifier: issue.identifier,
-      error
-    });
-  });
-
-  orchestrator.on('issue:retrying', (issue: Issue, attempt: number, delay: number) => {
-    logger.info('Issue retrying', {
-      issue_id: issue.id,
-      issue_identifier: issue.identifier,
-      attempt,
-      delay_ms: delay
-    });
-  });
-
-  orchestrator.on('session:event', (issueId: string, event: AgentEvent) => {
-    let timelineState = timelineRenderStateByIssue.get(issueId);
-    if (!timelineState) {
-      timelineState = createCliTimelineRenderState();
-      timelineRenderStateByIssue.set(issueId, timelineState);
-    }
-
-    const timelineMessages = consumeTimelineEventForCli(event, timelineState);
-    if (timelineMessages.length > 0) {
-      for (const message of timelineMessages) {
-        console.log(`[agent] ${message}`);
-      }
-      return;
-    }
-    if (!shouldLogStructuredAgentEvent(event)) {
-      return;
-    }
-
-    logger.info('Agent event', {
-      issue_id: issueId,
-      event: event.event,
-      payload: event.payload,
-      timestamp: event.timestamp.toISOString()
-    });
-  });
-
-  orchestrator.on('error', (error: Error) => {
-    logger.error('Orchestrator error', {}, error);
+  const runtimeHost = new RuntimeHost({
+    db,
+    initialConfig: config,
+    initialDefinition: loadResult.definition!,
+    cliPortOverride: args.port,
+    bindOrchestrator: (orchestrator) =>
+      attachCliObservers(orchestrator as Orchestrator, timelineRenderStateByIssue),
   });
 
   // Set up workflow watcher for dynamic reload
   // Section 6.2: Dynamic Reload Semantics
+  let reloadChain = Promise.resolve();
   const workflowWatcher = new WorkflowWatcher({
     workflowPath,
     onReload: (newDefinition: WorkflowDefinition, newConfig: ServiceConfig) => {
-      console.log('[symphony] Workflow reloaded, applying new configuration...');
-      // Note: In a full implementation, we'd update the orchestrator's config here
-      config = newConfig;
-      // The orchestrator would need a method to apply new config dynamically
+      reloadChain = reloadChain
+        .then(async () => {
+          console.log('[symphony] Workflow reloaded, rebuilding orchestrator/runtime...');
+          await runtimeHost.reload(newDefinition, newConfig);
+          config = runtimeHost.getConfig();
+          const server = runtimeHost.getServer() as { getInfo?: () => { port: number | null } } | null;
+          const info = server?.getInfo?.();
+          if (info?.port) {
+            console.log(`[symphony] Runtime UI: http://localhost:${info.port}/runtime`);
+            console.log(`[symphony] Runtime API: http://localhost:${info.port}/api/v1/runtime/overview`);
+            console.log(`[symphony] Bot manifest: http://localhost:${info.port}/api/v1/bots/manifest`);
+          }
+          console.log('[symphony] Workflow reload applied');
+        })
+        .catch((error: Error) => {
+          logger.warn('Workflow reload error', { error: error.message });
+        });
     },
     onError: (error: Error) => {
       logger.warn('Workflow reload error', { error: error.message });
@@ -306,7 +436,7 @@ async function main(): Promise<void> {
 
     try {
       await workflowWatcher.stop();
-      await orchestrator.stop();
+      await runtimeHost.stop();
       console.log('[symphony] Shutdown complete');
       process.exit(0);
     } catch (err) {
@@ -320,7 +450,15 @@ async function main(): Promise<void> {
 
   // Start the orchestrator
   try {
-    await orchestrator.start();
+    await runtimeHost.start();
+    config = runtimeHost.getConfig();
+    const server = runtimeHost.getServer() as { getInfo?: () => { port: number | null } } | null;
+    const info = server?.getInfo?.();
+    if (info?.port) {
+      console.log(`[symphony] Runtime UI: http://localhost:${info.port}/runtime`);
+      console.log(`[symphony] Runtime API: http://localhost:${info.port}/api/v1/runtime/overview`);
+      console.log(`[symphony] Bot manifest: http://localhost:${info.port}/api/v1/bots/manifest`);
+    }
     console.log('[symphony] Symphony is running. Press Ctrl+C to stop.');
 
     // Keep process alive

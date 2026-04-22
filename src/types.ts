@@ -48,6 +48,42 @@ export interface ProjectConfig {
   local_path: string;
 }
 
+export interface RepositoryRouteConfig {
+  github_owner: string;
+  github_repo: string;
+  local_path: string | null;
+}
+
+export interface ResolvedRepositoryRoute {
+  project_slug: string;
+  project_name: string | null;
+  github_owner: string;
+  github_repo: string;
+  github_repo_full: string;
+  local_path: string | null;
+  cache_key: string;
+}
+
+export interface ResolvedTrackerProject {
+  project_id: string;
+  project_slug: string;
+  project_name: string;
+}
+
+export interface LiveLifecycleScenarioConfig {
+  title: string;
+  description: string;
+}
+
+export interface RuntimeDiagnosticsSnapshot {
+  running_issue_count: number;
+  retry_count: number;
+  worker_process_count: number;
+  active_session_count: number;
+  claimed_issue_count: number;
+  leadership_lease_held: boolean;
+}
+
 export interface ServiceConfig {
   // Tracker
   trackerKind: string;
@@ -64,6 +100,9 @@ export interface ServiceConfig {
   // Workspace
   workspaceRoot: string;
   projectRoot: string;
+  repositories: {
+    routing: Record<string, RepositoryRouteConfig>;
+  };
 
   // Hooks
   hooks: {
@@ -97,6 +136,15 @@ export interface ServiceConfig {
   // Review Policy
   reviewPolicy: {
     notifyLinearOnReview: boolean;
+  };
+
+  // Internal verification tooling
+  verification: {
+    lifecycle: {
+      timeoutMs: number;
+      pollIntervalMs: number;
+      projects: Record<string, LiveLifecycleScenarioConfig>;
+    };
   };
 
   // Server (extension)
@@ -274,7 +322,9 @@ export type AgentTimelineCode =
   | 'rate_limit_retry'
   | 'turn_completed'
   | 'turn_failed'
-  | 'turn_cancelled';
+  | 'turn_cancelled'
+  | 'missing_repository_route'
+  | 'missing_tracker_project_slug';
 
 export interface AgentTimelinePayload {
   level: AgentTimelineLevel;
@@ -348,6 +398,8 @@ export type TrackerError =
   | 'unsupported_tracker_kind'
   | 'missing_tracker_api_key'
   | 'missing_tracker_project_slug'
+  | 'missing_repository_route'
+  | 'linear_project_not_found'
   | 'linear_api_request'
   | 'linear_api_status'
   | 'linear_graphql_errors'
@@ -442,7 +494,13 @@ export interface LinearCustomFields {
   dev_attempts?: number;
   review_round?: number;
   complexity?: 'small' | 'medium' | 'large';
-  last_review_decision?: 'approve' | 'minor' | 'major' | 'tests' | 'reject';
+  last_review_decision?:
+    | 'approve'
+    | 'approve_minor'
+    | 'request_changes'
+    | 'request_tests'
+    | 'reject'
+    | 'merge_blocked';
 }
 
 /**

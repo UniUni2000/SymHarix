@@ -1,4 +1,9 @@
-import type { AgentEvent, AgentTimelinePayload } from '../types';
+import type { AgentEvent, AgentTimelineCode, AgentTimelinePayload } from '../types';
+
+type ToolAggregationCode = Extract<
+  AgentTimelineCode,
+  'tool_started' | 'tool_completed' | 'tool_failed'
+>;
 
 function isString(value: unknown): value is string {
   return typeof value === 'string';
@@ -18,7 +23,7 @@ function isTimelinePayload(payload: AgentEvent['payload']): payload is AgentTime
 }
 
 interface ToolAggregationState {
-  code: 'tool_started' | 'tool_completed' | 'tool_failed';
+  code: ToolAggregationCode;
   level: AgentTimelinePayload['level'];
   toolName: string;
   turn: number | null;
@@ -174,7 +179,7 @@ export function consumeTimelineEventForCli(
 
   const messages = flushCliTimelineState(state);
   state.pendingTool = {
-    code: payload.code,
+    code: payload.code as ToolAggregationCode,
     level: payload.level,
     toolName: payload.tool_name,
     turn: payload.turn,

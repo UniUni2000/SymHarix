@@ -39,11 +39,15 @@ export function judgeComplexity(issue: Issue): ComplexityJudgment {
 
   const singleFilePatterns = [
     /写一个.*(python|py|rust|js|ts|shell|bash).*(文件|脚本)/i,
+    /写一个.*(python|py|rust|js|ts|shell|bash).*(程序|工具)/i,
     /创建一个.*(python|py|rust|js|ts|shell|bash).*(文件|脚本)/i,
+    /创建一个.*(python|py|rust|js|ts|shell|bash).*(程序|工具)/i,
     /新增一个.*(python|py|rust|js|ts|shell|bash).*(文件|脚本)/i,
+    /新增一个.*(python|py|rust|js|ts|shell|bash).*(程序|工具)/i,
     /(保存|存到|输出到).*(txt|md|markdown|json|csv)/i,
     /(collect|save|write).*(txt|md|markdown|json|csv)/i,
     /\b(create|write|add|implement)\b.*\b(file|script)\b/i,
+    /\b(create|write|add|implement)\b.*\b(program|utility|tool)\b/i,
     /\bhello world\b/i,
   ];
 

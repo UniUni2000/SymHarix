@@ -3,7 +3,7 @@
 
 from enum import Enum
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 class State(Enum):
@@ -35,7 +35,9 @@ class Transition:
     from_state: State
     to_state: State
     trigger: str
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    timestamp: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    )
     actor: str = "system"
     reason: Optional[str] = None
 

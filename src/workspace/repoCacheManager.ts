@@ -2,20 +2,19 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as cp from 'child_process';
 import { promisify } from 'util';
+import type { ResolvedRepositoryRoute } from '../types';
 import { getRepoRootPath, getRepoSourcePath } from './shared';
 
 const execAsync = promisify(cp.exec);
 
 export interface RepoCacheManagerOptions {
   workspaceRoot: string;
-  projectRoot: string;
-  githubOwner: string;
   githubToken: string;
 }
 
 export interface RepoCacheResult {
   success: boolean;
-  repoName: string;
+  githubRepoFull: string;
   repoRoot?: string;
   sourcePath?: string;
   error?: string;
@@ -23,64 +22,175 @@ export interface RepoCacheResult {
 
 export class RepoCacheManager {
   private workspaceRoot: string;
-  private projectRoot: string;
-  private githubOwner: string;
   private githubToken: string;
 
   constructor(options: RepoCacheManagerOptions) {
     this.workspaceRoot = options.workspaceRoot;
-    this.projectRoot = options.projectRoot;
-    this.githubOwner = options.githubOwner;
     this.githubToken = options.githubToken;
   }
 
-  getRepoRoot(projectSlug?: string | null, projectName?: string | null): string {
-    return getRepoRootPath(this.workspaceRoot, projectSlug, projectName);
+  getRepoRoot(route: Pick<ResolvedRepositoryRoute, 'cache_key'>): string {
+    return getRepoRootPath(this.workspaceRoot, route.cache_key);
   }
 
-  getSourcePath(projectSlug?: string | null, projectName?: string | null): string {
-    return getRepoSourcePath(this.workspaceRoot, projectSlug, projectName);
+  getSourcePath(route: Pick<ResolvedRepositoryRoute, 'cache_key'>): string {
+    return getRepoSourcePath(this.workspaceRoot, route.cache_key);
   }
 
-  async ensureRepoSource(projectSlug?: string | null, projectName?: string | null): Promise<RepoCacheResult> {
-    const repoName = projectName || projectSlug || 'main';
-    const repoRoot = this.getRepoRoot(projectSlug, projectName);
-    const sourcePath = this.getSourcePath(projectSlug, projectName);
-    const seedPath = path.join(this.projectRoot, repoName);
+  async ensureRepoSource(route: ResolvedRepositoryRoute): Promise<RepoCacheResult> {
+    const repoRoot = this.getRepoRoot(route);
+    const sourcePath = this.getSourcePath(route);
+    const expectedRepo = route.github_repo_full.toLowerCase();
 
     try {
       await fs.promises.mkdir(repoRoot, { recursive: true });
       await fs.promises.mkdir(path.join(repoRoot, 'worktrees'), { recursive: true });
 
+      if (route.local_path) {
+        const localPathMismatch = await this.getRouteMismatch(route.local_path, expectedRepo);
+        if (localPathMismatch) {
+          return {
+            success: false,
+            githubRepoFull: route.github_repo_full,
+            error: `Configured local_path ${route.local_path} resolves to ${localPathMismatch}, expected ${route.github_repo_full}.`,
+          };
+        }
+      }
+
       if (await this.isGitRepo(sourcePath)) {
-        await this.refreshRepoSource(sourcePath);
-        return { success: true, repoName, repoRoot, sourcePath };
+        const sourceMismatch = await this.getRouteMismatch(sourcePath, expectedRepo);
+        if (sourceMismatch) {
+          await fs.promises.rm(sourcePath, { recursive: true, force: true });
+        } else {
+          await this.refreshRepoSource(sourcePath);
+          return { success: true, githubRepoFull: route.github_repo_full, repoRoot, sourcePath };
+        }
       }
 
       await fs.promises.rm(sourcePath, { recursive: true, force: true });
 
-      if (await this.isGitRepo(seedPath)) {
-        await execAsync(`git clone "${seedPath}" "${sourcePath}"`, { maxBuffer: 10 * 1024 * 1024 });
+      if (route.local_path) {
+        if (!await this.isGitRepo(route.local_path)) {
+          return {
+            success: false,
+            githubRepoFull: route.github_repo_full,
+            error: `Configured local_path is not a git repository: ${route.local_path}`,
+          };
+        }
+
+        await execAsync(`git clone "${route.local_path}" "${sourcePath}"`, { maxBuffer: 10 * 1024 * 1024 });
       } else {
-        const githubRepo = `${this.githubOwner}/${repoName}`;
         const cloneUrl = this.githubToken
-          ? `https://${this.githubToken}@github.com/${githubRepo}.git`
-          : `https://github.com/${githubRepo}.git`;
+          ? `https://${this.githubToken}@github.com/${route.github_repo_full}.git`
+          : `https://github.com/${route.github_repo_full}.git`;
         await execAsync(`git clone "${cloneUrl}" "${sourcePath}"`, { maxBuffer: 10 * 1024 * 1024 });
+      }
+
+      const clonedSourceMismatch = await this.getRouteMismatch(sourcePath, expectedRepo);
+      if (clonedSourceMismatch) {
+        await fs.promises.rm(sourcePath, { recursive: true, force: true });
+        return {
+          success: false,
+          githubRepoFull: route.github_repo_full,
+          error: `Cloned source at ${sourcePath} resolves to ${clonedSourceMismatch}, expected ${route.github_repo_full}.`,
+        };
       }
 
       await this.configureGitIdentity(sourcePath);
       await this.refreshRepoSource(sourcePath);
 
-      return { success: true, repoName, repoRoot, sourcePath };
+      return { success: true, githubRepoFull: route.github_repo_full, repoRoot, sourcePath };
     } catch (err) {
       const error = err as Error;
       return {
         success: false,
-        repoName,
-        error: `Failed to ensure repo source for ${repoName}: ${error.message}`
+        githubRepoFull: route.github_repo_full,
+        error: `Failed to ensure repo source for ${route.github_repo_full}: ${error.message}`
       };
     }
+  }
+
+  private async getRouteMismatch(repoPath: string, expectedRepo: string): Promise<string | null> {
+    const actualRepo = await this.resolveRepositoryIdentity(repoPath);
+    if (!actualRepo) {
+      return null;
+    }
+
+    return actualRepo === expectedRepo ? null : actualRepo;
+  }
+
+  private async resolveRepositoryIdentity(repoPath: string, seenPaths = new Set<string>()): Promise<string | null> {
+    const normalizedPath = await fs.promises.realpath(repoPath).catch(() => path.resolve(repoPath));
+    if (seenPaths.has(normalizedPath)) {
+      return null;
+    }
+    seenPaths.add(normalizedPath);
+
+    const remoteUrl = await this.getOriginRemoteUrl(repoPath);
+    if (!remoteUrl) {
+      return null;
+    }
+
+    const githubRepo = this.parseGitHubRepoFull(remoteUrl);
+    if (githubRepo) {
+      return githubRepo;
+    }
+
+    const localRemotePath = this.parseLocalRemotePath(repoPath, remoteUrl);
+    if (!localRemotePath || !await this.isGitRepo(localRemotePath)) {
+      return null;
+    }
+
+    return this.resolveRepositoryIdentity(localRemotePath, seenPaths);
+  }
+
+  private async getOriginRemoteUrl(repoPath: string): Promise<string | null> {
+    try {
+      const { stdout } = await execAsync(`git -C "${repoPath}" remote get-url origin`);
+      const remoteUrl = stdout.trim();
+      return remoteUrl || null;
+    } catch {
+      return null;
+    }
+  }
+
+  private parseGitHubRepoFull(remoteUrl: string): string | null {
+    const trimmed = remoteUrl.trim();
+    const httpsMatch = trimmed.match(/^https?:\/\/(?:[^/@]+@)?github\.com\/([^/]+)\/(.+?)(?:\.git)?$/i);
+    if (httpsMatch) {
+      return `${httpsMatch[1]}/${httpsMatch[2]}`.toLowerCase();
+    }
+
+    const sshMatch = trimmed.match(/^(?:ssh:\/\/)?git@github\.com[:/]([^/]+)\/(.+?)(?:\.git)?$/i);
+    if (sshMatch) {
+      return `${sshMatch[1]}/${sshMatch[2]}`.toLowerCase();
+    }
+
+    return null;
+  }
+
+  private parseLocalRemotePath(repoPath: string, remoteUrl: string): string | null {
+    const trimmed = remoteUrl.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    if (trimmed.startsWith('file://')) {
+      return trimmed.slice('file://'.length);
+    }
+
+    if (path.isAbsolute(trimmed)) {
+      return trimmed;
+    }
+
+    if (/^[./~]/.test(trimmed)) {
+      const expanded = trimmed.startsWith('~/')
+        ? path.join(process.env.HOME || '', trimmed.slice(2))
+        : trimmed;
+      return path.resolve(repoPath, expanded);
+    }
+
+    return null;
   }
 
   private async isGitRepo(repoPath: string): Promise<boolean> {

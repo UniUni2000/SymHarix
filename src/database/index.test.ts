@@ -6,6 +6,9 @@ import { beforeEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import {
   AgentRunRepository,
+  BotConversationPreferenceRepository,
+  BotPendingActionRepository,
+  BotWatchSubscriptionRepository,
   RepoCacheRepository,
   ReviewEventRepository,
   ServiceLeaseRepository,
@@ -34,6 +37,9 @@ describe('database schema', () => {
     expect(tableNames).toContain('review_events');
     expect(tableNames).toContain('sync_events');
     expect(tableNames).toContain('service_leases');
+    expect(tableNames).toContain('bot_watch_subscriptions');
+    expect(tableNames).toContain('bot_conversation_preferences');
+    expect(tableNames).toContain('bot_pending_actions');
     expect(tableNames).not.toContain('tasks');
     expect(tableNames).not.toContain('execution_events');
   });
@@ -252,5 +258,163 @@ describe('ServiceLeaseRepository', () => {
 
     expect(takeover.acquired).toBe(true);
     expect(takeover.lease?.holder_id).toBe('holder-b');
+  });
+});
+
+describe('BotWatchSubscriptionRepository', () => {
+  test('persists and removes watch subscriptions by conversation and issue', () => {
+    const repository = new BotWatchSubscriptionRepository(db);
+
+    repository.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      user_id: 'user-1',
+      preset: 'verbose',
+    });
+
+    repository.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      user_id: 'user-1',
+      preset: 'failures',
+    });
+
+    const stored = repository.findAll();
+    expect(stored).toHaveLength(1);
+    expect(stored[0]?.preset).toBe('failures');
+
+    expect(
+      repository.delete({
+        transport: 'telegram',
+        conversation_id: 'chat-1',
+        issue_id: 'issue-1',
+      }),
+    ).toBe(true);
+    expect(repository.findAll()).toHaveLength(0);
+  });
+});
+
+describe('BotConversationPreferenceRepository', () => {
+  test('persists, updates, and clears a default project per conversation', () => {
+    const repository = new BotConversationPreferenceRepository(db);
+
+    repository.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      default_project_slug: 'test2',
+    });
+
+    expect(
+      repository.findByConversation({
+        transport: 'telegram',
+        conversation_id: 'chat-1',
+      })?.default_project_slug,
+    ).toBe('test2');
+
+    repository.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      default_project_slug: 'backend-core',
+    });
+
+    expect(
+      repository.findByConversation({
+        transport: 'telegram',
+        conversation_id: 'chat-1',
+      })?.default_project_slug,
+    ).toBe('backend-core');
+
+    expect(
+      repository.delete({
+        transport: 'telegram',
+        conversation_id: 'chat-1',
+      }),
+    ).toBe(true);
+    expect(
+      repository.findByConversation({
+        transport: 'telegram',
+        conversation_id: 'chat-1',
+      }),
+    ).toBeNull();
+  });
+});
+
+describe('BotPendingActionRepository', () => {
+  test('stores one pending action per conversation and deletes expired actions', () => {
+    const repository = new BotPendingActionRepository(db);
+
+    repository.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      intent_kind: 'create_issue',
+      normalized_payload: {
+        command: 'new',
+        create_issue: {
+          title: 'Build dashboard',
+          description: 'Track progress',
+          project_slug: 'test2',
+        },
+      },
+      summary_message: 'Action: create issue',
+      expires_at: new Date('2026-01-01T00:15:00.000Z'),
+    });
+
+    repository.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      intent_kind: 'retry',
+      normalized_payload: {
+        command: 'retry',
+        issue_id: 'INT-1',
+      },
+      summary_message: 'Action: retry',
+      expires_at: new Date('2026-01-01T00:20:00.000Z'),
+    });
+
+    const stored = repository.findByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(stored?.intent_kind).toBe('retry');
+    expect(stored?.summary_message).toBe('Action: retry');
+
+    repository.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-expired',
+      user_id: 'user-1',
+      intent_kind: 'create_issue',
+      normalized_payload: {
+        command: 'new',
+      },
+      summary_message: 'Expired action',
+      expires_at: new Date('2025-12-31T23:59:59.000Z'),
+    });
+
+    expect(repository.deleteExpired(new Date('2026-01-01T00:00:00.000Z'))).toBe(1);
+    expect(
+      repository.findByConversation({
+        transport: 'telegram',
+        conversation_id: 'chat-expired',
+      }),
+    ).toBeNull();
+
+    expect(
+      repository.delete({
+        transport: 'telegram',
+        conversation_id: 'chat-1',
+      }),
+    ).toBe(true);
+    expect(
+      repository.findByConversation({
+        transport: 'telegram',
+        conversation_id: 'chat-1',
+      }),
+    ).toBeNull();
   });
 });

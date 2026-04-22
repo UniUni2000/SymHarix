@@ -129,13 +129,37 @@ describe('AnthropicSupervisorService', () => {
       workspaceArtifacts: {
         handover: '# Handover',
         developmentLog: '# Development Log',
-        reviewReport: '## Review Decision: APPROVE\n\nLooks good.',
+        reviewReport: '## Review Decision: APPROVE\n\n## Review Summary\nLooks good.',
       },
     });
 
     expect(create).not.toHaveBeenCalled();
     expect(result.kind).toBe('finish');
     expect(String(result.reason || '')).toContain('.symphony/REVIEW_REPORT.md');
+  });
+
+  test('keeps reviewing when the report is missing the canonical summary section', async () => {
+    const service = new AnthropicSupervisorService('test-model');
+    const create = mock(async () => ({
+      content: [],
+    }));
+    (service as any).client = { messages: { create } };
+
+    const result = await service.decideNextAction({
+      ...decisionContext,
+      mode: 'review',
+      workspaceArtifacts: {
+        handover: '# Handover',
+        developmentLog: '# Development Log',
+        reviewReport: '## Review Decision: APPROVE\n\nLooks good.',
+      },
+    });
+
+    expect(create).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      kind: 'continue',
+      message: expect.stringContaining('## Review Summary'),
+    });
   });
 
   test('denies orchestrator-owned external write actions before consulting the provider', async () => {

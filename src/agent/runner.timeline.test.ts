@@ -1,40 +1,32 @@
 import { describe, expect, mock, test } from 'bun:test';
 import { EventEmitter } from 'events';
 import type { ChildProcess } from 'child_process';
+import { PassThrough } from 'stream';
 import { AgentRunner } from './runner';
 
-class FakeStream extends EventEmitter {
-  override removeAllListeners(event?: string | symbol): this {
-    super.removeAllListeners(event);
-    return this;
-  }
-}
+type FakeWritable = PassThrough & {
+  writes: string[];
+};
 
 function createFakeChildProcess() {
-  const child = new EventEmitter() as ChildProcess & EventEmitter & {
-    stdout: FakeStream;
-    stderr: FakeStream;
-    stdin: {
-      writes: string[];
-      write: (data: string) => boolean;
-      end: () => void;
-      writable: boolean;
-    };
+  const child = new EventEmitter() as unknown as ChildProcess & EventEmitter & {
+    stdout: PassThrough;
+    stderr: PassThrough;
+    stdin: FakeWritable;
     pid: number;
   };
+  const stdin = new PassThrough() as FakeWritable;
+  stdin.writes = [];
+  const originalWrite = stdin.write.bind(stdin);
+  stdin.write = ((chunk: string | Uint8Array, encoding?: BufferEncoding, cb?: (error?: Error | null) => void) => {
+    stdin.writes.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString());
+    return originalWrite(chunk, encoding as BufferEncoding, cb);
+  }) as typeof stdin.write;
 
   child.pid = 12345;
-  child.stdout = new FakeStream();
-  child.stderr = new FakeStream();
-  child.stdin = {
-    writes: [],
-    writable: true,
-    write(data: string) {
-      this.writes.push(data);
-      return true;
-    },
-    end() {},
-  };
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.stdin = stdin;
 
   return child;
 }
