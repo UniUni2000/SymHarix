@@ -5,6 +5,18 @@
 import type { Database } from 'bun:sqlite';
 import type { CreateWorkItem, UpdateWorkItem, WorkItem, WorkItemOrchestratorState } from '../types';
 
+function parseJsonValue<T>(value: unknown, fallback: T): T {
+  if (typeof value !== 'string' || !value.trim()) {
+    return fallback;
+  }
+
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
+  }
+}
+
 export class WorkItemRepository {
   constructor(private db: Database) {}
 
@@ -15,9 +27,12 @@ export class WorkItemRepository {
         id, linear_issue_id, linear_identifier, linear_title, linear_state,
         github_repo, github_issue_number, active_pr_number, branch_name,
         workspace_path, workspace_key, orchestrator_state, dev_attempt_count,
-        review_round, last_review_decision, last_review_summary, cancelled_at,
-        merged_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        review_round, last_review_decision, last_review_summary,
+        repo_harness_status, constitution_status, governance_status, governance_decision,
+        governance_summary, governance_override_at, governance_override_reason, change_pack_summary_json,
+        task_status_json, evidence_summary_json, missing_requirements_json, constitution_hits_json,
+        fitness_signals_json, cancelled_at, merged_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -37,6 +52,19 @@ export class WorkItemRepository {
       item.review_round ?? 0,
       item.last_review_decision ?? null,
       item.last_review_summary ?? null,
+      item.repo_harness_status ?? null,
+      item.constitution_status ?? null,
+      item.governance_status ?? null,
+      item.governance_decision ?? null,
+      item.governance_summary ?? null,
+      item.governance_override_at?.toISOString() ?? null,
+      item.governance_override_reason ?? null,
+      JSON.stringify(item.change_pack_summary ?? null),
+      JSON.stringify(item.task_status ?? null),
+      JSON.stringify(item.evidence_summary ?? null),
+      JSON.stringify(item.missing_requirements ?? []),
+      JSON.stringify(item.constitution_hits ?? []),
+      JSON.stringify(item.fitness_signals ?? []),
       item.cancelled_at?.toISOString() ?? null,
       item.merged_at?.toISOString() ?? null,
       now,
@@ -53,9 +81,12 @@ export class WorkItemRepository {
         id, linear_issue_id, linear_identifier, linear_title, linear_state,
         github_repo, github_issue_number, active_pr_number, branch_name,
         workspace_path, workspace_key, orchestrator_state, dev_attempt_count,
-        review_round, last_review_decision, last_review_summary, cancelled_at,
-        merged_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        review_round, last_review_decision, last_review_summary,
+        repo_harness_status, constitution_status, governance_status, governance_decision,
+        governance_summary, governance_override_at, governance_override_reason, change_pack_summary_json,
+        task_status_json, evidence_summary_json, missing_requirements_json, constitution_hits_json,
+        fitness_signals_json, cancelled_at, merged_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         linear_issue_id = excluded.linear_issue_id,
         linear_identifier = excluded.linear_identifier,
@@ -72,6 +103,19 @@ export class WorkItemRepository {
         review_round = excluded.review_round,
         last_review_decision = excluded.last_review_decision,
         last_review_summary = excluded.last_review_summary,
+        repo_harness_status = excluded.repo_harness_status,
+        constitution_status = excluded.constitution_status,
+        governance_status = excluded.governance_status,
+        governance_decision = excluded.governance_decision,
+        governance_summary = excluded.governance_summary,
+        governance_override_at = excluded.governance_override_at,
+        governance_override_reason = excluded.governance_override_reason,
+        change_pack_summary_json = excluded.change_pack_summary_json,
+        task_status_json = excluded.task_status_json,
+        evidence_summary_json = excluded.evidence_summary_json,
+        missing_requirements_json = excluded.missing_requirements_json,
+        constitution_hits_json = excluded.constitution_hits_json,
+        fitness_signals_json = excluded.fitness_signals_json,
         cancelled_at = excluded.cancelled_at,
         merged_at = excluded.merged_at,
         updated_at = excluded.updated_at
@@ -94,6 +138,19 @@ export class WorkItemRepository {
       item.review_round ?? 0,
       item.last_review_decision ?? null,
       item.last_review_summary ?? null,
+      item.repo_harness_status ?? null,
+      item.constitution_status ?? null,
+      item.governance_status ?? null,
+      item.governance_decision ?? null,
+      item.governance_summary ?? null,
+      item.governance_override_at?.toISOString() ?? null,
+      item.governance_override_reason ?? null,
+      JSON.stringify(item.change_pack_summary ?? null),
+      JSON.stringify(item.task_status ?? null),
+      JSON.stringify(item.evidence_summary ?? null),
+      JSON.stringify(item.missing_requirements ?? []),
+      JSON.stringify(item.constitution_hits ?? []),
+      JSON.stringify(item.fitness_signals ?? []),
       item.cancelled_at?.toISOString() ?? null,
       item.merged_at?.toISOString() ?? null,
       now,
@@ -178,6 +235,19 @@ export class WorkItemRepository {
     if (item.review_round !== undefined) assign('review_round', item.review_round);
     if (item.last_review_decision !== undefined) assign('last_review_decision', item.last_review_decision);
     if (item.last_review_summary !== undefined) assign('last_review_summary', item.last_review_summary);
+    if (item.repo_harness_status !== undefined) assign('repo_harness_status', item.repo_harness_status);
+    if (item.constitution_status !== undefined) assign('constitution_status', item.constitution_status);
+    if (item.governance_status !== undefined) assign('governance_status', item.governance_status);
+    if (item.governance_decision !== undefined) assign('governance_decision', item.governance_decision);
+    if (item.governance_summary !== undefined) assign('governance_summary', item.governance_summary);
+    if (item.governance_override_at !== undefined) assign('governance_override_at', item.governance_override_at?.toISOString() ?? null);
+    if (item.governance_override_reason !== undefined) assign('governance_override_reason', item.governance_override_reason);
+    if (item.change_pack_summary !== undefined) assign('change_pack_summary_json', JSON.stringify(item.change_pack_summary));
+    if (item.task_status !== undefined) assign('task_status_json', JSON.stringify(item.task_status));
+    if (item.evidence_summary !== undefined) assign('evidence_summary_json', JSON.stringify(item.evidence_summary));
+    if (item.missing_requirements !== undefined) assign('missing_requirements_json', JSON.stringify(item.missing_requirements));
+    if (item.constitution_hits !== undefined) assign('constitution_hits_json', JSON.stringify(item.constitution_hits));
+    if (item.fitness_signals !== undefined) assign('fitness_signals_json', JSON.stringify(item.fitness_signals));
     if (item.cancelled_at !== undefined) assign('cancelled_at', item.cancelled_at?.toISOString() ?? null);
     if (item.merged_at !== undefined) assign('merged_at', item.merged_at?.toISOString() ?? null);
 
@@ -219,6 +289,19 @@ export class WorkItemRepository {
       review_round: (row.review_round as number) ?? 0,
       last_review_decision: row.last_review_decision as WorkItem['last_review_decision'],
       last_review_summary: row.last_review_summary as string | null,
+      repo_harness_status: (row.repo_harness_status as WorkItem['repo_harness_status']) ?? null,
+      constitution_status: (row.constitution_status as WorkItem['constitution_status']) ?? null,
+      governance_status: (row.governance_status as WorkItem['governance_status']) ?? null,
+      governance_decision: (row.governance_decision as WorkItem['governance_decision']) ?? null,
+      governance_summary: row.governance_summary as string | null,
+      governance_override_at: row.governance_override_at ? new Date(row.governance_override_at as string) : null,
+      governance_override_reason: row.governance_override_reason as string | null,
+      change_pack_summary: parseJsonValue(row.change_pack_summary_json, null),
+      task_status: parseJsonValue(row.task_status_json, null),
+      evidence_summary: parseJsonValue(row.evidence_summary_json, null),
+      missing_requirements: parseJsonValue(row.missing_requirements_json, []),
+      constitution_hits: parseJsonValue(row.constitution_hits_json, []),
+      fitness_signals: parseJsonValue(row.fitness_signals_json, []),
       cancelled_at: row.cancelled_at ? new Date(row.cancelled_at as string) : null,
       merged_at: row.merged_at ? new Date(row.merged_at as string) : null,
       created_at: new Date(row.created_at as string),

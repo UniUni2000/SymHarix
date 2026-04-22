@@ -89,6 +89,16 @@ export class BotRuntimeContextService {
       ? {
           issue: toIssueContextView(focusIssue),
           digest: historyView?.digest ?? null,
+          governance: {
+            status: focusIssue.governance_status ?? null,
+            decision: focusIssue.governance_decision ?? null,
+            summary: focusIssue.governance_summary ?? null,
+            suggestions: (focusIssue.active_governance_suggestions ?? []).map((suggestion) => ({
+              suggestion_type: suggestion.suggestion_type,
+              title: suggestion.title,
+              summary: suggestion.summary,
+            })),
+          },
           recent_timeline: recentTimeline.map((event) => ({
             timestamp: event.timestamp,
             message: event.message,

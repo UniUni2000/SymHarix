@@ -1,3 +1,16 @@
+import type {
+  ChangePackSummary,
+  ChangePackTaskStatus,
+  CompletionRequirement,
+  ConstitutionHit,
+  ConstitutionStatus,
+  EvidenceSummary,
+  GovernanceDecision,
+  GovernanceStatus,
+  RepositoryHarnessConfig,
+  RepositoryHarnessStatus,
+} from '../types';
+
 /**
  * Database Types for Symphony Enterprise Agent Platform
  */
@@ -39,7 +52,17 @@ export type BotPendingIntentKind =
   | 'unwatch'
   | 'stop'
   | 'retry'
+  | 'override'
+  | 'rewrite'
+  | 'split'
   | 'set_default_project';
+export type GovernanceSuggestionType =
+  | 'cleanup'
+  | 'consolidation'
+  | 'architecture_alignment'
+  | 'constitution_update'
+  | 'harness_adoption';
+export type GovernanceSuggestionStatus = 'pending' | 'accepted' | 'dismissed';
 
 export interface ServiceLease {
   lease_key: string;
@@ -77,6 +100,19 @@ export interface WorkItem {
   review_round: number;
   last_review_decision: ReviewDecision | null;
   last_review_summary: string | null;
+  repo_harness_status: RepositoryHarnessStatus | null;
+  constitution_status: ConstitutionStatus | null;
+  governance_status: GovernanceStatus | null;
+  governance_decision: GovernanceDecision | null;
+  governance_summary: string | null;
+  governance_override_at: Date | null;
+  governance_override_reason: string | null;
+  change_pack_summary: ChangePackSummary | null;
+  task_status: ChangePackTaskStatus | null;
+  evidence_summary: EvidenceSummary | null;
+  missing_requirements: CompletionRequirement[];
+  constitution_hits: ConstitutionHit[];
+  fitness_signals: Array<{ code: string; summary: string; severity: 'low' | 'medium' | 'high' }>;
   cancelled_at: Date | null;
   merged_at: Date | null;
   created_at: Date;
@@ -100,6 +136,19 @@ export interface CreateWorkItem {
   review_round?: number;
   last_review_decision?: ReviewDecision | null;
   last_review_summary?: string | null;
+  repo_harness_status?: RepositoryHarnessStatus | null;
+  constitution_status?: ConstitutionStatus | null;
+  governance_status?: GovernanceStatus | null;
+  governance_decision?: GovernanceDecision | null;
+  governance_summary?: string | null;
+  governance_override_at?: Date | null;
+  governance_override_reason?: string | null;
+  change_pack_summary?: ChangePackSummary | null;
+  task_status?: ChangePackTaskStatus | null;
+  evidence_summary?: EvidenceSummary | null;
+  missing_requirements?: CompletionRequirement[];
+  constitution_hits?: ConstitutionHit[];
+  fitness_signals?: Array<{ code: string; summary: string; severity: 'low' | 'medium' | 'high' }>;
   cancelled_at?: Date | null;
   merged_at?: Date | null;
 }
@@ -293,4 +342,74 @@ export interface CreateBotPendingActionRecord {
 export interface DeleteBotPendingActionRecord {
   transport: BotWatchTransport;
   conversation_id: string;
+}
+
+export interface ShadowHarnessRecord {
+  repo_key: string;
+  source: RepositoryHarnessStatus;
+  config_json: RepositoryHarnessConfig;
+  inference_details_json: Record<string, unknown>;
+  successful_runs: number;
+  failed_runs: number;
+  adoption_suggested_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface UpsertShadowHarnessRecord {
+  repo_key: string;
+  source: RepositoryHarnessStatus;
+  config_json: RepositoryHarnessConfig;
+  inference_details_json?: Record<string, unknown>;
+  successful_runs?: number;
+  failed_runs?: number;
+  adoption_suggested_at?: Date | null;
+}
+
+export interface GovernanceAssessmentRecord {
+  id: string;
+  work_item_id: string | null;
+  issue_id: string;
+  decision: GovernanceDecision;
+  status: GovernanceStatus;
+  summary: string;
+  constitution_hits_json: ConstitutionHit[];
+  detail_json: Record<string, unknown> | null;
+  created_at: Date;
+}
+
+export interface CreateGovernanceAssessmentRecord {
+  id: string;
+  work_item_id?: string | null;
+  issue_id: string;
+  decision: GovernanceDecision;
+  status: GovernanceStatus;
+  summary: string;
+  constitution_hits_json: ConstitutionHit[];
+  detail_json?: Record<string, unknown> | null;
+  created_at?: Date;
+}
+
+export interface GovernanceSuggestionRecord {
+  id: string;
+  work_item_id: string | null;
+  issue_id: string;
+  suggestion_type: GovernanceSuggestionType;
+  status: GovernanceSuggestionStatus;
+  title: string;
+  summary: string;
+  detail_json: Record<string, unknown> | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface CreateGovernanceSuggestionRecord {
+  id: string;
+  work_item_id?: string | null;
+  issue_id: string;
+  suggestion_type: GovernanceSuggestionType;
+  status?: GovernanceSuggestionStatus;
+  title: string;
+  summary: string;
+  detail_json?: Record<string, unknown> | null;
 }

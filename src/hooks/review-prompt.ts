@@ -71,13 +71,14 @@ ${githubContext || ''}
 
 ## Your Responsibilities
 1. **First: Read \`.symphony/HANDOVER.md\`** — This is DEV's summary of what was done
-2. Inspect the local worktree diff directly with git and file reads; do not rely only on prior reports
-3. Run the narrowest relevant tests for the changed code; for Python code prefer the affected \`pytest\` target
-4. Assess code quality: logic, naming, performance, security
-5. **Give feedback in "现状+期望" format** — Do NOT give solutions
-6. Put the final decision in \`.symphony/REVIEW_REPORT.md\` so the orchestrator and review executor can act on it
-7. For straightforward small diffs, prefer completing the review in a single focused pass and writing the report in the same turn
-8. Treat the review as incomplete until \`.symphony/REVIEW_REPORT.md\` exists with the final decision line and review summary section
+2. Read repo-local contracts if present: \`.symphony-repo.yaml\`, \`.symphony-constitution.md\`, and \`.symphony/change-pack/*\`
+3. Inspect the local worktree diff directly with git and file reads; do not rely only on prior reports
+4. Run the narrowest relevant tests for the changed code; for Python code prefer the affected \`pytest\` target
+5. Assess code quality: logic, naming, performance, security
+6. **Give feedback in "现状+期望" format** — Do NOT give solutions
+7. Put the final decision in \`.symphony/REVIEW_REPORT.md\` so the orchestrator and review executor can act on it
+8. For straightforward small diffs, prefer completing the review in a single focused pass and writing the report in the same turn
+9. Treat the review as incomplete until \`.symphony/REVIEW_REPORT.md\` exists with the final decision line and review summary section
 
 ## Required Decision Line
 Include one exact machine-readable line near the top of \`.symphony/REVIEW_REPORT.md\`:
@@ -120,7 +121,8 @@ ${historySection}
 3. The review executor will merge only if your final decision is APPROVE or APPROVE_MINOR
 4. Do not commit files under \`.symphony/\`
 5. If you need notes while reviewing, keep them transient and still end the same turn with the final \`.symphony/REVIEW_REPORT.md\`
-6. Do not stop the turn until the final \`.symphony/REVIEW_REPORT.md\` has been written
+6. Keep \`.symphony/change-pack/evidence.json\` aligned with the final review state
+7. Do not stop the turn until the final \`.symphony/REVIEW_REPORT.md\` has been written
 `;
 }
 

@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { BotAssistantService } from './assistant';
 import { BotCommandService } from './commandService';
 import { BotSubscriptionService } from './subscriptions';
@@ -14,12 +17,21 @@ import { TrackerProjectResolutionService } from '../tracker/projectResolution';
 function createRuntimeControlPlane(): RuntimeControlPlane & {
   emit: (event: RuntimeStreamEvent) => void;
   createIssueCalls: Array<Record<string, unknown>>;
+  overrideGovernanceCalls: string[];
+  rewriteGovernanceCalls: string[];
+  splitGovernanceCalls: string[];
 } {
   const listeners = new Set<(event: RuntimeStreamEvent) => void>();
   const createIssueCalls: Array<Record<string, unknown>> = [];
+  const overrideGovernanceCalls: string[] = [];
+  const rewriteGovernanceCalls: string[] = [];
+  const splitGovernanceCalls: string[] = [];
   const runtime: RuntimeControlPlane & {
     emit: (event: RuntimeStreamEvent) => void;
     createIssueCalls: Array<Record<string, unknown>>;
+    overrideGovernanceCalls: string[];
+    rewriteGovernanceCalls: string[];
+    splitGovernanceCalls: string[];
   } = {
     getOverview: () => ({
       generated_at: '2026-01-01T00:00:00.000Z',
@@ -39,7 +51,14 @@ function createRuntimeControlPlane(): RuntimeControlPlane & {
           github_issue_number: null,
           active_pr_number: null,
           session: null,
-          actions: { can_stop: false, can_retry: true, can_open_pr: false },
+          actions: {
+            can_stop: false,
+            can_retry: true,
+            can_override_governance: false,
+            can_rewrite_governance: false,
+            can_split_governance: false,
+            can_open_pr: false,
+          },
           created_at: '2026-01-01T00:00:00.000Z',
           updated_at: '2026-01-01T00:00:00.000Z',
         },
@@ -84,6 +103,36 @@ function createRuntimeControlPlane(): RuntimeControlPlane & {
       issue_id: id,
       issue_identifier: 'INT-31',
     }),
+    overrideGovernance: async (id: string) => {
+      overrideGovernanceCalls.push(id);
+      return {
+        accepted: true,
+        status: 'accepted',
+        message: `Override approved for ${id}`,
+        issue_id: id,
+        issue_identifier: 'INT-31',
+      };
+    },
+    rewriteGovernance: async (id: string) => {
+      rewriteGovernanceCalls.push(id);
+      return {
+        accepted: true,
+        status: 'accepted',
+        message: `Rewrite applied for ${id}`,
+        issue_id: id,
+        issue_identifier: 'INT-31',
+      };
+    },
+    splitGovernance: async (id: string) => {
+      splitGovernanceCalls.push(id);
+      return {
+        accepted: true,
+        status: 'accepted',
+        message: `Split applied for ${id}`,
+        issue_id: id,
+        issue_identifier: 'INT-31',
+      };
+    },
     createStream: () => new ReadableStream<Uint8Array>(),
     subscribe: (listener) => {
       listeners.add(listener);
@@ -95,6 +144,9 @@ function createRuntimeControlPlane(): RuntimeControlPlane & {
       }
     },
     createIssueCalls,
+    overrideGovernanceCalls,
+    rewriteGovernanceCalls,
+    splitGovernanceCalls,
   };
   return runtime;
 }
@@ -369,6 +421,94 @@ describe('BotAssistantService', () => {
     subscriptions.dispose();
   });
 
+  test('includes governance guidance in the confirmation summary when the intake critic wants a split first', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-bot-intake-'));
+    try {
+      fs.writeFileSync(
+        path.join(repoRoot, '.symphony-constitution.md'),
+        [
+          '# Constitution',
+          '',
+          '## Main Path',
+          '- Keep one control plane.',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const runtime = createRuntimeControlPlane();
+      const subscriptions = new BotSubscriptionService(runtime, {});
+      const preferences = new BotConversationPreferenceRepository(db);
+      const pending = new BotPendingActionRepository(db);
+      preferences.upsert({
+        transport: 'telegram',
+        conversation_id: 'chat-split',
+        default_project_slug: 'test2',
+      });
+
+      const projectResolver = new TrackerProjectResolutionService(
+        {
+          listProjects: async () => ({
+            projects: [
+              { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' },
+            ],
+          }),
+          findProjectBySlug: async (projectSlug: string) => ({
+            project: projectSlug === 'test2'
+              ? { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' }
+              : null,
+          }),
+        } as any,
+        {
+          test2: {
+            github_owner: 'UniUni2000',
+            github_repo: 'test2',
+            local_path: repoRoot,
+          },
+        },
+      );
+
+      const commandService = new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver);
+      const assistant = new BotAssistantService(
+        runtime,
+        commandService,
+        preferences,
+        pending,
+        projectResolver,
+        {
+          decide: async () => ({
+            intent: {
+              kind: 'create_issue',
+              title: 'Refactor runtime API and redesign the web dashboard and rewrite Telegram copy',
+              description: 'Do all three in one issue and also clean related files.',
+              project_slug: 'test2',
+            },
+          }),
+        },
+      );
+
+      const response = await assistant.respondToText(
+        {
+          transport: 'telegram',
+          recipient: { transport: 'telegram', conversation_id: 'chat-split' },
+          identity: { user_id: 'user-1', display_name: 'Alice' },
+        },
+        '帮我同时重构 runtime API、重做运行态网页，再改 Telegram 文案',
+      );
+
+      expect(response.message).toContain('Action: create issue');
+      expect(response.message).toContain('Governance: split_before_implement');
+      expect(response.message).toContain('Dispatch: blocked');
+      expect(runtime.createIssueCalls).toHaveLength(0);
+
+      subscriptions.dispose();
+    } finally {
+      fs.rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
   test('answers active issue questions from runtime context when the model is unavailable', async () => {
     db = new Database(':memory:');
     initializeSchema(db);
@@ -453,6 +593,314 @@ describe('BotAssistantService', () => {
     expect(response.message).toContain('当前自然语言模型暂不可用');
     expect(response.message).toContain('INT-31');
     expect(response.message).toContain('repository route');
+
+    subscriptions.dispose();
+  });
+
+  test('explains how to rewrite or split a governance-blocked issue from runtime context when the model is unavailable', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const governanceIssue = {
+      ...runtime.getOverview().issues[0]!,
+      governance_status: 'advisory' as const,
+      governance_decision: 'split_before_implement' as const,
+      governance_summary: 'This issue spans multiple objectives across different parts of the system. Please split it before dispatch.',
+      constitution_hits: [],
+      fitness_signals: [],
+      active_governance_suggestions: [
+        {
+          id: 'gov-suggest-1',
+          suggestion_type: 'architecture_alignment' as const,
+          status: 'pending' as const,
+          title: 'Split INT-31 before implementation',
+          summary: 'Separate the runtime API change from the Telegram copy change before dispatch.',
+        },
+      ],
+    };
+    runtime.getOverview = () => ({
+      generated_at: '2026-01-01T00:00:00.000Z',
+      counts: { running: 0, retrying: 0, total: 1 },
+      issues: [governanceIssue],
+    });
+    runtime.getIssue = (id: string) => ['INT-31', 'issue-31'].includes(id) ? governanceIssue : null;
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const projectResolver = new TrackerProjectResolutionService(
+      {
+        listProjects: async () => ({ projects: [] }),
+      } as any,
+      {},
+    );
+    const commandService = new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver);
+    const assistant = new BotAssistantService(
+      runtime,
+      commandService,
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => {
+          throw new Error('Anthropic unavailable');
+        },
+      },
+    );
+
+    const response = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-6' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      'INT-31 这个 issue 该怎么改，怎么拆？',
+    );
+
+    expect(response.message).toContain('当前自然语言模型暂不可用');
+    expect(response.message).toContain('INT-31');
+    expect(response.message).toContain('split_before_implement');
+    expect(response.message).toContain('Separate the runtime API change');
+
+    subscriptions.dispose();
+  });
+
+  test('requires confirmation before overriding a governance-blocked issue from natural language', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const governanceIssue = {
+      ...runtime.getOverview().issues[0]!,
+      tracker_state: 'Todo',
+      orchestrator_state: 'halted',
+      github_repo: 'UniUni2000/test2',
+      governance_status: 'blocked' as const,
+      governance_decision: 'split_before_implement' as const,
+      governance_summary: 'This issue spans multiple objectives and is blocked until it is split or explicitly overridden.',
+      active_governance_suggestions: [
+        {
+          id: 'gov-suggest-1',
+          suggestion_type: 'architecture_alignment' as const,
+          status: 'pending' as const,
+          title: 'Split INT-31 before implementation',
+          summary: 'Separate the runtime API change from the Telegram copy change before dispatch.',
+        },
+      ],
+      actions: {
+        can_stop: false,
+        can_retry: true,
+        can_override_governance: true,
+        can_rewrite_governance: false,
+        can_split_governance: true,
+        can_open_pr: false,
+      },
+    };
+    runtime.getOverview = () => ({
+      generated_at: '2026-01-01T00:00:00.000Z',
+      counts: { running: 0, retrying: 0, total: 1 },
+      issues: [governanceIssue],
+    });
+    runtime.getIssue = (id: string) => ['INT-31', 'issue-31'].includes(id) ? governanceIssue : null;
+
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const projectResolver = new TrackerProjectResolutionService(
+      {
+        listProjects: async () => ({ projects: [] }),
+      } as any,
+      {},
+    );
+    const commandService = new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver);
+    const assistant = new BotAssistantService(
+      runtime,
+      commandService,
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => {
+          throw new Error('Assistant unavailable');
+        },
+      },
+    );
+
+    const context = {
+      transport: 'telegram' as const,
+      recipient: { transport: 'telegram' as const, conversation_id: 'chat-7' },
+      identity: { user_id: 'user-1', display_name: 'Alice' },
+    };
+
+    const first = await assistant.respondToText(context, 'INT-31 忽略治理拦截，继续跑');
+    expect(first.message).toContain('当前自然语言模型暂不可用');
+    expect(first.message).toContain('Action: override');
+    expect(first.message).toContain('Issue: INT-31');
+    expect(runtime.overrideGovernanceCalls).toHaveLength(0);
+
+    const confirmed = await assistant.respondToText(context, '确认');
+    expect(confirmed.message).toContain('Override approved');
+    expect(runtime.overrideGovernanceCalls).toEqual(['INT-31']);
+
+    subscriptions.dispose();
+  });
+
+  test('requires confirmation before rewriting a governance-blocked issue from natural language', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const governanceIssue = {
+      ...runtime.getOverview().issues[0]!,
+      tracker_state: 'Todo',
+      orchestrator_state: 'halted',
+      github_repo: 'UniUni2000/test2',
+      governance_status: 'advisory' as const,
+      governance_decision: 'accept_with_rewrite' as const,
+      governance_summary: 'This issue is too vague to dispatch safely. Rewrite it into one concrete, verifiable task first.',
+      active_governance_suggestions: [
+        {
+          id: 'gov-suggest-2',
+          suggestion_type: 'architecture_alignment' as const,
+          status: 'pending' as const,
+          title: 'Rewrite INT-31 into one concrete task',
+          summary: 'Clarify the target area, intended outcome, and verification command before dispatch.',
+        },
+      ],
+      actions: {
+        can_stop: false,
+        can_retry: true,
+        can_override_governance: true,
+        can_rewrite_governance: true,
+        can_split_governance: false,
+        can_open_pr: false,
+      },
+    };
+    runtime.getOverview = () => ({
+      generated_at: '2026-01-01T00:00:00.000Z',
+      counts: { running: 0, retrying: 0, total: 1 },
+      issues: [governanceIssue],
+    });
+    runtime.getIssue = (id: string) => ['INT-31', 'issue-31'].includes(id) ? governanceIssue : null;
+
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const projectResolver = new TrackerProjectResolutionService(
+      {
+        listProjects: async () => ({ projects: [] }),
+      } as any,
+      {},
+    );
+    const commandService = new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver);
+    const assistant = new BotAssistantService(
+      runtime,
+      commandService,
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => {
+          throw new Error('Assistant unavailable');
+        },
+      },
+    );
+
+    const context = {
+      transport: 'telegram' as const,
+      recipient: { transport: 'telegram' as const, conversation_id: 'chat-8' },
+      identity: { user_id: 'user-1', display_name: 'Alice' },
+    };
+
+    const first = await assistant.respondToText(context, 'INT-31 按建议改写这个 issue');
+    expect(first.message).toContain('当前自然语言模型暂不可用');
+    expect(first.message).toContain('Action: rewrite');
+    expect(first.message).toContain('Issue: INT-31');
+    expect(runtime.rewriteGovernanceCalls).toHaveLength(0);
+
+    const confirmed = await assistant.respondToText(context, '确认');
+    expect(confirmed.message).toContain('Rewrite applied');
+    expect(runtime.rewriteGovernanceCalls).toEqual(['INT-31']);
+
+    subscriptions.dispose();
+  });
+
+  test('requires confirmation before splitting a governance-blocked issue from natural language', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const governanceIssue = {
+      ...runtime.getOverview().issues[0]!,
+      tracker_state: 'Todo',
+      orchestrator_state: 'halted',
+      github_repo: 'UniUni2000/test2',
+      governance_status: 'blocked' as const,
+      governance_decision: 'split_before_implement' as const,
+      governance_summary: 'This issue spans multiple objectives and is blocked until it is split.',
+      active_governance_suggestions: [
+        {
+          id: 'gov-suggest-3',
+          suggestion_type: 'architecture_alignment' as const,
+          status: 'pending' as const,
+          title: 'Split INT-31 before implementation',
+          summary: 'Separate runtime work from bot copy and control-plane changes before dispatch.',
+        },
+      ],
+      actions: {
+        can_stop: false,
+        can_retry: true,
+        can_override_governance: true,
+        can_rewrite_governance: false,
+        can_split_governance: true,
+        can_open_pr: false,
+      },
+    };
+    runtime.getOverview = () => ({
+      generated_at: '2026-01-01T00:00:00.000Z',
+      counts: { running: 0, retrying: 0, total: 1 },
+      issues: [governanceIssue],
+    });
+    runtime.getIssue = (id: string) => ['INT-31', 'issue-31'].includes(id) ? governanceIssue : null;
+
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const projectResolver = new TrackerProjectResolutionService(
+      {
+        listProjects: async () => ({ projects: [] }),
+      } as any,
+      {},
+    );
+    const commandService = new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver);
+    const assistant = new BotAssistantService(
+      runtime,
+      commandService,
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => {
+          throw new Error('Assistant unavailable');
+        },
+      },
+    );
+
+    const context = {
+      transport: 'telegram' as const,
+      recipient: { transport: 'telegram' as const, conversation_id: 'chat-9' },
+      identity: { user_id: 'user-1', display_name: 'Alice' },
+    };
+
+    const first = await assistant.respondToText(context, 'INT-31 把这个 issue 拆分掉');
+    expect(first.message).toContain('当前自然语言模型暂不可用');
+    expect(first.message).toContain('Action: split');
+    expect(first.message).toContain('Issue: INT-31');
+    expect(runtime.splitGovernanceCalls).toHaveLength(0);
+
+    const confirmed = await assistant.respondToText(context, '确认');
+    expect(confirmed.message).toContain('Split applied');
+    expect(runtime.splitGovernanceCalls).toEqual(['INT-31']);
 
     subscriptions.dispose();
   });

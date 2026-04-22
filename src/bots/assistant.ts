@@ -2,6 +2,7 @@ import { BotConversationPreferenceRepository, BotPendingActionRepository } from 
 import { logger } from '../logging';
 import type { RuntimeControlPlane } from '../runtime/types';
 import { TrackerProjectResolutionService } from '../tracker/projectResolution';
+import { assessIntakeCritic } from '../governance/intakeCritic';
 import type {
   BotAssistantDiagnostics,
   BotAssistantDecision,
@@ -102,6 +103,9 @@ function coerceIntent(value: Record<string, unknown> | null): BotAssistantIntent
     case 'unwatch':
     case 'stop':
     case 'retry':
+    case 'override':
+    case 'rewrite':
+    case 'split':
       return {
         kind,
         issue_id:
@@ -191,6 +195,9 @@ function toPendingRequest(intent: BotAssistantIntent): BotCommandRequest | null 
     case 'unwatch':
     case 'stop':
     case 'retry':
+    case 'override':
+    case 'rewrite':
+    case 'split':
       return {
         command: intent.kind,
         issue_id: intent.issue_id,
@@ -267,8 +274,15 @@ function summarizeIssueActivity(focusIssue: BotFocusedIssueContext): string {
 }
 
 function explainBlockedIssue(focusIssue: BotFocusedIssueContext): string {
+  const governanceDetail = focusIssue.governance?.summary
+    ? `治理判断：${focusIssue.governance.summary}`
+    : null;
+  const governanceSuggestion = focusIssue.governance?.suggestions?.[0]
+    ? `建议：${focusIssue.governance.suggestions[0].summary}`
+    : null;
   const latestTimeline = focusIssue.recent_timeline[focusIssue.recent_timeline.length - 1] ?? null;
   const reason =
+    governanceDetail ||
     focusIssue.digest?.detail ||
     focusIssue.digest?.history_blurb ||
     latestTimeline?.message ||
@@ -279,6 +293,24 @@ function explainBlockedIssue(focusIssue: BotFocusedIssueContext): string {
     `${focusIssue.issue.identifier} 当前看起来卡在 ${focusIssue.issue.orchestrator_state || focusIssue.issue.tracker_state}。`,
     focusIssue.issue.github_repo ? `仓库：${focusIssue.issue.github_repo}` : null,
     `原因：${reason}`,
+    governanceSuggestion,
+  ].filter(Boolean).join('\n');
+}
+
+function explainGovernanceNextStep(focusIssue: BotFocusedIssueContext): string {
+  const governance = focusIssue.governance;
+  if (!governance || (!governance.summary && governance.suggestions.length === 0)) {
+    return [
+      `${focusIssue.issue.identifier} 目前没有额外的治理改写建议。`,
+      focusIssue.digest?.detail || '可以先看 runtime history 或 recent timeline 了解当前状态。',
+    ].filter(Boolean).join('\n');
+  }
+
+  return [
+    `${focusIssue.issue.identifier} 当前的治理状态是 ${governance.decision || governance.status || 'unknown'}。`,
+    governance.summary ? `原因：${governance.summary}` : null,
+    governance.suggestions[0] ? `建议：${governance.suggestions[0].summary}` : null,
+    governance.suggestions[1] ? `备选：${governance.suggestions[1].summary}` : null,
   ].filter(Boolean).join('\n');
 }
 
@@ -352,6 +384,54 @@ function buildHeuristicDecision(
     };
   }
 
+  if (focusIssue && /怎么改|怎么拆|如何修改|如何拆分|next step|what should.*do|how should.*rewrite/i.test(trimmed)) {
+    return {
+      intent: {
+        kind: 'answer_question',
+        answer: explainGovernanceNextStep(focusIssue),
+      },
+    };
+  }
+
+  if (
+    focusIssue &&
+    focusIssue.governance?.status === 'blocked' &&
+    /override|忽略治理|忽略拦截|强制继续|继续跑|继续执行|skip governance/i.test(trimmed)
+  ) {
+    return {
+      intent: {
+        kind: 'override',
+        issue_id: focusIssue.issue.identifier,
+      },
+    };
+  }
+
+  if (
+    focusIssue &&
+    focusIssue.governance?.decision === 'accept_with_rewrite' &&
+    /改写|重写|rewrite|按建议改写/i.test(trimmed)
+  ) {
+    return {
+      intent: {
+        kind: 'rewrite',
+        issue_id: focusIssue.issue.identifier,
+      },
+    };
+  }
+
+  if (
+    focusIssue &&
+    focusIssue.governance?.decision === 'split_before_implement' &&
+    /拆分|拆掉|split/i.test(trimmed)
+  ) {
+    return {
+      intent: {
+        kind: 'split',
+        issue_id: focusIssue.issue.identifier,
+      },
+    };
+  }
+
   if (issueId && /现在怎么样|状态|status|进度|哪个仓库|分配到哪个仓库/i.test(trimmed)) {
     if (/哪个仓库|分配到哪个仓库/i.test(trimmed) && focusIssue) {
       return {
@@ -418,7 +498,7 @@ function prefixFallbackNotice(message: string, diagnostics: BotAssistantDiagnost
 function buildScopedHelp(context: BotRuntimeCopilotContext, originalText: string): string {
   const availableProjects = context.available_projects.map((project) => project.project_slug);
   return [
-    '我主要负责 Symphony 控制面：建单、查状态、看仓库路由、设置默认项目、stop/retry/watch。',
+    '我主要负责 Symphony 控制面：建单、查状态、看仓库路由、设置默认项目、stop/retry/watch，以及治理相关的 rewrite/split/override。',
     context.default_project_slug ? `当前默认项目：${context.default_project_slug}` : null,
     availableProjects.length > 0 ? `可用项目：${availableProjects.join(', ')}` : null,
     context.overview.active_issues.length > 0 ? `当前活跃 issue 数：${context.overview.active_issues.length}` : null,
@@ -666,8 +746,45 @@ export class BotAssistantService {
           resolved?.route ? `Repo: ${resolved.route.github_repo_full}` : null,
           `Title: ${intent.title}`,
           intent.description ? `Description: ${compact(intent.description)}` : null,
-          'Reply with: 确认 / 取消',
-        ]
+        ];
+
+        if (resolved?.route) {
+          const governance = await assessIntakeCritic({
+            issue: {
+              id: 'preview',
+              identifier: 'PREVIEW',
+              title: intent.title,
+              description: intent.description,
+              priority: null,
+              state: 'Todo',
+              project_slug: resolved.route.project_slug,
+              project_name: resolved.route.project_name,
+              branch_name: null,
+              url: null,
+              labels: [],
+              blocked_by: [],
+              created_at: null,
+              updated_at: null,
+            },
+            route: resolved.route,
+            repositoryRoot: resolved.route.local_path,
+          });
+
+          if (governance.decision !== 'accept') {
+            summary.push(`Governance: ${governance.decision}`);
+            summary.push(`Dispatch: blocked until rewritten, split, or overridden (${governance.summary})`);
+            if (governance.rewrite_title) {
+              summary.push(`Suggested title: ${compact(governance.rewrite_title, 120)}`);
+            }
+            if (governance.split_suggestions[0]) {
+              summary.push(`Suggested split: ${compact(governance.split_suggestions[0], 140)}`);
+            }
+          }
+        }
+
+        summary.push('Reply with: 确认 / 取消');
+
+        const message = summary
           .filter(Boolean)
           .join('\n');
 
@@ -677,18 +794,21 @@ export class BotAssistantService {
           user_id: context.identity.user_id,
           intent_kind: 'create_issue',
           normalized_payload: request,
-          summary_message: summary,
+          summary_message: message,
           expires_at: new Date(Date.now() + 15 * 60 * 1000),
         });
 
         return {
-          message: summary,
+          message,
         };
       }
       case 'watch':
       case 'unwatch':
       case 'stop':
       case 'retry':
+      case 'override':
+      case 'rewrite':
+      case 'split':
       case 'set_default_project': {
         const request = toPendingRequest(intent);
         if (!request) {

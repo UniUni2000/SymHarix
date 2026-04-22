@@ -82,6 +82,35 @@ repositories:
 - 未命中路由时会直接阻止 dispatch，不会再回退到 `project_name == repo name` 的旧约定
 - 同一个 GitHub repo 被多个 Linear project 复用时，会共享同一个 `source` cache
 
+## Repo-Local Contracts 与 Governed Execution
+
+现在仓库内可以提供两份正式契约文件：
+
+- `.symphony-repo.yaml`
+  - 定义 repo harness
+  - 描述 `setup/dev/test/build/review_checks`
+  - 声明哪些 artifact 和 verification 才算真正完成
+- `.symphony-constitution.md`
+  - 定义项目主路径、稳定边界、偏好方向、禁止方向和 cleanup trigger
+
+如果仓库还没有 `.symphony-repo.yaml`，Symphony 会先落到 shadow harness：
+
+- 从仓库结构和历史成功命令推断 provisional harness
+- 继续允许运行，但 runtime 会明确标记当前是 `shadow` 或 `missing`
+- 当同仓连续稳定成功后，会产生 harness adoption suggestion，建议用单独小 PR 固化正式 harness
+
+每张 issue 在工作区内还会维护私有 `.symphony/change-pack/`：
+
+- 小任务默认生成 `brief.md`、`tasks.md`、`evidence.json`、`governance.md`
+- 中大任务会扩展 `proposal/spec/design/alternatives`
+- 这些文件是执行契约，不应进入最终业务提交
+
+completion 也开始走 evidence-based 路线：
+
+- dev 会看 handover、verification evidence、required artifacts
+- review 会看 canonical `.symphony/REVIEW_REPORT.md`
+- runtime/web/history 会展示 `repo_harness_status`、`governance_status`、`missing_requirements`、`change_pack_summary`
+
 ## Runtime 与聊天端入口
 
 启动 `bun run start -- --port 3000` 后，默认可以直接使用：
@@ -160,6 +189,12 @@ bot `watch` 的几个常用例子：
 - `agent_runs`
 - `review_events`
 - `sync_events`
+- `shadow_harnesses`
+- `governance_assessments`
+- `decision_memories`
+- `conflict_memories`
+- `debt_signals`
+- `governance_suggestions`
 
 ## 文档
 

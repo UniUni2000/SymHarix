@@ -65,6 +65,9 @@ function createRuntimeControlPlane(): RuntimeControlPlane & { emit: (event: Runt
           actions: {
             can_stop: true,
             can_retry: false,
+            can_override_governance: true,
+            can_rewrite_governance: true,
+            can_split_governance: true,
             can_open_pr: false,
           },
           created_at: '2026-01-01T00:00:00.000Z',
@@ -135,6 +138,27 @@ function createRuntimeControlPlane(): RuntimeControlPlane & { emit: (event: Runt
       issue_id: id,
       issue_identifier: 'INT-1',
     }),
+    overrideGovernance: async (id: string) => ({
+      accepted: true,
+      status: 'accepted',
+      message: `Governance override approved for ${id}`,
+      issue_id: id,
+      issue_identifier: 'INT-1',
+    }),
+    rewriteGovernance: async (id: string) => ({
+      accepted: true,
+      status: 'accepted',
+      message: `Governance rewrite applied for ${id}`,
+      issue_id: id,
+      issue_identifier: 'INT-1',
+    }),
+    splitGovernance: async (id: string) => ({
+      accepted: true,
+      status: 'accepted',
+      message: `Governance split applied for ${id}`,
+      issue_id: id,
+      issue_identifier: 'INT-1',
+    }),
     createStream: () => new ReadableStream<Uint8Array>(),
     subscribe: (listener) => {
       listeners.add(listener);
@@ -188,6 +212,24 @@ describe('BotCommandService', () => {
       issue_id: 'INT-1',
       watch_preset: 'verbose',
       raw_text: '/watch verbose INT-1',
+    });
+
+    expect(parseTextCommand('/override INT-1')).toEqual({
+      command: 'override',
+      issue_id: 'INT-1',
+      raw_text: '/override INT-1',
+    });
+
+    expect(parseTextCommand('/rewrite INT-1')).toEqual({
+      command: 'rewrite',
+      issue_id: 'INT-1',
+      raw_text: '/rewrite INT-1',
+    });
+
+    expect(parseTextCommand('/split INT-1')).toEqual({
+      command: 'split',
+      issue_id: 'INT-1',
+      raw_text: '/split INT-1',
     });
   });
 
@@ -272,6 +314,15 @@ describe('BotCommandService', () => {
 
     const retry = await service.executeText(context, '/retry INT-1');
     expect(retry.message).toBe('Queued INT-1');
+
+    const override = await service.executeText(context, '/override INT-1');
+    expect(override.message).toContain('override approved');
+
+    const rewrite = await service.executeText(context, '/rewrite INT-1');
+    expect(rewrite.message).toContain('rewrite applied');
+
+    const split = await service.executeText(context, '/split INT-1');
+    expect(split.message).toContain('split applied');
 
     const unwatch = await service.executeText(context, '/unwatch INT-1');
     expect(unwatch.watch_registered).toBe(false);

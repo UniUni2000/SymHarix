@@ -10,7 +10,10 @@ export type BotCommandName =
   | 'watch'
   | 'unwatch'
   | 'stop'
-  | 'retry';
+  | 'retry'
+  | 'override'
+  | 'rewrite'
+  | 'split';
 
 export interface BotIdentity {
   user_id: string | null;
@@ -101,6 +104,9 @@ export type BotAssistantIntentKind =
   | 'unwatch'
   | 'stop'
   | 'retry'
+  | 'override'
+  | 'rewrite'
+  | 'split'
   | 'set_default_project'
   | 'show_default_project'
   | 'help'
@@ -115,10 +121,10 @@ export type BotAssistantIntent =
       project_slug: string | null;
     }
   | {
-      kind: 'status' | 'watch' | 'unwatch' | 'stop' | 'retry';
-      issue_id: string | null;
-      watch_preset?: BotWatchPreset | null;
-    }
+    kind: 'status' | 'watch' | 'unwatch' | 'stop' | 'retry' | 'override' | 'rewrite' | 'split';
+    issue_id: string | null;
+    watch_preset?: BotWatchPreset | null;
+  }
   | {
       kind: 'set_default_project';
       project_slug: string | null;
@@ -185,6 +191,16 @@ export interface BotFocusedIssueContext {
     detail: string;
     history_blurb: string | null;
     updated_at: string | null;
+  } | null;
+  governance: {
+    status: string | null;
+    decision: string | null;
+    summary: string | null;
+    suggestions: Array<{
+      suggestion_type: string;
+      title: string;
+      summary: string;
+    }>;
   } | null;
   recent_timeline: Array<{
     timestamp: string;

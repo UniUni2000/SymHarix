@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type {
   AgentTimelinePayload,
+  CompletionRequirement,
   Issue,
   PendingRuntimeRequest,
   RuntimeRequestResponse,
@@ -121,6 +122,23 @@ function buildDeterministicNextAction(
   context: SupervisorDecisionContext,
 ): SupervisorNextAction | null {
   if (context.mode !== 'review') {
+    const missingRequirements = context.completionContext?.missing_requirements ?? [];
+    if (missingRequirements.length > 0) {
+      const topRequirements = missingRequirements
+        .slice(0, 3)
+        .map((requirement) => `- ${requirement.label}: ${requirement.reason}`)
+        .join(' ');
+      return {
+        kind: 'continue',
+        message: [
+          `Development for ${context.issue.identifier} is not complete yet because some required evidence is still missing.`,
+          'In this turn, do only the minimum remaining work to satisfy these requirements:',
+          topRequirements,
+          'Keep .symphony/change-pack/tasks.md and .symphony/change-pack/evidence.json aligned with the actual state before ending the turn.',
+        ].join(' '),
+      };
+    }
+
     return null;
   }
 
@@ -209,6 +227,9 @@ export interface SupervisorDecisionContext {
     developmentLog: string | null;
     reviewReport: string | null;
   };
+  completionContext?: {
+    missing_requirements: CompletionRequirement[];
+  };
   transcript: TurnTranscriptEntry[];
   timeline: AgentTimelinePayload[];
 }
@@ -292,6 +313,7 @@ export class AnthropicSupervisorService implements SupervisorService {
                     workspacePath: context.workspacePath,
                     workspaceHint: context.workspaceHint,
                     workspaceArtifacts: context.workspaceArtifacts || null,
+                    completionContext: context.completionContext || null,
                     timeline: context.timeline.map((event) => event.message),
                     transcript: context.transcript.map((entry) => ({
                       role: entry.role,
