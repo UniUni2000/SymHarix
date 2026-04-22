@@ -30,19 +30,18 @@ export class IssueWorktreeManager {
     this.workspaceRoot = options.workspaceRoot;
   }
 
-  getWorkspacePath(identifier: string, projectSlug?: string | null, projectName?: string | null): string {
-    return getIssueWorktreePath(this.workspaceRoot, identifier, projectSlug, projectName);
+  getWorkspacePath(identifier: string, cacheKey: string): string {
+    return getIssueWorktreePath(this.workspaceRoot, identifier, cacheKey);
   }
 
   async createOrReuse(
     sourcePath: string,
     identifier: string,
-    projectSlug?: string | null,
-    projectName?: string | null
+    cacheKey: string,
   ): Promise<IssueWorktreeResult> {
     const workspaceKey = sanitizeWorkspaceKey(identifier);
     const branchName = `feature/${workspaceKey.toLowerCase()}`;
-    const workspacePath = this.getWorkspacePath(identifier, projectSlug, projectName);
+    const workspacePath = this.getWorkspacePath(identifier, cacheKey);
 
     try {
       await fs.promises.mkdir(path.dirname(workspacePath), { recursive: true });
@@ -131,8 +130,8 @@ export class IssueWorktreeManager {
     }
   }
 
-  async workspaceExists(identifier: string, projectSlug?: string | null, projectName?: string | null): Promise<boolean> {
-    const workspacePath = this.getWorkspacePath(identifier, projectSlug, projectName);
+  async workspaceExists(identifier: string, cacheKey: string): Promise<boolean> {
+    const workspacePath = this.getWorkspacePath(identifier, cacheKey);
     try {
       const stat = await fs.promises.stat(workspacePath);
       return stat.isDirectory();

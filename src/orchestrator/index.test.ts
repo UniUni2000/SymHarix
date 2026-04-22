@@ -25,6 +25,15 @@ function makeConfig(): ServiceConfig {
     pollIntervalMs: 1000,
     workspaceRoot: '/tmp/symphony-tests',
     projectRoot: process.cwd(),
+    repositories: {
+      routing: {
+        proj: {
+          github_owner: 'owner',
+          github_repo: 'repo',
+          local_path: null,
+        },
+      },
+    },
     hooks: {
       after_create: null,
       before_run: null,
@@ -48,6 +57,13 @@ function makeConfig(): ServiceConfig {
     },
     reviewPolicy: {
       notifyLinearOnReview: true,
+    },
+    verification: {
+      lifecycle: {
+        timeoutMs: 60_000,
+        pollIntervalMs: 5_000,
+        projects: {},
+      },
     },
     serverPort: null,
   };
@@ -244,8 +260,10 @@ function createOrchestrator(
     fetchIssueStatesByIds: mock(async () => ({ issues: [issueForRefresh], error: null })),
     fetchCandidateIssues: mock(async () => ({ issues: [issueForRefresh], error: null })),
     fetchIssuesByStates: mock(async () => ({ issues: [], error: null })),
+    fetchIssueById: mock(async () => ({ issue: issueForRefresh, error: null })),
     postComment: mock(async () => ({ success: true })),
     updateIssueState: mock(async () => ({ success: true })),
+    createIssue: mock(async () => ({ success: true, issue: issueForRefresh })),
   };
 
   const workspaceManager = {
@@ -298,13 +316,20 @@ function createOrchestrator(
 
 async function awaitWorker(orchestrator: Orchestrator, issueId: string): Promise<void> {
   const state = (orchestrator as any).state;
-  const entry = state.running.get(issueId);
+  const entry = state.running.get(issueId) as { worker_handle: Promise<unknown> } | undefined;
   expect(entry).toBeDefined();
+  if (!entry) {
+    throw new Error(`Missing running worker for ${issueId}`);
+  }
   await entry.worker_handle;
 }
 
 function clearRetryTimers(orchestrator: Orchestrator): void {
-  const retryEntries = Array.from((orchestrator as any).state.retry_attempts.values());
+  const retryEntries = Array.from(
+    ((orchestrator as any).state.retry_attempts.values()) as Iterable<{
+      timer_handle: Timer | null;
+    }>,
+  );
   for (const entry of retryEntries) {
     if (entry.timer_handle) {
       clearTimeout(entry.timer_handle);
@@ -339,6 +364,63 @@ describe('Orchestrator Stability', () => {
     });
     expect(parseCliCommandResult('SYMPHONY_RESULT:not-json')).toBeNull();
     expect(parseCliCommandResult('no result here')).toBeNull();
+  });
+
+  it('routes issues through repositories.routing and persists full owner/repo names', async () => {
+    const issue = makeIssue({ project_slug: 'proj', project_name: 'Display Project' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    await (orchestrator as any).dispatchIssue(issue, null);
+    await awaitWorker(orchestrator, issue.id);
+
+    expect(ctx.workspaceManager.createForIssue).toHaveBeenCalledWith(
+      issue,
+      expect.objectContaining({
+        project_slug: 'proj',
+        github_owner: 'owner',
+        github_repo: 'repo',
+        github_repo_full: 'owner/repo',
+        cache_key: 'owner__repo',
+      }),
+    );
+
+    const workItem = ctx.workItemRepository.findByLinearIssueId(issue.id);
+    expect(workItem?.github_repo).toBe('owner/repo');
+  });
+
+  it('fails closed before workspace creation when repositories.routing does not contain the issue project_slug', async () => {
+    const issue = makeIssue({ project_slug: 'missing-project', project_name: 'Missing Project' });
+    const ctx = createOrchestrator(issue, {
+      repositories: {
+        routing: {
+          other: {
+            github_owner: 'owner',
+            github_repo: 'repo',
+            local_path: null,
+          },
+        },
+      },
+    });
+    orchestrator = ctx.orchestrator;
+    const timelineEvents: Array<{ issueId: string; event: any }> = [];
+    orchestrator.on('session:event', (issueId, event) => {
+      timelineEvents.push({ issueId, event });
+    });
+
+    await (orchestrator as any).dispatchIssue(issue, null);
+
+    expect((orchestrator as any).state.running.has(issue.id)).toBe(false);
+    expect(ctx.workspaceManager.createForIssue).not.toHaveBeenCalled();
+    expect(ctx.agentRunner.launch).not.toHaveBeenCalled();
+    expect(ctx.workItemRepository.findByLinearIssueId(issue.id)).toBeNull();
+    expect(
+      timelineEvents.some(({ issueId, event }) =>
+        issueId === issue.id &&
+        event.event === 'timeline' &&
+        (event.payload as { code?: string } | undefined)?.code === 'missing_repository_route',
+      ),
+    ).toBe(true);
   });
 
   it('reads workflow artifacts only from the canonical .symphony directory', async () => {
@@ -764,7 +846,52 @@ describe('Orchestrator Stability', () => {
     expect(ctx.supervisor.decideNextAction).not.toHaveBeenCalled();
   });
 
-  it('writes a heuristic review report for a simple task when the review turn budget is exhausted', async () => {
+  it('treats simple python program tasks like INT-30 as one-turn dev runs', async () => {
+    const issue = makeIssue({
+      state: 'Todo',
+      identifier: 'INT-30',
+      title: '写一个生成随机数的python 程序',
+      description: '生成一个简单随机数并打印出来。',
+    });
+    const ctx = createOrchestrator(issue, { maxTurns: 3 });
+    orchestrator = ctx.orchestrator;
+
+    ctx.agentRunner.runTurn = mock(async () => ({
+      success: true,
+      completed: true,
+      cancelled: false,
+      tokens: { input: 8, output: 4, total: 12 },
+      claude_api_calls: 1,
+      timeline: [],
+      transcript: [],
+    }));
+    (orchestrator as any).agentRunner = ctx.agentRunner;
+
+    (orchestrator as any).readWorkspaceFile = mock(async (_workspacePath: string, filename: string) => {
+      if (filename === 'HANDOVER.md') {
+        return '# Handover\n开发摘要：实现了随机数 python 程序。\n测试情况：PASS';
+      }
+      if (filename === 'DEVELOPMENT_LOG.md') {
+        return '# Development Log\n状态: Completed';
+      }
+      return null;
+    });
+
+    (orchestrator as any).runCliCommand = mock(async (command: string) => {
+      if (command === 'dispatch') {
+        return { success: true, result: makeCliResult({ final_state: 'In Progress' }) };
+      }
+      return { success: true, result: makeCliResult({ final_state: 'In Review' }) };
+    });
+
+    await (orchestrator as any).dispatchIssue(issue, null);
+    await awaitWorker(orchestrator, issue.id);
+
+    expect(ctx.agentRunner.runTurn).toHaveBeenCalledTimes(1);
+    expect(ctx.supervisor.decideNextAction).not.toHaveBeenCalled();
+  });
+
+  it('fails closed and schedules a review retry when the turn budget is exhausted without a canonical review report', async () => {
     const issue = makeIssue({
       state: 'In Review',
       title: '写一个 python 文件输出 hello world',
@@ -822,12 +949,16 @@ describe('Orchestrator Stability', () => {
       await (orchestrator as any).dispatchIssue(issue, null);
       await awaitWorker(orchestrator, issue.id);
 
-      const reportContent = fs.readFileSync(`${workspacePath}/.symphony/REVIEW_REPORT.md`, 'utf-8');
       const state = (orchestrator as any).state;
+      const workItem = ctx.workItemRepository.findById(issue.id);
 
       expect(ctx.agentRunner.runTurn).toHaveBeenCalledTimes(1);
-      expect(reportContent).toContain('## Review Decision: APPROVE_MINOR');
-      expect(state.retry_attempts.size).toBe(0);
+      expect(fs.existsSync(`${workspacePath}/.symphony/REVIEW_REPORT.md`)).toBe(false);
+      expect(ctx.supervisor.decideNextAction).toHaveBeenCalledTimes(1);
+      expect((orchestrator as any).runCliCommand).toHaveBeenCalledTimes(1);
+      expect(state.retry_attempts.get(issue.id)?.attempt).toBe(1);
+      expect(workItem?.linear_state).toBe('In Review');
+      expect(workItem?.orchestrator_state).toBe('retry_scheduled');
     } finally {
       fs.rmSync(workspacePath, { recursive: true, force: true });
     }
@@ -855,7 +986,12 @@ describe('Orchestrator Stability', () => {
 
     expect((orchestrator as any).state.running.size).toBe(1);
 
-    resolveAttempt?.({
+    const finishAttempt = resolveAttempt;
+    expect(finishAttempt).toBeDefined();
+    if (!finishAttempt) {
+      throw new Error('Expected resolveAttempt to be set');
+    }
+    (finishAttempt as (result: WorkerResult) => void)({
       issueId: issue.id,
       success: true,
       completed: true,
@@ -944,6 +1080,48 @@ describe('Orchestrator Stability', () => {
     expect(latestReview?.decision).toBe('APPROVE');
     expect(ctx.tracker.updateIssueState).toHaveBeenCalledWith(issue.id, 'Done');
     expect(ctx.workspaceManager.removeWorkspace).toHaveBeenCalled();
+  });
+
+  it('preserves APPROVE_MINOR as the final review decision when review completes', async () => {
+    const issue = makeIssue({ state: 'In Review' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    (orchestrator as any).runCliCommand = mock(async (command: string) => {
+      if (command === 'dispatch') {
+        return { success: true, result: makeCliResult({ final_state: 'In Review' }) };
+      }
+      return {
+        success: true,
+        result: makeCliResult({
+          final_state: 'Done',
+          review_decision: 'APPROVE_MINOR',
+        }),
+      };
+    });
+    (orchestrator as any).readWorkspaceStateFile = mock(async () => ({
+      metadata: {
+        branch: 'feature/int-1',
+        pr_number: 77,
+        pr_merged: true,
+      },
+    }));
+    (orchestrator as any).readWorkspaceFile = mock(async (_workspacePath: string, filename: string) => (
+      filename === 'REVIEW_REPORT.md'
+        ? '## Review Decision: APPROVE_MINOR\n\n## Review Summary\nMinor suggestions only.'
+        : null
+    ));
+
+    await (orchestrator as any).dispatchIssue(issue, null);
+    await awaitWorker(orchestrator, issue.id);
+
+    const workItem = ctx.workItemRepository.findById(issue.id);
+    const latestReview = ctx.reviewEventRepository.findLatestByWorkItemId(issue.id);
+
+    expect(workItem?.linear_state).toBe('Done');
+    expect(workItem?.last_review_decision).toBe('APPROVE_MINOR');
+    expect(latestReview?.decision).toBe('APPROVE_MINOR');
+    expect(ctx.githubSyncService.postPullRequestComment).not.toHaveBeenCalled();
   });
 
   it('deletes local and remote branches after terminal completion cleanup', async () => {
@@ -1058,7 +1236,9 @@ describe('Orchestrator Stability', () => {
       },
     }));
     (orchestrator as any).readWorkspaceFile = mock(async (_workspacePath: string, filename: string) => (
-      filename === 'REVIEW_REPORT.md' ? '## Review Decision: APPROVE\nMerge blocked by conflicts.' : null
+      filename === 'REVIEW_REPORT.md'
+        ? '## Review Decision: APPROVE\n\n## Review Summary\nReview passed before the merge conflict surfaced.'
+        : null
     ));
 
     await (orchestrator as any).dispatchIssue(issue, null);
@@ -1071,7 +1251,195 @@ describe('Orchestrator Stability', () => {
     expect(workItem?.linear_state).toBe('In Progress');
     expect(workItem?.last_review_decision).toBe('MERGE_BLOCKED');
     expect(latestReview?.decision).toBe('MERGE_BLOCKED');
+    expect(String(latestReview?.merge_block_reason || '')).toContain('Merge blocked by conflicts');
+    expect(ctx.tracker.postComment).toHaveBeenCalledWith(
+      issue.id,
+      expect.stringContaining('Review passed, but the merge failed'),
+    );
     expect(ctx.tracker.updateIssueState).toHaveBeenCalledWith(issue.id, 'In Progress');
     expect(state.retry_attempts.get(issue.id)?.attempt).toBe(1);
+  });
+
+  it('writes structured review follow-up steps into HANDOVER for non-approval decisions', async () => {
+    const issue = makeIssue({ state: 'In Review' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    const workspacePath = '/tmp/symphony-tests/repo/INT-1';
+    fs.mkdirSync(`${workspacePath}/.symphony`, { recursive: true });
+    fs.writeFileSync(
+      `${workspacePath}/.symphony/HANDOVER.md`,
+      '# Handover: INT-1\n\n## 下次继续\n(由 Review 填写)\n',
+      'utf-8',
+    );
+
+    try {
+      await (orchestrator as any).handleReviewFeedback(
+        workspacePath,
+        makeCliResult({
+          review_decision: 'REQUEST_TESTS',
+          feedback: 'Please add focused regression tests before approval.',
+        }),
+      );
+
+      const handoverContent = fs.readFileSync(`${workspacePath}/.symphony/HANDOVER.md`, 'utf-8');
+      expect(handoverContent).toContain('### Review Follow-up');
+      expect(handoverContent).toContain('- Decision: REQUEST_TESTS');
+      expect(handoverContent).toContain('### Required Next Steps');
+      expect(handoverContent).toContain('Please add focused regression tests before approval.');
+    } finally {
+      fs.rmSync(workspacePath, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves REQUEST_TESTS as a distinct review decision and sends the issue back to dev', async () => {
+    const issue = makeIssue({ state: 'In Review' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    (orchestrator as any).runCliCommand = mock(async (command: string) => {
+      if (command === 'dispatch') {
+        return { success: true, result: makeCliResult({ final_state: 'In Review' }) };
+      }
+      return {
+        success: true,
+        result: makeCliResult({
+          final_state: 'In Progress',
+          review_decision: 'REQUEST_TESTS',
+          feedback: 'Please add focused regression tests before approval.',
+          retry_hint: 'retry_dev',
+        }),
+      };
+    });
+    (orchestrator as any).readWorkspaceStateFile = mock(async () => ({
+      metadata: {
+        branch: 'feature/int-1',
+        pr_number: 77,
+      },
+    }));
+    (orchestrator as any).readWorkspaceFile = mock(async (_workspacePath: string, filename: string) => (
+      filename === 'REVIEW_REPORT.md'
+        ? '## Review Decision: REQUEST_TESTS\n\n## Review Summary\nPlease add focused regression coverage.'
+        : null
+    ));
+
+    await (orchestrator as any).dispatchIssue(issue, null);
+    await awaitWorker(orchestrator, issue.id);
+
+    const workItem = ctx.workItemRepository.findById(issue.id);
+    const latestReview = ctx.reviewEventRepository.findLatestByWorkItemId(issue.id);
+    const state = (orchestrator as any).state;
+
+    expect(workItem?.linear_state).toBe('In Progress');
+    expect(workItem?.last_review_decision).toBe('REQUEST_TESTS');
+    expect(latestReview?.decision).toBe('REQUEST_TESTS');
+    expect(ctx.tracker.updateIssueState).toHaveBeenCalledWith(issue.id, 'In Progress');
+    expect(ctx.githubSyncService.postPullRequestComment).not.toHaveBeenCalled();
+    expect(state.retry_attempts.get(issue.id)?.attempt).toBe(1);
+  });
+
+  it('createIssue provisions a discovering work item from the created Linear issue', async () => {
+    const issue = makeIssue({ id: 'issue-created', identifier: 'INT-55', title: 'Created from runtime' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    const result = await orchestrator.createIssue({
+      title: 'Created from runtime',
+      description: 'hello',
+      team_id: 'team-1',
+    });
+
+    const workItem = ctx.workItemRepository.findByLinearIssueId(issue.id);
+    expect(result.accepted).toBe(true);
+    expect(result.issue_id).toBe(issue.id);
+    expect(ctx.tracker.createIssue).toHaveBeenCalled();
+    expect(workItem?.linear_identifier).toBe('INT-55');
+    expect(workItem?.orchestrator_state).toBe('discovering');
+  });
+
+  it('createIssue resolves project_slug through the shared tracker project resolver before calling Linear', async () => {
+    const issue = makeIssue({
+      id: 'issue-created',
+      identifier: 'INT-56',
+      title: 'Created with project slug',
+      project_slug: 'test2',
+      project_name: 'Test Two',
+    });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+    (orchestrator as any).projectResolutionService = {
+      resolveProjectSlug: mock(async () => ({
+        project: {
+          project_id: 'project-1',
+          project_slug: 'test2',
+          project_name: 'Test Two',
+        },
+        route: {
+          project_slug: 'test2',
+          project_name: 'Test Two',
+          github_owner: 'owner',
+          github_repo: 'repo',
+          github_repo_full: 'owner/repo',
+          local_path: null,
+          cache_key: 'owner__repo',
+        },
+      })),
+    };
+
+    const result = await orchestrator.createIssue({
+      title: 'Created with project slug',
+      description: 'hello',
+      project_slug: 'test2',
+    });
+
+    expect(result.accepted).toBe(true);
+    expect(ctx.tracker.createIssue).toHaveBeenCalledWith({
+      title: 'Created with project slug',
+      description: 'hello',
+      teamId: null,
+      projectId: 'project-1',
+      stateId: null,
+    });
+  });
+
+  it('retryIssue queues an idle active issue when no execution slots are available', async () => {
+    const issue = makeIssue({ state: 'Todo' });
+    const ctx = createOrchestrator(issue, { maxConcurrentAgents: 0 });
+    orchestrator = ctx.orchestrator;
+
+    const workItem = ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: issue.state,
+      github_repo: 'repo',
+      orchestrator_state: 'failed',
+    });
+
+    const result = await orchestrator.retryIssue(issue.id);
+    const retryEntry = (orchestrator as any).state.retry_attempts.get(issue.id);
+    const updatedWorkItem = ctx.workItemRepository.findById(workItem.id);
+
+    expect(result.accepted).toBe(true);
+    expect(result.status).toBe('queued');
+    expect(retryEntry?.attempt).toBe(1);
+    expect(updatedWorkItem?.orchestrator_state).toBe('retry_scheduled');
+  });
+
+  it('stopIssue cancels a queued retry without leaving the claim reserved', async () => {
+    const issue = makeIssue({ state: 'Todo' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    await (orchestrator as any).scheduleRetry(issue.id, issue.identifier, 1, 'Manual retry requested', 1000);
+    (orchestrator as any).state.claimed.add(issue.id);
+
+    const result = await orchestrator.stopIssue(issue.id);
+
+    expect(result.accepted).toBe(true);
+    expect(result.status).toBe('completed');
+    expect((orchestrator as any).state.retry_attempts.has(issue.id)).toBe(false);
+    expect((orchestrator as any).state.claimed.has(issue.id)).toBe(false);
   });
 });

@@ -118,3 +118,6 @@ export { AgentRunRepository } from './repositories/agentRunRepository';
 export { ReviewEventRepository } from './repositories/reviewEventRepository';
 export { SyncEventRepository } from './repositories/syncEventRepository';
 export { ServiceLeaseRepository } from './repositories/serviceLeaseRepository';
+export { BotWatchSubscriptionRepository } from './repositories/botWatchSubscriptionRepository';
+export { BotConversationPreferenceRepository } from './repositories/botConversationPreferenceRepository';
+export { BotPendingActionRepository } from './repositories/botPendingActionRepository';

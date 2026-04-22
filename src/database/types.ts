@@ -22,9 +22,24 @@ export type WorkItemOrchestratorState =
 
 export type AgentType = 'dev' | 'review';
 export type AgentRunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
-export type ReviewDecision = 'APPROVE' | 'REQUEST_CHANGES' | 'MERGE_BLOCKED';
+export type ReviewDecision =
+  | 'APPROVE'
+  | 'APPROVE_MINOR'
+  | 'REQUEST_CHANGES'
+  | 'REQUEST_TESTS'
+  | 'REJECT'
+  | 'MERGE_BLOCKED';
 export type SyncTargetSystem = 'linear' | 'github';
 export type SyncResult = 'success' | 'failed';
+export type BotWatchTransport = 'telegram' | 'discord';
+export type BotWatchPresetValue = 'default' | 'verbose' | 'failures' | 'status';
+export type BotPendingIntentKind =
+  | 'create_issue'
+  | 'watch'
+  | 'unwatch'
+  | 'stop'
+  | 'retry'
+  | 'set_default_project';
 
 export interface ServiceLease {
   lease_key: string;
@@ -203,4 +218,79 @@ export interface CreateSyncEvent {
   payload_json: Record<string, unknown>;
   result?: SyncResult;
   error?: string | null;
+}
+
+/**
+ * Persisted bot watch subscription entity
+ */
+export interface BotWatchSubscriptionRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  issue_id: string;
+  issue_identifier: string | null;
+  user_id: string | null;
+  preset: BotWatchPresetValue;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface CreateBotWatchSubscriptionRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  issue_id: string;
+  issue_identifier?: string | null;
+  user_id?: string | null;
+  preset?: BotWatchPresetValue;
+}
+
+export interface DeleteBotWatchSubscriptionRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  issue_id: string;
+}
+
+export interface BotConversationPreferenceRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  default_project_slug: string | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface CreateBotConversationPreferenceRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  default_project_slug?: string | null;
+}
+
+export interface DeleteBotConversationPreferenceRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+}
+
+export interface BotPendingActionRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  user_id: string | null;
+  intent_kind: BotPendingIntentKind;
+  normalized_payload: Record<string, unknown>;
+  summary_message: string;
+  expires_at: Date;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface CreateBotPendingActionRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  user_id?: string | null;
+  intent_kind: BotPendingIntentKind;
+  normalized_payload: Record<string, unknown>;
+  summary_message: string;
+  expires_at: Date;
+}
+
+export interface DeleteBotPendingActionRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
 }

@@ -5,7 +5,16 @@
 
 
 // Using Bun's built-in global fetch (node-fetch has compatibility issues in Bun)
-import { Issue, BlockerRef, LinearApiResponse, LinearIssue, LinearCustomFields, LinearIssueExtended, TrackerError } from '../types';
+import {
+  Issue,
+  BlockerRef,
+  LinearApiResponse,
+  LinearIssue,
+  LinearCustomFields,
+  LinearIssueExtended,
+  ResolvedTrackerProject,
+  TrackerError,
+} from '../types';
 
 /**
  * Linear tracker client options
@@ -14,6 +23,20 @@ export interface LinearClientOptions {
   endpoint: string;
   apiKey: string;
   projectSlugs: string[];
+}
+
+export interface CreateLinearIssueInput {
+  title: string;
+  description?: string | null;
+  teamId?: string | null;
+  projectId?: string | null;
+  stateId?: string | null;
+}
+
+interface LinearStateNode {
+  id: string;
+  name: string;
+  type: string;
 }
 
 /**
@@ -128,6 +151,101 @@ export class LinearClient {
       created_at: linearIssue.createdAt ? new Date(linearIssue.createdAt) : null,
       updated_at: linearIssue.updatedAt ? new Date(linearIssue.updatedAt) : null
     };
+  }
+
+  private async resolveDefaultTeamId(): Promise<{ teamId: string | null; error?: string }> {
+    const query = `
+      query GetDefaultTeam {
+        teams(first: 1) {
+          nodes {
+            id
+          }
+        }
+      }
+    `;
+
+    const result = await this.graphqlQuery<{ teams: { nodes: Array<{ id: string }> } }>(query);
+    if (result.error) {
+      return {
+        teamId: null,
+        error: result.errorMessage || 'Failed to resolve a default Linear team',
+      };
+    }
+
+    const teamId = result.data?.teams?.nodes?.[0]?.id ?? null;
+    if (!teamId) {
+      return {
+        teamId: null,
+        error: 'No writable Linear team was available for issue creation',
+      };
+    }
+
+    return { teamId };
+  }
+
+  private pickPreferredCreateState(states: LinearStateNode[]): string | null {
+    const normalizedStates = states.filter((state) => state.id && state.name && state.type);
+    const todo = normalizedStates.find((state) => state.name.toLowerCase() === 'todo');
+    if (todo) {
+      return todo.id;
+    }
+
+    const nonBacklogUnstarted = normalizedStates.find(
+      (state) => state.type === 'unstarted' && state.name.toLowerCase() !== 'backlog',
+    );
+    if (nonBacklogUnstarted) {
+      return nonBacklogUnstarted.id;
+    }
+
+    return null;
+  }
+
+  private async resolvePreferredCreateStateId(projectId: string | null): Promise<string | null> {
+    const normalizedProjectId = projectId?.trim() || null;
+    if (!normalizedProjectId) {
+      return null;
+    }
+
+    const query = `
+      query GetProjectStatesForCreate($projectId: String!) {
+        project(id: $projectId) {
+          id
+          teams {
+            nodes {
+              id
+              states {
+                nodes {
+                  id
+                  name
+                  type
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const result = await this.graphqlQuery<{
+      project: {
+        id: string;
+        teams?: {
+          nodes: Array<{
+            id: string;
+            states: {
+              nodes: LinearStateNode[];
+            };
+          }>;
+        };
+      } | null;
+    }>(query, { projectId: normalizedProjectId });
+
+    if (result.error || !result.data?.project) {
+      return null;
+    }
+
+    const states = (result.data.project.teams?.nodes || []).flatMap((team) => team.states?.nodes || []);
+    return this.pickPreferredCreateState(states);
   }
 
   /**
@@ -453,8 +571,22 @@ export class LinearClient {
           }
           break;
         case 'last_review_decision':
-          if (['approve', 'minor', 'major', 'tests', 'reject'].includes(String(node.value).toLowerCase())) {
-            fields.last_review_decision = String(node.value).toLowerCase() as 'approve' | 'minor' | 'major' | 'tests' | 'reject';
+          {
+            const normalized = String(node.value).toLowerCase();
+            const normalizedDecision = {
+              approve: 'approve',
+              minor: 'approve_minor',
+              approve_minor: 'approve_minor',
+              major: 'request_changes',
+              request_changes: 'request_changes',
+              tests: 'request_tests',
+              request_tests: 'request_tests',
+              reject: 'reject',
+              merge_blocked: 'merge_blocked',
+            }[normalized];
+            if (normalizedDecision) {
+              fields.last_review_decision = normalizedDecision;
+            }
           }
           break;
       }
@@ -519,6 +651,213 @@ export class LinearClient {
     }
 
     return { success: result.data?.commentCreate?.success || false };
+  }
+
+  async listProjects(): Promise<{
+    projects: ResolvedTrackerProject[];
+    error?: TrackerError;
+    errorMessage?: string;
+  }> {
+    const query = `
+      query ListProjects {
+        projects(first: 100) {
+          nodes {
+            id
+            name
+            slugId
+          }
+        }
+      }
+    `;
+
+    const result = await this.graphqlQuery<{
+      projects: {
+        nodes: Array<{
+          id: string;
+          name: string;
+          slugId: string;
+        }>;
+      };
+    }>(query);
+
+    if (result.error) {
+      return {
+        projects: [],
+        error: result.error,
+        errorMessage: result.errorMessage,
+      };
+    }
+
+    const nodes = result.data?.projects?.nodes;
+    if (!Array.isArray(nodes)) {
+      return {
+        projects: [],
+        error: 'linear_unknown_payload',
+        errorMessage: 'Linear API returned unexpected project list payload',
+      };
+    }
+
+    return {
+      projects: nodes
+        .filter((node) => node.id && node.slugId && node.name)
+        .map((node) => ({
+          project_id: node.id,
+          project_slug: node.slugId,
+          project_name: node.name,
+        })),
+    };
+  }
+
+  async findProjectBySlug(projectSlug: string): Promise<{
+    project: ResolvedTrackerProject | null;
+    error?: TrackerError;
+    errorMessage?: string;
+  }> {
+    const normalizedSlug = projectSlug.trim();
+    if (!normalizedSlug) {
+      return {
+        project: null,
+        error: 'linear_project_not_found',
+        errorMessage: 'Project slug is required',
+      };
+    }
+
+    const result = await this.listProjects();
+    if (result.error) {
+      return {
+        project: null,
+        error: result.error,
+        errorMessage: result.errorMessage,
+      };
+    }
+
+    const project =
+      result.projects.find((candidate) => candidate.project_slug === normalizedSlug) ?? null;
+
+    return {
+      project,
+      ...(project
+        ? {}
+        : {
+            error: 'linear_project_not_found' as const,
+            errorMessage: `Linear project "${normalizedSlug}" was not found`,
+          }),
+    };
+  }
+
+  async createIssue(
+    input: CreateLinearIssueInput,
+  ): Promise<{ success: boolean; issue?: Issue; error?: string }> {
+    const title = input.title.trim();
+    if (!title) {
+      return { success: false, error: 'Issue title is required' };
+    }
+
+    let teamId = input.teamId?.trim() || null;
+    if (!teamId) {
+      const resolved = await this.resolveDefaultTeamId();
+      if (!resolved.teamId) {
+        return { success: false, error: resolved.error || 'Failed to resolve a Linear team' };
+      }
+      teamId = resolved.teamId;
+    }
+
+    const resolvedStateId =
+      input.stateId?.trim() || await this.resolvePreferredCreateStateId(input.projectId?.trim() || null);
+
+    const mutation = `
+      mutation CreateIssue(
+        $title: String!,
+        $description: String,
+        $teamId: String!,
+        $projectId: String,
+        $stateId: String
+      ) {
+        issueCreate(
+          input: {
+            title: $title,
+            description: $description,
+            teamId: $teamId,
+            projectId: $projectId,
+            stateId: $stateId
+          }
+        ) {
+          success
+          issue {
+            id
+            identifier
+            title
+            description
+            priority
+            state {
+              id
+              name
+              type
+            }
+            project {
+              id
+              name
+              slugId
+            }
+            labels {
+              nodes {
+                name
+              }
+            }
+            relations {
+              nodes {
+                type
+                relatedIssue {
+                  id
+                  identifier
+                  state {
+                    name
+                    type
+                  }
+                }
+              }
+            }
+            createdAt
+            updatedAt
+            branchName
+            url
+          }
+        }
+      }
+    `;
+
+    const result = await this.graphqlQuery<{
+      issueCreate: {
+        success: boolean;
+        issue: LinearIssue | null;
+      };
+    }>(mutation, {
+      title,
+      description: input.description?.trim() || null,
+      teamId,
+      projectId: input.projectId?.trim() || null,
+      stateId: resolvedStateId,
+    });
+
+    if (result.error) {
+      return {
+        success: false,
+        error: result.errorMessage || 'Linear issue creation failed',
+      };
+    }
+
+    const created = result.data?.issueCreate;
+    if (!created?.success || !created.issue) {
+      return {
+        success: false,
+        error: 'Linear issue creation returned no issue payload',
+      };
+    }
+
+    return {
+      success: true,
+      issue: this.normalizeIssue(created.issue),
+    };
   }
 
   /**

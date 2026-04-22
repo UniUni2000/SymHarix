@@ -1,6 +1,8 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import requests
+
 from scripts.hooks.dev import DevHook
 from scripts.lib.state_machine import State
 
@@ -336,3 +338,52 @@ def test_dev_hook_removes_workflow_artifacts_from_branch_diff_before_pr(tmp_path
 
     assert hook.run() is True
     assert ("commit", "-m", "chore: remove workflow artifacts from submission") in git_calls
+
+
+def test_dev_hook_recovers_when_pr_create_returns_422_but_pr_already_exists(tmp_path, monkeypatch):
+    hook = make_hook(tmp_path)
+    hook.github.pr_exists.return_value = None
+    existing_pr = {
+        "html_url": "https://github.com/owner/repo/pull/25",
+        "number": 25,
+    }
+
+    response = MagicMock()
+    response.status_code = 422
+    error = requests.HTTPError("422 Client Error: Unprocessable Entity for url", response=response)
+
+    hook.github.create_pull_request.side_effect = error
+    hook.github.get_pull_request_by_branch.return_value = existing_pr
+
+    def fake_run(cmd, cwd, capture_output, text, check):
+        assert cwd == hook.store.symphony_dir.path.parent
+        assert cmd[0] == "git"
+
+        result = MagicMock()
+        result.returncode = 0
+        result.stderr = ""
+        result.stdout = ""
+
+        command = tuple(cmd[1:])
+        if command == ("rev-parse", "--verify", "refs/remotes/origin/main"):
+            result.stdout = "origin-main-sha\n"
+        elif command == WORKFLOW_DIFF_COMMAND:
+            result.stdout = ""
+        elif command == ("rev-list", "--count", "refs/remotes/origin/main..HEAD"):
+            result.stdout = "2\n"
+        elif command == ("rev-parse", "HEAD"):
+            result.stdout = "local-head-sha\n"
+        elif command == ("rev-parse", "--verify", "refs/remotes/origin/feature/int-25"):
+            result.stdout = "local-head-sha\n"
+        else:
+            raise AssertionError(f"Unexpected git command: {cmd}")
+
+        return result
+
+    monkeypatch.setattr("scripts.hooks.dev.subprocess.run", fake_run)
+
+    assert hook.run() is True
+    hook.github.create_pull_request.assert_called_once()
+    hook.github.get_pull_request_by_branch.assert_called_once_with("feature/int-25", state="open")
+    assert hook.store.get_current_state_enum().value == State.IN_REVIEW.value
+    assert hook.store.get_state()["metadata"]["pr_number"] == 25

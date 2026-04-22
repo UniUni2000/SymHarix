@@ -11,52 +11,257 @@ import {
   ReviewEventRepository,
   WorkItemRepository,
 } from '../database';
+import type { RuntimeControlPlane } from '../runtime/types';
+import type { BotGateway } from '../bots/types';
+import { createRuntimeAccessController } from './runtimeAccess';
+
+async function readJson<T>(response: Response): Promise<T> {
+  return (await response.json()) as T;
+}
 
 describe('SymphonyServer', () => {
   let db: Database;
   let server: SymphonyServer;
-  let baseUrl: string;
+  let runtimeControlPlane: RuntimeControlPlane;
+  let botGateway: BotGateway;
+  let createIssueCalls: Array<Record<string, unknown>> = [];
+  let stopIssueCalls: string[] = [];
+  let retryIssueCalls: string[] = [];
+  let telegramWebhookCalls = 0;
+  let discordInteractionCalls = 0;
 
-  beforeAll(async () => {
+  async function request(path: string, init?: RequestInit): Promise<Response> {
+    return server.getApp().request(path, init);
+  }
+
+  beforeAll(() => {
     db = new Database(':memory:');
     initializeSchema(db);
 
+    runtimeControlPlane = {
+      getOverview: () => ({
+        generated_at: '2026-01-01T00:00:00.000Z',
+        counts: {
+          running: 1,
+          retrying: 0,
+          total: 1,
+        },
+        issues: [
+          {
+            issue_id: 'linear-rt-1',
+            work_item_id: 'linear-rt-1',
+            identifier: 'INT-RT-1',
+            title: 'Runtime view',
+            phase: 'DEV',
+            tracker_state: 'In Progress',
+            orchestrator_state: 'dev_running',
+            workspace_path: '/tmp/workspaces/INT-RT-1',
+            branch_name: 'feature/int-rt-1',
+            github_repo: 'acme/repo',
+            github_issue_number: 91,
+            active_pr_number: 33,
+            session: {
+              session_id: 'thread-1-turn-1',
+              turn_count: 1,
+              stage: 'coding',
+              last_event: 'timeline',
+              last_message: 'Using Read',
+              started_at: '2026-01-01T00:00:00.000Z',
+              last_event_at: '2026-01-01T00:01:00.000Z',
+              tokens: {
+                input_tokens: 10,
+                output_tokens: 5,
+                total_tokens: 15,
+              },
+              recent_tools: [],
+              recent_files: [],
+            },
+            actions: {
+              can_stop: true,
+              can_retry: false,
+              can_open_pr: true,
+            },
+            created_at: '2026-01-01T00:00:00.000Z',
+            updated_at: '2026-01-01T00:00:00.000Z',
+          },
+        ],
+      }),
+      getIssue: (id: string) =>
+        id === 'linear-rt-1' || id === 'INT-RT-1'
+          ? runtimeControlPlane.getOverview().issues[0] ?? null
+          : null,
+      getTimeline: () => [
+        {
+          id: 'evt-1',
+          issue_id: 'linear-rt-1',
+          issue_identifier: 'INT-RT-1',
+          timestamp: '2026-01-01T00:01:00.000Z',
+          level: 'info',
+          category: 'tool',
+          code: 'tool_started',
+          message: 'Using Read',
+          turn: 1,
+          tool_name: 'Read',
+          detail: {
+            path: '/tmp/workspaces/INT-RT-1/app.py',
+          },
+        },
+      ],
+      getHistoryView: () => ({
+        issue_id: 'linear-rt-1',
+        issue_identifier: 'INT-RT-1',
+        digest: {
+          headline: 'INT-RT-1 · DEV · In Progress',
+          detail: 'Live coding session with Read activity.',
+          history_blurb: 'Latest review: none',
+          updated_at: '2026-01-01T00:01:00.000Z',
+        },
+        entries: [
+          {
+            id: 'hist-1',
+            issue_id: 'linear-rt-1',
+            issue_identifier: 'INT-RT-1',
+            source: 'agent_run',
+            title: 'Dev run completed',
+            summary: 'Implemented runtime view.',
+            timestamp: '2026-01-01T00:01:00.000Z',
+            detail: null,
+          },
+        ],
+      }),
+      createIssue: async (input) => {
+        createIssueCalls.push(input as Record<string, unknown>);
+        return {
+          accepted: true,
+          status: 'accepted',
+          message: 'Created INT-RT-2',
+          issue_id: 'linear-rt-2',
+          issue_identifier: 'INT-RT-2',
+          issue: null,
+        };
+      },
+      stopIssue: async (id: string) => {
+        stopIssueCalls.push(id);
+        return {
+          accepted: true,
+          status: 'accepted',
+          message: `Stopping ${id}`,
+          issue_id: id,
+          issue_identifier: 'INT-RT-1',
+        };
+      },
+      retryIssue: async (id: string) => {
+        retryIssueCalls.push(id);
+        return {
+          accepted: true,
+          status: 'queued',
+          message: `Queued ${id}`,
+          issue_id: id,
+          issue_identifier: 'INT-RT-1',
+        };
+      },
+      createStream: () =>
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(
+                'event: snapshot\\ndata: {"generated_at":"2026-01-01T00:00:00.000Z","counts":{"running":1,"retrying":0,"total":1},"issues":[]}\\n\\n',
+              ),
+            );
+          },
+        }),
+      subscribe: () => () => undefined,
+    };
+
+    botGateway = {
+      getManifest: () => ({
+        transports: {
+          telegram: {
+            enabled: true,
+            inbound_enabled: true,
+            outbound_enabled: true,
+            watch_supported: true,
+            write_requires_operator: false,
+            inbound_path: '/api/v1/bots/telegram/webhook',
+          },
+          discord: {
+            enabled: true,
+            inbound_enabled: true,
+            outbound_enabled: true,
+            watch_supported: true,
+            write_requires_operator: false,
+            inbound_path: '/api/v1/bots/discord/interactions',
+          },
+        },
+        commands: ['help', 'status', 'new', 'watch', 'unwatch', 'stop', 'retry'],
+        watch_presets: ['default', 'verbose', 'failures', 'status'],
+        assistant: {
+          provider: null,
+          model: null,
+          configured: false,
+          health: 'unconfigured',
+          fallback_available: true,
+          last_error_code: 'unconfigured',
+        },
+      }),
+      handleTelegramWebhook: async () => {
+        telegramWebhookCalls += 1;
+        return {
+          ok: true,
+          status: 200,
+          body: { ok: true },
+        };
+      },
+      handleDiscordInteraction: async () => {
+        discordInteractionCalls += 1;
+        return {
+          status: 200,
+          body: { type: 4, data: { content: 'pong', flags: 64 } },
+        };
+      },
+      dispose: () => undefined,
+    };
+
     server = new SymphonyServer(db, {
       port: 0,
-      hostname: 'localhost',
+      hostname: '127.0.0.1',
       corsOrigins: ['*'],
-    });
-
-    const { port } = await server.start();
-    baseUrl = `http://localhost:${port}`;
+    }, runtimeControlPlane, botGateway);
   });
 
-  afterAll(async () => {
-    await server.stop();
+  afterAll(() => {
     db.close();
   });
 
   beforeEach(() => {
     dropAllTables(db);
     initializeSchema(db);
+    createIssueCalls = [];
+    stopIssueCalls = [];
+    retryIssueCalls = [];
+    telegramWebhookCalls = 0;
+    discordInteractionCalls = 0;
   });
 
   test('GET / returns minimal server info', async () => {
-    const response = await fetch(baseUrl);
+    const response = await request('/');
     expect(response.status).toBe(200);
 
-    const payload = await response.json();
+    const payload = await readJson<any>(response);
     expect(payload.success).toBe(true);
     expect(payload.data.endpoints.health).toBe('/api/v1/health');
     expect(payload.data.endpoints.workItems).toBe('/api/v1/work-items');
-    expect(payload.data.endpoints.tasks).toBeUndefined();
+    expect(payload.data.endpoints.runtimeOverview).toBe('/api/v1/runtime/overview');
+    expect(payload.data.endpoints.runtimeManifest).toBe('/api/v1/runtime/manifest');
+    expect(payload.data.endpoints.runtimeApp).toBe('/runtime');
+    expect(payload.data.endpoints.botsManifest).toBe('/api/v1/bots/manifest');
   });
 
   test('GET /api/v1/health returns health status', async () => {
-    const response = await fetch(`${baseUrl}/api/v1/health`);
+    const response = await request('/api/v1/health');
     expect(response.status).toBe(200);
 
-    const payload = await response.json();
+    const payload = await readJson<any>(response);
     expect(payload.success).toBe(true);
     expect(payload.data.status).toBeDefined();
     expect(payload.data.checks.database).toBe(true);
@@ -76,10 +281,10 @@ describe('SymphonyServer', () => {
       orchestrator_state: 'review_running',
     });
 
-    const response = await fetch(`${baseUrl}/api/v1/work-items`);
+    const response = await request('/api/v1/work-items');
     expect(response.status).toBe(200);
 
-    const payload = await response.json();
+    const payload = await readJson<any>(response);
     expect(payload.success).toBe(true);
     expect(payload.data).toHaveLength(1);
     expect(payload.data[0].linear_identifier).toBe('INT-1');
@@ -96,10 +301,10 @@ describe('SymphonyServer', () => {
       github_repo: 'acme/repo',
     });
 
-    const response = await fetch(`${baseUrl}/api/v1/work-items/wi-2`);
+    const response = await request('/api/v1/work-items/wi-2');
     expect(response.status).toBe(200);
 
-    const payload = await response.json();
+    const payload = await readJson<any>(response);
     expect(payload.success).toBe(true);
     expect(payload.data.id).toBe('wi-2');
   });
@@ -124,10 +329,10 @@ describe('SymphonyServer', () => {
       input_summary: 'GitHub context',
     });
 
-    const response = await fetch(`${baseUrl}/api/v1/work-items/wi-3/runs`);
+    const response = await request('/api/v1/work-items/wi-3/runs');
     expect(response.status).toBe(200);
 
-    const payload = await response.json();
+    const payload = await readJson<any>(response);
     expect(payload.success).toBe(true);
     expect(payload.data).toHaveLength(1);
     expect(payload.data[0].id).toBe('run-1');
@@ -155,12 +360,216 @@ describe('SymphonyServer', () => {
       summary_md: 'Please add tests',
     });
 
-    const response = await fetch(`${baseUrl}/api/v1/work-items/wi-4/reviews`);
+    const response = await request('/api/v1/work-items/wi-4/reviews');
     expect(response.status).toBe(200);
 
-    const payload = await response.json();
+    const payload = await readJson<any>(response);
     expect(payload.success).toBe(true);
     expect(payload.data).toHaveLength(1);
     expect(payload.data[0].decision).toBe('REQUEST_CHANGES');
+  });
+
+  test('GET /runtime serves the lightweight runtime page', async () => {
+    const response = await request('/runtime');
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('text/html');
+
+    const html = await response.text();
+    expect(html).toContain('Symphony Runtime');
+    expect(html).toContain('Access');
+    expect(html).toContain('Save Token');
+    expect(html).toContain('Create Issue');
+    expect(html).toContain('History Replay');
+    expect(html).toContain('Stop');
+    expect(html).toContain('Retry');
+    expect(html).toContain('/api/v1/runtime/overview');
+  });
+
+  test('GET /api/v1/runtime/overview returns runtime snapshot data', async () => {
+    const response = await request('/api/v1/runtime/overview');
+    expect(response.status).toBe(200);
+
+    const payload = await readJson<any>(response);
+    expect(payload.success).toBe(true);
+    expect(payload.data.counts.running).toBe(1);
+    expect(payload.data.issues[0].identifier).toBe('INT-RT-1');
+  });
+
+  test('GET /api/v1/runtime/issues/:id returns a runtime issue view', async () => {
+    const response = await request('/api/v1/runtime/issues/INT-RT-1');
+    expect(response.status).toBe(200);
+
+    const payload = await readJson<any>(response);
+    expect(payload.success).toBe(true);
+    expect(payload.data.issue_id).toBe('linear-rt-1');
+    expect(payload.data.identifier).toBe('INT-RT-1');
+  });
+
+  test('POST /api/v1/runtime/issues creates a runtime issue', async () => {
+    const response = await request('/api/v1/runtime/issues', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Create from web',
+        description: 'desc',
+        team_id: 'team-1',
+        project_slug: 'test2',
+        project_id: 'project-1',
+        state_id: 'state-1',
+      }),
+    });
+
+    expect(response.status).toBe(201);
+    const payload = await readJson<any>(response);
+    expect(payload.success).toBe(true);
+    expect(payload.data.issue_identifier).toBe('INT-RT-2');
+    expect(createIssueCalls).toHaveLength(1);
+    expect(createIssueCalls[0]?.project_slug).toBe('test2');
+  });
+
+  test('POST /api/v1/runtime/issues rejects missing title', async () => {
+    const response = await request('/api/v1/runtime/issues', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        description: 'desc only',
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    const payload = await readJson<any>(response);
+    expect(payload.success).toBe(false);
+    expect(payload.error).toBe('title is required');
+  });
+
+  test('POST /api/v1/runtime/issues/:id/stop proxies stop control actions', async () => {
+    const response = await request('/api/v1/runtime/issues/linear-rt-1/stop', {
+      method: 'POST',
+    });
+
+    expect(response.status).toBe(202);
+    const payload = await readJson<any>(response);
+    expect(payload.success).toBe(true);
+    expect(payload.data.message).toContain('Stopping linear-rt-1');
+    expect(stopIssueCalls).toEqual(['linear-rt-1']);
+  });
+
+  test('POST /api/v1/runtime/issues/:id/retry proxies retry control actions', async () => {
+    const response = await request('/api/v1/runtime/issues/INT-RT-1/retry', {
+      method: 'POST',
+    });
+
+    expect(response.status).toBe(202);
+    const payload = await readJson<any>(response);
+    expect(payload.success).toBe(true);
+    expect(payload.data.message).toContain('Queued INT-RT-1');
+    expect(retryIssueCalls).toEqual(['INT-RT-1']);
+  });
+
+  test('GET /api/v1/runtime/stream returns SSE snapshot', async () => {
+    const response = await request('/api/v1/runtime/stream');
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('text/event-stream');
+
+    const reader = response.body?.getReader();
+    const chunk = await reader?.read();
+    await reader?.cancel();
+    const text = new TextDecoder().decode(chunk?.value);
+    expect(text).toContain('event: snapshot');
+  });
+
+  test('GET /api/v1/runtime/manifest returns access and feature flags', async () => {
+    const response = await request('/api/v1/runtime/manifest');
+    expect(response.status).toBe(200);
+
+    const payload = await readJson<any>(response);
+    expect(payload.success).toBe(true);
+    expect(payload.data.features.history_replay).toBe(true);
+    expect(payload.data.features.subscription_preferences).toBe(true);
+    expect(payload.data.access.viewer_role).toBe('operator');
+  });
+
+  test('GET /api/v1/runtime/issues/:id/history returns replay history', async () => {
+    const response = await request('/api/v1/runtime/issues/INT-RT-1/history');
+    expect(response.status).toBe(200);
+
+    const payload = await readJson<any>(response);
+    expect(payload.success).toBe(true);
+    expect(payload.data.digest.headline).toContain('INT-RT-1');
+    expect(payload.data.entries[0].title).toContain('Dev run');
+  });
+
+  test('GET /api/v1/bots/manifest returns thin adapter capabilities', async () => {
+    const response = await request('/api/v1/bots/manifest');
+    expect(response.status).toBe(200);
+
+    const payload = await readJson<any>(response);
+    expect(payload.success).toBe(true);
+    expect(payload.data.transports.telegram.inbound_path).toBe('/api/v1/bots/telegram/webhook');
+    expect(payload.data.transports.telegram.watch_supported).toBe(true);
+    expect(payload.data.transports.telegram.write_requires_operator).toBe(false);
+    expect(payload.data.transports.discord.outbound_enabled).toBe(true);
+    expect(payload.data.transports.discord.write_requires_operator).toBe(false);
+    expect(payload.data.commands).toContain('watch');
+    expect(payload.data.watch_presets).toEqual(['default', 'verbose', 'failures', 'status']);
+    expect(payload.data.assistant.configured).toBe(false);
+    expect(payload.data.assistant.health).toBe('unconfigured');
+    expect(payload.data.assistant.fallback_available).toBe(true);
+  });
+
+  test('POST /api/v1/bots/telegram/webhook proxies Telegram updates to the bot gateway', async () => {
+    const response = await request('/api/v1/bots/telegram/webhook', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: {
+          text: '/status',
+          chat: { id: 123 },
+        },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(telegramWebhookCalls).toBe(1);
+  });
+
+  test('POST /api/v1/bots/discord/interactions proxies Discord interactions to the bot gateway', async () => {
+    const response = await request('/api/v1/bots/discord/interactions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 1 }),
+    });
+
+    expect(response.status).toBe(200);
+    const payload = await readJson<any>(response);
+    expect(payload.type).toBe(4);
+    expect(discordInteractionCalls).toBe(1);
+  });
+
+  test('POST runtime mutations require a write token when runtime access is protected', async () => {
+    const protectedServer = new (SymphonyServer as any)(
+      db,
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        corsOrigins: ['*'],
+      },
+      runtimeControlPlane,
+      botGateway,
+      createRuntimeAccessController({ writeToken: 'secret-token' }),
+    );
+
+    const denied = await protectedServer.getApp().request('/api/v1/runtime/issues/INT-RT-1/retry', {
+      method: 'POST',
+    });
+    expect(denied.status).toBe(403);
+
+    const allowed = await protectedServer.getApp().request('/api/v1/runtime/issues/INT-RT-1/retry', {
+      method: 'POST',
+      headers: {
+        'x-symphony-runtime-token': 'secret-token',
+      },
+    });
+    expect(allowed.status).toBe(202);
   });
 });

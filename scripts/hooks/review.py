@@ -31,6 +31,8 @@ class ReviewHook:
         self.config = config
         self.auto_merge_no_reviews = config.auto_merge_no_reviews if config else False
         self.last_pr_status: Optional[str] = None
+        self.last_review_decision: Optional[str] = None
+        self.last_review_report: Optional[str] = None
 
         # Use provided clients or load from config
         if config:
@@ -85,31 +87,36 @@ class ReviewHook:
         if not content:
             return None, None
 
-        patterns = [
-            r"^##\s*评审结果[:：]\s*([A-Z_]+)\s*$",
-            r"^##\s*Review Decision[:：]\s*([A-Z_]+)\s*$",
-            r"^\s*[-*]?\s*\*\*Decision\*\*[:：]\s*([A-Z_]+)\s*$",
-            r"^\s*[-*]?\s*\*\*决策\*\*[:：]\s*([A-Z_]+)\s*$",
-            r"^Decision[:：]\s*([A-Z_]+)\s*$",
-            r"^##\s*最终决定\s*$[\r\n]+\s*(?:\*\*)?([A-Z_]+)(?:\*\*)?",
-            r"^##\s*Final Decision\s*$[\r\n]+\s*(?:\*\*)?([A-Z_]+)(?:\*\*)?",
-        ]
+        decision_match = re.search(
+            r"^## Review Decision:\s*(APPROVE|APPROVE_MINOR|REQUEST_CHANGES|REQUEST_TESTS|REJECT)\s*$",
+            content,
+            re.MULTILINE,
+        )
+        if not decision_match:
+            return None, content
 
-        for pattern in patterns:
-            match = re.search(pattern, content, re.MULTILINE)
-            if match:
-                return match.group(1).upper(), content
+        summary_heading = re.search(r"^## Review Summary\s*$", content, re.MULTILINE)
+        if not summary_heading:
+            return None, content
 
-        return None, content
+        summary_start = summary_heading.end()
+        remaining = content[summary_start:].lstrip()
+        next_heading = re.search(r"^##\s+", remaining, re.MULTILINE)
+        summary = (remaining[: next_heading.start()] if next_heading else remaining).strip()
+        if not summary:
+            return None, content
+
+        return decision_match.group(1).upper(), content
 
     def _workflow_file_path(self, filename: str) -> Path:
         """Resolve workflow artifacts under the canonical .symphony/ directory."""
         return self.store.symphony_dir.path.parent / ".symphony" / filename
 
-    def _publish_review_summary(self, pr_number: Optional[int], review_decision: str, review_report: Optional[str]) -> None:
-        """Publish review feedback to the PR timeline so it is visible on GitHub."""
+    def _submit_native_review(self, pr_number: Optional[int], review_decision: str, review_report: Optional[str]) -> bool:
+        """Submit a native GitHub review and fail closed if GitHub rejects it."""
         if not pr_number or not review_report:
-            return
+            self.store.set_error("Missing pull request review context")
+            return False
 
         body = "\n".join([
             f"## Automated Review: {review_decision}",
@@ -117,11 +124,36 @@ class ReviewHook:
             review_report.strip(),
         ]).strip()
 
+        event = None
+        if review_decision in ("APPROVE", "APPROVE_MINOR"):
+            event = "APPROVE"
+        elif review_decision in ("REQUEST_CHANGES", "REQUEST_TESTS", "REJECT"):
+            event = "REQUEST_CHANGES"
+
+        if not event:
+            self.store.set_error(f"Unsupported review decision: {review_decision}")
+            return False
+
         try:
-            self.github.add_pull_request_comment(pr_number, body)
-            print(f"[REVIEW] Published review summary to PR #{pr_number}")
+            self.github.submit_pull_request_review(pr_number, event, body=body)
+            print(f"[REVIEW] Submitted native review to PR #{pr_number} ({event})")
+            return True
         except Exception as e:
-            print(f"[REVIEW] WARNING: Failed to publish review summary to PR #{pr_number}: {e}")
+            print(f"[REVIEW] ERROR: Failed to submit native review to PR #{pr_number}: {e}")
+            self.store.set_error(f"Failed to submit native review: {e}")
+            return False
+
+    def _build_merge_blocked_feedback(self, reason: str) -> str:
+        base_report = (self.last_review_report or "").strip()
+        sections = [
+            "## Merge Blocked",
+            "Review passed, but the merge failed, so the issue is returning to development.",
+            "",
+            f"Reason: {reason}",
+        ]
+        if base_report:
+            sections = [base_report, ""] + sections
+        return "\n".join(sections).strip()
 
     def run(self) -> bool:
         """
@@ -142,11 +174,14 @@ class ReviewHook:
             self.store.set_error("Missing review decision")
             return False
 
+        self.last_review_decision = review_decision
+        self.last_review_report = review_report
         print(f"[REVIEW] Review decision: {review_decision}")
 
         state = self.store.get_state()
         pr_info = state.get("metadata", {})
-        self._publish_review_summary(pr_info.get("pr_number"), review_decision, review_report)
+        if not self._submit_native_review(pr_info.get("pr_number"), review_decision, review_report):
+            return False
 
         if review_decision in ("APPROVE", "APPROVE_MINOR"):
             self.last_pr_status = "approved"
@@ -209,12 +244,16 @@ class ReviewHook:
             error_msg = str(e)
             print(f"[REVIEW] Merge blocked: {error_msg}")
             self.last_pr_status = "merge_blocked"
+            self.last_review_decision = "MERGE_BLOCKED"
+            self.last_review_report = self._build_merge_blocked_feedback(error_msg)
             return self._handle_changes_requested(linear_issue_id, f"Merge blocked: {error_msg}")
 
         if not merge_result.get("merged"):
             error_msg = merge_result.get("message", "Merge failed")
             print(f"[REVIEW] Merge blocked: {error_msg}")
             self.last_pr_status = "merge_blocked"
+            self.last_review_decision = "MERGE_BLOCKED"
+            self.last_review_report = self._build_merge_blocked_feedback(error_msg)
             return self._handle_changes_requested(linear_issue_id, f"Merge blocked: {error_msg}")
 
         self.last_pr_status = "merged"
