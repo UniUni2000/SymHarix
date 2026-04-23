@@ -7,6 +7,7 @@ import type {
   ConstitutionHit,
   ConstitutionStatus,
   EvidenceSummary,
+  HarnessLearningConfidence,
   GovernanceDecision,
   GovernanceStatus,
   GovernanceSuggestion,
@@ -44,6 +45,10 @@ export interface RuntimeGovernanceOverrideView {
 export interface RuntimeHarnessStatusView {
   status: RepositoryHarnessStatus;
   adoption_suggested: boolean;
+  learning_confidence?: HarnessLearningConfidence | null;
+  learned_command_count?: number;
+  learned_artifact_count?: number;
+  learned_runtime_hint_count?: number;
 }
 
 export interface RuntimeToolActivity {
@@ -99,6 +104,10 @@ export interface RuntimeIssueView {
   task_status?: ChangePackTaskStatus | null;
   evidence_summary?: EvidenceSummary | null;
   missing_requirements?: CompletionRequirement[];
+  architectural_target?: string | null;
+  path_families?: string[];
+  boundary_edges?: string[];
+  import_edges?: string[];
   governance_status?: GovernanceStatus | null;
   governance_decision?: GovernanceDecision | null;
   governance_summary?: string | null;
@@ -216,6 +225,8 @@ export interface RuntimeControlPlane {
   overrideGovernance(id: string): Promise<RuntimeActionResult>;
   rewriteGovernance(id: string): Promise<RuntimeActionResult>;
   splitGovernance(id: string): Promise<RuntimeActionResult>;
+  executeGovernanceSuggestion(issueId: string, suggestionId: string): Promise<RuntimeActionResult>;
+  dismissGovernanceSuggestion(issueId: string, suggestionId: string): Promise<RuntimeActionResult>;
   createStream(): ReadableStream<Uint8Array>;
   subscribe(listener: (event: RuntimeStreamEvent) => void): () => void;
 }

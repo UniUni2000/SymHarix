@@ -468,6 +468,7 @@ export function renderRuntimePage(): string {
         pending: {
           create: false,
           actionIssueId: null,
+          actionSuggestionId: null,
           action: null,
         },
         stream: null,
@@ -645,6 +646,12 @@ export function renderRuntimePage(): string {
         if (state.pending.action === 'split') {
           return 'Splitting...';
         }
+        if (state.pending.action === 'execute_suggestion') {
+          return 'Executing suggestion...';
+        }
+        if (state.pending.action === 'dismiss_suggestion') {
+          return 'Dismissing suggestion...';
+        }
         return 'Working...';
       }
 
@@ -733,6 +740,38 @@ export function renderRuntimePage(): string {
         return items.map((item) => item).join('');
       }
 
+      function renderGovernanceSuggestions(issue, actionPending, hasControlAccess) {
+        const suggestions = issue && issue.active_governance_suggestions
+          ? issue.active_governance_suggestions
+          : [];
+        if (!suggestions.length) {
+          return '<div class="detail-list-item muted">No active governance suggestions.</div>';
+        }
+
+        return suggestions.map((suggestion) => {
+          const executePending =
+            state.pending.actionIssueId === issue.issue_id &&
+            state.pending.actionSuggestionId === suggestion.id &&
+            state.pending.action === 'execute_suggestion';
+          const dismissPending =
+            state.pending.actionIssueId === issue.issue_id &&
+            state.pending.actionSuggestionId === suggestion.id &&
+            state.pending.action === 'dismiss_suggestion';
+          const executeDisabled = !suggestion.can_execute || actionPending || !hasControlAccess;
+          const dismissDisabled = !suggestion.can_dismiss || actionPending || !hasControlAccess;
+          return [
+            '<div class="detail-list-item">',
+            '<strong>' + escapeHtml(suggestion.title) + '</strong>',
+            '<br><span class="muted">' + escapeHtml(suggestion.suggestion_type + ' · ' + suggestion.summary) + '</span>',
+            '<div class="action-row" style="margin-top: 10px;">',
+            '<button type="button" class="secondary" data-suggestion-action="execute" data-suggestion-id="' + escapeHtml(suggestion.id) + '" ' + (executeDisabled ? 'disabled' : '') + '>' + escapeHtml(executePending ? 'Executing Suggestion...' : 'Execute Suggestion') + '</button>',
+            '<button type="button" class="secondary" data-suggestion-action="dismiss" data-suggestion-id="' + escapeHtml(suggestion.id) + '" ' + (dismissDisabled ? 'disabled' : '') + '>' + escapeHtml(dismissPending ? 'Dismissing Suggestion...' : 'Dismiss Suggestion') + '</button>',
+            '</div>',
+            '</div>',
+          ].join('');
+        }).join('');
+      }
+
       function renderDetail() {
         const issue = state.selectedIssue || getSelectedIssueFromOverview();
         if (!issue) {
@@ -771,18 +810,25 @@ export function renderRuntimePage(): string {
             })
           : [];
         const governanceItems = buildDetailList([
-          '<div class="detail-list-item">Repo harness · <strong>' + escapeHtml(issue.repo_harness_status ? issue.repo_harness_status.status : 'missing') + '</strong>' + (issue.repo_harness_status && issue.repo_harness_status.adoption_suggested ? '<br><span class="muted">formalization suggested</span>' : '') + '</div>',
+          '<div class="detail-list-item">Repo harness · <strong>' + escapeHtml(issue.repo_harness_status ? issue.repo_harness_status.status : 'missing') + '</strong>' + (issue.repo_harness_status && issue.repo_harness_status.adoption_suggested ? '<br><span class="muted">formalization suggested</span>' : '') + (issue.repo_harness_status && issue.repo_harness_status.learning_confidence ? '<br><span class="muted">learning=' + escapeHtml(issue.repo_harness_status.learning_confidence) + ' · commands=' + escapeHtml(issue.repo_harness_status.learned_command_count || 0) + ' · artifacts=' + escapeHtml(issue.repo_harness_status.learned_artifact_count || 0) + ' · hints=' + escapeHtml(issue.repo_harness_status.learned_runtime_hint_count || 0) + '</span>' : '') + '</div>',
           '<div class="detail-list-item">Constitution · <strong>' + escapeHtml(issue.constitution_status || 'missing') + '</strong></div>',
           '<div class="detail-list-item">Decision · <strong>' + escapeHtml(issue.governance_decision || 'n/a') + '</strong></div>',
           '<div class="detail-list-item">Status · <strong>' + escapeHtml(issue.governance_status || 'n/a') + '</strong><br><span class="muted">' + escapeHtml(issue.governance_summary || 'No governance summary yet.') + '</span></div>',
           '<div class="detail-list-item">Override · <strong>' + escapeHtml(issue.governance_override && issue.governance_override.active ? 'approved' : 'inactive') + '</strong>' + (issue.governance_override && issue.governance_override.active ? '<br><span class="muted">' + escapeHtml((issue.governance_override.reason || 'Manual operator override') + (issue.governance_override.approved_at ? ' · ' + formatDate(issue.governance_override.approved_at) : '')) + '</span>' : '') + '</div>',
+          '<div class="detail-list-item">Architecture · <strong>' + escapeHtml(issue.architectural_target || 'n/a') + '</strong>' + ((issue.path_families && issue.path_families.length) || (issue.boundary_edges && issue.boundary_edges.length) || (issue.import_edges && issue.import_edges.length) ? '<br><span class="muted">' + escapeHtml([
+            issue.path_families && issue.path_families.length ? 'families: ' + issue.path_families.join(', ') : '',
+            issue.boundary_edges && issue.boundary_edges.length ? 'boundaries: ' + issue.boundary_edges.join(', ') : '',
+            issue.import_edges && issue.import_edges.length ? 'imports: ' + issue.import_edges.join(', ') : '',
+          ].filter(Boolean).join(' · ')) + '</span>' : '') + '</div>',
         ], 'No governance assessment yet.');
         const evidenceItems = buildDetailList([
           '<div class="detail-list-item">Change pack · <strong>' + escapeHtml(issue.change_pack_summary ? ((issue.change_pack_summary.profile || 'unknown') + ' · ' + (issue.change_pack_summary.complexity || 'unknown')) : 'n/a') + '</strong></div>',
           '<div class="detail-list-item">Tasks · <strong>' + escapeHtml(issue.task_status ? (String(issue.task_status.completed) + '/' + String(issue.task_status.total)) : '0/0') + '</strong></div>',
-          '<div class="detail-list-item">Evidence · <strong>' + escapeHtml(issue.evidence_summary ? (String(issue.evidence_summary.satisfied) + '/' + String(issue.evidence_summary.total_requirements)) : '0/0') + '</strong></div>',
+          '<div class="detail-list-item">Evidence · <strong>' + escapeHtml(issue.evidence_summary ? (String(issue.evidence_summary.satisfied) + '/' + String(issue.evidence_summary.total_requirements)) : '0/0') + '</strong>' + (issue.evidence_summary ? '<br><span class="muted">commands ok=' + escapeHtml(issue.evidence_summary.successful_commands.join(', ') || 'none') + ' · commands failed=' + escapeHtml(issue.evidence_summary.failed_commands.join(', ') || 'none') + '</span>' : '') + '</div>',
+          '<div class="detail-list-item">Artifacts & runtime · <strong>' + escapeHtml(issue.evidence_summary ? String(issue.evidence_summary.observed_artifacts.length) : '0') + '</strong>' + (issue.evidence_summary ? '<br><span class="muted">artifacts=' + escapeHtml(issue.evidence_summary.observed_artifacts.join(', ') || 'none') + ' · runtime=' + escapeHtml(issue.evidence_summary.runtime_checks.map((check) => check.hint_key + ':' + check.status).join(', ') || 'none') + '</span>' : '') + '</div>',
           '<div class="detail-list-item">Missing requirements · <strong>' + escapeHtml(issue.missing_requirements ? String(issue.missing_requirements.length) : '0') + '</strong>' + (issue.missing_requirements && issue.missing_requirements.length ? '<br><span class="muted">' + escapeHtml(issue.missing_requirements.map((item) => item.label).join(' · ')) + '</span>' : '') + '</div>',
           '<div class="detail-list-item">Suggestions · <strong>' + escapeHtml(issue.active_governance_suggestions ? String(issue.active_governance_suggestions.length) : '0') + '</strong>' + (issue.active_governance_suggestions && issue.active_governance_suggestions.length ? '<br><span class="muted">' + escapeHtml(issue.active_governance_suggestions.map((item) => item.suggestion_type + ': ' + item.title).join(' · ')) + '</span>' : '') + '</div>',
+          '<div class="detail-list-item">Fitness signals · <strong>' + escapeHtml(issue.fitness_signals ? String(issue.fitness_signals.length) : '0') + '</strong>' + (issue.fitness_signals && issue.fitness_signals.length ? '<br><span class="muted">' + escapeHtml(issue.fitness_signals.map((item) => item.code).join(', ')) + '</span>' : '') + '</div>',
         ], 'No evidence summary yet.');
         const statusMessage = getCurrentActionLabel(issue) || 'Ready';
 
@@ -817,6 +863,7 @@ export function renderRuntimePage(): string {
             '<div class="detail-list-item">Active PR · <strong>' + escapeHtml(issue.active_pr_number || 'n/a') + '</strong></div>',
           ], 'No linked workspace yet.') + '<div class="action-row" style="margin-top: 12px;"><button id="stop-button" class="warn" ' + (stopDisabled ? 'disabled' : '') + '>Stop</button><button id="retry-button" class="secondary" ' + (retryDisabled ? 'disabled' : '') + '>Retry</button><button id="override-button" class="secondary" ' + (overrideDisabled ? 'disabled' : '') + '>Override Gate</button><button id="rewrite-button" class="secondary" ' + (rewriteDisabled ? 'disabled' : '') + '>Rewrite Gate</button><button id="split-button" class="secondary" ' + (splitDisabled ? 'disabled' : '') + '>Split Gate</button><button id="refresh-issue-button" class="secondary">Refresh Issue</button></div></div></div>',
           '<div class="detail-block"><h3>Governance</h3><div class="detail-list">' + governanceItems + '</div></div>',
+          '<div class="detail-block"><h3>Governance Suggestions</h3><div class="detail-list">' + renderGovernanceSuggestions(issue, actionPending, hasControlAccess) + '</div></div>',
           '<div class="detail-block"><h3>Evidence</h3><div class="detail-list">' + evidenceItems + '</div></div>',
           '<div class="detail-block"><h3>Recent Tools</h3><div class="detail-list">' + buildDetailList(toolItems, 'No recent tool events yet.') + '</div></div>',
           '<div class="detail-block"><h3>Recent Files</h3><div class="detail-list">' + buildDetailList(fileItems, 'No recent file activity yet.') + '</div></div>',
@@ -840,6 +887,15 @@ export function renderRuntimePage(): string {
         });
         document.getElementById('refresh-issue-button').addEventListener('click', () => {
           void refreshSelectedIssue();
+        });
+        detailCard.querySelectorAll('[data-suggestion-action]').forEach((button) => {
+          button.addEventListener('click', () => {
+            const suggestionId = button.getAttribute('data-suggestion-id');
+            const action = button.getAttribute('data-suggestion-action');
+            if (suggestionId && (action === 'execute' || action === 'dismiss')) {
+              void postGovernanceSuggestionAction(issue.issue_id, suggestionId, action);
+            }
+          });
         });
       }
 
@@ -984,6 +1040,7 @@ export function renderRuntimePage(): string {
 
       async function postIssueAction(issueId, action) {
         state.pending.actionIssueId = issueId;
+        state.pending.actionSuggestionId = null;
         state.pending.action = action;
         renderAll();
         try {
@@ -1004,6 +1061,30 @@ export function renderRuntimePage(): string {
           setFlash(error.message);
         } finally {
           state.pending.actionIssueId = null;
+          state.pending.actionSuggestionId = null;
+          state.pending.action = null;
+          renderAll();
+        }
+      }
+
+      async function postGovernanceSuggestionAction(issueId, suggestionId, action) {
+        state.pending.actionIssueId = issueId;
+        state.pending.actionSuggestionId = suggestionId;
+        state.pending.action = action === 'execute' ? 'execute_suggestion' : 'dismiss_suggestion';
+        renderAll();
+        try {
+          const actionPath = '/api/v1/runtime/issues/' + encodeURIComponent(issueId) + '/governance/suggestions/' + encodeURIComponent(suggestionId) + '/' + action;
+          const result = await fetchJson(actionPath, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+          });
+          setFlash(result.message || (action + ' suggestion requested'));
+          await refreshSelectedIssue();
+        } catch (error) {
+          setFlash(error.message);
+        } finally {
+          state.pending.actionIssueId = null;
+          state.pending.actionSuggestionId = null;
           state.pending.action = null;
           renderAll();
         }

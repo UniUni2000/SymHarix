@@ -287,5 +287,57 @@ export function createRuntimeRoutes(
       buildActionStatus(result),
     );
   });
+
+  runtime.post('/issues/:id/governance/suggestions/:suggestionId/execute', async (c) => {
+    const access = accessController.authorizeMutation(c.req.raw.headers);
+    if (!access.allowed) {
+      return c.json(
+        {
+          success: false,
+          error: 'Write access requires an operator token.',
+        },
+        403,
+      );
+    }
+
+    const result = await controlPlane.executeGovernanceSuggestion(
+      c.req.param('id'),
+      c.req.param('suggestionId'),
+    );
+    return c.json(
+      {
+        success: result.accepted,
+        data: result,
+        error: result.accepted ? undefined : result.message,
+      },
+      buildActionStatus(result),
+    );
+  });
+
+  runtime.post('/issues/:id/governance/suggestions/:suggestionId/dismiss', async (c) => {
+    const access = accessController.authorizeMutation(c.req.raw.headers);
+    if (!access.allowed) {
+      return c.json(
+        {
+          success: false,
+          error: 'Write access requires an operator token.',
+        },
+        403,
+      );
+    }
+
+    const result = await controlPlane.dismissGovernanceSuggestion(
+      c.req.param('id'),
+      c.req.param('suggestionId'),
+    );
+    return c.json(
+      {
+        success: result.accepted,
+        data: result,
+        error: result.accepted ? undefined : result.message,
+      },
+      buildActionStatus(result),
+    );
+  });
   return runtime;
 }

@@ -109,7 +109,12 @@ export function judgeComplexity(issue: Issue): ComplexityJudgment {
 /**
  * Build DEV agent prompt with complexity judgment
  */
-export function buildDevPrompt(issue: Issue, existingLog?: string, githubContext?: string): string {
+export function buildDevPrompt(
+  issue: Issue,
+  existingLog?: string,
+  githubContext?: string,
+  harnessGuidance?: string,
+): string {
   const judgment = judgeComplexity(issue);
 
   const prompt = `You are a DEV Agent working on issue ${issue.identifier}.
@@ -122,6 +127,7 @@ export function buildDevPrompt(issue: Issue, existingLog?: string, githubContext
 ${issue.branch_name ? `- **Branch**: ${issue.branch_name}` : ''}
 
 ${githubContext ? `${githubContext}\n` : ''}
+${harnessGuidance ? `${harnessGuidance}\n` : ''}
 
 ## Complexity Assessment
 - **Complexity**: ${judgment.complexity.toUpperCase()}

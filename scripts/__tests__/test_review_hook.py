@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -145,3 +146,52 @@ def test_review_hook_reports_merge_blocked_feedback_without_faking_rejection(tmp
     assert "Review passed, but the merge failed" in hook.last_review_report
     assert "Branch protection blocked merge" in hook.last_review_report
     assert hook.store.get_current_state_enum().value == "IN_PROGRESS"
+
+
+def test_review_hook_runs_review_checks_before_submitting_native_review(tmp_path, monkeypatch):
+    hook = make_hook(tmp_path)
+    report_path = hook.store.symphony_dir.path / "REVIEW_REPORT.md"
+    report_path.write_text("## Review Decision: APPROVE\n\n## Review Summary\nLooks good to merge.\n")
+    change_pack_dir = hook.store.symphony_dir.path / "change-pack"
+    change_pack_dir.mkdir(parents=True, exist_ok=True)
+    (change_pack_dir / "evidence.json").write_text(json.dumps({}), encoding="utf-8")
+    monkeypatch.setenv(
+        "SYMPHONY_EFFECTIVE_HARNESS_JSON",
+        json.dumps(
+            {
+                "commands": {
+                    "review_checks": 'python3 -c "import sys; sys.exit(1)"',
+                }
+            }
+        ),
+    )
+
+    assert hook.run() is False
+    hook.github.submit_pull_request_review.assert_not_called()
+    assert "review_checks failed" in hook.store.get_state()["error"]
+    assert hook.store.get_current_state_enum().value == "IN_REVIEW"
+
+
+def test_review_hook_records_review_check_evidence(tmp_path, monkeypatch):
+    hook = make_hook(tmp_path)
+    report_path = hook.store.symphony_dir.path / "REVIEW_REPORT.md"
+    report_path.write_text("## Review Decision: REQUEST_TESTS\n\n## Review Summary\nPlease add one more test.\n")
+    change_pack_dir = hook.store.symphony_dir.path / "change-pack"
+    change_pack_dir.mkdir(parents=True, exist_ok=True)
+    evidence_path = change_pack_dir / "evidence.json"
+    evidence_path.write_text(json.dumps({}), encoding="utf-8")
+    monkeypatch.setenv(
+        "SYMPHONY_EFFECTIVE_HARNESS_JSON",
+        json.dumps(
+            {
+                "commands": {
+                    "review_checks": 'python3 -c "print(\'ok\')"',
+                }
+            }
+        ),
+    )
+
+    assert hook.run() is True
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["command_runs"][0]["command_key"] == "review_checks"
+    assert evidence["command_runs"][0]["status"] == "satisfied"

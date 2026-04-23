@@ -7,6 +7,7 @@ import {
   GovernanceAssessmentRepository,
   GovernanceSuggestionRepository,
   ReviewEventRepository,
+  ShadowHarnessRepository,
   SyncEventRepository,
   WorkItemRepository,
 } from '../database';
@@ -63,6 +64,22 @@ class FakeController extends EventEmitter {
     issue_identifier: 'INT-1',
   });
 
+  executeGovernanceSuggestion = async (issueId: string, suggestionId: string) => ({
+    accepted: true,
+    status: 'accepted' as const,
+    message: `executed ${suggestionId} for ${issueId}`,
+    issue_id: issueId,
+    issue_identifier: 'INT-1',
+  });
+
+  dismissGovernanceSuggestion = async (issueId: string, suggestionId: string) => ({
+    accepted: true,
+    status: 'accepted' as const,
+    message: `dismissed ${suggestionId} for ${issueId}`,
+    issue_id: issueId,
+    issue_identifier: 'INT-1',
+  });
+
   getStateSnapshot() {
     return {
       generated_at: '2026-01-01T00:00:00.000Z',
@@ -113,6 +130,7 @@ describe('RuntimeHub', () => {
     initializeSchema(db);
 
     const workItemRepository = new WorkItemRepository(db);
+    const shadowHarnessRepository = new ShadowHarnessRepository(db);
     workItemRepository.create({
       id: 'issue-1',
       linear_issue_id: 'issue-1',
@@ -128,6 +146,10 @@ describe('RuntimeHub', () => {
       governance_status: 'blocked',
       governance_decision: 'split_before_implement',
       governance_summary: 'Split this issue before dispatch.',
+      path_families: ['runtime/hub', 'server/routes'],
+      boundary_edges: ['runtime<->server'],
+      import_edges: ['runtime/hub->server/routes'],
+      architectural_target: 'runtime<->server',
       change_pack_summary: {
         profile: 'coding',
         complexity: 'small',
@@ -138,6 +160,16 @@ describe('RuntimeHub', () => {
         total_requirements: 2,
         satisfied: 1,
         missing: 1,
+        successful_commands: ['build'],
+        failed_commands: ['lint'],
+        observed_artifacts: ['dist/index.html'],
+        runtime_checks: [
+          {
+            hint_key: 'url',
+            status: 'satisfied',
+            value: 'http://localhost:3000',
+          },
+        ],
         notes: ['Write .symphony/HANDOVER.md before finishing.'],
       },
       missing_requirements: [
@@ -148,6 +180,40 @@ describe('RuntimeHub', () => {
           kind: 'artifact',
         },
       ],
+    });
+    shadowHarnessRepository.upsert({
+      repo_key: 'acme/repo',
+      source: 'shadow',
+      config_json: {
+        commands: {
+          test: 'bun test',
+        },
+      },
+      inference_details_json: {
+        inferred_from: ['package.json', '.symphony/change-pack/evidence.json'],
+        learning_confidence: 'medium',
+        observed_commands: {
+          test: {
+            command: 'bun test',
+            success_count: 2,
+            failure_count: 0,
+            last_status: 'satisfied',
+          },
+        },
+        observed_artifacts: {
+          'dist/index.html': {
+            success_count: 2,
+          },
+        },
+        observed_runtime_hints: {
+          url: {
+            success_count: 2,
+            failure_count: 0,
+          },
+        },
+      },
+      successful_runs: 2,
+      failed_runs: 0,
     });
 
     const controller = new FakeController();
@@ -199,8 +265,17 @@ describe('RuntimeHub', () => {
     expect(overview.issues[0]?.actions.can_stop).toBe(true);
     expect(overview.issues[0]?.actions.can_override_governance).toBe(false);
     expect(overview.issues[0]?.repo_harness_status?.status).toBe('shadow');
+    expect(overview.issues[0]?.repo_harness_status?.learning_confidence).toBe('medium');
+    expect(overview.issues[0]?.repo_harness_status?.learned_command_count).toBe(1);
+    expect(overview.issues[0]?.repo_harness_status?.learned_artifact_count).toBe(1);
+    expect(overview.issues[0]?.repo_harness_status?.learned_runtime_hint_count).toBe(1);
     expect(overview.issues[0]?.constitution_status).toBe('missing');
     expect(overview.issues[0]?.missing_requirements).toHaveLength(1);
+    expect(overview.issues[0]?.architectural_target).toBe('runtime<->server');
+    expect(overview.issues[0]?.path_families).toEqual(['runtime/hub', 'server/routes']);
+    expect(overview.issues[0]?.boundary_edges).toEqual(['runtime<->server']);
+    expect(overview.issues[0]?.import_edges).toEqual(['runtime/hub->server/routes']);
+    expect(overview.issues[0]?.evidence_summary?.successful_commands).toEqual(['build']);
 
     const timeline = hub.getTimeline('INT-1');
     expect(timeline).toHaveLength(2);
@@ -335,6 +410,44 @@ describe('RuntimeHub', () => {
     hub.dispose();
   });
 
+  test('proxies governance suggestion execute and dismiss actions through the controller', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workItemRepository = new WorkItemRepository(db);
+    const governanceSuggestionRepository = new GovernanceSuggestionRepository(db);
+    workItemRepository.create({
+      id: 'issue-1',
+      linear_issue_id: 'issue-1',
+      linear_identifier: 'INT-1',
+      linear_title: 'Governance action proxy',
+      linear_state: 'Done',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'completed',
+    });
+    governanceSuggestionRepository.create({
+      id: 'suggestion-1',
+      work_item_id: 'issue-1',
+      issue_id: 'issue-1',
+      suggestion_type: 'cleanup',
+      title: '[GOVERNANCE] Clean runtime duplication',
+      summary: 'Create a cleanup follow-up.',
+    });
+
+    const hub = new RuntimeHub(db, new FakeController());
+
+    await expect((hub as any).executeGovernanceSuggestion('INT-1', 'suggestion-1')).resolves.toMatchObject({
+      accepted: true,
+      message: 'executed suggestion-1 for issue-1',
+    });
+    await expect((hub as any).dismissGovernanceSuggestion('INT-1', 'suggestion-1')).resolves.toMatchObject({
+      accepted: true,
+      message: 'dismissed suggestion-1 for issue-1',
+    });
+
+    hub.dispose();
+  });
+
   test('builds summary and replay history from agent runs and review events', () => {
     db = new Database(':memory:');
     initializeSchema(db);
@@ -431,6 +544,46 @@ describe('RuntimeHub', () => {
     expect(historyView.entries.some((entry: any) => entry.source === 'agent_run')).toBe(true);
     expect(historyView.entries.some((entry: any) => entry.source === 'governance')).toBe(true);
     expect(historyView.entries.some((entry: any) => entry.title.includes('Governance'))).toBe(true);
+
+    hub.dispose();
+  });
+
+  test('surfaces governance suggestion action states on issue detail', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workItemRepository = new WorkItemRepository(db);
+    const governanceSuggestionRepository = new GovernanceSuggestionRepository(db);
+
+    workItemRepository.create({
+      id: 'issue-suggestion',
+      linear_issue_id: 'issue-suggestion',
+      linear_identifier: 'INT-SUGGEST',
+      linear_title: 'Governance suggestion state',
+      linear_state: 'Done',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'completed',
+    });
+
+    governanceSuggestionRepository.create({
+      id: 'suggestion-exec',
+      work_item_id: 'issue-suggestion',
+      issue_id: 'issue-suggestion',
+      suggestion_type: 'cleanup',
+      title: '[GOVERNANCE] Clean runtime duplication',
+      summary: 'Repeated review churn suggests a cleanup follow-up.',
+      detail_json: {
+        target_area: 'runtime',
+      },
+    });
+
+    const hub = new RuntimeHub(db, new FakeController());
+    const issue = hub.getIssue('INT-SUGGEST');
+    const suggestion = issue?.active_governance_suggestions?.[0];
+
+    expect(suggestion?.suggestion_type).toBe('cleanup');
+    expect(suggestion?.can_execute).toBe(true);
+    expect(suggestion?.can_dismiss).toBe(true);
 
     hub.dispose();
   });

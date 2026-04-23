@@ -3,6 +3,7 @@ import * as path from 'path';
 import { judgeComplexity } from '../hooks/dev-prompt';
 import { parseCanonicalReviewReport } from '../hooks/review-prompt';
 import type {
+  AgentTimelinePayload,
   ChangePackSummary,
   ChangePackTaskStatus,
   CompletionRequirement,
@@ -17,6 +18,78 @@ export interface ChangePackState {
   evidence_summary: EvidenceSummary;
   missing_requirements: CompletionRequirement[];
 }
+
+type EvidenceCommandStatus = 'satisfied' | 'failed';
+type EvidenceCommandKey =
+  | 'setup'
+  | 'dev'
+  | 'test'
+  | 'lint'
+  | 'build'
+  | 'review_checks';
+type EvidencePhase = 'setup' | 'dev' | 'review';
+type EvidenceArtifactKind =
+  | 'file'
+  | 'dir'
+  | 'report'
+  | 'screenshot'
+  | 'markdown'
+  | 'json'
+  | 'html'
+  | 'unknown';
+type RuntimeHintKey = 'url' | 'ready_signal';
+
+interface ChangePackCommandRun {
+  phase: EvidencePhase;
+  command: string;
+  command_key: EvidenceCommandKey | null;
+  status: EvidenceCommandStatus;
+  source: string;
+  turn: number | null;
+  exit_code: number | null;
+  summary: string | null;
+  recorded_at: string;
+}
+
+interface ChangePackArtifactObservation {
+  path: string;
+  kind: EvidenceArtifactKind;
+  exists: boolean;
+  non_empty: boolean;
+  source: string;
+  turn: number | null;
+  summary: string | null;
+  recorded_at: string;
+}
+
+interface ChangePackRuntimeObservation {
+  hint_key: RuntimeHintKey;
+  status: EvidenceCommandStatus;
+  value: string;
+  source: string;
+  turn: number | null;
+  summary: string | null;
+  recorded_at: string;
+}
+
+interface ChangePackEvidenceFile {
+  issue_identifier?: string;
+  profile?: 'coding' | 'research' | 'ui' | 'review';
+  complexity?: 'small' | 'medium' | 'large';
+  requirements?: Array<CompletionRequirement & { status?: 'missing' | 'satisfied' }>;
+  notes?: string[];
+  command_runs?: ChangePackCommandRun[];
+  artifact_observations?: ChangePackArtifactObservation[];
+  runtime_observations?: ChangePackRuntimeObservation[];
+}
+
+const COMMON_ARTIFACT_CANDIDATES = [
+  'dist',
+  'build',
+  'coverage',
+  '.next',
+  'playwright-report',
+];
 
 function changePackDir(workspacePath: string): string {
   return path.join(workspacePath, '.symphony', 'change-pack');
@@ -59,6 +132,536 @@ async function readJson<T>(filePath: string, fallback: T): Promise<T> {
   } catch {
     return fallback;
   }
+}
+
+function normalizeCommand(value: string): string {
+  return value.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function mergeUniqueStrings(values: Array<string | null | undefined>): string[] {
+  const merged: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (!value) {
+      continue;
+    }
+    const normalized = value.trim();
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    merged.push(normalized);
+  }
+  return merged;
+}
+
+function inferPhase(commandKey: EvidenceCommandKey | null): EvidencePhase {
+  if (commandKey === 'setup') {
+    return 'setup';
+  }
+  if (commandKey === 'review_checks') {
+    return 'review';
+  }
+  return 'dev';
+}
+
+function inferArtifactKind(candidatePath: string, isDirectory: boolean): EvidenceArtifactKind {
+  if (isDirectory) {
+    return 'dir';
+  }
+
+  const normalized = candidatePath.trim().toLowerCase();
+  if (normalized.endsWith('.md') || normalized.endsWith('.markdown')) {
+    return 'markdown';
+  }
+  if (normalized.endsWith('.json')) {
+    return 'json';
+  }
+  if (normalized.endsWith('.html') || normalized.endsWith('.htm')) {
+    return 'html';
+  }
+  if (/\.(png|jpg|jpeg|webp|gif)$/i.test(normalized)) {
+    return 'screenshot';
+  }
+  if (/report/i.test(normalized)) {
+    return 'report';
+  }
+  if (/\.[^./]+$/i.test(normalized)) {
+    return 'file';
+  }
+  return 'unknown';
+}
+
+async function getArtifactState(resolvedPath: string): Promise<{
+  exists: boolean;
+  non_empty: boolean;
+  kind: EvidenceArtifactKind;
+}> {
+  try {
+    const stat = await fs.stat(resolvedPath);
+    if (stat.isDirectory()) {
+      const entries = await fs.readdir(resolvedPath);
+      return {
+        exists: true,
+        non_empty: entries.length > 0,
+        kind: inferArtifactKind(resolvedPath, true),
+      };
+    }
+    return {
+      exists: true,
+      non_empty: stat.size > 0,
+      kind: inferArtifactKind(resolvedPath, false),
+    };
+  } catch {
+    return {
+      exists: false,
+      non_empty: false,
+      kind: inferArtifactKind(resolvedPath, false),
+    };
+  }
+}
+
+function artifactNeedsNonEmpty(
+  profile: ChangePackEvidenceFile['profile'],
+  kind: EvidenceArtifactKind,
+): boolean {
+  if (profile === 'research') {
+    return ['markdown', 'json', 'html'].includes(kind);
+  }
+  if (profile === 'ui') {
+    return ['screenshot', 'html', 'report', 'dir'].includes(kind);
+  }
+  return false;
+}
+
+function asHintValue(value: string | string[] | undefined, key: RuntimeHintKey): string | null {
+  if (typeof value === 'string' && value.trim()) {
+    return value.trim();
+  }
+  if (Array.isArray(value)) {
+    const first = value.find((entry) => typeof entry === 'string' && entry.trim());
+    return first?.trim() ?? null;
+  }
+  return key === 'url' || key === 'ready_signal' ? null : null;
+}
+
+function inferCommandKey(
+  command: string,
+  harness?: RepositoryHarnessConfig | null,
+): EvidenceCommandKey | null {
+  const normalized = normalizeCommand(command);
+  for (const [key, configuredCommand] of Object.entries(harness?.commands ?? {})) {
+    if (typeof configuredCommand !== 'string') {
+      continue;
+    }
+    if (normalizeCommand(configuredCommand) === normalized) {
+      return key as EvidenceCommandKey;
+    }
+  }
+
+  if (
+    /\b(pytest|vitest|jest|bun test|npm test|pnpm test|cargo test|go test)\b/.test(normalized) ||
+    /\btest\b/.test(normalized)
+  ) {
+    return 'test';
+  }
+  if (
+    /\b(eslint|biome check|ruff check|flake8)\b/.test(normalized) ||
+    /\blint\b/.test(normalized)
+  ) {
+    return 'lint';
+  }
+  if (
+    /\b(build|tsc|next build|vite build|cargo build)\b/.test(normalized)
+  ) {
+    return 'build';
+  }
+  if (
+    /\b(next dev|vite|npm run dev|pnpm dev|bun run dev)\b/.test(normalized) ||
+    /\bdev\b/.test(normalized)
+  ) {
+    return 'dev';
+  }
+  if (
+    /\breview[_ -]?checks\b/.test(normalized) ||
+    (normalized.includes('review') && normalized.includes('check'))
+  ) {
+    return 'review_checks';
+  }
+  if (
+    /\b(setup|install|bootstrap|bun install|npm install|pnpm install)\b/.test(normalized)
+  ) {
+    return 'setup';
+  }
+
+  return null;
+}
+
+function dedupeCommandRuns(runs: ChangePackCommandRun[]): ChangePackCommandRun[] {
+  const deduped: ChangePackCommandRun[] = [];
+  const seen = new Set<string>();
+  for (const run of runs) {
+    const key = [
+      run.phase,
+      normalizeCommand(run.command),
+      run.command_key ?? '',
+      run.status,
+      run.source,
+      String(run.turn ?? ''),
+    ].join('::');
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push(run);
+  }
+  return deduped;
+}
+
+function dedupeArtifactObservations(
+  observations: ChangePackArtifactObservation[],
+): ChangePackArtifactObservation[] {
+  const deduped: ChangePackArtifactObservation[] = [];
+  const seen = new Set<string>();
+  for (const observation of observations) {
+    const normalizedPath = observation.path.trim();
+    const key = [
+      normalizedPath,
+      observation.kind,
+      String(observation.exists),
+      String(observation.non_empty),
+      observation.source,
+      String(observation.turn ?? ''),
+    ].join('::');
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push({
+      ...observation,
+      path: normalizedPath,
+    });
+  }
+  return deduped;
+}
+
+function dedupeRuntimeObservations(
+  observations: ChangePackRuntimeObservation[],
+): ChangePackRuntimeObservation[] {
+  const deduped: ChangePackRuntimeObservation[] = [];
+  const seen = new Set<string>();
+  for (const observation of observations) {
+    const key = [
+      observation.hint_key,
+      observation.status,
+      observation.value.trim(),
+      observation.source,
+      String(observation.turn ?? ''),
+    ].join('::');
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push({
+      ...observation,
+      value: observation.value.trim(),
+    });
+  }
+  return deduped;
+}
+
+export function collectTimelineCommandRuns(params: {
+  timeline: AgentTimelinePayload[];
+  harness?: RepositoryHarnessConfig | null;
+}): ChangePackCommandRun[] {
+  const runs: ChangePackCommandRun[] = [];
+
+  for (const entry of params.timeline) {
+    if (
+      entry.category !== 'tool' ||
+      entry.tool_name !== 'Bash' ||
+      (entry.code !== 'tool_completed' && entry.code !== 'tool_failed')
+    ) {
+      continue;
+    }
+
+    const commandPreview = typeof entry.detail?.command_preview === 'string'
+      ? entry.detail.command_preview.trim()
+      : null;
+    if (!commandPreview) {
+      continue;
+    }
+
+    runs.push({
+      phase: inferPhase(inferCommandKey(commandPreview, params.harness)),
+      command: commandPreview,
+      command_key: inferCommandKey(commandPreview, params.harness),
+      status: entry.code === 'tool_failed' ? 'failed' : 'satisfied',
+      source: 'timeline',
+      turn: entry.turn,
+      exit_code: typeof entry.detail?.exit_code === 'number' ? entry.detail.exit_code : null,
+      summary: typeof entry.detail?.summary === 'string' ? entry.detail.summary.trim() : null,
+      recorded_at: new Date().toISOString(),
+    });
+  }
+
+  return dedupeCommandRuns(runs);
+}
+
+export async function collectWorkspaceArtifactObservations(params: {
+  workspacePath: string;
+  harness?: RepositoryHarnessConfig | null;
+}): Promise<ChangePackArtifactObservation[]> {
+  const candidatePaths = mergeUniqueStrings([
+    ...(params.harness?.verification?.required_artifacts ?? []),
+    ...(params.harness?.artifacts ?? []),
+    ...COMMON_ARTIFACT_CANDIDATES,
+  ]);
+  const observations: ChangePackArtifactObservation[] = [];
+
+  for (const candidate of candidatePaths) {
+    const resolvedPath = path.isAbsolute(candidate)
+      ? candidate
+      : path.join(params.workspacePath, candidate);
+    const artifactState = await getArtifactState(resolvedPath);
+    if (!artifactState.exists) {
+      continue;
+    }
+    observations.push({
+      path: candidate,
+      kind: artifactState.kind,
+      exists: true,
+      non_empty: artifactState.non_empty,
+      source: 'workspace',
+      turn: null,
+      summary: artifactState.non_empty
+        ? `${candidate} exists and is non-empty`
+        : `${candidate} exists but is empty`,
+      recorded_at: new Date().toISOString(),
+    });
+  }
+
+  return dedupeArtifactObservations(observations);
+}
+
+async function probeUrl(url: string): Promise<ChangePackRuntimeObservation> {
+  const attempt = async (method: 'HEAD' | 'GET'): Promise<Response> => {
+    return fetch(url, {
+      method,
+      signal: AbortSignal.timeout(5000),
+    });
+  };
+
+  try {
+    let response = await attempt('HEAD');
+    if (!response.ok) {
+      response = await attempt('GET');
+    }
+    if (response.ok) {
+      return {
+        hint_key: 'url',
+        status: 'satisfied',
+        value: url,
+        source: 'cli_postprocess',
+        turn: null,
+        summary: `URL probe succeeded with ${response.status}`,
+        recorded_at: new Date().toISOString(),
+      };
+    }
+    return {
+      hint_key: 'url',
+      status: 'failed',
+      value: url,
+      source: 'cli_postprocess',
+      turn: null,
+      summary: `URL probe returned ${response.status}`,
+      recorded_at: new Date().toISOString(),
+    };
+  } catch (error) {
+    return {
+      hint_key: 'url',
+      status: 'failed',
+      value: url,
+      source: 'cli_postprocess',
+      turn: null,
+      summary: `URL probe failed: ${(error as Error).message}`,
+      recorded_at: new Date().toISOString(),
+    };
+  }
+}
+
+export async function collectRuntimeObservations(params: {
+  workspacePath: string;
+  harness?: RepositoryHarnessConfig | null;
+  turn?: number | null;
+  timeline?: AgentTimelinePayload[];
+}): Promise<ChangePackRuntimeObservation[]> {
+  const observations: ChangePackRuntimeObservation[] = [];
+  const url = asHintValue(params.harness?.runtime_hints?.url, 'url');
+  if (url) {
+    const observation = await probeUrl(url);
+    observations.push({
+      ...observation,
+      turn: params.turn ?? observation.turn,
+    });
+  }
+
+  const readySignal = asHintValue(params.harness?.runtime_hints?.ready_signal, 'ready_signal');
+  if (readySignal) {
+    const developmentLog = await readText(path.join(params.workspacePath, '.symphony', 'DEVELOPMENT_LOG.md'));
+    const handover = await readText(path.join(params.workspacePath, '.symphony', 'HANDOVER.md'));
+    const timelineHaystack = (params.timeline ?? [])
+      .map((entry) => `${entry.message} ${typeof entry.detail?.summary === 'string' ? entry.detail.summary : ''}`.trim())
+      .join('\n');
+    const haystack = [timelineHaystack, developmentLog, handover]
+      .filter((value): value is string => Boolean(value))
+      .join('\n')
+      .toLowerCase();
+    const matched = haystack.includes(readySignal.toLowerCase());
+    observations.push({
+      hint_key: 'ready_signal',
+      status: matched ? 'satisfied' : 'failed',
+      value: readySignal,
+      source: 'cli_postprocess',
+      turn: params.turn ?? null,
+      summary: matched
+        ? 'Ready signal found in recent timeline or workspace logs'
+        : 'Ready signal not found in recent timeline or workspace logs',
+      recorded_at: new Date().toISOString(),
+    });
+  }
+
+  return dedupeRuntimeObservations(observations);
+}
+
+export async function recordChangePackEvidence(params: {
+  workspacePath: string;
+  harness?: RepositoryHarnessConfig | null;
+  commandRuns?: Array<{
+    phase?: EvidencePhase;
+    command: string;
+    command_key?: string | null;
+    status: EvidenceCommandStatus;
+    source: string;
+    turn?: number | null;
+    exit_code?: number | null;
+    summary?: string | null;
+    recorded_at?: string;
+  }>;
+  artifactObservations?: Array<{
+    path: string;
+    kind?: EvidenceArtifactKind;
+    exists: boolean;
+    non_empty?: boolean;
+    source: string;
+    turn?: number | null;
+    summary?: string | null;
+    recorded_at?: string;
+  }>;
+  runtimeObservations?: Array<{
+    hint_key: RuntimeHintKey;
+    status: EvidenceCommandStatus;
+    value: string;
+    source: string;
+    turn?: number | null;
+    summary?: string | null;
+    recorded_at?: string;
+  }>;
+  notes?: string[];
+}): Promise<{
+  commandRunsAdded: number;
+  artifactObservationsAdded: number;
+  runtimeObservationsAdded: number;
+}> {
+  await fs.mkdir(changePackDir(params.workspacePath), { recursive: true });
+  const evidencePath = path.join(changePackDir(params.workspacePath), 'evidence.json');
+  const existing = await readJson<ChangePackEvidenceFile>(evidencePath, {});
+  const existingCommandRuns = existing.command_runs ?? [];
+  const existingArtifactObservations = existing.artifact_observations ?? [];
+  const existingRuntimeObservations = existing.runtime_observations ?? [];
+
+  const normalizedCommandRuns = (params.commandRuns ?? [])
+    .filter((run) => Boolean(run.command?.trim()))
+    .map((run) => {
+      const inferredCommandKey = (
+        typeof run.command_key === 'string' && run.command_key.trim()
+          ? run.command_key.trim()
+          : inferCommandKey(run.command, params.harness)
+      ) as EvidenceCommandKey | null;
+      return {
+        phase: run.phase ?? inferPhase(inferredCommandKey),
+        command: run.command.trim(),
+        command_key: inferredCommandKey,
+        status: run.status,
+        source: run.source,
+        turn: run.turn ?? null,
+        exit_code: typeof run.exit_code === 'number' ? run.exit_code : null,
+        summary: typeof run.summary === 'string' ? run.summary.trim() : null,
+        recorded_at: run.recorded_at ?? new Date().toISOString(),
+      };
+    });
+
+  const normalizedArtifactObservations = (params.artifactObservations ?? [])
+    .filter((observation) => Boolean(observation.path?.trim()))
+    .map((observation) => {
+      const normalizedPath = observation.path.trim();
+      return {
+        path: normalizedPath,
+        kind: observation.kind ?? inferArtifactKind(normalizedPath, false),
+        exists: observation.exists,
+        non_empty: observation.non_empty ?? false,
+        source: observation.source,
+        turn: observation.turn ?? null,
+        summary: typeof observation.summary === 'string' ? observation.summary.trim() : null,
+        recorded_at: observation.recorded_at ?? new Date().toISOString(),
+      };
+    });
+  const normalizedRuntimeObservations = (params.runtimeObservations ?? [])
+    .filter((observation) => Boolean(observation.value?.trim()))
+    .map((observation) => ({
+      hint_key: observation.hint_key,
+      status: observation.status,
+      value: observation.value.trim(),
+      source: observation.source,
+      turn: observation.turn ?? null,
+      summary: typeof observation.summary === 'string' ? observation.summary.trim() : null,
+      recorded_at: observation.recorded_at ?? new Date().toISOString(),
+    }));
+
+  const mergedCommandRuns = dedupeCommandRuns([
+    ...existingCommandRuns,
+    ...normalizedCommandRuns,
+  ]);
+  const mergedArtifactObservations = dedupeArtifactObservations([
+    ...existingArtifactObservations,
+    ...normalizedArtifactObservations,
+  ]);
+  const mergedRuntimeObservations = dedupeRuntimeObservations([
+    ...existingRuntimeObservations,
+    ...normalizedRuntimeObservations,
+  ]);
+
+  await fs.writeFile(
+    evidencePath,
+    JSON.stringify(
+      {
+        ...existing,
+        notes: mergeUniqueStrings([...(existing.notes ?? []), ...(params.notes ?? [])]),
+        command_runs: mergedCommandRuns,
+        artifact_observations: mergedArtifactObservations,
+        runtime_observations: mergedRuntimeObservations,
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+
+  return {
+    commandRunsAdded: Math.max(0, mergedCommandRuns.length - existingCommandRuns.length),
+    artifactObservationsAdded: Math.max(0, mergedArtifactObservations.length - existingArtifactObservations.length),
+    runtimeObservationsAdded: Math.max(0, mergedRuntimeObservations.length - existingRuntimeObservations.length),
+  };
 }
 
 function inferProfile(issue: Issue, mode?: 'dev' | 'review'): 'coding' | 'research' | 'ui' | 'review' {
@@ -127,6 +730,15 @@ function buildDefaultRequirements(params: {
     });
   }
 
+  if (params.profile === 'ui' && asHintValue(params.harness?.runtime_hints?.url, 'url')) {
+    requirements.push({
+      key: 'runtime:url',
+      label: 'Record a successful runtime URL probe',
+      reason: 'UI completion requires evidence that the configured runtime URL responded.',
+      kind: 'verification',
+    });
+  }
+
   return requirements;
 }
 
@@ -178,7 +790,7 @@ export async function initializeChangePack(params: {
   );
 
   const evidencePath = path.join(packPath, 'evidence.json');
-  const existingEvidence = await readJson<{ requirements?: CompletionRequirement[]; notes?: string[] }>(
+  const existingEvidence = await readJson<ChangePackEvidenceFile>(
     evidencePath,
     {},
   );
@@ -208,6 +820,9 @@ export async function initializeChangePack(params: {
         complexity,
         requirements,
         notes: existingEvidence.notes ?? [],
+        command_runs: existingEvidence.command_runs ?? [],
+        artifact_observations: existingEvidence.artifact_observations ?? [],
+        runtime_observations: existingEvidence.runtime_observations ?? [],
       },
       null,
       2,
@@ -245,6 +860,38 @@ function verificationMentioned(text: string | null): boolean {
   return /test.*pass|tests passed|单元测试:\s*pass|verification complete|验证通过/i.test(text);
 }
 
+function summarizeCommandForEvidence(run: ChangePackCommandRun): string {
+  return run.command_key ?? normalizeCommand(run.command);
+}
+
+async function isArtifactRequirementSatisfied(params: {
+  workspacePath: string;
+  artifactPath: string;
+  profile: ChangePackEvidenceFile['profile'];
+  observations: ChangePackArtifactObservation[];
+}): Promise<boolean> {
+  const normalizedArtifactPath = params.artifactPath.trim();
+  const matchingObservations = params.observations
+    .filter((observation) => observation.path.trim() === normalizedArtifactPath);
+  if (matchingObservations.some((observation) => (
+    observation.exists &&
+    (artifactNeedsNonEmpty(params.profile, observation.kind) ? observation.non_empty : true)
+  ))) {
+    return true;
+  }
+
+  const resolvedArtifactPath = path.isAbsolute(normalizedArtifactPath)
+    ? normalizedArtifactPath
+    : path.join(params.workspacePath, normalizedArtifactPath);
+  const artifactState = await getArtifactState(resolvedArtifactPath);
+  if (!artifactState.exists) {
+    return false;
+  }
+  return artifactNeedsNonEmpty(params.profile, artifactState.kind)
+    ? artifactState.non_empty
+    : true;
+}
+
 export async function evaluateChangePackState(params: {
   workspacePath: string;
   issue: Issue;
@@ -254,15 +901,14 @@ export async function evaluateChangePackState(params: {
   const files = await fs.readdir(packPath).catch(() => []);
   const brief = await readText(path.join(packPath, 'brief.md'));
   const tasksText = await readText(path.join(packPath, 'tasks.md'));
-  const evidence = await readJson<{
-    profile?: 'coding' | 'research' | 'ui' | 'review';
-    complexity?: 'small' | 'medium' | 'large';
-    requirements?: Array<CompletionRequirement & { status?: 'missing' | 'satisfied' }>;
-    notes?: string[];
-  }>(path.join(packPath, 'evidence.json'), {});
+  const evidence = await readJson<ChangePackEvidenceFile>(path.join(packPath, 'evidence.json'), {});
   const handover = await readText(path.join(params.workspacePath, '.symphony', 'HANDOVER.md'));
   const developmentLog = await readText(path.join(params.workspacePath, '.symphony', 'DEVELOPMENT_LOG.md'));
   const reviewReport = await readText(path.join(params.workspacePath, '.symphony', 'REVIEW_REPORT.md'));
+  const successfulCommandRuns = (evidence.command_runs ?? []).filter((run) => run.status === 'satisfied');
+  const failedCommandRuns = (evidence.command_runs ?? []).filter((run) => run.status === 'failed');
+  const runtimeObservations = evidence.runtime_observations ?? [];
+  const profile = evidence.profile ?? inferProfile(params.issue, params.mode);
   const requirements: Array<CompletionRequirement & { status: 'missing' | 'satisfied' }> = [];
   for (const item of evidence.requirements ?? []) {
     let satisfied = item.status === 'satisfied';
@@ -270,15 +916,37 @@ export async function evaluateChangePackState(params: {
     if (item.key === 'handover' && handover) {
       satisfied = true;
     }
-    if (item.key === 'verification' && (verificationMentioned(handover) || verificationMentioned(developmentLog))) {
+    if (
+      item.key === 'verification' &&
+      (
+        verificationMentioned(handover) ||
+        verificationMentioned(developmentLog) ||
+        successfulCommandRuns.some((run) => !['setup', 'dev'].includes(run.command_key ?? ''))
+      )
+    ) {
       satisfied = true;
+    }
+    if (item.key.startsWith('command:')) {
+      const requiredKey = item.key.slice('command:'.length);
+      satisfied = successfulCommandRuns.some((run) => (
+        run.command_key === requiredKey ||
+        normalizeCommand(run.command) === normalizeCommand(requiredKey)
+      ));
     }
     if (item.key.startsWith('artifact:')) {
       const artifactPath = item.key.slice('artifact:'.length);
-      const resolvedArtifactPath = path.isAbsolute(artifactPath)
-        ? artifactPath
-        : path.join(params.workspacePath, artifactPath);
-      satisfied = await fileExists(resolvedArtifactPath);
+      satisfied = await isArtifactRequirementSatisfied({
+        workspacePath: params.workspacePath,
+        artifactPath,
+        profile,
+        observations: evidence.artifact_observations ?? [],
+      });
+    }
+    if (item.key === 'runtime:url') {
+      satisfied = runtimeObservations.some((observation) => (
+        observation.hint_key === 'url' &&
+        observation.status === 'satisfied'
+      ));
     }
     if (item.key === 'review_report' && reviewReport && parseCanonicalReviewReport(reviewReport)) {
       satisfied = true;
@@ -299,7 +967,7 @@ export async function evaluateChangePackState(params: {
 
   return {
     summary: {
-      profile: evidence.profile ?? inferProfile(params.issue, params.mode),
+      profile,
       complexity: evidence.complexity ?? judgeComplexity(params.issue).complexity,
       files,
       overview: brief ? normalizeOverview(brief) : null,
@@ -309,6 +977,18 @@ export async function evaluateChangePackState(params: {
       total_requirements: requirements.length,
       satisfied: requirements.length - missing.length,
       missing: missing.length,
+      successful_commands: mergeUniqueStrings(successfulCommandRuns.map(summarizeCommandForEvidence)),
+      failed_commands: mergeUniqueStrings(failedCommandRuns.map(summarizeCommandForEvidence)),
+      observed_artifacts: mergeUniqueStrings(
+        (evidence.artifact_observations ?? [])
+          .filter((observation) => observation.exists && observation.non_empty)
+          .map((observation) => observation.path),
+      ),
+      runtime_checks: runtimeObservations.map((observation) => ({
+        hint_key: observation.hint_key,
+        status: observation.status,
+        value: observation.value,
+      })),
       notes: evidence.notes ?? [],
     },
     missing_requirements: missing,

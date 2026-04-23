@@ -3,6 +3,9 @@ import type {
   ShadowHarnessRecord,
   UpsertShadowHarnessRecord,
 } from '../types';
+import type {
+  ShadowHarnessInferenceDetails,
+} from '../../types';
 
 function parseJsonRecord(value: unknown): Record<string, unknown> {
   if (typeof value !== 'string' || !value.trim()) {
@@ -14,6 +17,38 @@ function parseJsonRecord(value: unknown): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function parseInferenceDetails(value: unknown): ShadowHarnessInferenceDetails {
+  const parsed = parseJsonRecord(value);
+  const inferredFrom = Array.isArray(parsed.inferred_from)
+    ? parsed.inferred_from.filter((entry): entry is string => typeof entry === 'string')
+    : [];
+  return {
+    inferred_from: inferredFrom,
+    observed_commands:
+      parsed.observed_commands && typeof parsed.observed_commands === 'object'
+        ? parsed.observed_commands as ShadowHarnessInferenceDetails['observed_commands']
+        : {},
+    observed_artifacts:
+      parsed.observed_artifacts && typeof parsed.observed_artifacts === 'object'
+        ? parsed.observed_artifacts as ShadowHarnessInferenceDetails['observed_artifacts']
+        : {},
+    observed_runtime_hints:
+      parsed.observed_runtime_hints && typeof parsed.observed_runtime_hints === 'object'
+        ? parsed.observed_runtime_hints as ShadowHarnessInferenceDetails['observed_runtime_hints']
+        : {},
+    learning_confidence:
+      parsed.learning_confidence === 'medium' || parsed.learning_confidence === 'high'
+        ? parsed.learning_confidence
+        : 'low',
+    successful_work_item_ids: Array.isArray(parsed.successful_work_item_ids)
+      ? parsed.successful_work_item_ids.filter((entry): entry is string => typeof entry === 'string')
+      : [],
+    failed_work_item_ids: Array.isArray(parsed.failed_work_item_ids)
+      ? parsed.failed_work_item_ids.filter((entry): entry is string => typeof entry === 'string')
+      : [],
+  };
 }
 
 export class ShadowHarnessRepository {
@@ -100,7 +135,7 @@ export class ShadowHarnessRepository {
       repo_key: row.repo_key as string,
       source: row.source as ShadowHarnessRecord['source'],
       config_json: parseJsonRecord(row.config_json) as ShadowHarnessRecord['config_json'],
-      inference_details_json: parseJsonRecord(row.inference_details_json),
+      inference_details_json: parseInferenceDetails(row.inference_details_json),
       successful_runs: Number(row.successful_runs ?? 0),
       failed_runs: Number(row.failed_runs ?? 0),
       adoption_suggested_at: row.adoption_suggested_at ? new Date(row.adoption_suggested_at as string) : null,

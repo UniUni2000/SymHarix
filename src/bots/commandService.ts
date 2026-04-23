@@ -86,6 +86,24 @@ function formatIssue(issue: RuntimeIssueView): string {
   return lines.join('\n');
 }
 
+function formatGovernanceSuggestions(issue: RuntimeIssueView): string {
+  const suggestions = issue.active_governance_suggestions ?? [];
+  if (suggestions.length === 0) {
+    return '';
+  }
+
+  return [
+    'governance suggestions',
+    ...suggestions.map((suggestion, index) => {
+      const actions = [
+        suggestion.can_execute ? 'execute' : null,
+        suggestion.can_dismiss ? 'dismiss' : null,
+      ].filter(Boolean).join('/');
+      return `- [${index + 1}] ${suggestion.suggestion_type} · ${compact(suggestion.title, 80)} · id ${suggestion.id}${actions ? ` · ${actions}` : ''}`;
+    }),
+  ].join('\n');
+}
+
 function parseWatchArgs(inlineArgs: string): {
   issue_id: string | null;
   watch_preset: BotWatchPreset | null;
@@ -245,6 +263,10 @@ export class BotCommandService {
         return this.handleRewrite(context, request.issue_id);
       case 'split':
         return this.handleSplit(context, request.issue_id);
+      case 'execute_governance_suggestion':
+        return this.handleExecuteGovernanceSuggestion(context, request.issue_id, request.suggestion_id);
+      case 'dismiss_governance_suggestion':
+        return this.handleDismissGovernanceSuggestion(context, request.issue_id, request.suggestion_id);
       case 'help':
       default:
         return { message: listCommands() };
@@ -285,9 +307,10 @@ export class BotCommandService {
       historyView && historyView.entries.length > 0
         ? `\nhistory replay\n${historyView.entries.map((entry) => `- ${entry.title} · ${entry.summary}`).join('\n')}`
         : '';
+    const governanceSuggestions = formatGovernanceSuggestions(issue);
 
     return {
-      message: `${summary}${digest}${recentTimeline}${recentHistory}`,
+      message: `${summary}${governanceSuggestions ? `\n${governanceSuggestions}` : ''}${digest}${recentTimeline}${recentHistory}`,
       issue_id: issue.issue_id,
     };
   }
@@ -587,6 +610,52 @@ export class BotCommandService {
     }
 
     const result = await this.runtime.splitGovernance(issueId);
+    return {
+      message: result.message,
+      issue_id: result.issue_id,
+    };
+  }
+
+  private async handleExecuteGovernanceSuggestion(
+    context: BotCommandContext,
+    issueId?: string | null,
+    suggestionId?: string | null,
+  ): Promise<BotCommandResponse> {
+    if (!this.canWrite(context)) {
+      return {
+        message: `${context.transport} is configured as read-only for this user. Allowed commands: help, status, watch, unwatch.`,
+      };
+    }
+    if (!issueId || !suggestionId) {
+      return {
+        message: 'Issue id and suggestion id are required to execute a governance suggestion.',
+      };
+    }
+
+    const result = await this.runtime.executeGovernanceSuggestion(issueId, suggestionId);
+    return {
+      message: result.message,
+      issue_id: result.issue_id,
+    };
+  }
+
+  private async handleDismissGovernanceSuggestion(
+    context: BotCommandContext,
+    issueId?: string | null,
+    suggestionId?: string | null,
+  ): Promise<BotCommandResponse> {
+    if (!this.canWrite(context)) {
+      return {
+        message: `${context.transport} is configured as read-only for this user. Allowed commands: help, status, watch, unwatch.`,
+      };
+    }
+    if (!issueId || !suggestionId) {
+      return {
+        message: 'Issue id and suggestion id are required to dismiss a governance suggestion.',
+      };
+    }
+
+    const result = await this.runtime.dismissGovernanceSuggestion(issueId, suggestionId);
     return {
       message: result.message,
       issue_id: result.issue_id,

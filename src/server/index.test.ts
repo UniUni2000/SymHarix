@@ -30,6 +30,8 @@ describe('SymphonyServer', () => {
   let overrideGovernanceCalls: string[] = [];
   let rewriteGovernanceCalls: string[] = [];
   let splitGovernanceCalls: string[] = [];
+  let executeGovernanceSuggestionCalls: Array<{ issueId: string; suggestionId: string }> = [];
+  let dismissGovernanceSuggestionCalls: Array<{ issueId: string; suggestionId: string }> = [];
   let telegramWebhookCalls = 0;
   let discordInteractionCalls = 0;
 
@@ -196,6 +198,26 @@ describe('SymphonyServer', () => {
           issue_identifier: 'INT-RT-1',
         };
       },
+      executeGovernanceSuggestion: async (id: string, suggestionId: string) => {
+        executeGovernanceSuggestionCalls.push({ issueId: id, suggestionId });
+        return {
+          accepted: true,
+          status: 'accepted',
+          message: `Executed ${suggestionId} for ${id}`,
+          issue_id: id,
+          issue_identifier: 'INT-RT-1',
+        };
+      },
+      dismissGovernanceSuggestion: async (id: string, suggestionId: string) => {
+        dismissGovernanceSuggestionCalls.push({ issueId: id, suggestionId });
+        return {
+          accepted: true,
+          status: 'accepted',
+          message: `Dismissed ${suggestionId} for ${id}`,
+          issue_id: id,
+          issue_identifier: 'INT-RT-1',
+        };
+      },
       createStream: () =>
         new ReadableStream<Uint8Array>({
           start(controller) {
@@ -278,6 +300,8 @@ describe('SymphonyServer', () => {
     overrideGovernanceCalls = [];
     rewriteGovernanceCalls = [];
     splitGovernanceCalls = [];
+    executeGovernanceSuggestionCalls = [];
+    dismissGovernanceSuggestionCalls = [];
     telegramWebhookCalls = 0;
     discordInteractionCalls = 0;
   });
@@ -421,6 +445,8 @@ describe('SymphonyServer', () => {
     expect(html).toContain('History Replay');
     expect(html).toContain('Stop');
     expect(html).toContain('Retry');
+    expect(html).toContain('Execute Suggestion');
+    expect(html).toContain('Dismiss Suggestion');
     expect(html).toContain('/api/v1/runtime/overview');
   });
 
@@ -539,6 +565,34 @@ describe('SymphonyServer', () => {
     expect(payload.success).toBe(true);
     expect(payload.data.message).toContain('Split applied');
     expect(splitGovernanceCalls).toEqual(['INT-RT-1']);
+  });
+
+  test('POST /api/v1/runtime/issues/:id/governance/suggestions/:suggestionId/execute proxies suggestion execution', async () => {
+    const response = await request('/api/v1/runtime/issues/INT-RT-1/governance/suggestions/suggestion-1/execute', {
+      method: 'POST',
+    });
+
+    expect(response.status).toBe(202);
+    const payload = await readJson<any>(response);
+    expect(payload.success).toBe(true);
+    expect(payload.data.message).toContain('Executed');
+    expect(executeGovernanceSuggestionCalls).toEqual([
+      { issueId: 'INT-RT-1', suggestionId: 'suggestion-1' },
+    ]);
+  });
+
+  test('POST /api/v1/runtime/issues/:id/governance/suggestions/:suggestionId/dismiss proxies suggestion dismissal', async () => {
+    const response = await request('/api/v1/runtime/issues/INT-RT-1/governance/suggestions/suggestion-1/dismiss', {
+      method: 'POST',
+    });
+
+    expect(response.status).toBe(202);
+    const payload = await readJson<any>(response);
+    expect(payload.success).toBe(true);
+    expect(payload.data.message).toContain('Dismissed');
+    expect(dismissGovernanceSuggestionCalls).toEqual([
+      { issueId: 'INT-RT-1', suggestionId: 'suggestion-1' },
+    ]);
   });
 
   test('GET /api/v1/runtime/stream returns SSE snapshot', async () => {

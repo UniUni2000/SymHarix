@@ -4,6 +4,7 @@ import {
   GovernanceAssessmentRepository,
   GovernanceSuggestionRepository,
   ReviewEventRepository,
+  ShadowHarnessRepository,
   SyncEventRepository,
   WorkItemRepository,
 } from '../database';
@@ -36,6 +37,8 @@ interface RuntimeHubController {
   overrideGovernance(issueId: string): Promise<RuntimeActionResult>;
   rewriteGovernance(issueId: string): Promise<RuntimeActionResult>;
   splitGovernance(issueId: string): Promise<RuntimeActionResult>;
+  executeGovernanceSuggestion?(issueId: string, suggestionId: string): Promise<RuntimeActionResult>;
+  dismissGovernanceSuggestion?(issueId: string, suggestionId: string): Promise<RuntimeActionResult>;
   on(event: string, listener: (...args: any[]) => void): this;
   off?(event: string, listener: (...args: any[]) => void): this;
 }
@@ -108,6 +111,7 @@ export class RuntimeHub implements RuntimeControlPlane {
   private readonly reviewEventRepository: ReviewEventRepository;
   private readonly syncEventRepository: SyncEventRepository;
   private readonly governanceSuggestionRepository: GovernanceSuggestionRepository;
+  private readonly shadowHarnessRepository: ShadowHarnessRepository;
   private readonly timelineHistoryLimit: number;
   private readonly issueCacheById = new Map<string, Issue>();
   private readonly timelineByIssueId = new Map<string, RuntimeTimelineEvent[]>();
@@ -127,6 +131,7 @@ export class RuntimeHub implements RuntimeControlPlane {
     this.reviewEventRepository = new ReviewEventRepository(db);
     this.syncEventRepository = new SyncEventRepository(db);
     this.governanceSuggestionRepository = new GovernanceSuggestionRepository(db);
+    this.shadowHarnessRepository = new ShadowHarnessRepository(db);
     this.timelineHistoryLimit = Math.max(10, options.timelineHistoryLimit ?? 200);
     this.controller = controller;
     this.bindControllerListeners();
@@ -273,6 +278,40 @@ export class RuntimeHub implements RuntimeControlPlane {
     const workItem = this.resolveWorkItem(id);
     const issueId = workItem?.linear_issue_id ?? id;
     const result = await this.controller.splitGovernance(issueId);
+    this.publishOverview();
+    if (result.issue_id) {
+      this.publishIssue(result.issue_id);
+    }
+    return result;
+  }
+
+  async executeGovernanceSuggestion(id: string, suggestionId: string): Promise<RuntimeActionResult> {
+    const workItem = this.resolveWorkItem(id);
+    const issueId = workItem?.linear_issue_id ?? id;
+    const result = await this.controller.executeGovernanceSuggestion?.(issueId, suggestionId) ?? {
+      accepted: false,
+      status: 'rejected',
+      message: 'Governance suggestion execution is not available',
+      issue_id: issueId,
+      issue_identifier: workItem?.linear_identifier ?? null,
+    };
+    this.publishOverview();
+    if (result.issue_id) {
+      this.publishIssue(result.issue_id);
+    }
+    return result;
+  }
+
+  async dismissGovernanceSuggestion(id: string, suggestionId: string): Promise<RuntimeActionResult> {
+    const workItem = this.resolveWorkItem(id);
+    const issueId = workItem?.linear_issue_id ?? id;
+    const result = await this.controller.dismissGovernanceSuggestion?.(issueId, suggestionId) ?? {
+      accepted: false,
+      status: 'rejected',
+      message: 'Governance suggestion dismissal is not available',
+      issue_id: issueId,
+      issue_identifier: workItem?.linear_identifier ?? null,
+    };
     this.publishOverview();
     if (result.issue_id) {
       this.publishIssue(result.issue_id);
@@ -490,6 +529,10 @@ export class RuntimeHub implements RuntimeControlPlane {
     const canSplitGovernance =
       canOverrideGovernance &&
       workItem.governance_decision === 'split_before_implement';
+    const shadowHarness = workItem.github_repo
+      ? this.shadowHarnessRepository.findByRepoKey(workItem.github_repo)
+      : null;
+    const inferredDetails = shadowHarness?.inference_details_json ?? null;
 
     return {
       issue_id: workItem.linear_issue_id,
@@ -511,6 +554,22 @@ export class RuntimeHub implements RuntimeControlPlane {
             adoption_suggested: this.governanceSuggestionRepository
               .findPendingByIssueId(workItem.linear_issue_id)
               .some((suggestion) => suggestion.suggestion_type === 'harness_adoption'),
+            learning_confidence: inferredDetails?.learning_confidence ?? null,
+            learned_command_count: Object.keys(inferredDetails?.observed_commands ?? {})
+              .filter((key) => {
+                const command = inferredDetails?.observed_commands?.[key];
+                return (command?.success_count ?? 0) >= 2 && (command?.success_count ?? 0) > (command?.failure_count ?? 0);
+              })
+              .length,
+            learned_artifact_count: Object.keys(inferredDetails?.observed_artifacts ?? {})
+              .filter((key) => (inferredDetails?.observed_artifacts?.[key]?.success_count ?? 0) >= 2)
+              .length,
+            learned_runtime_hint_count: Object.keys(inferredDetails?.observed_runtime_hints ?? {})
+              .filter((key) => {
+                const hint = inferredDetails?.observed_runtime_hints?.[key];
+                return (hint?.success_count ?? 0) >= 2 && (hint?.success_count ?? 0) > (hint?.failure_count ?? 0);
+              })
+              .length,
           }
         : null,
       constitution_status: workItem.constitution_status,
@@ -518,6 +577,10 @@ export class RuntimeHub implements RuntimeControlPlane {
       task_status: workItem.task_status,
       evidence_summary: workItem.evidence_summary,
       missing_requirements: workItem.missing_requirements,
+      architectural_target: workItem.architectural_target,
+      path_families: workItem.path_families,
+      boundary_edges: workItem.boundary_edges,
+      import_edges: workItem.import_edges,
       governance_status: workItem.governance_status,
       governance_decision: workItem.governance_decision,
       governance_summary: workItem.governance_summary,
@@ -531,6 +594,8 @@ export class RuntimeHub implements RuntimeControlPlane {
           status: suggestion.status,
           title: suggestion.title,
           summary: suggestion.summary,
+          can_execute: true,
+          can_dismiss: true,
         })),
       governance_override: {
         active: hasOverride,
@@ -586,6 +651,10 @@ export class RuntimeHub implements RuntimeControlPlane {
       task_status: null,
       evidence_summary: null,
       missing_requirements: [],
+      architectural_target: null,
+      path_families: [],
+      boundary_edges: [],
+      import_edges: [],
       governance_status: null,
       governance_decision: null,
       governance_summary: null,
