@@ -95,7 +95,7 @@ Arguments:
   workflow-path      Path to WORKFLOW.md file (default: ./WORKFLOW.md)
 
 Examples:
-  symphony                        # Use ./WORKFLOW.md
+  symphony                        # Use local ./WORKFLOW.md (copy from WORKFLOW.md.example first)
   symphony path/to/WORKFLOW.md    # Use specified workflow file
   symphony --port 3000            # Enable HTTP server on port 3000
   symphony --kill                 # Stop all running agents
@@ -274,13 +274,6 @@ async function main(): Promise<void> {
 
   console.log('[symphony] Starting...');
   console.log('[symphony] Workflow path:', workflowPath);
-
-  // Check if workflow file exists
-  if (!fs.existsSync(workflowPath)) {
-    console.error('[symphony] ERROR: Workflow file not found:', workflowPath);
-    console.error('[symphony] Please create a WORKFLOW.md file or specify a path.');
-    process.exit(1);
-  }
 
   // Load initial workflow
   const loadResult = loadWorkflow(workflowPath);

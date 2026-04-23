@@ -3,7 +3,7 @@
 ## 当前保留的最小主链
 
 ```text
-WORKFLOW.md
+local WORKFLOW.md
   -> CLI
   -> Orchestrator
   -> Runtime Hub
@@ -33,9 +33,13 @@ bun run dev
 ## 必要配置
 
 1. 准备 `.env`
-2. 准备 `WORKFLOW.md`
+2. 从 `WORKFLOW.md.example` 复制出本地 `WORKFLOW.md`
 3. 配好 `Linear` / `GitHub` / Claude 运行所需变量
 4. 如需聊天端接入，再补 Telegram / Discord 可选变量
+
+```bash
+cp WORKFLOW.md.example WORKFLOW.md
+```
 
 `WORKFLOW.md` 里需要显式配置 `repositories.routing`，用 Linear `project_slug` 路由到目标仓库：
 
@@ -54,7 +58,7 @@ repositories:
 - 未命中路由时，issue 会保留在 Linear，但 Symphony 不会创建 workspace / GitHub issue / agent session
 - 多个 Linear project 指向同一个 GitHub repo 时，会共享同一个 `source` cache
 
-最关键的是 [WORKFLOW.md](/Users/example/projects/symharix/WORKFLOW.md) 里的 `codex.command`，当前默认走：
+最关键的是本地 `WORKFLOW.md`；仓库只提交模板 [WORKFLOW.md.example](/Users/example/projects/symharix/WORKFLOW.md.example)。`codex.command` 当前默认走：
 
 ```yaml
 codex:

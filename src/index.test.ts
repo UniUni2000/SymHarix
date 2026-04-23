@@ -59,6 +59,16 @@ tracker:
       expect(result.error).toBe('workflow_parse_error');
     });
   });
+
+  describe('loadWorkflow', () => {
+    it('should explain how to create a local workflow file from the example when WORKFLOW.md is missing', () => {
+      const result = loadWorkflow('__missing__/WORKFLOW.md');
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('missing_workflow_file');
+      expect(result.errorMessage).toContain('WORKFLOW.md.example');
+      expect(result.errorMessage).toContain('WORKFLOW.md');
+    });
+  });
 });
 
 describe('Config Layer', () => {
