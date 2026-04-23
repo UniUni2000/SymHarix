@@ -27,6 +27,7 @@
 
 ```bash
 bun install
+cp WORKFLOW.md.example WORKFLOW.md
 bun run start
 ```
 
@@ -54,11 +55,13 @@ Orchestrator
   -> claude-code/bin/claude-haha
 ```
 
-默认 `WORKFLOW.md` 里 `codex.command` 指向 `node ./scripts/claude-adapter.cjs`。
+真实 `WORKFLOW.md` 是本地私有运行配置，不再提交到仓库；请先从 [WORKFLOW.md.example](/Users/liupenghui/Documents/code/agent/test-cc/WORKFLOW.md.example) 复制一份到本地 `WORKFLOW.md` 再启动。
+
+默认 `WORKFLOW.md.example` 里 `codex.command` 指向 `node ./scripts/claude-adapter.cjs`。
 
 ## 多仓路由
 
-仓库路由现在以 `WORKFLOW.md` 为唯一真相源，不再按 Linear project 名字隐式猜 repo。
+仓库路由现在以本地 `WORKFLOW.md` 为唯一真相源，不再按 Linear project 名字隐式猜 repo。
 
 示例：
 

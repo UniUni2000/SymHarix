@@ -18,6 +18,13 @@ export interface WorkflowLoadResult {
   errorMessage?: string;
 }
 
+function formatMissingWorkflowFileMessage(filePath: string): string {
+  return [
+    `Workflow file not found: ${filePath}`,
+    'Create a local WORKFLOW.md by copying WORKFLOW.md.example and editing repo-specific values, or pass an explicit workflow path.',
+  ].join(' ');
+}
+
 /**
  * Load and parse a WORKFLOW.md file
  *
@@ -40,7 +47,7 @@ export function loadWorkflow(filePath: string): WorkflowLoadResult {
       return {
         success: false,
         error: 'missing_workflow_file',
-        errorMessage: `Workflow file not found: ${filePath}`
+        errorMessage: formatMissingWorkflowFileMessage(filePath)
       };
     }
     return {
