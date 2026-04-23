@@ -27,9 +27,6 @@ export interface WorkspaceManagerOptions {
   githubToken: string;
   hooks: {
     after_create: string | null;
-    before_run: string | null;
-    after_run: string | null;
-    before_remove: string | null;
     timeout_ms: number;
   };
 }
@@ -232,26 +229,6 @@ export class WorkspaceManager {
       success: true,
       workspace: worktreeResult.workspace
     };
-  }
-
-  /**
-   * Run before_run hook for a workspace
-   */
-  async beforeRun(
-    workspacePath: string,
-    issue?: Pick<Issue, 'identifier' | 'state' | 'project_slug' | 'project_name'>
-  ): Promise<{ success: boolean; error?: string }> {
-    return { success: true };
-  }
-
-  /**
-   * Run after_run hook for a workspace
-   */
-  async afterRun(
-    workspacePath: string,
-    issue?: Pick<Issue, 'identifier' | 'state' | 'project_slug' | 'project_name'>
-  ): Promise<{ success: boolean; output?: string }> {
-    return { success: true, output: undefined };
   }
 
   /**

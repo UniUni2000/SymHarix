@@ -93,6 +93,12 @@ repositories:
 - `.symphony-constitution.md`
   - 定义项目主路径、稳定边界、偏好方向、禁止方向和 cleanup trigger
 
+说明：
+
+- 这两份文件是“目标仓库自己的正式契约”，不是 Symphony 全局配置
+- 全局 orchestration / routing / policy 仍然以 `WORKFLOW.md` 为准
+- 当 Symphony 管理它自己的程序仓库时，这个仓库也会像普通目标仓库一样携带自己的 `.symphony-repo.yaml` 与 `.symphony-constitution.md`；这属于 dogfood / self-managed repo 场景，不会跨仓影响别的用户仓库
+
 如果仓库还没有 `.symphony-repo.yaml`，Symphony 会先落到 shadow harness：
 
 - 从仓库结构和历史成功命令推断 provisional harness
