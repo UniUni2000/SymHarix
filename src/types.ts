@@ -68,6 +68,13 @@ export interface ResolvedRepositoryRoute {
 
 export type RepositoryHarnessStatus = 'formal' | 'shadow' | 'missing';
 export type ConstitutionStatus = 'present' | 'missing';
+export type RepositoryHarnessCommandKey =
+  | 'setup'
+  | 'dev'
+  | 'test'
+  | 'lint'
+  | 'build'
+  | 'review_checks';
 export type GovernanceDecision =
   | 'accept'
   | 'accept_with_rewrite'
@@ -83,13 +90,19 @@ export type CompletionRequirementKind =
 
 export interface RepositoryHarnessConfig {
   profiles?: Array<'coding' | 'research' | 'ui' | 'review'>;
-  commands?: Record<string, string>;
+  commands?: Partial<Record<RepositoryHarnessCommandKey, string>>;
   artifacts?: string[];
   verification?: {
     required_commands?: string[];
     required_artifacts?: string[];
   };
   runtime_hints?: Record<string, string | string[]>;
+}
+
+export interface EffectiveRepositoryHarness {
+  source: RepositoryHarnessStatus;
+  config: RepositoryHarnessConfig;
+  has_verification_requirements: boolean;
 }
 
 export interface ResolvedRepositoryHarness {
@@ -131,11 +144,54 @@ export interface CompletionRequirement {
   kind: CompletionRequirementKind;
 }
 
+export interface EvidenceRuntimeCheckSummary {
+  hint_key: 'url' | 'ready_signal';
+  status: 'satisfied' | 'failed';
+  value: string;
+}
+
 export interface EvidenceSummary {
   total_requirements: number;
   satisfied: number;
   missing: number;
+  successful_commands: string[];
+  failed_commands: string[];
+  observed_artifacts: string[];
+  runtime_checks: EvidenceRuntimeCheckSummary[];
   notes: string[];
+}
+
+export type HarnessLearningConfidence = 'low' | 'medium' | 'high';
+
+export interface ShadowHarnessObservedCommand {
+  command: string;
+  success_count: number;
+  failure_count: number;
+  last_status: 'satisfied' | 'failed' | null;
+  last_work_item_id: string | null;
+}
+
+export interface ShadowHarnessObservedArtifact {
+  success_count: number;
+  last_work_item_id: string | null;
+}
+
+export interface ShadowHarnessObservedRuntimeHint {
+  value: string;
+  success_count: number;
+  failure_count: number;
+  last_status: 'satisfied' | 'failed' | null;
+  last_work_item_id: string | null;
+}
+
+export interface ShadowHarnessInferenceDetails {
+  inferred_from: string[];
+  observed_commands: Record<string, ShadowHarnessObservedCommand>;
+  observed_artifacts: Record<string, ShadowHarnessObservedArtifact>;
+  observed_runtime_hints: Record<string, ShadowHarnessObservedRuntimeHint>;
+  learning_confidence: HarnessLearningConfidence;
+  successful_work_item_ids?: string[];
+  failed_work_item_ids?: string[];
 }
 
 export interface GovernanceAssessment {
@@ -153,12 +209,65 @@ export interface IntakeCriticAssessment extends GovernanceAssessment {
   rewrite_title: string | null;
   rewrite_description: string | null;
   split_suggestions: string[];
+  repo_key: string | null;
+  target_area: string | null;
+  active_fitness_signals: string[];
+  related_conflict_count: number;
+  related_debt_signal_count: number;
+  repeated_constitution_phrase: string | null;
 }
 
 export interface FitnessSignal {
   code: string;
   summary: string;
   severity: 'low' | 'medium' | 'high';
+}
+
+export interface GovernanceRepoSnapshot {
+  repo_key: string;
+  recent_work_items: Array<{
+    work_item_id: string;
+    issue_identifier: string;
+    linear_state: string;
+    last_review_decision: string | null;
+    touched_paths: string[];
+    touched_areas: string[];
+    path_families: string[];
+    boundary_edges: string[];
+    import_edges: string[];
+    architectural_target: string | null;
+    updated_at: string;
+  }>;
+  recent_review_events: Array<{
+    work_item_id: string;
+    decision: string;
+    created_at: string;
+  }>;
+  latest_assessments: Array<{
+    work_item_id: string | null;
+    decision: string;
+    summary: string;
+    detail_json: Record<string, unknown> | null;
+    created_at: string;
+  }>;
+  decision_memories: Array<{
+    summary: string;
+    detail_json: Record<string, unknown> | null;
+    created_at: string;
+  }>;
+  conflict_memories: Array<{
+    summary: string;
+    detail_json: Record<string, unknown> | null;
+    created_at: string;
+  }>;
+  debt_signals: Array<{
+    signal_code: string;
+    summary: string;
+    severity: 'low' | 'medium' | 'high';
+    detail_json: Record<string, unknown> | null;
+    created_at: string;
+  }>;
+  active_fitness_signals: FitnessSignal[];
 }
 
 export interface GovernanceSuggestion {
@@ -172,6 +281,8 @@ export interface GovernanceSuggestion {
   status: 'pending' | 'accepted' | 'dismissed';
   title: string;
   summary: string;
+  can_execute?: boolean;
+  can_dismiss?: boolean;
 }
 
 export interface ResolvedTrackerProject {

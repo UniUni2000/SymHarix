@@ -39,6 +39,12 @@ export const WORK_ITEMS_TABLE_SCHEMA = `
     evidence_summary_json TEXT,
     missing_requirements_json TEXT,
     constitution_hits_json TEXT,
+    touched_paths_json TEXT,
+    touched_areas_json TEXT,
+    path_families_json TEXT,
+    boundary_edges_json TEXT,
+    import_edges_json TEXT,
+    architectural_target TEXT,
     fitness_signals_json TEXT,
     cancelled_at TEXT,
     merged_at TEXT,
@@ -350,6 +356,12 @@ export function initializeSchema(db: Database): void {
   ensureColumn(db, 'work_items', 'evidence_summary_json', 'TEXT');
   ensureColumn(db, 'work_items', 'missing_requirements_json', 'TEXT');
   ensureColumn(db, 'work_items', 'constitution_hits_json', 'TEXT');
+  ensureColumn(db, 'work_items', 'touched_paths_json', 'TEXT');
+  ensureColumn(db, 'work_items', 'touched_areas_json', 'TEXT');
+  ensureColumn(db, 'work_items', 'path_families_json', 'TEXT');
+  ensureColumn(db, 'work_items', 'boundary_edges_json', 'TEXT');
+  ensureColumn(db, 'work_items', 'import_edges_json', 'TEXT');
+  ensureColumn(db, 'work_items', 'architectural_target', 'TEXT');
   ensureColumn(db, 'work_items', 'fitness_signals_json', 'TEXT');
   db.exec(CONTROL_PLANE_INDEXES_SCHEMA);
 }

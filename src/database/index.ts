@@ -124,3 +124,6 @@ export { BotPendingActionRepository } from './repositories/botPendingActionRepos
 export { ShadowHarnessRepository } from './repositories/shadowHarnessRepository';
 export { GovernanceAssessmentRepository } from './repositories/governanceAssessmentRepository';
 export { GovernanceSuggestionRepository } from './repositories/governanceSuggestionRepository';
+export { DecisionMemoryRepository } from './repositories/decisionMemoryRepository';
+export { ConflictMemoryRepository } from './repositories/conflictMemoryRepository';
+export { DebtSignalRepository } from './repositories/debtSignalRepository';

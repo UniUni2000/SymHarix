@@ -31,8 +31,10 @@ export class WorkItemRepository {
         repo_harness_status, constitution_status, governance_status, governance_decision,
         governance_summary, governance_override_at, governance_override_reason, change_pack_summary_json,
         task_status_json, evidence_summary_json, missing_requirements_json, constitution_hits_json,
+        touched_paths_json, touched_areas_json, path_families_json, boundary_edges_json, import_edges_json,
+        architectural_target,
         fitness_signals_json, cancelled_at, merged_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -64,6 +66,12 @@ export class WorkItemRepository {
       JSON.stringify(item.evidence_summary ?? null),
       JSON.stringify(item.missing_requirements ?? []),
       JSON.stringify(item.constitution_hits ?? []),
+      JSON.stringify(item.touched_paths ?? []),
+      JSON.stringify(item.touched_areas ?? []),
+      JSON.stringify(item.path_families ?? []),
+      JSON.stringify(item.boundary_edges ?? []),
+      JSON.stringify(item.import_edges ?? []),
+      item.architectural_target ?? null,
       JSON.stringify(item.fitness_signals ?? []),
       item.cancelled_at?.toISOString() ?? null,
       item.merged_at?.toISOString() ?? null,
@@ -85,8 +93,10 @@ export class WorkItemRepository {
         repo_harness_status, constitution_status, governance_status, governance_decision,
         governance_summary, governance_override_at, governance_override_reason, change_pack_summary_json,
         task_status_json, evidence_summary_json, missing_requirements_json, constitution_hits_json,
+        touched_paths_json, touched_areas_json, path_families_json, boundary_edges_json, import_edges_json,
+        architectural_target,
         fitness_signals_json, cancelled_at, merged_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         linear_issue_id = excluded.linear_issue_id,
         linear_identifier = excluded.linear_identifier,
@@ -115,6 +125,12 @@ export class WorkItemRepository {
         evidence_summary_json = excluded.evidence_summary_json,
         missing_requirements_json = excluded.missing_requirements_json,
         constitution_hits_json = excluded.constitution_hits_json,
+        touched_paths_json = excluded.touched_paths_json,
+        touched_areas_json = excluded.touched_areas_json,
+        path_families_json = excluded.path_families_json,
+        boundary_edges_json = excluded.boundary_edges_json,
+        import_edges_json = excluded.import_edges_json,
+        architectural_target = excluded.architectural_target,
         fitness_signals_json = excluded.fitness_signals_json,
         cancelled_at = excluded.cancelled_at,
         merged_at = excluded.merged_at,
@@ -150,6 +166,12 @@ export class WorkItemRepository {
       JSON.stringify(item.evidence_summary ?? null),
       JSON.stringify(item.missing_requirements ?? []),
       JSON.stringify(item.constitution_hits ?? []),
+      JSON.stringify(item.touched_paths ?? []),
+      JSON.stringify(item.touched_areas ?? []),
+      JSON.stringify(item.path_families ?? []),
+      JSON.stringify(item.boundary_edges ?? []),
+      JSON.stringify(item.import_edges ?? []),
+      item.architectural_target ?? null,
       JSON.stringify(item.fitness_signals ?? []),
       item.cancelled_at?.toISOString() ?? null,
       item.merged_at?.toISOString() ?? null,
@@ -247,6 +269,12 @@ export class WorkItemRepository {
     if (item.evidence_summary !== undefined) assign('evidence_summary_json', JSON.stringify(item.evidence_summary));
     if (item.missing_requirements !== undefined) assign('missing_requirements_json', JSON.stringify(item.missing_requirements));
     if (item.constitution_hits !== undefined) assign('constitution_hits_json', JSON.stringify(item.constitution_hits));
+    if (item.touched_paths !== undefined) assign('touched_paths_json', JSON.stringify(item.touched_paths));
+    if (item.touched_areas !== undefined) assign('touched_areas_json', JSON.stringify(item.touched_areas));
+    if (item.path_families !== undefined) assign('path_families_json', JSON.stringify(item.path_families));
+    if (item.boundary_edges !== undefined) assign('boundary_edges_json', JSON.stringify(item.boundary_edges));
+    if (item.import_edges !== undefined) assign('import_edges_json', JSON.stringify(item.import_edges));
+    if (item.architectural_target !== undefined) assign('architectural_target', item.architectural_target);
     if (item.fitness_signals !== undefined) assign('fitness_signals_json', JSON.stringify(item.fitness_signals));
     if (item.cancelled_at !== undefined) assign('cancelled_at', item.cancelled_at?.toISOString() ?? null);
     if (item.merged_at !== undefined) assign('merged_at', item.merged_at?.toISOString() ?? null);
@@ -301,6 +329,12 @@ export class WorkItemRepository {
       evidence_summary: parseJsonValue(row.evidence_summary_json, null),
       missing_requirements: parseJsonValue(row.missing_requirements_json, []),
       constitution_hits: parseJsonValue(row.constitution_hits_json, []),
+      touched_paths: parseJsonValue(row.touched_paths_json, []),
+      touched_areas: parseJsonValue(row.touched_areas_json, []),
+      path_families: parseJsonValue(row.path_families_json, []),
+      boundary_edges: parseJsonValue(row.boundary_edges_json, []),
+      import_edges: parseJsonValue(row.import_edges_json, []),
+      architectural_target: (row.architectural_target as string | null) ?? null,
       fitness_signals: parseJsonValue(row.fitness_signals_json, []),
       cancelled_at: row.cancelled_at ? new Date(row.cancelled_at as string) : null,
       merged_at: row.merged_at ? new Date(row.merged_at as string) : null,

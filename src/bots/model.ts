@@ -116,6 +116,8 @@ function buildPromptText(params: BotAssistantModelRequest): string {
     '{"intent":{"kind":"override","issue_id":"INT-31"}}',
     '{"intent":{"kind":"rewrite","issue_id":"INT-31"}}',
     '{"intent":{"kind":"split","issue_id":"INT-31"}}',
+    '{"intent":{"kind":"execute_governance_suggestion","issue_id":"INT-31","suggestion_id":"suggestion-1","suggestion_type":null,"ordinal":null}}',
+    '{"intent":{"kind":"dismiss_governance_suggestion","issue_id":"INT-31","suggestion_id":null,"suggestion_type":"cleanup","ordinal":null}}',
     '{"intent":{"kind":"set_default_project","project_slug":"test2"}}',
     '{"intent":{"kind":"set_default_project","project_slug":null}}',
     '{"intent":{"kind":"show_default_project"}}',

@@ -9,6 +9,9 @@ import {
   BotConversationPreferenceRepository,
   BotPendingActionRepository,
   BotWatchSubscriptionRepository,
+  ConflictMemoryRepository,
+  DebtSignalRepository,
+  DecisionMemoryRepository,
   GovernanceAssessmentRepository,
   GovernanceSuggestionRepository,
   RepoCacheRepository,
@@ -75,6 +78,12 @@ describe('WorkItemRepository', () => {
       linear_title: 'First item',
       linear_state: 'Todo',
       github_repo: 'acme/repo',
+      touched_paths: ['src/runtime/hub.ts'],
+      touched_areas: ['runtime'],
+      path_families: ['runtime/hub'],
+      boundary_edges: [],
+      import_edges: ['runtime/hub->server/routes'],
+      architectural_target: 'runtime/hub->server/routes',
     });
 
     const updated = repository.update({
@@ -82,10 +91,22 @@ describe('WorkItemRepository', () => {
       linear_state: 'In Review',
       active_pr_number: 42,
       orchestrator_state: 'review_running',
+      touched_paths: ['src/runtime/hub.ts', 'src/runtime/types.ts'],
+      touched_areas: ['runtime', 'server'],
+      path_families: ['runtime/hub', 'runtime/types'],
+      boundary_edges: ['runtime<->server'],
+      import_edges: ['runtime/hub->server/routes'],
+      architectural_target: 'runtime<->server',
     });
 
     expect(updated?.linear_state).toBe('In Review');
     expect(updated?.active_pr_number).toBe(42);
+    expect(updated?.touched_paths).toEqual(['src/runtime/hub.ts', 'src/runtime/types.ts']);
+    expect(updated?.touched_areas).toEqual(['runtime', 'server']);
+    expect(updated?.path_families).toEqual(['runtime/hub', 'runtime/types']);
+    expect(updated?.boundary_edges).toEqual(['runtime<->server']);
+    expect(updated?.import_edges).toEqual(['runtime/hub->server/routes']);
+    expect(updated?.architectural_target).toBe('runtime<->server');
     expect(repository.findByIdentifier('INT-1')?.id).toBe('wi-1');
   });
 });
@@ -129,6 +150,7 @@ describe('ShadowHarnessRepository', () => {
     const stored = repository.findByRepoKey('acme/repo');
     expect(stored?.config_json.commands?.test).toBe('bun test');
     expect(stored?.inference_details_json.inferred_from).toEqual(['package.json']);
+    expect(stored?.inference_details_json.learning_confidence).toBe('low');
   });
 });
 
@@ -296,10 +318,13 @@ describe('ServiceLeaseRepository', () => {
 });
 
 describe('Governance repositories', () => {
-  test('store governance assessments and suggestions', () => {
+  test('store governance assessments, suggestions, and repo memories', () => {
     const workItems = new WorkItemRepository(db);
     const assessmentRepository = new GovernanceAssessmentRepository(db);
     const suggestionRepository = new GovernanceSuggestionRepository(db);
+    const decisionRepository = new DecisionMemoryRepository(db);
+    const conflictRepository = new ConflictMemoryRepository(db);
+    const debtSignalRepository = new DebtSignalRepository(db);
 
     workItems.create({
       id: 'wi-governance',
@@ -332,8 +357,42 @@ describe('Governance repositories', () => {
       detail_json: { severity: 'medium' },
     });
 
+    decisionRepository.create({
+      id: 'decision-1',
+      repo_key: 'acme/repo',
+      summary: 'Runtime DTO changes should stay inside the shared control plane.',
+      detail_json: {
+        source_issue_identifier: 'INT-GOV',
+        touched_areas: ['runtime'],
+      },
+    });
+
+    conflictRepository.create({
+      id: 'conflict-1',
+      repo_key: 'acme/repo',
+      summary: 'Vague multi-surface runtime changes keep getting rewritten or split.',
+      detail_json: {
+        trigger: 'split_before_implement',
+      },
+    });
+
+    debtSignalRepository.create({
+      id: 'debt-1',
+      repo_key: 'acme/repo',
+      signal_code: 'repeated_review_churn',
+      summary: 'Runtime changes are repeatedly sent back from review.',
+      severity: 'high',
+      detail_json: {
+        review_rounds: 3,
+      },
+    });
+
     expect(assessmentRepository.findLatestByWorkItemId('wi-governance')?.decision).toBe('accept_with_rewrite');
     expect(suggestionRepository.findPendingByIssueId('linear-governance')).toHaveLength(1);
+    expect(decisionRepository.findByRepoKey('acme/repo')).toHaveLength(1);
+    expect(conflictRepository.findByRepoKey('acme/repo')).toHaveLength(1);
+    expect(debtSignalRepository.findByRepoKey('acme/repo')).toHaveLength(1);
+    expect(debtSignalRepository.findActiveByRepoKey('acme/repo')[0]?.signal_code).toBe('repeated_review_churn');
   });
 });
 
