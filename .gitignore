@@ -28,18 +28,34 @@ Thumbs.db
 
 # Test coverage
 coverage/
+.coverage
+htmlcov/
 
 # Claude Code
 hooks/
+!src/hooks/
+!src/hooks/**
+!scripts/hooks/
+scripts/hooks/*
+!scripts/hooks/review.py
 repos/
 .claude/
 
 # Python
 __pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 *.pyc
 *.pyo
 *.pyd
 .Python
 
+# Local runtime state
+symphony.db
+symphony.db-shm
+symphony.db-wal
+
 # Symphony workspaces
 workspaces/
+.worktrees/
