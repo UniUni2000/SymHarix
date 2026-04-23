@@ -10,10 +10,12 @@ build/
 .env
 .env.local
 .env.*.local
+WORKFLOW.md
 
 # Logs
 logs/
 *.log
+log.txt
 npm-debug.log*
 
 # OS files
