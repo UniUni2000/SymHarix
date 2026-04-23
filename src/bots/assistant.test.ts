@@ -20,18 +20,24 @@ function createRuntimeControlPlane(): RuntimeControlPlane & {
   overrideGovernanceCalls: string[];
   rewriteGovernanceCalls: string[];
   splitGovernanceCalls: string[];
+  executeGovernanceSuggestionCalls: Array<{ issueId: string; suggestionId: string }>;
+  dismissGovernanceSuggestionCalls: Array<{ issueId: string; suggestionId: string }>;
 } {
   const listeners = new Set<(event: RuntimeStreamEvent) => void>();
   const createIssueCalls: Array<Record<string, unknown>> = [];
   const overrideGovernanceCalls: string[] = [];
   const rewriteGovernanceCalls: string[] = [];
   const splitGovernanceCalls: string[] = [];
+  const executeGovernanceSuggestionCalls: Array<{ issueId: string; suggestionId: string }> = [];
+  const dismissGovernanceSuggestionCalls: Array<{ issueId: string; suggestionId: string }> = [];
   const runtime: RuntimeControlPlane & {
     emit: (event: RuntimeStreamEvent) => void;
     createIssueCalls: Array<Record<string, unknown>>;
     overrideGovernanceCalls: string[];
     rewriteGovernanceCalls: string[];
     splitGovernanceCalls: string[];
+    executeGovernanceSuggestionCalls: Array<{ issueId: string; suggestionId: string }>;
+    dismissGovernanceSuggestionCalls: Array<{ issueId: string; suggestionId: string }>;
   } = {
     getOverview: () => ({
       generated_at: '2026-01-01T00:00:00.000Z',
@@ -133,6 +139,26 @@ function createRuntimeControlPlane(): RuntimeControlPlane & {
         issue_identifier: 'INT-31',
       };
     },
+    executeGovernanceSuggestion: async (issueId: string, suggestionId: string) => {
+      executeGovernanceSuggestionCalls.push({ issueId, suggestionId });
+      return {
+        accepted: true,
+        status: 'accepted',
+        message: `Executed governance suggestion ${suggestionId} for ${issueId}`,
+        issue_id: issueId,
+        issue_identifier: 'INT-31',
+      };
+    },
+    dismissGovernanceSuggestion: async (issueId: string, suggestionId: string) => {
+      dismissGovernanceSuggestionCalls.push({ issueId, suggestionId });
+      return {
+        accepted: true,
+        status: 'accepted',
+        message: `Dismissed governance suggestion ${suggestionId} for ${issueId}`,
+        issue_id: issueId,
+        issue_identifier: 'INT-31',
+      };
+    },
     createStream: () => new ReadableStream<Uint8Array>(),
     subscribe: (listener) => {
       listeners.add(listener);
@@ -147,6 +173,8 @@ function createRuntimeControlPlane(): RuntimeControlPlane & {
     overrideGovernanceCalls,
     rewriteGovernanceCalls,
     splitGovernanceCalls,
+    executeGovernanceSuggestionCalls,
+    dismissGovernanceSuggestionCalls,
   };
   return runtime;
 }
@@ -901,6 +929,260 @@ describe('BotAssistantService', () => {
     const confirmed = await assistant.respondToText(context, '确认');
     expect(confirmed.message).toContain('Split applied');
     expect(runtime.splitGovernanceCalls).toEqual(['INT-31']);
+
+    subscriptions.dispose();
+  });
+
+  test('requires confirmation before executing a governance suggestion by ordinal from natural language', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const governanceIssue = {
+      ...runtime.getOverview().issues[0]!,
+      tracker_state: 'Todo',
+      orchestrator_state: 'halted',
+      github_repo: 'UniUni2000/test2',
+      active_governance_suggestions: [
+        {
+          id: 'gov-suggest-cleanup',
+          suggestion_type: 'cleanup' as const,
+          status: 'pending' as const,
+          title: '[GOVERNANCE] Cleanup runtime hotspot',
+          summary: 'Create a focused cleanup issue for the runtime hotspot.',
+          can_execute: true,
+          can_dismiss: true,
+        },
+        {
+          id: 'gov-suggest-constitution',
+          suggestion_type: 'constitution_update' as const,
+          status: 'pending' as const,
+          title: '[GOVERNANCE] Update constitution',
+          summary: 'Patch the constitution with the repeated exception.',
+          can_execute: true,
+          can_dismiss: true,
+        },
+      ],
+      actions: {
+        can_stop: false,
+        can_retry: true,
+        can_override_governance: false,
+        can_rewrite_governance: false,
+        can_split_governance: false,
+        can_open_pr: false,
+      },
+    };
+    runtime.getOverview = () => ({
+      generated_at: '2026-01-01T00:00:00.000Z',
+      counts: { running: 0, retrying: 0, total: 1 },
+      issues: [governanceIssue],
+    });
+    runtime.getIssue = (id: string) => ['INT-31', 'issue-31'].includes(id) ? governanceIssue : null;
+
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const projectResolver = new TrackerProjectResolutionService({ listProjects: async () => ({ projects: [] }) } as any, {});
+    const commandService = new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver);
+    const assistant = new BotAssistantService(
+      runtime,
+      commandService,
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => {
+          throw new Error('Assistant unavailable');
+        },
+      },
+    );
+
+    const context = {
+      transport: 'telegram' as const,
+      recipient: { transport: 'telegram' as const, conversation_id: 'chat-10' },
+      identity: { user_id: 'user-1', display_name: 'Alice' },
+    };
+
+    const first = await assistant.respondToText(context, '执行第一个治理建议');
+    expect(first.message).toContain('当前自然语言模型暂不可用');
+    expect(first.message).toContain('Action: execute governance suggestion');
+    expect(first.message).toContain('Suggestion: [1] cleanup');
+    expect(runtime.executeGovernanceSuggestionCalls).toHaveLength(0);
+
+    const confirmed = await assistant.respondToText(context, '确认');
+    expect(confirmed.message).toContain('Executed governance suggestion');
+    expect(runtime.executeGovernanceSuggestionCalls).toEqual([
+      {
+        issueId: 'issue-31',
+        suggestionId: 'gov-suggest-cleanup',
+      },
+    ]);
+
+    subscriptions.dispose();
+  });
+
+  test('requires confirmation before dismissing a governance suggestion by type from natural language', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const governanceIssue = {
+      ...runtime.getOverview().issues[0]!,
+      tracker_state: 'Todo',
+      orchestrator_state: 'halted',
+      github_repo: 'UniUni2000/test2',
+      active_governance_suggestions: [
+        {
+          id: 'gov-suggest-cleanup',
+          suggestion_type: 'cleanup' as const,
+          status: 'pending' as const,
+          title: '[GOVERNANCE] Cleanup runtime hotspot',
+          summary: 'Create a focused cleanup issue for the runtime hotspot.',
+          can_execute: true,
+          can_dismiss: true,
+        },
+      ],
+      actions: {
+        can_stop: false,
+        can_retry: true,
+        can_override_governance: false,
+        can_rewrite_governance: false,
+        can_split_governance: false,
+        can_open_pr: false,
+      },
+    };
+    runtime.getOverview = () => ({
+      generated_at: '2026-01-01T00:00:00.000Z',
+      counts: { running: 0, retrying: 0, total: 1 },
+      issues: [governanceIssue],
+    });
+    runtime.getIssue = (id: string) => ['INT-31', 'issue-31'].includes(id) ? governanceIssue : null;
+
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const projectResolver = new TrackerProjectResolutionService({ listProjects: async () => ({ projects: [] }) } as any, {});
+    const commandService = new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver);
+    const assistant = new BotAssistantService(
+      runtime,
+      commandService,
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => {
+          throw new Error('Assistant unavailable');
+        },
+      },
+    );
+
+    const context = {
+      transport: 'telegram' as const,
+      recipient: { transport: 'telegram' as const, conversation_id: 'chat-11' },
+      identity: { user_id: 'user-1', display_name: 'Alice' },
+    };
+
+    const first = await assistant.respondToText(context, '忽略 cleanup suggestion');
+    expect(first.message).toContain('当前自然语言模型暂不可用');
+    expect(first.message).toContain('Action: dismiss governance suggestion');
+    expect(first.message).toContain('cleanup');
+    expect(runtime.dismissGovernanceSuggestionCalls).toHaveLength(0);
+
+    const confirmed = await assistant.respondToText(context, '确认');
+    expect(confirmed.message).toContain('Dismissed governance suggestion');
+    expect(runtime.dismissGovernanceSuggestionCalls).toEqual([
+      {
+        issueId: 'issue-31',
+        suggestionId: 'gov-suggest-cleanup',
+      },
+    ]);
+
+    subscriptions.dispose();
+  });
+
+  test('asks for clarification when multiple governance suggestions exist and the request is ambiguous', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const governanceIssue = {
+      ...runtime.getOverview().issues[0]!,
+      tracker_state: 'Todo',
+      orchestrator_state: 'halted',
+      github_repo: 'UniUni2000/test2',
+      active_governance_suggestions: [
+        {
+          id: 'gov-suggest-cleanup',
+          suggestion_type: 'cleanup' as const,
+          status: 'pending' as const,
+          title: '[GOVERNANCE] Cleanup runtime hotspot',
+          summary: 'Create a focused cleanup issue for the runtime hotspot.',
+          can_execute: true,
+          can_dismiss: true,
+        },
+        {
+          id: 'gov-suggest-harness',
+          suggestion_type: 'harness_adoption' as const,
+          status: 'pending' as const,
+          title: '[GOVERNANCE] Adopt harness',
+          summary: 'Promote the shadow harness into the repository.',
+          can_execute: true,
+          can_dismiss: true,
+        },
+      ],
+      actions: {
+        can_stop: false,
+        can_retry: true,
+        can_override_governance: false,
+        can_rewrite_governance: false,
+        can_split_governance: false,
+        can_open_pr: false,
+      },
+    };
+    runtime.getOverview = () => ({
+      generated_at: '2026-01-01T00:00:00.000Z',
+      counts: { running: 0, retrying: 0, total: 1 },
+      issues: [governanceIssue],
+    });
+    runtime.getIssue = (id: string) => ['INT-31', 'issue-31'].includes(id) ? governanceIssue : null;
+
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const projectResolver = new TrackerProjectResolutionService({ listProjects: async () => ({ projects: [] }) } as any, {});
+    const commandService = new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver);
+    const assistant = new BotAssistantService(
+      runtime,
+      commandService,
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => {
+          throw new Error('Assistant unavailable');
+        },
+      },
+    );
+
+    const response = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-12' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      '执行治理建议',
+    );
+
+    expect(response.message).toContain('请明确指定要操作的治理建议');
+    expect(response.message).toContain('[1] cleanup');
+    expect(response.message).toContain('[2] harness_adoption');
+    expect(runtime.executeGovernanceSuggestionCalls).toHaveLength(0);
+    expect(
+      pending.findByConversation({
+        transport: 'telegram',
+        conversation_id: 'chat-12',
+      }),
+    ).toBeNull();
 
     subscriptions.dispose();
   });

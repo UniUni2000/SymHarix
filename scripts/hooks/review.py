@@ -1,8 +1,12 @@
 # scripts/hooks/review.py
 """REVIEW phase hook - handles review and merge."""
 
+import json
+import os
 import sys
 import re
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -112,6 +116,71 @@ class ReviewHook:
         """Resolve workflow artifacts under the canonical .symphony/ directory."""
         return self.store.symphony_dir.path.parent / ".symphony" / filename
 
+    def _append_change_pack_command_run(
+        self,
+        command: str,
+        command_key: str,
+        status: str,
+        source: str,
+        *,
+        phase: str = "review",
+        exit_code: Optional[int] = None,
+        summary: Optional[str] = None,
+    ) -> None:
+        evidence_path = self._workflow_file_path("change-pack/evidence.json")
+        if not evidence_path.exists():
+            return
+
+        try:
+            payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {}
+
+        if not isinstance(payload, dict):
+            payload = {}
+
+        command_runs = payload.get("command_runs")
+        if not isinstance(command_runs, list):
+            command_runs = []
+
+        normalized_command = command.strip()
+        dedupe_key = (
+            phase,
+            normalized_command,
+            command_key,
+            status,
+            source,
+        )
+        existing_keys = {
+            (
+                str(entry.get("phase", "")).strip(),
+                str(entry.get("command", "")).strip(),
+                str(entry.get("command_key", "")).strip(),
+                str(entry.get("status", "")).strip(),
+                str(entry.get("source", "")).strip(),
+            )
+            for entry in command_runs
+            if isinstance(entry, dict)
+        }
+        if dedupe_key in existing_keys:
+            return
+
+        command_runs.append(
+            {
+                "phase": phase,
+                "command": normalized_command,
+                "command_key": command_key,
+                "status": status,
+                "source": source,
+                "turn": None,
+                "exit_code": exit_code,
+                "summary": summary,
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        payload["command_runs"] = command_runs
+        evidence_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
     def _submit_native_review(self, pr_number: Optional[int], review_decision: str, review_report: Optional[str]) -> bool:
         """Submit a native GitHub review and fail closed if GitHub rejects it."""
         if not pr_number or not review_report:
@@ -141,6 +210,75 @@ class ReviewHook:
         except Exception as e:
             print(f"[REVIEW] ERROR: Failed to submit native review to PR #{pr_number}: {e}")
             self.store.set_error(f"Failed to submit native review: {e}")
+            return False
+
+    def _load_effective_harness(self) -> dict:
+        raw = os.environ.get("SYMPHONY_EFFECTIVE_HARNESS_JSON", "").strip()
+        if not raw:
+            repo_harness_path = self.workspace_root / ".symphony-repo.yaml"
+            if not repo_harness_path.exists():
+                return {}
+            try:
+                import yaml  # type: ignore
+
+                parsed = yaml.safe_load(repo_harness_path.read_text())
+                return parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                return {}
+
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return {}
+
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _run_review_checks(self) -> bool:
+        harness = self._load_effective_harness()
+        commands = harness.get("commands", {})
+        if not isinstance(commands, dict):
+            return True
+
+        review_checks = commands.get("review_checks")
+        if not isinstance(review_checks, str) or not review_checks.strip():
+            return True
+
+        try:
+            subprocess.run(
+                review_checks,
+                cwd=self.workspace_root,
+                shell=True,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            print(f"[REVIEW] review_checks passed: {review_checks}")
+            self._append_change_pack_command_run(
+                command=review_checks,
+                command_key="review_checks",
+                status="satisfied",
+                source="review_checks",
+                exit_code=0,
+                summary="review_checks passed",
+            )
+            return True
+        except subprocess.CalledProcessError as exc:
+            stdout = (exc.stdout or "").strip()
+            stderr = (exc.stderr or "").strip()
+            detail = " | ".join(part for part in [stdout, stderr] if part)
+            error_message = f"review_checks failed: {review_checks}"
+            if detail:
+                error_message = f"{error_message} ({detail})"
+            print(f"[REVIEW] ERROR: {error_message}")
+            self.store.set_error(error_message)
+            self._append_change_pack_command_run(
+                command=review_checks,
+                command_key="review_checks",
+                status="failed",
+                source="review_checks",
+                exit_code=exc.returncode,
+                summary=detail or "review_checks failed",
+            )
             return False
 
     def _build_merge_blocked_feedback(self, reason: str) -> str:
@@ -177,6 +315,9 @@ class ReviewHook:
         self.last_review_decision = review_decision
         self.last_review_report = review_report
         print(f"[REVIEW] Review decision: {review_decision}")
+
+        if not self._run_review_checks():
+            return False
 
         state = self.store.get_state()
         pr_info = state.get("metadata", {})

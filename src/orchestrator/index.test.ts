@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { Database } from 'bun:sqlite';
+import * as cp from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -9,6 +10,9 @@ import { TrackerProjectResolutionService } from '../tracker/projectResolution';
 import { initializeSchema } from '../database/schema';
 import {
   AgentRunRepository,
+  ConflictMemoryRepository,
+  DecisionMemoryRepository,
+  DebtSignalRepository,
   GovernanceSuggestionRepository,
   ReviewEventRepository,
   SyncEventRepository,
@@ -150,6 +154,13 @@ function createTestDatabase(): Database {
   db.exec('PRAGMA foreign_keys = ON;');
   initializeSchema(db);
   return db;
+}
+
+function runGit(args: string[], cwd: string): string {
+  return cp.execFileSync('/usr/bin/git', args, {
+    cwd,
+    encoding: 'utf8',
+  }).trim();
 }
 
 function createOrchestrator(
@@ -696,6 +707,353 @@ describe('Orchestrator Stability', () => {
     expect(ctx.agentRunner.runTurn.mock.calls[1]?.[2]).toBe('Continue with the next concrete implementation step.');
   });
 
+  it('records harness setup execution only once per workspace state file', async () => {
+    const issue = makeIssue({ state: 'Todo' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-harness-setup-'));
+    fs.mkdirSync(path.join(workspacePath, '.symphony'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspacePath, '.symphony', 'state.json'),
+      JSON.stringify({
+        version: 1,
+        issue_id: issue.identifier,
+        current_state: 'IN_PROGRESS',
+        previous_state: 'TODO',
+        transition_history: [],
+        metadata: {},
+        error: null,
+        retry_count: 0,
+      }, null, 2),
+      'utf8',
+    );
+
+    const effectiveHarness = {
+      source: 'formal' as const,
+      config: {
+        commands: {
+          setup: 'python3 -c "from pathlib import Path; p=Path(\'setup-count.txt\'); n=int(p.read_text())+1 if p.exists() else 1; p.write_text(str(n))"',
+        },
+      },
+      has_verification_requirements: false,
+    };
+
+    try {
+      await (orchestrator as any).runHarnessSetupOnce(issue, workspacePath, effectiveHarness);
+      await (orchestrator as any).runHarnessSetupOnce(issue, workspacePath, effectiveHarness);
+
+      expect(
+        fs.readFileSync(path.join(workspacePath, 'setup-count.txt'), 'utf8'),
+      ).toBe('1');
+
+      const state = JSON.parse(
+        fs.readFileSync(path.join(workspacePath, '.symphony', 'state.json'), 'utf8'),
+      ) as { metadata?: { harness_setup?: { command?: string; completed_at?: string } } };
+
+      expect(state.metadata?.harness_setup?.command).toContain('setup-count.txt');
+      expect(state.metadata?.harness_setup?.completed_at).toBeTruthy();
+
+      const evidence = JSON.parse(
+        fs.readFileSync(path.join(workspacePath, '.symphony', 'change-pack', 'evidence.json'), 'utf8'),
+      ) as {
+        command_runs?: Array<{ command_key?: string | null; status?: string }>;
+      };
+      expect(evidence.command_runs).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          command_key: 'setup',
+          status: 'satisfied',
+        }),
+      ]));
+    } finally {
+      fs.rmSync(workspacePath, { recursive: true, force: true });
+    }
+  });
+
+  it('builds harness bridge env and workspace hints from the effective harness contract', async () => {
+    const issue = makeIssue({ state: 'Todo' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-harness-hint-'));
+    fs.mkdirSync(path.join(workspacePath, '.git'), { recursive: true });
+    fs.mkdirSync(path.join(workspacePath, '.symphony'), { recursive: true });
+
+    const effectiveHarness = {
+      source: 'shadow' as const,
+      config: {
+        commands: {
+          test: 'bun test',
+          review_checks: 'bun test src/review.spec.ts',
+        },
+        verification: {
+          required_commands: ['test'],
+        },
+        runtime_hints: {
+          url: 'http://localhost:3000',
+          ready_signal: 'server ready',
+        },
+      },
+      has_verification_requirements: true,
+    };
+
+    try {
+      const env = (orchestrator as any).buildHarnessBridgeEnv(effectiveHarness);
+      expect(JSON.parse(env.SYMPHONY_EFFECTIVE_HARNESS_JSON)).toMatchObject({
+        source: 'shadow',
+        commands: {
+          test: 'bun test',
+          review_checks: 'bun test src/review.spec.ts',
+        },
+        verification: {
+          required_commands: ['test'],
+        },
+      });
+
+      const hint = await (orchestrator as any).buildWorkspaceHint(workspacePath, effectiveHarness);
+      expect(hint).toContain('Harness source: shadow');
+      expect(hint).toContain('review_checks');
+      expect(hint).toContain('http://localhost:3000');
+    } finally {
+      fs.rmSync(workspacePath, { recursive: true, force: true });
+    }
+  });
+
+  it('captures a final dev post-process evidence sweep after the CLI finishes', async () => {
+    const issue = makeIssue({
+      state: 'Todo',
+      title: 'Produce a runtime status markdown summary',
+      description: 'Write the final runtime handover artifact.',
+    });
+    const ctx = createOrchestrator(issue, { maxTurns: 1 });
+    orchestrator = ctx.orchestrator;
+
+    const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-final-dev-evidence-'));
+    fs.mkdirSync(path.join(workspacePath, '.git'), { recursive: true });
+    fs.mkdirSync(path.join(workspacePath, '.symphony'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspacePath, '.symphony-repo.yaml'),
+      [
+        'profiles:',
+        '  - coding',
+        'verification:',
+        '  required_artifacts:',
+        '    - reports/dev-summary.md',
+        'runtime_hints:',
+        '  ready_signal: ready for ship',
+      ].join('\n'),
+      'utf8',
+    );
+
+    ctx.workspaceManager.createForIssue = mock(async () => ({
+      success: true,
+      workspace: {
+        path: workspacePath,
+        workspace_key: 'INT-1',
+        created_now: false,
+      },
+    }));
+    (orchestrator as any).workspaceManager = ctx.workspaceManager;
+
+    ctx.agentRunner.runTurn = mock(async () => ({
+      success: true,
+      completed: true,
+      cancelled: false,
+      tokens: { input: 8, output: 4, total: 12 },
+      claude_api_calls: 1,
+      timeline: [],
+      transcript: [],
+    }));
+    (orchestrator as any).agentRunner = ctx.agentRunner;
+
+    (orchestrator as any).runCliCommand = mock(async (command: string) => {
+      if (command === 'dev') {
+        fs.mkdirSync(path.join(workspacePath, 'reports'), { recursive: true });
+        fs.writeFileSync(path.join(workspacePath, 'reports', 'dev-summary.md'), '# Summary\nready for ship\n', 'utf8');
+        writeWorkflowArtifacts(workspacePath, {
+          handover: '# Handover\nready for ship\n',
+          developmentLog: '# Development Log\nready for ship\n',
+        });
+        return { success: true, result: makeCliResult({ final_state: 'In Review' }) };
+      }
+      return { success: true, result: makeCliResult({ final_state: 'In Progress' }) };
+    });
+
+    try {
+      const workerResult = await (orchestrator as any).runAgentAttempt(
+        issue,
+        null,
+        (orchestrator as any).resolveRepositoryRoute(issue),
+      );
+      expect(workerResult.success).toBe(true);
+
+      const evidence = JSON.parse(
+        fs.readFileSync(path.join(workspacePath, '.symphony', 'change-pack', 'evidence.json'), 'utf8'),
+      ) as {
+        command_runs?: Array<{ command_key?: string | null; source?: string; status?: string }>;
+        artifact_observations?: Array<{ path?: string; exists?: boolean; non_empty?: boolean }>;
+        runtime_observations?: Array<{ hint_key?: string; status?: string; value?: string }>;
+      };
+
+      expect(evidence.command_runs).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          command_key: 'dev',
+          source: 'cli_postprocess',
+          status: 'satisfied',
+        }),
+      ]));
+      expect(evidence.artifact_observations).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          path: 'reports/dev-summary.md',
+          exists: true,
+          non_empty: true,
+        }),
+      ]));
+      expect(evidence.runtime_observations).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          hint_key: 'ready_signal',
+          status: 'satisfied',
+          value: 'ready for ship',
+        }),
+      ]));
+
+      const workItem = ctx.workItemRepository.findByLinearIssueId(issue.id);
+      expect(workItem?.evidence_summary?.observed_artifacts).toContain('reports/dev-summary.md');
+      expect(workItem?.evidence_summary?.runtime_checks).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          hint_key: 'ready_signal',
+          status: 'satisfied',
+          value: 'ready for ship',
+        }),
+      ]));
+    } finally {
+      fs.rmSync(workspacePath, { recursive: true, force: true });
+    }
+  });
+
+  it('captures a final review post-process evidence sweep after the CLI finishes', async () => {
+    const issue = makeIssue({
+      state: 'In Review',
+      title: 'Review the runtime status markdown summary',
+      description: 'Confirm the final report is ready.',
+    });
+    const ctx = createOrchestrator(issue, { maxTurns: 1 });
+    orchestrator = ctx.orchestrator;
+
+    const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-final-review-evidence-'));
+    fs.mkdirSync(path.join(workspacePath, '.git'), { recursive: true });
+    fs.mkdirSync(path.join(workspacePath, '.symphony'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspacePath, '.symphony-repo.yaml'),
+      [
+        'profiles:',
+        '  - review',
+        'verification:',
+        '  required_artifacts:',
+        '    - reports/review-summary.md',
+        'runtime_hints:',
+        '  ready_signal: review complete',
+      ].join('\n'),
+      'utf8',
+    );
+
+    ctx.workspaceManager.createForIssue = mock(async () => ({
+      success: true,
+      workspace: {
+        path: workspacePath,
+        workspace_key: 'INT-1',
+        created_now: false,
+      },
+    }));
+    (orchestrator as any).workspaceManager = ctx.workspaceManager;
+
+    ctx.agentRunner.runTurn = mock(async () => ({
+      success: true,
+      completed: true,
+      cancelled: false,
+      tokens: { input: 6, output: 3, total: 9 },
+      claude_api_calls: 1,
+      timeline: [],
+      transcript: [],
+    }));
+    (orchestrator as any).agentRunner = ctx.agentRunner;
+
+    (orchestrator as any).runCliCommand = mock(async (command: string) => {
+      if (command === 'review') {
+        fs.mkdirSync(path.join(workspacePath, 'reports'), { recursive: true });
+        fs.writeFileSync(path.join(workspacePath, 'reports', 'review-summary.md'), '# Review Summary\nreview complete\n', 'utf8');
+        writeWorkflowArtifacts(workspacePath, {
+          reviewReport: [
+            '## Review Decision: APPROVE',
+            '',
+            '## Review Summary',
+            'review complete',
+          ].join('\n'),
+          developmentLog: '# Development Log\nreview complete\n',
+        });
+        return {
+          success: true,
+          result: makeCliResult({
+            final_state: 'Done',
+            review_decision: 'APPROVE',
+          }),
+        };
+      }
+      return { success: true, result: makeCliResult({ final_state: 'In Review' }) };
+    });
+
+    try {
+      const workerResult = await (orchestrator as any).runAgentAttempt(
+        issue,
+        null,
+        (orchestrator as any).resolveRepositoryRoute(issue),
+      );
+      expect(workerResult.success).toBe(true);
+
+      const evidence = JSON.parse(
+        fs.readFileSync(path.join(workspacePath, '.symphony', 'change-pack', 'evidence.json'), 'utf8'),
+      ) as {
+        command_runs?: Array<{ command_key?: string | null; source?: string; status?: string }>;
+        artifact_observations?: Array<{ path?: string; exists?: boolean; non_empty?: boolean }>;
+        runtime_observations?: Array<{ hint_key?: string; status?: string; value?: string }>;
+      };
+
+      expect(evidence.command_runs).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          command_key: 'review',
+          source: 'cli_postprocess',
+          status: 'satisfied',
+        }),
+      ]));
+      expect(evidence.artifact_observations).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          path: 'reports/review-summary.md',
+          exists: true,
+          non_empty: true,
+        }),
+      ]));
+      expect(evidence.runtime_observations).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          hint_key: 'ready_signal',
+          status: 'satisfied',
+          value: 'review complete',
+        }),
+      ]));
+
+      const workItem = ctx.workItemRepository.findByLinearIssueId(issue.id);
+      expect(workItem?.evidence_summary?.observed_artifacts).toContain('reports/review-summary.md');
+      expect(workItem?.evidence_summary?.runtime_checks).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          hint_key: 'ready_signal',
+          status: 'satisfied',
+          value: 'review complete',
+        }),
+      ]));
+    } finally {
+      fs.rmSync(workspacePath, { recursive: true, force: true });
+    }
+  });
+
   it('keeps most review runs to one turn and only expands budgets for complex reviews', () => {
     const mediumReviewIssue = makeIssue({
       state: 'In Review',
@@ -1111,6 +1469,68 @@ describe('Orchestrator Stability', () => {
     expect(ctx.githubSyncService.publishPullRequestSummary).toHaveBeenCalled();
   });
 
+  it('captures touched paths and touched areas from the native agent timeline into the work item', async () => {
+    const issue = makeIssue({ state: 'Todo' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.agentRunner.runTurn = mock(async () => ({
+      success: true,
+      completed: true,
+      cancelled: false,
+      tokens: { input: 10, output: 5, total: 15 },
+      claude_api_calls: 1,
+      timeline: [
+        {
+          level: 'info',
+          category: 'tool',
+          code: 'tool_started',
+          message: 'Using Read',
+          turn: 1,
+          tool_name: 'Read',
+          detail: {
+            path: 'src/runtime/hub.ts',
+            summary: 'src/runtime/hub.ts',
+          },
+        },
+        {
+          level: 'info',
+          category: 'tool',
+          code: 'tool_completed',
+          message: 'Write completed',
+          turn: 1,
+          tool_name: 'Write',
+          detail: {
+            path: 'src/server/routes/runtime.ts',
+            summary: 'src/server/routes/runtime.ts',
+          },
+        },
+      ],
+      transcript: [],
+    }));
+    (orchestrator as any).agentRunner = ctx.agentRunner;
+
+    (orchestrator as any).runCliCommand = mock(async (command: string) => {
+      if (command === 'dispatch') {
+        return { success: true, result: makeCliResult({ final_state: 'In Progress' }) };
+      }
+      return { success: true, result: makeCliResult({ final_state: 'In Review' }) };
+    });
+    (orchestrator as any).readWorkspaceFile = mock(async (_workspacePath: string, filename: string) => (
+      filename === 'HANDOVER.md' ? '# Handover\nImplemented feature.' : null
+    ));
+
+    await (orchestrator as any).dispatchIssue(issue, null);
+    await awaitWorker(orchestrator, issue.id);
+
+    const workItem = ctx.workItemRepository.findByLinearIssueId(issue.id);
+    expect(workItem?.touched_paths).toEqual([
+      'src/runtime/hub.ts',
+      'src/server/routes/runtime.ts',
+    ]);
+    expect(workItem?.touched_areas).toEqual(['runtime', 'server']);
+  });
+
   it('records review approval, marks the work item done, and cleans the workspace after merge', async () => {
     const issue = makeIssue({ state: 'In Review' });
     const ctx = createOrchestrator(issue);
@@ -1151,6 +1571,47 @@ describe('Orchestrator Stability', () => {
     expect(latestReview?.decision).toBe('APPROVE');
     expect(ctx.tracker.updateIssueState).toHaveBeenCalledWith(issue.id, 'Done');
     expect(ctx.workspaceManager.removeWorkspace).toHaveBeenCalled();
+  });
+
+  it('records decision memory when a review completes with approval and no missing requirements', async () => {
+    const issue = makeIssue({ state: 'In Review' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+    (orchestrator as any).cleanupAllTerminalIssueBranches = mock(async () => undefined);
+
+    (orchestrator as any).runCliCommand = mock(async (command: string) => {
+      if (command === 'dispatch') {
+        return { success: true, result: makeCliResult({ final_state: 'In Review' }) };
+      }
+      return {
+        success: true,
+        result: makeCliResult({
+          final_state: 'Done',
+          review_decision: 'APPROVED',
+        }),
+      };
+    });
+    (orchestrator as any).readWorkspaceStateFile = mock(async () => ({
+      metadata: {
+        branch: 'feature/int-1',
+        pr_number: 77,
+        pr_merged: true,
+      },
+    }));
+    (orchestrator as any).readWorkspaceFile = mock(async (_workspacePath: string, filename: string) => (
+      filename === 'REVIEW_REPORT.md'
+        ? '## Review Decision: APPROVE\n\n## Review Summary\nLooks good to merge.'
+        : null
+    ));
+
+    await (orchestrator as any).dispatchIssue(issue, null);
+    await awaitWorker(orchestrator, issue.id);
+
+    const decisions = new DecisionMemoryRepository(ctx.db).findByRepoKey('owner/repo');
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]?.detail_json).toMatchObject({
+      source_issue_identifier: issue.identifier,
+    });
   });
 
   it('preserves APPROVE_MINOR as the final review decision when review completes', async () => {
@@ -1744,6 +2205,426 @@ describe('Orchestrator Stability', () => {
     } finally {
       fs.rmSync(repoRoot, { recursive: true, force: true });
     }
+  });
+
+  it('executeGovernanceSuggestion creates a governance follow-up issue and dismissGovernanceSuggestion hides it from active suggestions', async () => {
+    const issue = makeIssue({
+      id: 'issue-governance-exec',
+      identifier: 'INT-92',
+      state: 'Done',
+    });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: issue.state,
+      github_repo: 'owner/repo',
+      orchestrator_state: 'completed',
+    });
+    ctx.governanceSuggestionRepository.create({
+      id: 'suggestion-cleanup',
+      work_item_id: issue.id,
+      issue_id: issue.id,
+      suggestion_type: 'cleanup',
+      title: '[GOVERNANCE] Clean up runtime duplication',
+      summary: 'Repeated review churn suggests a cleanup follow-up.',
+      detail_json: {
+        target_area: 'runtime',
+        recommended_issue_title: '[GOVERNANCE] Clean up runtime duplication',
+        recommended_issue_description: 'Source issue: INT-92\nRepo: owner/repo\nTarget area: runtime',
+      },
+    });
+    ctx.governanceSuggestionRepository.create({
+      id: 'suggestion-dismiss',
+      work_item_id: issue.id,
+      issue_id: issue.id,
+      suggestion_type: 'consolidation',
+      title: '[GOVERNANCE] Consolidate runtime duplication',
+      summary: 'The same runtime path keeps being split.',
+      detail_json: {
+        target_area: 'runtime',
+      },
+    });
+
+    const createdGovernanceIssue = makeIssue({
+      id: 'issue-governance-created',
+      identifier: 'INT-93',
+      title: '[GOVERNANCE] Clean up runtime duplication',
+      description: 'Source issue: INT-92\nRepo: owner/repo\nTarget area: runtime',
+      state: 'Todo',
+    });
+    ctx.tracker.fetchIssueById = mock(async () => ({ issue, error: null }));
+    ctx.tracker.createIssue = mock(async () => ({ success: true, issue: createdGovernanceIssue }));
+    (orchestrator as any).tracker = ctx.tracker;
+
+    const executed = await (orchestrator as any).executeGovernanceSuggestion(issue.id, 'suggestion-cleanup');
+    const dismissed = await (orchestrator as any).dismissGovernanceSuggestion(issue.id, 'suggestion-dismiss');
+
+    expect(executed.accepted).toBe(true);
+    expect(executed.message).toContain('INT-93');
+    expect(ctx.tracker.createIssue).toHaveBeenCalledTimes(1);
+    expect(ctx.governanceSuggestionRepository.findById('suggestion-cleanup')?.status).toBe('accepted');
+    expect(ctx.governanceSuggestionRepository.findById('suggestion-dismiss')?.status).toBe('dismissed');
+    expect(dismissed.accepted).toBe(true);
+    expect(dismissed.message).toContain('Dismissed');
+  });
+
+  it('executeGovernanceSuggestion does not synchronously dispatch the created governance issue', async () => {
+    const issue = makeIssue({
+      id: 'issue-governance-nonblocking',
+      identifier: 'INT-98',
+      state: 'Done',
+    });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: issue.state,
+      github_repo: 'owner/repo',
+      orchestrator_state: 'completed',
+    });
+    ctx.governanceSuggestionRepository.create({
+      id: 'suggestion-nonblocking',
+      work_item_id: issue.id,
+      issue_id: issue.id,
+      suggestion_type: 'cleanup',
+      title: '[GOVERNANCE] Clean up runtime duplication',
+      summary: 'Repeated review churn suggests a cleanup follow-up.',
+      detail_json: {
+        target_area: 'runtime',
+        recommended_issue_title: '[GOVERNANCE] Clean up runtime duplication',
+        recommended_issue_description: 'Source issue: INT-98\nRepo: owner/repo\nTarget area: runtime',
+      },
+    });
+
+    const createdGovernanceIssue = makeIssue({
+      id: 'issue-governance-created-nonblocking',
+      identifier: 'INT-99',
+      title: '[GOVERNANCE] Clean up runtime duplication',
+      description: 'Source issue: INT-98\nRepo: owner/repo\nTarget area: runtime',
+      state: 'Todo',
+    });
+    ctx.tracker.fetchIssueById = mock(async () => ({ issue, error: null }));
+    ctx.tracker.createIssue = mock(async () => ({ success: true, issue: createdGovernanceIssue }));
+    (orchestrator as any).tracker = ctx.tracker;
+    (orchestrator as any).running = true;
+    const dispatchIssue = mock(async () => {
+      throw new Error('executeGovernanceSuggestion should not await dispatchIssue');
+    });
+    (orchestrator as any).dispatchIssue = dispatchIssue;
+
+    const executed = await (orchestrator as any).executeGovernanceSuggestion(issue.id, 'suggestion-nonblocking');
+
+    expect(executed.accepted).toBe(true);
+    expect(executed.message).toContain('INT-99');
+    expect(dispatchIssue).not.toHaveBeenCalled();
+    expect(ctx.governanceSuggestionRepository.findById('suggestion-nonblocking')?.status).toBe('accepted');
+  });
+
+  it('executeGovernanceSuggestion creates a draft governance PR for constitution updates', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-governance-pr-'));
+    const remoteRepoPath = path.join(tempRoot, 'remote.git');
+    const seedRepoPath = path.join(tempRoot, 'seed');
+    fs.mkdirSync(seedRepoPath, { recursive: true });
+
+    runGit(['init', '--bare', remoteRepoPath], tempRoot);
+    runGit(['init', '-b', 'main'], seedRepoPath);
+    runGit(['config', 'user.name', 'Symphony Test'], seedRepoPath);
+    runGit(['config', 'user.email', 'symphony-test@example.com'], seedRepoPath);
+    fs.writeFileSync(
+      path.join(seedRepoPath, '.symphony-constitution.md'),
+      [
+        '## Main Path',
+        '- Keep the core runtime simple.',
+        '',
+        '## Preferred Directions',
+        '- Prefer one runtime control plane.',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    runGit(['add', '.'], seedRepoPath);
+    runGit(['commit', '-m', 'Initial constitution'], seedRepoPath);
+    runGit(['remote', 'add', 'origin', remoteRepoPath], seedRepoPath);
+    runGit(['push', '-u', 'origin', 'main'], seedRepoPath);
+    runGit(['symbolic-ref', 'HEAD', 'refs/heads/main'], remoteRepoPath);
+
+    const issue = makeIssue({
+      id: 'issue-governance-pr',
+      identifier: 'INT-94',
+      state: 'Done',
+      project_slug: 'proj',
+    });
+    const ctx = createOrchestrator(issue, {
+      workspaceRoot: path.join(tempRoot, 'workspaces'),
+      repositories: {
+        routing: {
+          proj: {
+            github_owner: 'owner',
+            github_repo: 'repo',
+            local_path: remoteRepoPath,
+          },
+        },
+      },
+    });
+    orchestrator = ctx.orchestrator;
+
+    ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: issue.state,
+      github_repo: 'owner/repo',
+      orchestrator_state: 'completed',
+    });
+    ctx.governanceSuggestionRepository.create({
+      id: 'suggestion-constitution',
+      work_item_id: issue.id,
+      issue_id: issue.id,
+      suggestion_type: 'constitution_update',
+      title: '[GOVERNANCE] Update repository constitution',
+      summary: 'Clarify the runtime control-plane rule.',
+      detail_json: {
+        section: 'Preferred Directions',
+        operation: 'append_bullet',
+        proposed_bullet: 'Clarify how runtime extensions should stay inside the shared control plane.',
+      },
+    });
+
+    const pullRequest = {
+      number: 18,
+      url: 'https://github.com/owner/repo/pull/18',
+      title: '[GOVERNANCE] Update repository constitution',
+      body: 'body',
+      state: 'open',
+      draft: true,
+      head_branch: 'governance/constitution-update/owner-repo',
+      head_sha: 'abc123',
+      base_branch: 'main',
+      mergeable: true,
+      mergeable_state: 'clean',
+      review_state: 'pending',
+      reviews: [],
+      review_comments: [],
+      review_threads: [],
+      combined_status: null,
+    };
+    (orchestrator as any).createGitHubWriteClient = () => ({
+      findOpenPullRequestByBranch: async () => null,
+      createPullRequest: async () => pullRequest,
+    });
+    ctx.tracker.fetchIssueById = mock(async () => ({ issue, error: null }));
+    (orchestrator as any).tracker = ctx.tracker;
+
+    const executed = await (orchestrator as any).executeGovernanceSuggestion(issue.id, 'suggestion-constitution');
+    const sourcePath = path.join(tempRoot, 'workspaces', 'owner__repo', 'source');
+    const constitutionContent = runGit(
+      ['show', 'governance/constitution-update/owner-repo:.symphony-constitution.md'],
+      sourcePath,
+    );
+
+    expect(executed.accepted).toBe(true);
+    expect(executed.message).toContain('#18');
+    expect(ctx.governanceSuggestionRepository.findById('suggestion-constitution')?.status).toBe('accepted');
+    expect(constitutionContent).toContain('Clarify how runtime extensions should stay inside the shared control plane.');
+    expect(runGit(['branch', '--list', 'governance/constitution-update/owner-repo'], sourcePath)).toContain(
+      'governance/constitution-update/owner-repo',
+    );
+  });
+
+  it('executeGovernanceSuggestion creates a draft governance PR for harness adoption', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-governance-harness-'));
+    const remoteRepoPath = path.join(tempRoot, 'remote.git');
+    const seedRepoPath = path.join(tempRoot, 'seed');
+    fs.mkdirSync(seedRepoPath, { recursive: true });
+
+    runGit(['init', '--bare', remoteRepoPath], tempRoot);
+    runGit(['init', '-b', 'main'], seedRepoPath);
+    runGit(['config', 'user.name', 'Symphony Test'], seedRepoPath);
+    runGit(['config', 'user.email', 'symphony-test@example.com'], seedRepoPath);
+    fs.writeFileSync(path.join(seedRepoPath, 'README.md'), '# Seed\n', 'utf8');
+    runGit(['add', '.'], seedRepoPath);
+    runGit(['commit', '-m', 'Initial repo'], seedRepoPath);
+    runGit(['remote', 'add', 'origin', remoteRepoPath], seedRepoPath);
+    runGit(['push', '-u', 'origin', 'main'], seedRepoPath);
+    runGit(['symbolic-ref', 'HEAD', 'refs/heads/main'], remoteRepoPath);
+
+    const issue = makeIssue({
+      id: 'issue-harness-pr',
+      identifier: 'INT-97',
+      state: 'Done',
+      project_slug: 'proj',
+    });
+    const ctx = createOrchestrator(issue, {
+      workspaceRoot: path.join(tempRoot, 'workspaces'),
+      repositories: {
+        routing: {
+          proj: {
+            github_owner: 'owner',
+            github_repo: 'repo',
+            local_path: remoteRepoPath,
+          },
+        },
+      },
+    });
+    orchestrator = ctx.orchestrator;
+
+    ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: issue.state,
+      github_repo: 'owner/repo',
+      orchestrator_state: 'completed',
+    });
+    ctx.governanceSuggestionRepository.create({
+      id: 'suggestion-harness',
+      work_item_id: issue.id,
+      issue_id: issue.id,
+      suggestion_type: 'harness_adoption',
+      title: '[GOVERNANCE] Adopt formal repo harness for owner/repo',
+      summary: 'Promote the shadow harness into the repository.',
+      detail_json: {
+        harness_payload: {
+          profiles: ['coding'],
+          commands: {
+            test: 'bun test',
+          },
+          verification: {
+            required_commands: ['bun test'],
+          },
+        },
+      },
+    });
+
+    const pullRequest = {
+      number: 19,
+      url: 'https://github.com/owner/repo/pull/19',
+      title: '[GOVERNANCE] Adopt formal repo harness for owner/repo',
+      body: 'body',
+      state: 'open',
+      draft: true,
+      head_branch: 'governance/harness-adoption/owner-repo',
+      head_sha: 'def456',
+      base_branch: 'main',
+      mergeable: true,
+      mergeable_state: 'clean',
+      review_state: 'pending',
+      reviews: [],
+      review_comments: [],
+      review_threads: [],
+      combined_status: null,
+    };
+    (orchestrator as any).createGitHubWriteClient = () => ({
+      findOpenPullRequestByBranch: async () => null,
+      createPullRequest: async () => pullRequest,
+    });
+    ctx.tracker.fetchIssueById = mock(async () => ({ issue, error: null }));
+    (orchestrator as any).tracker = ctx.tracker;
+
+    const executed = await (orchestrator as any).executeGovernanceSuggestion(issue.id, 'suggestion-harness');
+    const sourcePath = path.join(tempRoot, 'workspaces', 'owner__repo', 'source');
+    const harnessContent = runGit(
+      ['show', 'governance/harness-adoption/owner-repo:.symphony-repo.yaml'],
+      sourcePath,
+    );
+
+    expect(executed.accepted).toBe(true);
+    expect(executed.message).toContain('#19');
+    expect(ctx.governanceSuggestionRepository.findById('suggestion-harness')?.status).toBe('accepted');
+    expect(harnessContent).toContain('profiles:');
+    expect(harnessContent).toContain('required_commands:');
+  });
+
+  it('refreshes repo fitness signals and creates threshold-driven governance suggestions', async () => {
+    const issue = makeIssue({
+      id: 'issue-governance-fitness',
+      identifier: 'INT-95',
+      state: 'Done',
+    });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    for (let index = 0; index < 6; index += 1) {
+      ctx.workItemRepository.create({
+        id: `history-${index}`,
+        linear_issue_id: `history-issue-${index}`,
+        linear_identifier: `INT-H${index}`,
+        linear_title: `History ${index}`,
+        linear_state: 'Done',
+        github_repo: 'owner/repo',
+        touched_paths: index < 4 ? ['src/runtime/hub.ts'] : ['src/server/routes/runtime.ts'],
+        touched_areas: index < 4 ? ['runtime'] : ['server'],
+        orchestrator_state: 'completed',
+      });
+    }
+    ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: issue.state,
+      github_repo: 'owner/repo',
+      orchestrator_state: 'completed',
+      touched_paths: ['src/runtime/hub.ts'],
+      touched_areas: ['runtime'],
+    });
+    for (let round = 1; round <= 3; round += 1) {
+      ctx.reviewEventRepository.create({
+        id: `review-churn-${round}`,
+        work_item_id: issue.id,
+        pr_number: 50,
+        review_round: round,
+        decision: round === 3 ? 'REQUEST_TESTS' : 'REQUEST_CHANGES',
+        summary_md: `Round ${round}`,
+      });
+    }
+    new ConflictMemoryRepository(ctx.db).create({
+      id: 'conflict-runtime',
+      repo_key: 'owner/repo',
+      summary: 'Runtime path keeps churning.',
+      detail_json: {
+        kind: 'split_before_implement',
+        target_area: 'runtime',
+      },
+    });
+    ctx.governanceSuggestionRepository.create({
+      id: 'accepted-cleanup',
+      work_item_id: issue.id,
+      issue_id: issue.id,
+      suggestion_type: 'cleanup',
+      status: 'accepted',
+      title: '[GOVERNANCE] Clean up runtime',
+      summary: 'Already accepted for this repo target.',
+      detail_json: {
+        target_area: 'runtime',
+        normalized_target: 'runtime',
+      },
+    });
+
+    const signals = await (orchestrator as any).refreshRepoGovernanceIntelligence(issue, issue.id, 'owner/repo');
+    const updated = ctx.workItemRepository.findById(issue.id);
+    const suggestions = ctx.governanceSuggestionRepository.findPendingByIssueId(issue.id);
+
+    expect(signals.map((signal: any) => signal.code)).toEqual(expect.arrayContaining([
+      'hotspot_concentration',
+      'repeated_review_churn',
+    ]));
+    expect(updated?.fitness_signals.map((signal) => signal.code)).toEqual(expect.arrayContaining([
+      'hotspot_concentration',
+      'repeated_review_churn',
+    ]));
+    expect(suggestions.map((suggestion) => suggestion.suggestion_type)).not.toContain('cleanup');
   });
 
   it('retryIssue queues an idle active issue when no execution slots are available', async () => {

@@ -13,7 +13,9 @@ export type BotCommandName =
   | 'retry'
   | 'override'
   | 'rewrite'
-  | 'split';
+  | 'split'
+  | 'execute_governance_suggestion'
+  | 'dismiss_governance_suggestion';
 
 export interface BotIdentity {
   user_id: string | null;
@@ -35,6 +37,7 @@ export interface BotCommandContext {
 export interface BotCommandRequest {
   command: BotCommandName;
   issue_id?: string | null;
+  suggestion_id?: string | null;
   project_slug?: string | null;
   watch_preset?: BotWatchPreset | null;
   create_issue?: CreateIssueRequest | null;
@@ -107,6 +110,8 @@ export type BotAssistantIntentKind =
   | 'override'
   | 'rewrite'
   | 'split'
+  | 'execute_governance_suggestion'
+  | 'dismiss_governance_suggestion'
   | 'set_default_project'
   | 'show_default_project'
   | 'help'
@@ -125,6 +130,13 @@ export type BotAssistantIntent =
     issue_id: string | null;
     watch_preset?: BotWatchPreset | null;
   }
+  | {
+      kind: 'execute_governance_suggestion' | 'dismiss_governance_suggestion';
+      issue_id: string | null;
+      suggestion_id: string | null;
+      suggestion_type: string | null;
+      ordinal: number | null;
+    }
   | {
       kind: 'set_default_project';
       project_slug: string | null;
@@ -182,6 +194,18 @@ export interface BotIssueContextView {
   active_pr_number: number | null;
   session_stage: string | null;
   session_message: string | null;
+  architectural_target: string | null;
+  path_families: string[];
+  boundary_edges: string[];
+  import_edges: string[];
+  fitness_signals: string[];
+  repo_harness_status: {
+    status: string;
+    learning_confidence: string | null;
+    learned_command_count: number;
+    learned_artifact_count: number;
+    learned_runtime_hint_count: number;
+  } | null;
 }
 
 export interface BotFocusedIssueContext {
@@ -197,9 +221,13 @@ export interface BotFocusedIssueContext {
     decision: string | null;
     summary: string | null;
     suggestions: Array<{
+      id: string;
       suggestion_type: string;
+      status: string;
       title: string;
       summary: string;
+      can_execute: boolean;
+      can_dismiss: boolean;
     }>;
   } | null;
   recent_timeline: Array<{

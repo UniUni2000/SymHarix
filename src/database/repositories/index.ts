@@ -14,3 +14,6 @@ export { BotPendingActionRepository } from './botPendingActionRepository';
 export { ShadowHarnessRepository } from './shadowHarnessRepository';
 export { GovernanceAssessmentRepository } from './governanceAssessmentRepository';
 export { GovernanceSuggestionRepository } from './governanceSuggestionRepository';
+export { DecisionMemoryRepository } from './decisionMemoryRepository';
+export { ConflictMemoryRepository } from './conflictMemoryRepository';
+export { DebtSignalRepository } from './debtSignalRepository';

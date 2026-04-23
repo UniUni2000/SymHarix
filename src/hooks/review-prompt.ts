@@ -52,7 +52,8 @@ export function buildReviewPrompt(
   issue: Issue,
   devLog?: string,
   previousReviews?: ReviewReport[],
-  githubContext?: string
+  githubContext?: string,
+  harnessGuidance?: string,
 ): string {
   const historySection = previousReviews && previousReviews.length > 0
     ? previousReviews.map(r =>
@@ -68,6 +69,7 @@ export function buildReviewPrompt(
 - **Labels**: ${issue.labels.join(', ') || '(none)'}
 
 ${githubContext || ''}
+${harnessGuidance ? `\n${harnessGuidance}` : ''}
 
 ## Your Responsibilities
 1. **First: Read \`.symphony/HANDOVER.md\`** — This is DEV's summary of what was done

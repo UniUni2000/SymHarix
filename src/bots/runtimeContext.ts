@@ -28,6 +28,20 @@ function toIssueContextView(issue: RuntimeIssueView): BotIssueContextView {
     active_pr_number: issue.active_pr_number,
     session_stage: issue.session?.stage ?? null,
     session_message: issue.session?.last_message ?? null,
+    architectural_target: issue.architectural_target ?? null,
+    path_families: issue.path_families ?? [],
+    boundary_edges: issue.boundary_edges ?? [],
+    import_edges: issue.import_edges ?? [],
+    fitness_signals: (issue.fitness_signals ?? []).map((signal) => signal.code),
+    repo_harness_status: issue.repo_harness_status
+      ? {
+          status: issue.repo_harness_status.status,
+          learning_confidence: issue.repo_harness_status.learning_confidence ?? null,
+          learned_command_count: issue.repo_harness_status.learned_command_count ?? 0,
+          learned_artifact_count: issue.repo_harness_status.learned_artifact_count ?? 0,
+          learned_runtime_hint_count: issue.repo_harness_status.learned_runtime_hint_count ?? 0,
+        }
+      : null,
   };
 }
 
@@ -48,6 +62,17 @@ function resolveFocusIssue(
   const runningIssues = overviewIssues.filter((issue) => issue.actions.can_stop);
   if (runningIssues.length === 1) {
     return runningIssues[0] ?? null;
+  }
+
+  const activeIssues = overviewIssues.filter((issue) =>
+    issue.actions.can_stop ||
+    issue.actions.can_retry ||
+    issue.actions.can_override_governance ||
+    issue.actions.can_rewrite_governance ||
+    issue.actions.can_split_governance,
+  );
+  if (activeIssues.length === 1) {
+    return activeIssues[0] ?? null;
   }
 
   return null;
@@ -94,9 +119,13 @@ export class BotRuntimeContextService {
             decision: focusIssue.governance_decision ?? null,
             summary: focusIssue.governance_summary ?? null,
             suggestions: (focusIssue.active_governance_suggestions ?? []).map((suggestion) => ({
+              id: suggestion.id,
               suggestion_type: suggestion.suggestion_type,
+              status: suggestion.status,
               title: suggestion.title,
               summary: suggestion.summary,
+              can_execute: Boolean(suggestion.can_execute),
+              can_dismiss: Boolean(suggestion.can_dismiss),
             })),
           },
           recent_timeline: recentTimeline.map((event) => ({

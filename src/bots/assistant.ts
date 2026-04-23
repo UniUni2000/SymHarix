@@ -22,6 +22,13 @@ import { createBotAssistantModelFromEnv, type BotAssistantModel } from './model'
 const CONFIRM_WORDS = new Set(['确认', 'yes', 'y', 'ok', 'okay', '好', '执行', '继续', 'confirm']);
 const CANCEL_WORDS = new Set(['取消', 'cancel', 'no', 'n', '停止']);
 const TRANSPARENT_FALLBACK_NOTICE = '当前自然语言模型暂不可用，已切换到简化理解模式。';
+const SUGGESTION_TYPE_ALIASES: Record<string, string[]> = {
+  cleanup: ['cleanup', '清理'],
+  consolidation: ['consolidation', '整合', '收口'],
+  architecture_alignment: ['architecture alignment', 'alignment', '架构对齐', 'realign'],
+  constitution_update: ['constitution update', 'constitution_update', '宪法更新', 'constitution'],
+  harness_adoption: ['harness adoption', 'harness_adoption', 'repo harness', 'harness'],
+};
 
 function normalizeText(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
@@ -124,6 +131,27 @@ function coerceIntent(value: Record<string, unknown> | null): BotAssistantIntent
             ? intent.project_slug.trim()
             : null,
       };
+    case 'execute_governance_suggestion':
+    case 'dismiss_governance_suggestion':
+      return {
+        kind,
+        issue_id:
+          typeof intent.issue_id === 'string' && intent.issue_id.trim()
+            ? intent.issue_id.trim()
+            : null,
+        suggestion_id:
+          typeof intent.suggestion_id === 'string' && intent.suggestion_id.trim()
+            ? intent.suggestion_id.trim()
+            : null,
+        suggestion_type:
+          typeof intent.suggestion_type === 'string' && intent.suggestion_type.trim()
+            ? intent.suggestion_type.trim()
+            : null,
+        ordinal:
+          typeof intent.ordinal === 'number' && Number.isFinite(intent.ordinal)
+            ? Math.max(1, Math.trunc(intent.ordinal))
+            : null,
+      };
     case 'show_default_project':
     case 'help':
       return { kind };
@@ -207,6 +235,18 @@ function toPendingRequest(intent: BotAssistantIntent): BotCommandRequest | null 
         command: 'project',
         project_slug: intent.project_slug || 'clear',
       };
+    case 'execute_governance_suggestion':
+      return {
+        command: 'execute_governance_suggestion',
+        issue_id: intent.issue_id,
+        suggestion_id: intent.suggestion_id,
+      };
+    case 'dismiss_governance_suggestion':
+      return {
+        command: 'dismiss_governance_suggestion',
+        issue_id: intent.issue_id,
+        suggestion_id: intent.suggestion_id,
+      };
     default:
       return null;
   }
@@ -265,8 +305,18 @@ function summarizeIssueActivity(focusIssue: BotFocusedIssueContext): string {
     `${focusIssue.issue.identifier} · ${focusIssue.issue.title}`,
     [focusIssue.issue.phase, focusIssue.issue.tracker_state, focusIssue.issue.orchestrator_state || 'unknown'].join(' · '),
     focusIssue.issue.github_repo ? `仓库：${focusIssue.issue.github_repo}` : null,
+    focusIssue.issue.architectural_target ? `架构目标：${focusIssue.issue.architectural_target}` : null,
+    focusIssue.issue.boundary_edges.length > 0 ? `边界：${focusIssue.issue.boundary_edges.join(' · ')}` : null,
+    focusIssue.issue.import_edges.length > 0 ? `依赖边：${focusIssue.issue.import_edges.join(' · ')}` : null,
+    focusIssue.issue.repo_harness_status
+      ? `Harness：${focusIssue.issue.repo_harness_status.status}${focusIssue.issue.repo_harness_status.learning_confidence ? ` · learning=${focusIssue.issue.repo_harness_status.learning_confidence}` : ''} · commands=${focusIssue.issue.repo_harness_status.learned_command_count} · artifacts=${focusIssue.issue.repo_harness_status.learned_artifact_count} · hints=${focusIssue.issue.repo_harness_status.learned_runtime_hint_count}`
+      : null,
+    focusIssue.issue.fitness_signals.length > 0 ? `Fitness signals：${focusIssue.issue.fitness_signals.join(', ')}` : null,
     focusIssue.issue.session_stage
       ? `当前阶段：${focusIssue.issue.session_stage}${focusIssue.issue.session_message ? ` · ${focusIssue.issue.session_message}` : ''}`
+      : null,
+    focusIssue.governance?.suggestions?.length
+      ? `治理建议：${focusIssue.governance.suggestions.map((suggestion, index) => `[${index + 1}] ${suggestion.suggestion_type} (${suggestion.id})`).join(' · ')}`
       : null,
     latestTimeline ? `最近事件：${latestTimeline.message}` : null,
     focusIssue.digest?.detail || null,
@@ -292,6 +342,8 @@ function explainBlockedIssue(focusIssue: BotFocusedIssueContext): string {
   return [
     `${focusIssue.issue.identifier} 当前看起来卡在 ${focusIssue.issue.orchestrator_state || focusIssue.issue.tracker_state}。`,
     focusIssue.issue.github_repo ? `仓库：${focusIssue.issue.github_repo}` : null,
+    focusIssue.issue.architectural_target ? `当前命中的架构目标：${focusIssue.issue.architectural_target}` : null,
+    focusIssue.issue.fitness_signals.length > 0 ? `相关 repo signals：${focusIssue.issue.fitness_signals.join(', ')}` : null,
     `原因：${reason}`,
     governanceSuggestion,
   ].filter(Boolean).join('\n');
@@ -311,7 +363,43 @@ function explainGovernanceNextStep(focusIssue: BotFocusedIssueContext): string {
     governance.summary ? `原因：${governance.summary}` : null,
     governance.suggestions[0] ? `建议：${governance.suggestions[0].summary}` : null,
     governance.suggestions[1] ? `备选：${governance.suggestions[1].summary}` : null,
+    governance.suggestions.length > 0
+      ? `可引用建议：${governance.suggestions.map((suggestion, index) => `[${index + 1}] ${suggestion.suggestion_type} (${suggestion.id})`).join(' · ')}`
+      : null,
   ].filter(Boolean).join('\n');
+}
+
+function extractOrdinal(text: string): number | null {
+  const normalized = text.toLowerCase();
+  if (/\bfirst\b|1st|第一个|第一条|第1个|第1条/.test(normalized)) {
+    return 1;
+  }
+  if (/\bsecond\b|2nd|第二个|第二条|第2个|第2条/.test(normalized)) {
+    return 2;
+  }
+
+  const match = normalized.match(/第\s*(\d+)\s*(个|条)?/);
+  if (!match?.[1]) {
+    return null;
+  }
+  const value = Number.parseInt(match[1], 10);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function detectSuggestionType(text: string): string | null {
+  const normalized = text.toLowerCase();
+  for (const [type, aliases] of Object.entries(SUGGESTION_TYPE_ALIASES)) {
+    if (aliases.some((alias) => normalized.includes(alias.toLowerCase()))) {
+      return type;
+    }
+  }
+  return null;
+}
+
+function formatGovernanceSuggestionChoices(focusIssue: BotFocusedIssueContext): string {
+  return focusIssue.governance?.suggestions.map((suggestion, index) => (
+    `[${index + 1}] ${suggestion.suggestion_type} · ${suggestion.title} · id ${suggestion.id}`
+  )).join('\n') ?? '';
 }
 
 function buildHeuristicDecision(
@@ -432,6 +520,31 @@ function buildHeuristicDecision(
     };
   }
 
+  const governanceActionWords = /治理建议|suggestion|cleanup|consolidation|constitution|harness|architecture/i.test(trimmed);
+  if (governanceActionWords && /忽略|dismiss|skip|ignore/i.test(trimmed)) {
+    return {
+      intent: {
+        kind: 'dismiss_governance_suggestion',
+        issue_id: issueId || focusIssue?.issue.identifier || null,
+        suggestion_id: focusIssue?.governance?.suggestions.find((suggestion) => trimmed.includes(suggestion.id.toLowerCase()))?.id ?? null,
+        suggestion_type: detectSuggestionType(trimmed),
+        ordinal: extractOrdinal(trimmed),
+      },
+    };
+  }
+
+  if (governanceActionWords && /执行|接受掉|接受|采纳|apply|execute|run/i.test(trimmed)) {
+    return {
+      intent: {
+        kind: 'execute_governance_suggestion',
+        issue_id: issueId || focusIssue?.issue.identifier || null,
+        suggestion_id: focusIssue?.governance?.suggestions.find((suggestion) => trimmed.includes(suggestion.id.toLowerCase()))?.id ?? null,
+        suggestion_type: detectSuggestionType(trimmed),
+        ordinal: extractOrdinal(trimmed),
+      },
+    };
+  }
+
   if (issueId && /现在怎么样|状态|status|进度|哪个仓库|分配到哪个仓库/i.test(trimmed)) {
     if (/哪个仓库|分配到哪个仓库/i.test(trimmed) && focusIssue) {
       return {
@@ -503,8 +616,71 @@ function buildScopedHelp(context: BotRuntimeCopilotContext, originalText: string
     availableProjects.length > 0 ? `可用项目：${availableProjects.join(', ')}` : null,
     context.overview.active_issues.length > 0 ? `当前活跃 issue 数：${context.overview.active_issues.length}` : null,
     `未识别请求：${compact(normalizeText(originalText), 160)}`,
-    '你可以直接说“INT-31 现在怎么样了”、“仓库 test2 建一个 issue”，或者用 /project /status /new 这些命令。',
+    '你可以直接说“INT-31 现在怎么样了”、“仓库 test2 建一个 issue”、“执行第一个治理建议”，或者用 /project /status /new 这些命令。',
   ].filter(Boolean).join('\n');
+}
+
+function resolveGovernanceSuggestionIssue(
+  runtime: RuntimeControlPlane,
+  runtimeContext: BotRuntimeCopilotContext,
+  requestedIssueId: string | null,
+): ReturnType<RuntimeControlPlane['getIssue']> {
+  if (requestedIssueId) {
+    return runtime.getIssue(requestedIssueId);
+  }
+
+  if (runtimeContext.focus_issue) {
+    return runtime.getIssue(runtimeContext.focus_issue.issue.issue_id);
+  }
+
+  if (runtimeContext.overview.active_issues.length === 1) {
+    return runtime.getIssue(runtimeContext.overview.active_issues[0]!.issue_id);
+  }
+
+  return null;
+}
+
+function resolveGovernanceSuggestionSelection(params: {
+  intent: Extract<BotAssistantIntent, { kind: 'execute_governance_suggestion' | 'dismiss_governance_suggestion' }>;
+  issue: NonNullable<ReturnType<RuntimeControlPlane['getIssue']>>;
+}): {
+  suggestion: NonNullable<NonNullable<ReturnType<RuntimeControlPlane['getIssue']>>['active_governance_suggestions']>[number] | null;
+  error: string | null;
+} {
+  const suggestions = params.issue.active_governance_suggestions ?? [];
+  if (suggestions.length === 0) {
+    return {
+      suggestion: null,
+      error: `${params.issue.identifier} 当前没有可操作的治理建议。`,
+    };
+  }
+
+  if (params.intent.suggestion_id) {
+    const suggestion = suggestions.find((item) => item.id === params.intent.suggestion_id) ?? null;
+    return suggestion
+      ? { suggestion, error: null }
+      : { suggestion: null, error: `没有找到 suggestion id=${params.intent.suggestion_id}。` };
+  }
+
+  if (params.intent.suggestion_type) {
+    const normalizedType = params.intent.suggestion_type.toLowerCase();
+    const suggestion = suggestions.find((item) => item.suggestion_type.toLowerCase() === normalizedType) ?? null;
+    return suggestion
+      ? { suggestion, error: null }
+      : { suggestion: null, error: `没有找到 type=${params.intent.suggestion_type} 的治理建议。` };
+  }
+
+  if (params.intent.ordinal) {
+    const suggestion = suggestions[params.intent.ordinal - 1] ?? null;
+    return suggestion
+      ? { suggestion, error: null }
+      : { suggestion: null, error: `没有第 ${params.intent.ordinal} 个治理建议。` };
+  }
+
+  return {
+    suggestion: null,
+    error: `请明确指定要操作的治理建议：\n${suggestions.map((item, index) => `[${index + 1}] ${item.suggestion_type} · ${item.title} · id ${item.id}`).join('\n')}`,
+  };
 }
 
 export class BotAssistantService {
@@ -689,6 +865,70 @@ export class BotAssistantService {
         return this.commandService.execute(context, {
           command: 'project',
         });
+      case 'execute_governance_suggestion':
+      case 'dismiss_governance_suggestion': {
+        if (!this.canWrite(context)) {
+          return {
+            message: `${context.transport} is configured as read-only for this user. Allowed actions here are status and help.`,
+          };
+        }
+
+        const issue = resolveGovernanceSuggestionIssue(this.runtime, runtimeContext, intent.issue_id);
+        if (!issue) {
+          return {
+            message: '我还不能确定你要操作哪一张 issue。请显式说出 issue id，或者先让我聚焦到唯一活跃 issue。',
+          };
+        }
+
+        const { suggestion, error } = resolveGovernanceSuggestionSelection({ intent, issue });
+        if (!suggestion) {
+          return {
+            message: error ?? `请明确指定要操作的治理建议：\n${formatGovernanceSuggestionChoices(runtimeContext.focus_issue!)}`,
+          };
+        }
+
+        const request = toPendingRequest({
+          ...intent,
+          issue_id: issue.issue_id,
+          suggestion_id: suggestion.id,
+          suggestion_type: suggestion.suggestion_type,
+          ordinal: null,
+        });
+        if (!request) {
+          return {
+            message: 'I could not understand that governance suggestion action.',
+          };
+        }
+
+        const summary = [
+          `Action: ${intent.kind === 'execute_governance_suggestion' ? 'execute governance suggestion' : 'dismiss governance suggestion'}`,
+          `Issue: ${issue.identifier}`,
+          issue.github_repo ? `Repo: ${issue.github_repo}` : null,
+          `Suggestion: [${(issue.active_governance_suggestions ?? []).findIndex((item) => item.id === suggestion.id) + 1}] ${suggestion.suggestion_type}`,
+          `Suggestion id: ${suggestion.id}`,
+          `Title: ${suggestion.title}`,
+          `Summary: ${compact(suggestion.summary, 160)}`,
+          'Reply with: 确认 / 取消',
+        ].filter(Boolean).join('\n');
+
+        if (!this.pendingActions) {
+          return this.commandService.execute(context, request);
+        }
+
+        this.pendingActions.upsert({
+          transport: context.transport,
+          conversation_id: context.recipient.conversation_id,
+          user_id: context.identity.user_id,
+          intent_kind: intent.kind,
+          normalized_payload: request,
+          summary_message: summary,
+          expires_at: new Date(Date.now() + 15 * 60 * 1000),
+        });
+
+        return {
+          message: summary,
+        };
+      }
       case 'help':
         return {
           message: buildScopedHelp(runtimeContext, originalText),

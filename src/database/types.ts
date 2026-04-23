@@ -5,6 +5,7 @@ import type {
   ConstitutionHit,
   ConstitutionStatus,
   EvidenceSummary,
+  ShadowHarnessInferenceDetails,
   GovernanceDecision,
   GovernanceStatus,
   RepositoryHarnessConfig,
@@ -55,6 +56,8 @@ export type BotPendingIntentKind =
   | 'override'
   | 'rewrite'
   | 'split'
+  | 'execute_governance_suggestion'
+  | 'dismiss_governance_suggestion'
   | 'set_default_project';
 export type GovernanceSuggestionType =
   | 'cleanup'
@@ -112,6 +115,12 @@ export interface WorkItem {
   evidence_summary: EvidenceSummary | null;
   missing_requirements: CompletionRequirement[];
   constitution_hits: ConstitutionHit[];
+  touched_paths: string[];
+  touched_areas: string[];
+  path_families: string[];
+  boundary_edges: string[];
+  import_edges: string[];
+  architectural_target: string | null;
   fitness_signals: Array<{ code: string; summary: string; severity: 'low' | 'medium' | 'high' }>;
   cancelled_at: Date | null;
   merged_at: Date | null;
@@ -148,6 +157,12 @@ export interface CreateWorkItem {
   evidence_summary?: EvidenceSummary | null;
   missing_requirements?: CompletionRequirement[];
   constitution_hits?: ConstitutionHit[];
+  touched_paths?: string[];
+  touched_areas?: string[];
+  path_families?: string[];
+  boundary_edges?: string[];
+  import_edges?: string[];
+  architectural_target?: string | null;
   fitness_signals?: Array<{ code: string; summary: string; severity: 'low' | 'medium' | 'high' }>;
   cancelled_at?: Date | null;
   merged_at?: Date | null;
@@ -348,7 +363,7 @@ export interface ShadowHarnessRecord {
   repo_key: string;
   source: RepositoryHarnessStatus;
   config_json: RepositoryHarnessConfig;
-  inference_details_json: Record<string, unknown>;
+  inference_details_json: ShadowHarnessInferenceDetails;
   successful_runs: number;
   failed_runs: number;
   adoption_suggested_at: Date | null;
@@ -360,7 +375,7 @@ export interface UpsertShadowHarnessRecord {
   repo_key: string;
   source: RepositoryHarnessStatus;
   config_json: RepositoryHarnessConfig;
-  inference_details_json?: Record<string, unknown>;
+  inference_details_json?: ShadowHarnessInferenceDetails;
   successful_runs?: number;
   failed_runs?: number;
   adoption_suggested_at?: Date | null;
@@ -412,4 +427,58 @@ export interface CreateGovernanceSuggestionRecord {
   title: string;
   summary: string;
   detail_json?: Record<string, unknown> | null;
+}
+
+export interface DecisionMemoryRecord {
+  id: string;
+  repo_key: string;
+  summary: string;
+  detail_json: Record<string, unknown> | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface CreateDecisionMemoryRecord {
+  id: string;
+  repo_key: string;
+  summary: string;
+  detail_json?: Record<string, unknown> | null;
+  created_at?: Date;
+}
+
+export interface ConflictMemoryRecord {
+  id: string;
+  repo_key: string;
+  summary: string;
+  detail_json: Record<string, unknown> | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface CreateConflictMemoryRecord {
+  id: string;
+  repo_key: string;
+  summary: string;
+  detail_json?: Record<string, unknown> | null;
+  created_at?: Date;
+}
+
+export interface DebtSignalRecord {
+  id: string;
+  repo_key: string;
+  signal_code: string;
+  summary: string;
+  severity: 'low' | 'medium' | 'high';
+  detail_json: Record<string, unknown> | null;
+  created_at: Date;
+}
+
+export interface CreateDebtSignalRecord {
+  id: string;
+  repo_key: string;
+  signal_code: string;
+  summary: string;
+  severity: 'low' | 'medium' | 'high';
+  detail_json?: Record<string, unknown> | null;
+  created_at?: Date;
 }
