@@ -27,9 +27,6 @@ const DEFAULTS: Partial<ServiceConfig> = {
   // Hooks
   hooks: {
     after_create: null,
-    before_run: null,
-    after_run: null,
-    before_remove: null,
     timeout_ms: 60000
   },
 
@@ -267,15 +264,8 @@ export function buildServiceConfig(workflow: WorkflowDefinition): ServiceConfig 
   const hooksTimeout = parseNumber(hooksConfig.timeout_ms, DEFAULTS.hooks!.timeout_ms);
   const hooks = {
     after_create: (hooksConfig.after_create as string) || null,
-    before_run: (hooksConfig.before_run as string) || null,
-    after_run: (hooksConfig.after_run as string) || null,
-    before_remove: (hooksConfig.before_remove as string) || null,
     timeout_ms: hooksTimeout > 0 ? hooksTimeout : DEFAULTS.hooks!.timeout_ms
   };
-
-  if (hooks.before_run || hooks.after_run) {
-    console.warn('[config] hooks.before_run and hooks.after_run are deprecated and ignored by the orchestrator');
-  }
 
   // Agent config
   const agent = (config.agent as Record<string, unknown>) || {};

@@ -165,6 +165,32 @@ describe('Config Layer', () => {
       });
     });
 
+    it('should only preserve supported workspace hooks and ignore legacy hook keys', () => {
+      const workflow = {
+        config: {
+          tracker: {
+            kind: 'linear',
+            api_key: 'test',
+            project_slug: 'TEST'
+          },
+          hooks: {
+            timeout_ms: 120000,
+            after_create: './scripts/hooks/after_create.sh',
+            before_run: './scripts/hooks/before_run.py',
+            after_run: './scripts/hooks/after_run.py',
+            before_remove: './scripts/hooks/before_remove.py',
+          },
+        },
+        prompt_template: 'test'
+      };
+
+      const config = buildServiceConfig(workflow);
+      expect(config.hooks).toEqual({
+        after_create: './scripts/hooks/after_create.sh',
+        timeout_ms: 120000,
+      });
+    });
+
     it('should fail fast when verification.lifecycle scenario is missing title or description', () => {
       const workflow = {
         config: {
