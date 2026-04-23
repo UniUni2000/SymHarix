@@ -328,9 +328,6 @@ export interface ServiceConfig {
   // Hooks
   hooks: {
     after_create: string | null;
-    before_run: string | null;
-    after_run: string | null;
-    before_remove: string | null;
     timeout_ms: number;
   };
 

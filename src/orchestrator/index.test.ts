@@ -42,9 +42,6 @@ function makeConfig(): ServiceConfig {
     },
     hooks: {
       after_create: null,
-      before_run: null,
-      after_run: null,
-      before_remove: null,
       timeout_ms: 1000,
     },
     maxConcurrentAgents: 2,
