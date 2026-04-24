@@ -2,12 +2,55 @@ import { describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { BotCommandService, parseTextCommand } from './commandService';
 import { BotSubscriptionService } from './subscriptions';
-import { BotConversationPreferenceRepository, initializeSchema } from '../database';
-import type { RuntimeControlPlane, RuntimeStreamEvent } from '../runtime/types';
-import type { BotRecipient, BotTransportNotifier } from './types';
+import {
+  BotConversationPreferenceRepository,
+  BotIssueFollowupRepository,
+  initializeSchema,
+} from '../database';
+import type { RuntimeControlPlane, RuntimeIssueView, RuntimeStreamEvent } from '../runtime/types';
+import type { BotRecipient, BotTransportMessage, BotTransportNotifier } from './types';
 
 function createRuntimeControlPlane(): RuntimeControlPlane & { emit: (event: RuntimeStreamEvent) => void } {
   const listeners = new Set<(event: RuntimeStreamEvent) => void>();
+  const createdIssue: RuntimeIssueView = {
+    issue_id: 'issue-2',
+    work_item_id: 'issue-2',
+    identifier: 'INT-2',
+    title: 'Created by bot',
+    phase: 'DEV',
+    tracker_state: 'Todo',
+    orchestrator_state: 'halted',
+    workspace_path: null,
+    branch_name: null,
+    github_repo: 'acme/repo',
+    github_issue_number: 11,
+    active_pr_number: null,
+    session: null,
+    governance_status: 'advisory',
+    governance_decision: 'split_before_implement',
+    governance_summary: 'Split this issue before dispatch.',
+    active_governance_suggestions: [
+      {
+        id: 'suggestion-1',
+        suggestion_type: 'cleanup',
+        status: 'pending',
+        title: 'Create a cleanup issue',
+        summary: 'Split the runtime and bot cleanup into a dedicated governance issue.',
+        can_execute: true,
+        can_dismiss: true,
+      },
+    ],
+    actions: {
+      can_stop: false,
+      can_retry: false,
+      can_override_governance: true,
+      can_rewrite_governance: false,
+      can_split_governance: true,
+      can_open_pr: false,
+    },
+    created_at: '2026-01-01T00:02:00.000Z',
+    updated_at: '2026-01-01T00:02:00.000Z',
+  };
   const runtime: RuntimeControlPlane & { emit: (event: RuntimeStreamEvent) => void } = {
     getOverview: () => ({
       generated_at: '2026-01-01T00:00:00.000Z',
@@ -76,7 +119,11 @@ function createRuntimeControlPlane(): RuntimeControlPlane & { emit: (event: Runt
       ],
     }),
     getIssue: (id: string) =>
-      ['issue-1', 'INT-1'].includes(id) ? runtime.getOverview().issues[0] ?? null : null,
+      ['issue-1', 'INT-1'].includes(id)
+        ? runtime.getOverview().issues[0] ?? null
+        : ['issue-2', 'INT-2'].includes(id)
+          ? createdIssue
+          : null,
     getTimeline: () => [
       {
         id: 'event-1',
@@ -122,7 +169,7 @@ function createRuntimeControlPlane(): RuntimeControlPlane & { emit: (event: Runt
       message: `Created ${input.title}`,
       issue_id: 'issue-2',
       issue_identifier: 'INT-2',
-      issue: null,
+      issue: createdIssue,
     }),
     stopIssue: async (id: string) => ({
       accepted: true,
@@ -174,10 +221,20 @@ function createRuntimeControlPlane(): RuntimeControlPlane & { emit: (event: Runt
 }
 
 class MemoryNotifier implements BotTransportNotifier {
-  public readonly messages: Array<{ recipient: BotRecipient; message: string }> = [];
+  public readonly messages: Array<{ recipient: BotRecipient; message: BotTransportMessage }> = [];
 
-  async sendMessage(recipient: BotRecipient, message: string): Promise<void> {
+  async sendMessage(recipient: BotRecipient, message: BotTransportMessage) {
     this.messages.push({ recipient, message });
+    return {
+      provider_message_id: `msg-${this.messages.length}`,
+    };
+  }
+
+  async editMessage(recipient: BotRecipient, _messageRef: { provider_message_id: string }, message: BotTransportMessage) {
+    this.messages.push({ recipient, message });
+    return {
+      provider_message_id: `msg-${this.messages.length}`,
+    };
   }
 }
 
@@ -282,7 +339,7 @@ describe('BotCommandService', () => {
     expect(setProject.message).toContain('Default project set to test2');
 
     const created = await service.executeText(context, '/new Build dashboard\nTrack progress');
-    expect(created.message).toContain('Created');
+    expect(created.message).toBe('已收到，已创建 INT-2 · Created by bot');
 
     const watched = await service.executeText(context, '/watch INT-1');
     expect(watched.watch_registered).toBe(true);
@@ -307,7 +364,7 @@ describe('BotCommandService', () => {
       },
     });
     expect(notifier.messages).toHaveLength(1);
-    expect(notifier.messages[0]?.message).toContain('Write completed');
+    expect(notifier.messages[0]?.message.text).toContain('Write completed');
 
     const stop = await service.executeText(context, '/stop INT-1');
     expect(stop.message).toBe('Stopping INT-1');
@@ -355,6 +412,57 @@ describe('BotCommandService', () => {
     expect(response.message).toContain('discord watch notifications are not configured');
 
     subscriptions.dispose();
+  });
+
+  test('registers an origin follow-up and returns an ACK-only response when Telegram creates an issue', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const followups = new BotIssueFollowupRepository(db);
+    preferences.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-42',
+      default_project_slug: 'test2',
+    });
+
+    const service = new BotCommandService(
+      runtime,
+      subscriptions,
+      () => true,
+      preferences,
+      null,
+      followups,
+    );
+
+    const response = await service.execute(
+      {
+        transport: 'telegram',
+        recipient: {
+          transport: 'telegram',
+          conversation_id: 'chat-42',
+        },
+        identity: {
+          user_id: 'user-1',
+          display_name: 'Alice',
+        },
+      },
+      {
+        command: 'new',
+        create_issue: {
+          title: 'Need a split-first issue',
+        },
+      },
+    );
+
+    expect(response.issue_id).toBe('issue-2');
+    expect(response.message).toBe('已收到，已创建 INT-2 · Created by bot');
+    expect(followups.findByIssueId('issue-2')).toHaveLength(1);
+    expect(followups.findByIssueId('issue-2')[0]?.conversation_id).toBe('chat-42');
+
+    subscriptions.dispose();
+    db.close();
   });
 
   test('denies write commands for read-only bot users', async () => {

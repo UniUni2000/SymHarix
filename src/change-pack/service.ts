@@ -245,6 +245,14 @@ function asHintValue(value: string | string[] | undefined, key: RuntimeHintKey):
   return key === 'url' || key === 'ready_signal' ? null : null;
 }
 
+function normalizeArtifactObservationPath(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function normalizeRuntimeObservationValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
 function inferCommandKey(
   command: string,
   harness?: RepositoryHarnessConfig | null,
@@ -324,7 +332,10 @@ function dedupeArtifactObservations(
   const deduped: ChangePackArtifactObservation[] = [];
   const seen = new Set<string>();
   for (const observation of observations) {
-    const normalizedPath = observation.path.trim();
+    const normalizedPath = normalizeArtifactObservationPath(observation.path);
+    if (!normalizedPath) {
+      continue;
+    }
     const key = [
       normalizedPath,
       observation.kind,
@@ -351,10 +362,14 @@ function dedupeRuntimeObservations(
   const deduped: ChangePackRuntimeObservation[] = [];
   const seen = new Set<string>();
   for (const observation of observations) {
+    const normalizedValue = normalizeRuntimeObservationValue(observation.value);
+    if (!normalizedValue) {
+      continue;
+    }
     const key = [
       observation.hint_key,
       observation.status,
-      observation.value.trim(),
+      normalizedValue,
       observation.source,
       String(observation.turn ?? ''),
     ].join('::');
@@ -364,7 +379,7 @@ function dedupeRuntimeObservations(
     seen.add(key);
     deduped.push({
       ...observation,
-      value: observation.value.trim(),
+      value: normalizedValue,
     });
   }
   return deduped;
@@ -576,9 +591,24 @@ export async function recordChangePackEvidence(params: {
   await fs.mkdir(changePackDir(params.workspacePath), { recursive: true });
   const evidencePath = path.join(changePackDir(params.workspacePath), 'evidence.json');
   const existing = await readJson<ChangePackEvidenceFile>(evidencePath, {});
-  const existingCommandRuns = existing.command_runs ?? [];
-  const existingArtifactObservations = existing.artifact_observations ?? [];
-  const existingRuntimeObservations = existing.runtime_observations ?? [];
+  const existingCommandRuns = (existing.command_runs ?? []).filter((run) => Boolean(run?.command?.trim()));
+  const existingArtifactObservations = (existing.artifact_observations ?? [])
+    .filter((observation) => Boolean(normalizeArtifactObservationPath(observation?.path)))
+    .map((observation) => {
+      const normalizedPath = normalizeArtifactObservationPath(observation.path)!;
+      return {
+        ...observation,
+        path: normalizedPath,
+        kind: observation.kind ?? inferArtifactKind(normalizedPath, false),
+        non_empty: observation.non_empty ?? false,
+      };
+    });
+  const existingRuntimeObservations = (existing.runtime_observations ?? [])
+    .filter((observation) => Boolean(normalizeRuntimeObservationValue(observation?.value)))
+    .map((observation) => ({
+      ...observation,
+      value: normalizeRuntimeObservationValue(observation.value)!,
+    }));
 
   const normalizedCommandRuns = (params.commandRuns ?? [])
     .filter((run) => Boolean(run.command?.trim()))
@@ -602,9 +632,9 @@ export async function recordChangePackEvidence(params: {
     });
 
   const normalizedArtifactObservations = (params.artifactObservations ?? [])
-    .filter((observation) => Boolean(observation.path?.trim()))
+    .filter((observation) => Boolean(normalizeArtifactObservationPath(observation.path)))
     .map((observation) => {
-      const normalizedPath = observation.path.trim();
+      const normalizedPath = normalizeArtifactObservationPath(observation.path)!;
       return {
         path: normalizedPath,
         kind: observation.kind ?? inferArtifactKind(normalizedPath, false),
@@ -617,11 +647,11 @@ export async function recordChangePackEvidence(params: {
       };
     });
   const normalizedRuntimeObservations = (params.runtimeObservations ?? [])
-    .filter((observation) => Boolean(observation.value?.trim()))
+    .filter((observation) => Boolean(normalizeRuntimeObservationValue(observation.value)))
     .map((observation) => ({
       hint_key: observation.hint_key,
       status: observation.status,
-      value: observation.value.trim(),
+      value: normalizeRuntimeObservationValue(observation.value)!,
       source: observation.source,
       turn: observation.turn ?? null,
       summary: typeof observation.summary === 'string' ? observation.summary.trim() : null,
@@ -872,7 +902,7 @@ async function isArtifactRequirementSatisfied(params: {
 }): Promise<boolean> {
   const normalizedArtifactPath = params.artifactPath.trim();
   const matchingObservations = params.observations
-    .filter((observation) => observation.path.trim() === normalizedArtifactPath);
+    .filter((observation) => normalizeArtifactObservationPath(observation.path) === normalizedArtifactPath);
   if (matchingObservations.some((observation) => (
     observation.exists &&
     (artifactNeedsNonEmpty(params.profile, observation.kind) ? observation.non_empty : true)

@@ -4,7 +4,7 @@ import { BotSubscriptionService } from './subscriptions';
 import { BotWatchSubscriptionRepository } from '../database';
 import { initializeSchema } from '../database/schema';
 import type { RuntimeControlPlane, RuntimeStreamEvent } from '../runtime/types';
-import type { BotRecipient, BotTransportNotifier } from './types';
+import type { BotRecipient, BotTransportMessage, BotTransportNotifier } from './types';
 
 function createRuntimeControlPlane(): RuntimeControlPlane & { emit: (event: RuntimeStreamEvent) => void } {
   const listeners = new Set<(event: RuntimeStreamEvent) => void>();
@@ -102,10 +102,20 @@ function createRuntimeControlPlane(): RuntimeControlPlane & { emit: (event: Runt
 }
 
 class MemoryNotifier implements BotTransportNotifier {
-  public readonly messages: Array<{ recipient: BotRecipient; message: string }> = [];
+  public readonly messages: Array<{ recipient: BotRecipient; message: BotTransportMessage }> = [];
 
-  async sendMessage(recipient: BotRecipient, message: string): Promise<void> {
+  async sendMessage(recipient: BotRecipient, message: BotTransportMessage) {
     this.messages.push({ recipient, message });
+    return {
+      provider_message_id: `msg-${this.messages.length}`,
+    };
+  }
+
+  async editMessage(recipient: BotRecipient, _messageRef: { provider_message_id: string }, message: BotTransportMessage) {
+    this.messages.push({ recipient, message });
+    return {
+      provider_message_id: `msg-${this.messages.length}`,
+    };
   }
 }
 
@@ -169,7 +179,7 @@ describe('BotSubscriptionService', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(notifier.messages).toHaveLength(1);
-    expect(notifier.messages[0]?.message).toContain('Write failed');
+    expect(notifier.messages[0]?.message.text).toContain('Write failed');
 
     subscriptions.dispose();
   });
@@ -229,7 +239,7 @@ describe('BotSubscriptionService', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(secondNotifier.messages).toHaveLength(1);
-    expect(secondNotifier.messages[0]?.message).toContain('Turn 1 completed');
+    expect(secondNotifier.messages[0]?.message.text).toContain('Turn 1 completed');
 
     restoredService.dispose();
     db.close();

@@ -3,6 +3,7 @@ import type { BotWatchSubscriptionRepository } from '../database';
 import type {
   BotRecipient,
   BotTransport,
+  BotTransportMessage,
   BotTransportNotifier,
   BotWatchPreset,
   BotWatchSubscription,
@@ -274,7 +275,7 @@ export class BotSubscriptionService {
 
   private async sendToSubscription(
     subscription: BotWatchSubscription,
-    message: string,
+    message: string | BotTransportMessage,
   ): Promise<void> {
     const notifier = this.notifiers[subscription.transport];
     if (!notifier) {
@@ -286,7 +287,7 @@ export class BotSubscriptionService {
         transport: subscription.transport,
         conversation_id: subscription.conversation_id,
       },
-      message,
+      typeof message === 'string' ? { text: message } : message,
     );
   }
 }
