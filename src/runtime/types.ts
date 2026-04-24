@@ -51,6 +51,55 @@ export interface RuntimeHarnessStatusView {
   learned_runtime_hint_count?: number;
 }
 
+export interface RuntimeGovernanceChildIssueView {
+  issue_id: string;
+  issue_identifier: string;
+  title: string;
+  tracker_state: string;
+  orchestrator_state: WorkItemOrchestratorState | null;
+  governance_decision: GovernanceDecision | null;
+  governance_summary: string | null;
+  queue_state?: RuntimeGovernanceChildQueueState;
+  delivery_state?: RuntimeDeliveryState | null;
+  delivery_code?: RuntimeDeliveryCode | null;
+  delivery_summary?: string | null;
+}
+
+export type RuntimeGovernanceChildQueueState =
+  | 'current'
+  | 'queued'
+  | 'blocked'
+  | 'failed'
+  | 'completed';
+
+export type RuntimeGovernanceThreadState =
+  | 'blocked'
+  | 'confirming'
+  | 'executing'
+  | 'waiting_on_child'
+  | 'child_failed'
+  | 'resolved'
+  | 'failed';
+
+export type RuntimeDeliveryState =
+  | 'proof_satisfied'
+  | 'delivery_failed'
+  | 'completed';
+
+export type RuntimeDeliveryCode =
+  | 'review_submit_failed'
+  | 'dirty_workspace_no_commit'
+  | 'tracker_state_conflict'
+  | 'no_actionable_diff';
+
+export interface RuntimeGovernanceActionView {
+  outcome_kind: 'unblocked' | 'waiting_on_child' | 'child_still_blocked' | 'failed';
+  root_issue_identifier: string | null;
+  created_issue_identifiers: string[];
+  next_recommended_action: string | null;
+  user_summary: string | null;
+}
+
 export interface RuntimeToolActivity {
   tool_name: string;
   status: 'started' | 'completed' | 'failed';
@@ -111,6 +160,16 @@ export interface RuntimeIssueView {
   governance_status?: GovernanceStatus | null;
   governance_decision?: GovernanceDecision | null;
   governance_summary?: string | null;
+  governance_root_issue_id?: string | null;
+  governance_root_issue_identifier?: string | null;
+  governance_thread_state?: RuntimeGovernanceThreadState | null;
+  governance_child_issues?: RuntimeGovernanceChildIssueView[];
+  governance_current_child?: RuntimeGovernanceChildIssueView | null;
+  governance_child_queue?: RuntimeGovernanceChildIssueView[];
+  next_recommended_action?: string | null;
+  delivery_state?: RuntimeDeliveryState | null;
+  delivery_code?: RuntimeDeliveryCode | null;
+  delivery_summary?: string | null;
   constitution_hits?: ConstitutionHit[];
   fitness_signals?: Array<{ code: string; summary: string; severity: 'low' | 'medium' | 'high' }>;
   active_governance_suggestions?: GovernanceSuggestion[];
@@ -194,6 +253,8 @@ export interface RuntimeActionResult {
   message: string;
   issue_id: string | null;
   issue_identifier: string | null;
+  delivery_code?: RuntimeDeliveryCode | null;
+  governance_action?: RuntimeGovernanceActionView | null;
 }
 
 export interface CreateIssueResult extends RuntimeActionResult {

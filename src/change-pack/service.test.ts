@@ -425,4 +425,170 @@ describe('changePackService', () => {
       }),
     ]));
   });
+
+  test('ignores malformed artifact and runtime observations instead of throwing during evidence recording', async () => {
+    workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-change-pack-malformed-'));
+    fs.mkdirSync(path.join(workspacePath, '.symphony'), { recursive: true });
+
+    await initializeChangePack({
+      workspacePath,
+      issue: makeIssue(),
+      profile: 'ui',
+      harness: {
+        verification: {
+          required_artifacts: ['dist/index.html'],
+        },
+        runtime_hints: {
+          url: 'http://localhost:3000',
+        },
+      },
+      governanceSummary: 'No governance blockers detected.',
+    });
+
+    await expect(recordChangePackEvidence({
+      workspacePath,
+      artifactObservations: [
+        {
+          path: 'dist/index.html',
+          kind: 'html',
+          exists: true,
+          non_empty: true,
+          source: 'workspace',
+        },
+        {
+          path: '' as unknown as string,
+          kind: 'html',
+          exists: false,
+          non_empty: false,
+          source: 'workspace',
+        },
+        {
+          path: undefined as unknown as string,
+          kind: 'unknown',
+          exists: false,
+          non_empty: false,
+          source: 'workspace',
+        },
+      ],
+      runtimeObservations: [
+        {
+          hint_key: 'url',
+          status: 'satisfied',
+          value: 'http://localhost:3000',
+          source: 'cli_postprocess',
+        },
+        {
+          hint_key: 'ready_signal',
+          status: 'failed',
+          value: '' as unknown as string,
+          source: 'cli_postprocess',
+        },
+        {
+          hint_key: 'ready_signal',
+          status: 'failed',
+          value: undefined as unknown as string,
+          source: 'cli_postprocess',
+        },
+      ],
+    })).resolves.toEqual({
+      commandRunsAdded: 0,
+      artifactObservationsAdded: 1,
+      runtimeObservationsAdded: 1,
+    });
+
+    const state = await evaluateChangePackState({
+      workspacePath,
+      issue: makeIssue(),
+      mode: 'dev',
+    });
+
+    expect(state.evidence_summary.observed_artifacts).toEqual(['dist/index.html']);
+    expect(state.evidence_summary.runtime_checks).toEqual([
+      expect.objectContaining({
+        hint_key: 'url',
+        status: 'satisfied',
+        value: 'http://localhost:3000',
+      }),
+    ]);
+  });
+
+  test('ignores malformed persisted observations when appending new evidence and evaluating state', async () => {
+    workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-change-pack-persisted-malformed-'));
+    fs.mkdirSync(path.join(workspacePath, '.symphony', 'change-pack'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspacePath, '.symphony', 'change-pack', 'evidence.json'),
+      JSON.stringify({
+        requirements: [
+          {
+            key: 'artifact:reports/weekly-summary.md',
+            label: 'Collect weekly summary',
+            reason: 'Need a report artifact.',
+            kind: 'artifact',
+          },
+        ],
+        artifact_observations: [
+          {
+            path: null,
+            kind: 'markdown',
+            exists: true,
+            non_empty: true,
+            source: 'workspace',
+          },
+        ],
+        runtime_observations: [
+          {
+            hint_key: 'ready_signal',
+            status: 'satisfied',
+            value: null,
+            source: 'workspace',
+          },
+        ],
+      }),
+      'utf8',
+    );
+
+    await expect(recordChangePackEvidence({
+      workspacePath,
+      artifactObservations: [
+        {
+          path: 'reports/weekly-summary.md',
+          kind: 'markdown',
+          exists: true,
+          non_empty: true,
+          source: 'workspace',
+          turn: 1,
+          summary: 'weekly summary exists',
+        },
+      ],
+      runtimeObservations: [
+        {
+          hint_key: 'ready_signal',
+          status: 'satisfied',
+          value: 'verification complete',
+          source: 'workspace',
+          turn: 1,
+          summary: 'ready signal found',
+        },
+      ],
+    })).resolves.toEqual({
+      commandRunsAdded: 0,
+      artifactObservationsAdded: 1,
+      runtimeObservationsAdded: 1,
+    });
+
+    const state = await evaluateChangePackState({
+      workspacePath,
+      issue: makeIssue(),
+      mode: 'dev',
+    });
+
+    expect(state.evidence_summary.observed_artifacts).toContain('reports/weekly-summary.md');
+    expect(state.evidence_summary.runtime_checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        hint_key: 'ready_signal',
+        status: 'satisfied',
+        value: 'verification complete',
+      }),
+    ]));
+  });
 });

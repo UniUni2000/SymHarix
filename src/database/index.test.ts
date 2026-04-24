@@ -6,8 +6,12 @@ import { beforeEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import {
   AgentRunRepository,
+  BotFollowupDeliveryStateRepository,
+  BotFollowupMessageStateRepository,
   BotConversationPreferenceRepository,
+  BotIssueFollowupRepository,
   BotPendingActionRepository,
+  BotTransportEventRepository,
   BotWatchSubscriptionRepository,
   ConflictMemoryRepository,
   DebtSignalRepository,
@@ -46,6 +50,10 @@ describe('database schema', () => {
     expect(tableNames).toContain('bot_watch_subscriptions');
     expect(tableNames).toContain('bot_conversation_preferences');
     expect(tableNames).toContain('bot_pending_actions');
+    expect(tableNames).toContain('bot_issue_followups');
+    expect(tableNames).toContain('bot_followup_message_states');
+    expect(tableNames).toContain('bot_followup_delivery_states');
+    expect(tableNames).toContain('bot_transport_events');
     expect(tableNames).toContain('shadow_harnesses');
     expect(tableNames).toContain('governance_assessments');
     expect(tableNames).toContain('decision_memories');
@@ -478,13 +486,212 @@ describe('BotConversationPreferenceRepository', () => {
   });
 });
 
+describe('BotIssueFollowupRepository', () => {
+  test('persists origin follow-up bindings by conversation and issue', () => {
+    const repository = new BotIssueFollowupRepository(db);
+
+    repository.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      user_id: 'user-1',
+      role: 'origin',
+    });
+
+    repository.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      user_id: 'user-2',
+      role: 'origin',
+    });
+
+    expect(repository.findByIssueId('issue-1')).toHaveLength(1);
+    expect(repository.findByIssueId('issue-1')[0]?.user_id).toBe('user-2');
+    expect(
+      repository.findByConversation({
+        transport: 'telegram',
+        conversation_id: 'chat-1',
+      }),
+    ).toHaveLength(1);
+  });
+});
+
+describe('BotFollowupMessageStateRepository', () => {
+  test('persists one active follow-up card state per conversation and issue', () => {
+    const repository = new BotFollowupMessageStateRepository(db);
+
+    repository.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      message_id: '101',
+      card_kind: 'governance_blocked',
+      card_key: 'blocked|split_before_implement|suggestion-1',
+      card_state: 'open',
+    });
+
+    repository.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      message_id: '101',
+      card_kind: 'governance_blocked',
+      card_key: 'blocked|split_before_implement|suggestion-1|confirm',
+      card_state: 'confirming',
+    });
+
+    const stored = repository.findByConversationIssue({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      issue_id: 'issue-1',
+    });
+
+    expect(stored?.message_id).toBe('101');
+    expect(stored?.card_key).toContain('confirm');
+    expect(stored?.card_state).toBe('confirming');
+    expect(
+      repository.findOpenByConversation({
+        transport: 'telegram',
+        conversation_id: 'chat-1',
+      }),
+    ).toHaveLength(1);
+
+    repository.updateState({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      issue_id: 'issue-1',
+      card_state: 'resolved',
+    });
+
+    expect(
+      repository.findOpenByConversation({
+        transport: 'telegram',
+        conversation_id: 'chat-1',
+      }),
+    ).toHaveLength(0);
+  });
+});
+
+describe('BotFollowupDeliveryStateRepository', () => {
+  test('persists one delivery baseline per conversation, root issue, and delivery kind', () => {
+    const repository = new BotFollowupDeliveryStateRepository(db);
+
+    repository.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      root_issue_id: 'issue-root',
+      root_issue_identifier: 'INT-1',
+      delivery_kind: 'governance_card',
+      last_material_key: 'blocked|split|reason-a',
+      last_notification_class: null,
+      last_message_id: '101',
+    });
+
+    repository.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      root_issue_id: 'issue-root',
+      root_issue_identifier: 'INT-1',
+      delivery_kind: 'governance_card',
+      last_material_key: 'blocked|split|reason-a',
+      last_notification_class: null,
+      last_message_id: '101',
+    });
+
+    repository.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      root_issue_id: 'issue-root',
+      root_issue_identifier: 'INT-1',
+      delivery_kind: 'lifecycle_digest',
+      last_material_key: 'class:retrying',
+      last_notification_class: 'retrying',
+      last_message_id: '202',
+    });
+
+    expect(
+      repository.findByKey({
+        transport: 'telegram',
+        conversation_id: 'chat-1',
+        root_issue_id: 'issue-root',
+        delivery_kind: 'governance_card',
+      }),
+    ).toEqual(expect.objectContaining({
+      last_material_key: 'blocked|split|reason-a',
+      last_message_id: '101',
+    }));
+    expect(
+      repository.findByConversation({
+        transport: 'telegram',
+        conversation_id: 'chat-1',
+      }),
+    ).toHaveLength(2);
+  });
+});
+
+describe('BotTransportEventRepository', () => {
+  test('stores outbound bot transport audit events for replay and debugging', () => {
+    const repository = new BotTransportEventRepository(db);
+
+    repository.create({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      issue_id: 'issue-root',
+      root_issue_id: 'issue-root',
+      source: 'followup_card',
+      message_id: '101',
+      action: 'send',
+      result: 'success',
+      material_key: 'blocked|split|reason-a',
+    });
+
+    repository.create({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      issue_id: 'issue-root',
+      root_issue_id: 'issue-root',
+      source: 'callback_update',
+      message_id: '101',
+      action: 'edit',
+      result: 'failed',
+      material_key: 'confirming|blocked|split|reason-a',
+      error_message: 'message to edit not found',
+    });
+
+    const events = repository.findByRootIssue({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      root_issue_id: 'issue-root',
+    });
+
+    expect(events).toHaveLength(2);
+    expect(events[0]).toEqual(expect.objectContaining({
+      source: 'callback_update',
+      action: 'edit',
+      result: 'failed',
+      error_message: 'message to edit not found',
+    }));
+    expect(events[1]).toEqual(expect.objectContaining({
+      source: 'followup_card',
+      action: 'send',
+      result: 'success',
+    }));
+  });
+});
+
 describe('BotPendingActionRepository', () => {
-  test('stores one pending action per conversation and deletes expired actions', () => {
+  test('stores generic and issue-scoped pending actions independently and deletes expired actions', () => {
     const repository = new BotPendingActionRepository(db);
 
     repository.upsert({
       transport: 'telegram',
       conversation_id: 'chat-1',
+      issue_id: null,
       user_id: 'user-1',
       intent_kind: 'create_issue',
       normalized_payload: {
@@ -497,31 +704,73 @@ describe('BotPendingActionRepository', () => {
       },
       summary_message: 'Action: create issue',
       expires_at: new Date('2026-01-01T00:15:00.000Z'),
+      status: 'pending_confirm',
+      message_id: null,
+      card_key: null,
     });
 
     repository.upsert({
       transport: 'telegram',
       conversation_id: 'chat-1',
+      issue_id: 'issue-1',
       user_id: 'user-1',
-      intent_kind: 'retry',
+      intent_kind: 'split',
       normalized_payload: {
-        command: 'retry',
-        issue_id: 'INT-1',
+        command: 'split',
+        issue_id: 'issue-1',
       },
-      summary_message: 'Action: retry',
+      summary_message: 'Action: split',
       expires_at: new Date('2026-01-01T00:20:00.000Z'),
+      status: 'executing',
+      message_id: '101',
+      card_key: 'blocked|INT-1',
     });
 
-    const stored = repository.findByConversation({
+    repository.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      issue_id: 'issue-2',
+      user_id: 'user-1',
+      intent_kind: 'override',
+      normalized_payload: {
+        command: 'override',
+        issue_id: 'issue-2',
+      },
+      summary_message: 'Action: override',
+      expires_at: new Date('2026-01-01T00:25:00.000Z'),
+      status: 'pending_confirm',
+      message_id: '202',
+      card_key: 'blocked|INT-2',
+    });
+
+    const generic = repository.findLatestByConversation({
       transport: 'telegram',
       conversation_id: 'chat-1',
     });
-    expect(stored?.intent_kind).toBe('retry');
-    expect(stored?.summary_message).toBe('Action: retry');
+    const issueScoped = repository.findByConversationIssue({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      issue_id: 'issue-1',
+    });
+    expect(generic?.intent_kind).toBe('create_issue');
+    expect(generic?.summary_message).toBe('Action: create issue');
+    expect(issueScoped?.intent_kind).toBe('split');
+    expect(issueScoped?.status).toBe('executing');
+    expect(issueScoped?.message_id).toBe('101');
+    expect(
+      repository.findOpenByConversation({
+        transport: 'telegram',
+        conversation_id: 'chat-1',
+      }).map((record) => [record.issue_id, record.status]),
+    ).toEqual([
+      ['issue-2', 'pending_confirm'],
+      ['issue-1', 'executing'],
+    ]);
 
     repository.upsert({
       transport: 'telegram',
       conversation_id: 'chat-expired',
+      issue_id: 'issue-expired',
       user_id: 'user-1',
       intent_kind: 'create_issue',
       normalized_payload: {
@@ -529,13 +778,17 @@ describe('BotPendingActionRepository', () => {
       },
       summary_message: 'Expired action',
       expires_at: new Date('2025-12-31T23:59:59.000Z'),
+      status: 'pending_confirm',
+      message_id: '303',
+      card_key: 'blocked|expired',
     });
 
     expect(repository.deleteExpired(new Date('2026-01-01T00:00:00.000Z'))).toBe(1);
     expect(
-      repository.findByConversation({
+      repository.findByConversationIssue({
         transport: 'telegram',
         conversation_id: 'chat-expired',
+        issue_id: 'issue-expired',
       }),
     ).toBeNull();
 
@@ -543,12 +796,14 @@ describe('BotPendingActionRepository', () => {
       repository.delete({
         transport: 'telegram',
         conversation_id: 'chat-1',
+        issue_id: 'issue-1',
       }),
     ).toBe(true);
     expect(
-      repository.findByConversation({
+      repository.findByConversationIssue({
         transport: 'telegram',
         conversation_id: 'chat-1',
+        issue_id: 'issue-1',
       }),
     ).toBeNull();
   });

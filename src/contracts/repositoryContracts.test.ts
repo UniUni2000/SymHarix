@@ -425,4 +425,87 @@ describe('repositoryContracts', () => {
       },
     });
   });
+
+  test('skips malformed artifact and runtime observations while strengthening a shadow harness', async () => {
+    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-shadow-malformed-'));
+    const workspace = path.join(tempRoot, 'run-malformed');
+    fs.mkdirSync(path.join(workspace, '.symphony', 'change-pack'), { recursive: true });
+
+    fs.writeFileSync(
+      path.join(workspace, '.symphony', 'change-pack', 'evidence.json'),
+      JSON.stringify(
+        {
+          command_runs: [
+            {
+              command: 'bun test',
+              command_key: 'test',
+              status: 'satisfied',
+              source: 'timeline',
+              turn: 1,
+              exit_code: 0,
+              summary: 'tests passed',
+              recorded_at: '2026-04-23T00:00:00.000Z',
+            },
+          ],
+          artifact_observations: [
+            {
+              path: '',
+              kind: 'dir',
+              exists: true,
+              non_empty: true,
+              source: 'workspace',
+            },
+            {
+              exists: true,
+              non_empty: true,
+              source: 'workspace',
+            },
+          ],
+          runtime_observations: [
+            {
+              hint_key: 'url',
+              status: 'failed',
+              value: '',
+              source: 'cli_postprocess',
+            },
+            {
+              hint_key: 'ready_signal',
+              status: 'satisfied',
+              source: 'cli_postprocess',
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+
+    db = new Database(':memory:');
+    initializeSchema(db);
+    const repository = new ShadowHarnessRepository(db);
+
+    await inferShadowHarness({
+      workspacePath: workspace,
+      repoKey: 'acme/repo',
+      repository,
+    });
+
+    await expect(strengthenShadowHarnessFromWorkspace({
+      workspacePath: workspace,
+      repoKey: 'acme/repo',
+      repository,
+      workItemId: 'wi-malformed',
+    })).resolves.toMatchObject({
+      status: 'shadow',
+    });
+
+    expect(repository.findByRepoKey('acme/repo')?.inference_details_json).toMatchObject({
+      observed_commands: {
+        test: expect.objectContaining({
+          success_count: 1,
+        }),
+      },
+    });
+  });
 });
