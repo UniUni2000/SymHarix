@@ -79,6 +79,8 @@ def emit_result(
     final_state: str = "unknown",
     review_decision: Optional[str] = None,
     feedback: Optional[str] = None,
+    delivery_code: Optional[str] = None,
+    delivery_summary: Optional[str] = None,
     retry_hint: Optional[str] = None,
     linear_api_calls: int = 0,
     github_api_calls: int = 0,
@@ -88,6 +90,8 @@ def emit_result(
         "final_state": final_state,
         "review_decision": review_decision,
         "feedback": feedback,
+        "delivery_code": delivery_code,
+        "delivery_summary": delivery_summary,
         "retry_hint": retry_hint,
         "linear_api_calls": linear_api_calls,
         "github_api_calls": github_api_calls,
@@ -302,9 +306,30 @@ def dev(ctx, issue_id, workspace_path_opt):
             "TODO": "Todo",
             "ERROR": "Error",
         }.get(state_name, state_name)
-        emit_result(final_state=final_state_label)
+        emit_result(
+            final_state=final_state_label,
+            delivery_code=getattr(hook, "last_delivery_code", None),
+            delivery_summary=getattr(hook, "last_delivery_summary", None),
+        )
     else:
         click.echo(f"Dev phase failed for {issue_id}", err=True)
+        final_state = store.get_current_state_enum()
+        state_name = final_state.value if final_state else "ERROR"
+        final_state_label = {
+            "IN_PROGRESS": "In Progress",
+            "IN_REVIEW": "In Review",
+            "DONE": "Done",
+            "CANCELLED": "Cancelled",
+            "TODO": "Todo",
+            "ERROR": "Error",
+        }.get(state_name, state_name)
+        emit_result(
+            ok=False,
+            final_state=final_state_label,
+            feedback=store.get_state().get("error") if store.get_state() else None,
+            delivery_code=getattr(hook, "last_delivery_code", None),
+            delivery_summary=getattr(hook, "last_delivery_summary", None),
+        )
         sys.exit(1)
 
 
@@ -395,10 +420,30 @@ def review(ctx, issue_id, workspace_path_opt):
             final_state=final_state_label,
             review_decision=review_decision,
             feedback=hook.last_review_report,
+            delivery_code=getattr(hook, "last_delivery_code", None),
+            delivery_summary=getattr(hook, "last_delivery_summary", None),
             retry_hint=retry_hint,
         )
     else:
         click.echo(f"Review phase failed for {issue_id}", err=True)
+        final_state = store.get_current_state_enum()
+        state_name = final_state.value if final_state else "ERROR"
+        final_state_label = {
+            "IN_PROGRESS": "In Progress",
+            "IN_REVIEW": "In Review",
+            "DONE": "Done",
+            "CANCELLED": "Cancelled",
+            "TODO": "Todo",
+            "ERROR": "Error",
+        }.get(state_name, state_name)
+        emit_result(
+            ok=False,
+            final_state=final_state_label,
+            review_decision=hook.last_review_decision,
+            feedback=hook.last_review_report or (store.get_state().get("error") if store.get_state() else None),
+            delivery_code=getattr(hook, "last_delivery_code", None),
+            delivery_summary=getattr(hook, "last_delivery_summary", None),
+        )
         sys.exit(1)
 
 

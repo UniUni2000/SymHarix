@@ -37,6 +37,8 @@ class ReviewHook:
         self.last_pr_status: Optional[str] = None
         self.last_review_decision: Optional[str] = None
         self.last_review_report: Optional[str] = None
+        self.last_delivery_code: Optional[str] = None
+        self.last_delivery_summary: Optional[str] = None
 
         # Use provided clients or load from config
         if config:
@@ -55,6 +57,14 @@ class ReviewHook:
             self.github = github_client
 
         self.store = StateStore(workspace_root, issue_id)
+
+    def _set_delivery_failure(self, code: str, summary: str) -> None:
+        self.last_delivery_code = code
+        self.last_delivery_summary = summary
+
+    def _clear_delivery_failure(self) -> None:
+        self.last_delivery_code = None
+        self.last_delivery_summary = None
 
     def check_pr_status(self) -> str:
         """
@@ -185,6 +195,7 @@ class ReviewHook:
         """Submit a native GitHub review and fail closed if GitHub rejects it."""
         if not pr_number or not review_report:
             self.store.set_error("Missing pull request review context")
+            self._set_delivery_failure("review_submit_failed", "Missing pull request review context")
             return False
 
         body = "\n".join([
@@ -201,15 +212,46 @@ class ReviewHook:
 
         if not event:
             self.store.set_error(f"Unsupported review decision: {review_decision}")
+            self._set_delivery_failure("review_submit_failed", f"Unsupported review decision: {review_decision}")
             return False
 
         try:
+            self._clear_delivery_failure()
             self.github.submit_pull_request_review(pr_number, event, body=body)
             print(f"[REVIEW] Submitted native review to PR #{pr_number} ({event})")
             return True
         except Exception as e:
-            print(f"[REVIEW] ERROR: Failed to submit native review to PR #{pr_number}: {e}")
-            self.store.set_error(f"Failed to submit native review: {e}")
+            equivalent_review = next((
+                review for review in self.github.get_reviews(pr_number)
+                if review.get("state") == event
+                and (review.get("body") or "").strip() == body.strip()
+            ), None)
+            if equivalent_review:
+                print(f"[REVIEW] Equivalent native review already exists on PR #{pr_number}; treating as success")
+                self._clear_delivery_failure()
+                return True
+
+            pr_state = self.github.get_pull_request(pr_number)
+            response = getattr(e, "response", None)
+            response_text = None
+            if response is not None:
+                try:
+                    response_text = response.text
+                except Exception:
+                    response_text = None
+
+            detail_parts = [
+                f"Failed to submit native review to PR #{pr_number}: {e}",
+                f"event={event}",
+                f"head={pr_state.get('head', {}).get('sha') if isinstance(pr_state, dict) else None}",
+                f"state={pr_state.get('state') if isinstance(pr_state, dict) else None}",
+                f"open={pr_state.get('state') == 'open' if isinstance(pr_state, dict) else None}",
+                f"response={response_text}" if response_text else None,
+            ]
+            detail = " | ".join(part for part in detail_parts if part)
+            print(f"[REVIEW] ERROR: {detail}")
+            self.store.set_error(f"Failed to submit native review: {detail}")
+            self._set_delivery_failure("review_submit_failed", detail)
             return False
 
     def _load_effective_harness(self) -> dict:
@@ -314,6 +356,7 @@ class ReviewHook:
 
         self.last_review_decision = review_decision
         self.last_review_report = review_report
+        self._clear_delivery_failure()
         print(f"[REVIEW] Review decision: {review_decision}")
 
         if not self._run_review_checks():

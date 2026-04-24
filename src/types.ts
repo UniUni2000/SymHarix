@@ -558,6 +558,10 @@ export type AgentTimelineCode =
   | 'completion_blocked'
   | 'fitness_signal_recorded'
   | 'governance_suggestion_created'
+  | 'governance_suggestion_executed'
+  | 'governance_suggestion_dismissed'
+  | 'governance_suggestion_reused_child'
+  | 'governance_child_noop_closed'
   | 'constitution_update_suggested';
 
 export interface AgentTimelinePayload {

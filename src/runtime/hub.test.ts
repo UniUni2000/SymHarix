@@ -284,6 +284,198 @@ describe('RuntimeHub', () => {
     hub.dispose();
   });
 
+  test('shows halted for a waiting-on-child root issue when no live session exists', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workItemRepository = new WorkItemRepository(db);
+    workItemRepository.create({
+      id: 'issue-root',
+      linear_issue_id: 'issue-root',
+      linear_identifier: 'INT-ROOT',
+      linear_title: 'Root governance issue',
+      linear_state: 'In Progress',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'dev_running',
+      governance_status: 'degraded',
+      governance_decision: 'accept',
+      governance_summary: 'Waiting on child work.',
+      governance_root_issue_id: 'issue-root',
+      governance_parent_issue_id: null,
+      governance_generation: 0,
+    });
+    workItemRepository.create({
+      id: 'issue-child',
+      linear_issue_id: 'issue-child',
+      linear_identifier: 'INT-CHILD',
+      linear_title: 'Child governance issue',
+      linear_state: 'In Progress',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'dev_running',
+      governance_status: 'degraded',
+      governance_decision: 'accept',
+      governance_summary: 'Child is active.',
+      governance_root_issue_id: 'issue-root',
+      governance_parent_issue_id: 'issue-root',
+      governance_generation: 1,
+    });
+
+    const controller = new FakeController();
+    controller.getStateSnapshot = () => ({
+      generated_at: '2026-01-01T00:00:00.000Z',
+      counts: {
+        running: 0,
+        retrying: 0,
+      },
+      running: [],
+      retrying: [],
+      codex_totals: {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        seconds_running: 0,
+      },
+      rate_limits: null,
+    });
+
+    const hub = new RuntimeHub(db, controller);
+    const issue = hub.getIssue('INT-ROOT');
+
+    expect(issue?.governance_thread_state).toBe('waiting_on_child');
+    expect(issue?.orchestrator_state).toBe('halted');
+    expect(issue?.session).toBeNull();
+
+    hub.dispose();
+  });
+
+  test('projects a governance root thread with a single current child and delivery failure semantics', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workItemRepository = new WorkItemRepository(db);
+    const agentRunRepository = new AgentRunRepository(db);
+
+    workItemRepository.create({
+      id: 'issue-root',
+      linear_issue_id: 'issue-root',
+      linear_identifier: 'INT-44',
+      linear_title: 'Split runtime and bot work',
+      linear_state: 'Todo',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'halted',
+      governance_status: 'degraded',
+      governance_decision: 'accept',
+      governance_summary: 'No .symphony-constitution.md found yet, so governance is running in degraded mode.',
+      governance_root_issue_id: 'issue-root',
+      governance_parent_issue_id: null,
+      governance_generation: 0,
+    });
+    workItemRepository.create({
+      id: 'issue-child-1',
+      linear_issue_id: 'issue-child-1',
+      linear_identifier: 'INT-45',
+      linear_title: '[GOVERNANCE FOLLOW-UP for INT-44] Runtime cleanup',
+      linear_state: 'In Progress',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'failed',
+      governance_status: 'degraded',
+      governance_decision: 'accept',
+      governance_summary: 'No .symphony-constitution.md found yet, so governance is running in degraded mode.',
+      governance_root_issue_id: 'issue-root',
+      governance_parent_issue_id: 'issue-root',
+      governance_generation: 1,
+      evidence_summary: {
+        total_requirements: 3,
+        satisfied: 3,
+        missing: 0,
+        successful_commands: ['test', 'build'],
+        failed_commands: [],
+        observed_artifacts: ['dist/index.html'],
+        runtime_checks: [],
+        notes: [],
+      },
+      missing_requirements: [],
+    });
+    workItemRepository.create({
+      id: 'issue-child-2',
+      linear_issue_id: 'issue-child-2',
+      linear_identifier: 'INT-46',
+      linear_title: '[GOVERNANCE FOLLOW-UP for INT-44] Bot UX cleanup',
+      linear_state: 'In Progress',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'failed',
+      governance_status: 'degraded',
+      governance_decision: 'accept',
+      governance_summary: 'No .symphony-constitution.md found yet, so governance is running in degraded mode.',
+      governance_root_issue_id: 'issue-root',
+      governance_parent_issue_id: 'issue-root',
+      governance_generation: 1,
+    });
+    workItemRepository.create({
+      id: 'issue-child-3',
+      linear_issue_id: 'issue-child-3',
+      linear_identifier: 'INT-47',
+      linear_title: '[GOVERNANCE FOLLOW-UP for INT-44] Cleanup sweep',
+      linear_state: 'In Progress',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'failed',
+      governance_status: 'degraded',
+      governance_decision: 'accept',
+      governance_summary: 'No .symphony-constitution.md found yet, so governance is running in degraded mode.',
+      governance_root_issue_id: 'issue-root',
+      governance_parent_issue_id: 'issue-root',
+      governance_generation: 1,
+    });
+
+    agentRunRepository.create({
+      id: 'run-child-1',
+      work_item_id: 'issue-child-1',
+      agent_type: 'dev',
+      phase: 'DEV',
+      run_status: 'failed',
+      error: 'Command failed with code 1: [DEV] ERROR: Workspace for feature/int-45 has uncommitted changes but no commits relative to refs/remotes/origin/main; commit and push are required before PR creation',
+    });
+
+    const controller = new FakeController();
+    controller.getStateSnapshot = () => ({
+      generated_at: '2026-01-01T00:00:00.000Z',
+      counts: {
+        running: 0,
+        retrying: 0,
+      },
+      running: [],
+      retrying: [],
+      codex_totals: {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        seconds_running: 0,
+      },
+      rate_limits: null,
+    });
+
+    const hub = new RuntimeHub(db, controller);
+    const rootIssue = hub.getIssue('INT-44');
+    const currentChild = hub.getIssue('INT-45');
+
+    expect(rootIssue?.governance_thread_state).toBe('child_failed');
+    expect(rootIssue?.governance_current_child).toEqual(expect.objectContaining({
+      issue_identifier: 'INT-45',
+      queue_state: 'current',
+    }));
+    expect(rootIssue?.governance_child_queue).toEqual([
+      expect.objectContaining({ issue_identifier: 'INT-45', queue_state: 'current' }),
+      expect.objectContaining({ issue_identifier: 'INT-46', queue_state: 'queued' }),
+      expect.objectContaining({ issue_identifier: 'INT-47', queue_state: 'queued' }),
+    ]);
+    expect(rootIssue?.next_recommended_action).toBe('先处理治理子任务 INT-45');
+    expect(currentChild?.delivery_state).toBe('delivery_failed');
+    expect(currentChild?.delivery_summary).toContain('Workspace for feature/int-45 has uncommitted changes');
+    expect(currentChild?.delivery_summary).toContain('证据已满足');
+
+    hub.dispose();
+  });
+
   test('surfaces governance override as an action for halted issues blocked by governance', () => {
     db = new Database(':memory:');
     initializeSchema(db);

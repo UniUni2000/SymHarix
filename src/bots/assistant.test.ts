@@ -8,6 +8,7 @@ import { BotCommandService } from './commandService';
 import { BotSubscriptionService } from './subscriptions';
 import {
   BotConversationPreferenceRepository,
+  BotFollowupMessageStateRepository,
   BotPendingActionRepository,
   initializeSchema,
 } from '../database';
@@ -693,6 +694,128 @@ describe('BotAssistantService', () => {
     subscriptions.dispose();
   });
 
+  test('uses the single open governance card in the conversation as the focus issue for free-form follow-up text', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const blockedIssue = {
+      ...runtime.getOverview().issues[0]!,
+      issue_id: 'issue-31',
+      work_item_id: 'issue-31',
+      identifier: 'INT-31',
+      title: 'Runtime and bot cleanup together',
+      tracker_state: 'In Progress',
+      orchestrator_state: 'halted',
+      github_repo: 'UniUni2000/test2',
+      governance_status: 'blocked' as const,
+      governance_decision: 'split_before_implement' as const,
+      governance_summary: 'This issue spans multiple objectives and is blocked until it is split.',
+      active_governance_suggestions: [
+        {
+          id: 'gov-suggest-1',
+          suggestion_type: 'architecture_alignment' as const,
+          status: 'pending' as const,
+          title: 'Split INT-31 before implementation',
+          summary: 'Separate runtime cleanup from Telegram UX cleanup.',
+          can_execute: true,
+          can_dismiss: true,
+        },
+      ],
+      actions: {
+        can_stop: false,
+        can_retry: true,
+        can_override_governance: true,
+        can_rewrite_governance: false,
+        can_split_governance: true,
+        can_open_pr: false,
+      },
+    };
+    const otherIssue = {
+      ...blockedIssue,
+      issue_id: 'issue-32',
+      work_item_id: 'issue-32',
+      identifier: 'INT-32',
+      title: 'Another active issue',
+      orchestrator_state: 'dev_running',
+      governance_status: null,
+      governance_decision: null,
+      governance_summary: null,
+      active_governance_suggestions: [],
+      actions: {
+        can_stop: true,
+        can_retry: false,
+        can_override_governance: false,
+        can_rewrite_governance: false,
+        can_split_governance: false,
+        can_open_pr: false,
+      },
+    };
+    runtime.getOverview = () => ({
+      generated_at: '2026-01-01T00:00:00.000Z',
+      counts: { running: 1, retrying: 0, total: 2 },
+      issues: [blockedIssue, otherIssue],
+    });
+    runtime.getIssue = (id: string) => {
+      if (['INT-31', 'issue-31'].includes(id)) return blockedIssue;
+      if (['INT-32', 'issue-32'].includes(id)) return otherIssue;
+      return null;
+    };
+
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const followupMessageStates = new BotFollowupMessageStateRepository(db);
+    followupMessageStates.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-7',
+      issue_id: 'issue-31',
+      issue_identifier: 'INT-31',
+      message_id: '101',
+      card_kind: 'governance_blocked',
+      card_key: 'blocked|split_before_implement|gov-suggest-1',
+      card_state: 'open',
+    });
+
+    const projectResolver = new TrackerProjectResolutionService(
+      {
+        listProjects: async () => ({ projects: [] }),
+      } as any,
+      {},
+    );
+    const commandService = new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver);
+    const assistant = new BotAssistantService(
+      runtime,
+      commandService,
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => {
+          throw new Error('LLM unavailable');
+        },
+      },
+      undefined,
+      subscriptions,
+      followupMessageStates,
+    );
+
+    const response = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-7' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      '那我想拆成两个任务',
+    );
+
+    expect(response.message).toContain('INT-31');
+    expect(response.message).toContain('split_before_implement');
+    expect(response.message).toContain('Separate runtime cleanup');
+
+    subscriptions.dispose();
+  });
+
   test('requires confirmation before overriding a governance-blocked issue from natural language', async () => {
     db = new Database(':memory:');
     initializeSchema(db);
@@ -1096,6 +1219,80 @@ describe('BotAssistantService', () => {
         suggestionId: 'gov-suggest-cleanup',
       },
     ]);
+
+    subscriptions.dispose();
+  });
+
+  test('treats a plain ordinal reply as the recommended governance action for the focused issue', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const governanceIssue = {
+      ...runtime.getOverview().issues[0]!,
+      tracker_state: 'Todo',
+      orchestrator_state: 'halted',
+      github_repo: 'UniUni2000/test2',
+      governance_status: 'advisory' as const,
+      governance_decision: 'split_before_implement' as const,
+      governance_summary: 'Split this issue before dispatch.',
+      active_governance_suggestions: [
+        {
+          id: 'gov-suggest-cleanup',
+          suggestion_type: 'cleanup' as const,
+          status: 'pending' as const,
+          title: '[GOVERNANCE] Cleanup runtime hotspot',
+          summary: 'Create a focused cleanup issue for the runtime hotspot.',
+          can_execute: true,
+          can_dismiss: true,
+        },
+      ],
+      actions: {
+        can_stop: false,
+        can_retry: true,
+        can_override_governance: true,
+        can_rewrite_governance: false,
+        can_split_governance: true,
+        can_open_pr: false,
+      },
+    };
+    runtime.getOverview = () => ({
+      generated_at: '2026-01-01T00:00:00.000Z',
+      counts: { running: 0, retrying: 0, total: 1 },
+      issues: [governanceIssue],
+    });
+    runtime.getIssue = (id: string) => ['INT-31', 'issue-31'].includes(id) ? governanceIssue : null;
+
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const projectResolver = new TrackerProjectResolutionService({ listProjects: async () => ({ projects: [] }) } as any, {});
+    const commandService = new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver);
+    const assistant = new BotAssistantService(
+      runtime,
+      commandService,
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => {
+          throw new Error('Assistant unavailable');
+        },
+      },
+    );
+
+    const response = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-ordinal' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      '1',
+    );
+
+    expect(response.message).toContain('Action: split');
+    expect(response.message).toContain('Issue: INT-31');
+    expect(runtime.executeGovernanceSuggestionCalls).toHaveLength(0);
 
     subscriptions.dispose();
   });

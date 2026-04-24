@@ -204,6 +204,8 @@ export interface CliCommandResult {
   final_state: string;
   review_decision: string | null;
   feedback: string | null;
+  delivery_code?: string | null;
+  delivery_summary?: string | null;
   retry_hint: WorkerNextAction | null;
   linear_api_calls: number;
   github_api_calls: number;
@@ -294,6 +296,8 @@ export function parseCliCommandResult(output: string): CliCommandResult | null {
       final_state: String(parsed.final_state || 'unknown'),
       review_decision: parsed.review_decision ? String(parsed.review_decision) : null,
       feedback: parsed.feedback ? String(parsed.feedback) : null,
+      delivery_code: parsed.delivery_code ? String(parsed.delivery_code) : null,
+      delivery_summary: parsed.delivery_summary ? String(parsed.delivery_summary) : null,
       retry_hint: parsed.retry_hint || null,
       linear_api_calls: Number(parsed.linear_api_calls || 0),
       github_api_calls: Number(parsed.github_api_calls || 0),
@@ -629,9 +633,16 @@ export class Orchestrator extends EventEmitter {
     input: CreateIssueRequest,
     options: {
       defer_dispatch?: boolean;
+      schedule_tick?: boolean;
+      governance_lineage?: {
+        root_issue_id: string;
+        parent_issue_id: string | null;
+        generation: number;
+      } | null;
     } = {},
   ): Promise<CreateIssueResult> {
     const deferDispatch = options.defer_dispatch ?? false;
+    const scheduleTickWhenRunning = options.schedule_tick ?? true;
     let resolvedProjectId = input.project_id ?? null;
     let resolvedRoute: ResolvedRepositoryRoute | null = null;
     if (input.project_slug?.trim()) {
@@ -674,7 +685,14 @@ export class Orchestrator extends EventEmitter {
     let governance: IntakeCriticAssessment | null = null;
     if (route) {
       const workItem = this.githubMappingService.ensureWorkItem(issue, route.github_repo_full, 'discovering');
-      const targetArea = this.inferGovernanceTargetArea(issue, workItem);
+      const lineage = options.governance_lineage ?? null;
+      const normalizedWorkItem = this.workItemRepository.update({
+        id: workItem.id,
+        governance_root_issue_id: lineage?.root_issue_id ?? issue.id,
+        governance_parent_issue_id: lineage?.parent_issue_id ?? null,
+        governance_generation: lineage?.generation ?? 0,
+      }) ?? workItem;
+      const targetArea = this.inferGovernanceTargetArea(issue, normalizedWorkItem);
       const repoIntelligence = this.buildRepoIntelligenceContext(route.github_repo_full);
       governance = await assessIntakeCritic({
         issue,
@@ -684,21 +702,22 @@ export class Orchestrator extends EventEmitter {
         activeFitnessSignals: repoIntelligence.activeSignals,
       });
       this.workItemRepository.update({
-        id: workItem.id,
+        id: normalizedWorkItem.id,
         repo_harness_status: governance.repo_harness_status,
         constitution_status: governance.constitution_status,
         governance_status: governance.status,
         governance_decision: governance.decision,
         governance_summary: governance.summary,
+        governance_source_updated_at: governance.blocks_dispatch ? issue.updated_at ?? null : null,
         constitution_hits: governance.constitution_hits,
         orchestrator_state:
           governance.blocks_dispatch && !this.hasGovernanceOverride(issue)
             ? 'halted'
-            : workItem.orchestrator_state,
+            : normalizedWorkItem.orchestrator_state,
       });
       this.governanceAssessmentRepository.create({
         id: crypto.randomUUID(),
-        work_item_id: workItem.id,
+        work_item_id: normalizedWorkItem.id,
         issue_id: issue.id,
         decision: governance.decision,
         status: governance.status,
@@ -709,10 +728,10 @@ export class Orchestrator extends EventEmitter {
           repo_harness_status: governance.repo_harness_status,
           constitution_status: governance.constitution_status,
           target_area: targetArea,
-          architectural_target: workItem.architectural_target ?? targetArea,
-          path_families: workItem.path_families,
-          boundary_edges: workItem.boundary_edges,
-          import_edges: workItem.import_edges,
+          architectural_target: normalizedWorkItem.architectural_target ?? targetArea,
+          path_families: normalizedWorkItem.path_families,
+          boundary_edges: normalizedWorkItem.boundary_edges,
+          import_edges: normalizedWorkItem.import_edges,
           repo_key: governance.repo_key,
           active_fitness_signals: governance.active_fitness_signals,
           related_conflict_count: governance.related_conflict_count,
@@ -724,9 +743,9 @@ export class Orchestrator extends EventEmitter {
           blocks_dispatch: governance.blocks_dispatch,
         },
       });
-      this.ensureGovernanceSuggestions(issue, workItem.id, route, governance);
-      this.recordGovernanceMemoryOutcome(workItem.id, issue, governance);
-      this.refreshRepoGovernanceIntelligence(issue, workItem.id, route.github_repo_full);
+      this.ensureGovernanceSuggestions(issue, normalizedWorkItem.id, route, governance);
+      this.recordGovernanceMemoryOutcome(normalizedWorkItem.id, issue, governance);
+      this.refreshRepoGovernanceIntelligence(issue, normalizedWorkItem.id, route.github_repo_full);
       this.emitTimelineEvent(issue, {
         level: governance.blocks_dispatch ? 'warn' : 'info',
         category: 'diagnostic',
@@ -748,7 +767,9 @@ export class Orchestrator extends EventEmitter {
     if (this.running) {
       if (route && governance?.blocks_dispatch && !this.hasGovernanceOverride(issue)) {
         message = `Created ${issue.identifier}, but dispatch is blocked: ${governance.summary}`;
-        this.scheduleTick(0);
+        if (scheduleTickWhenRunning) {
+          this.scheduleTick(0);
+        }
       } else if (!deferDispatch && route && this.hasAvailableSlots() && this.shouldDispatch(issue)) {
         await this.dispatchIssue(issue, null);
         message = `Created ${issue.identifier} and dispatched it`;
@@ -758,7 +779,9 @@ export class Orchestrator extends EventEmitter {
         if (deferDispatch && this.shouldDispatch(issue)) {
           message = `Created ${issue.identifier} and queued it for dispatch`;
         }
-        this.scheduleTick(0);
+        if (scheduleTickWhenRunning) {
+          this.scheduleTick(0);
+        }
       }
     } else if (!route) {
       message = `Created ${issue.identifier}, but dispatch is blocked: repository route is not configured`;
@@ -1291,13 +1314,37 @@ export class Orchestrator extends EventEmitter {
       };
     }
 
+    this.workItemRepository.update({
+      id: workItem.id,
+      governance_root_issue_id: workItem.governance_root_issue_id ?? issue.id,
+      governance_parent_issue_id: workItem.governance_parent_issue_id ?? null,
+      governance_generation: workItem.governance_generation ?? 0,
+    });
+
     const createdIdentifiers: string[] = [];
     for (let index = 1; index < splitSuggestions.length; index += 1) {
       const childDraft = this.buildGovernanceSplitDraft(issue, splitSuggestions[index]!, index, splitSuggestions.length);
-      const created = await this.createIssue({
+      const existingChild = this.findEquivalentOpenGovernanceChild({
+        rootIssueId: workItem.governance_root_issue_id ?? issue.id,
+        githubRepo: workItem.github_repo,
+        architecturalTarget: childDraft.architectural_target,
+      });
+      if (existingChild) {
+        createdIdentifiers.push(existingChild.linear_identifier);
+        continue;
+      }
+      const created = await this.createIssueInternal({
         title: childDraft.title,
         description: childDraft.description,
         project_slug: issue.project_slug,
+      }, {
+        defer_dispatch: true,
+        schedule_tick: false,
+        governance_lineage: {
+          root_issue_id: workItem.governance_root_issue_id ?? issue.id,
+          parent_issue_id: issue.id,
+          generation: (workItem.governance_generation ?? 0) + 1,
+        },
       });
       if (!created.accepted || !created.issue_identifier) {
         return {
@@ -1309,6 +1356,16 @@ export class Orchestrator extends EventEmitter {
         };
       }
       createdIdentifiers.push(created.issue_identifier);
+      if (created.issue_id) {
+        const childWorkItem = this.workItemRepository.findByLinearIssueId(created.issue_id);
+        if (childWorkItem) {
+          this.workItemRepository.update({
+            id: childWorkItem.id,
+            orchestrator_state: index > 1 ? 'halted' : childWorkItem.orchestrator_state,
+            architectural_target: childDraft.architectural_target,
+          });
+        }
+      }
     }
 
     const primaryDraft = this.buildGovernanceSplitDraft(issue, splitSuggestions[0]!, 0, splitSuggestions.length);
@@ -1360,7 +1417,20 @@ export class Orchestrator extends EventEmitter {
       },
     });
 
-    if (!refreshedGovernance.blocks_dispatch && this.running && this.hasAvailableSlots() && this.shouldDispatch(refreshedIssue)) {
+    if (createdIdentifiers.length > 0) {
+      this.workItemRepository.update({
+        id: workItem.id,
+        orchestrator_state: 'halted',
+      });
+    }
+
+    if (
+      createdIdentifiers.length === 0 &&
+      !refreshedGovernance.blocks_dispatch &&
+      this.running &&
+      this.hasAvailableSlots() &&
+      this.shouldDispatch(refreshedIssue)
+    ) {
       await this.dispatchIssue(refreshedIssue, null);
       return {
         accepted: true,
@@ -1368,6 +1438,13 @@ export class Orchestrator extends EventEmitter {
         message: `Split applied for ${refreshedIssue.identifier}, created ${createdIdentifiers.join(', ')}, and dispatched the rewritten issue`,
         issue_id: refreshedIssue.id,
         issue_identifier: refreshedIssue.identifier,
+        governance_action: {
+          outcome_kind: 'unblocked',
+          root_issue_identifier: refreshedIssue.identifier,
+          created_issue_identifiers: createdIdentifiers,
+          next_recommended_action: null,
+          user_summary: `已按拆分方案处理 ${refreshedIssue.identifier}，并重新启动源单开发。`,
+        },
       };
     }
 
@@ -1384,6 +1461,15 @@ export class Orchestrator extends EventEmitter {
         : `Split applied for ${refreshedIssue.identifier}${createdIdentifiers.length ? `; created ${createdIdentifiers.join(', ')}` : ''}`,
       issue_id: refreshedIssue.id,
       issue_identifier: refreshedIssue.identifier,
+      governance_action: {
+        outcome_kind: createdIdentifiers.length > 0 ? 'waiting_on_child' : (refreshedGovernance.blocks_dispatch ? 'child_still_blocked' : 'unblocked'),
+        root_issue_identifier: refreshedIssue.identifier,
+        created_issue_identifiers: createdIdentifiers,
+        next_recommended_action: createdIdentifiers[0] ? `先处理治理子任务 ${createdIdentifiers[0]}；其余子任务会按顺序自动接力。` : null,
+        user_summary: createdIdentifiers.length > 0
+          ? `已为 ${refreshedIssue.identifier} 创建治理子任务 ${createdIdentifiers.join('、')}，当前先处理 ${createdIdentifiers[0]}，其余子任务会按顺序自动接力，源单仍保持暂停。`
+          : refreshedGovernance.summary,
+      },
     };
   }
 
@@ -1455,6 +1541,27 @@ export class Orchestrator extends EventEmitter {
       };
     }
 
+    if (
+      (workItem.governance_generation ?? 0) > 0 &&
+      suggestion.suggestion_type !== 'harness_adoption' &&
+      suggestion.suggestion_type !== 'constitution_update'
+    ) {
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: `${sourceIssue.identifier} 已经是治理子任务，Symphony 不会继续自动创建下一层治理 issue。请直接 rewrite/split/override 这张子任务。`,
+        issue_id: sourceIssue.id,
+        issue_identifier: sourceIssue.identifier,
+        governance_action: {
+          outcome_kind: 'child_still_blocked',
+          root_issue_identifier: this.workItemRepository.findByLinearIssueId(workItem.governance_root_issue_id ?? sourceIssue.id)?.linear_identifier ?? sourceIssue.identifier,
+          created_issue_identifiers: [],
+          next_recommended_action: `直接处理子任务 ${sourceIssue.identifier}`,
+          user_summary: `${sourceIssue.identifier} 仍需人工处理，系统已停止继续向下递归创建治理 issue。`,
+        },
+      };
+    }
+
     if (suggestion.suggestion_type === 'harness_adoption' || suggestion.suggestion_type === 'constitution_update') {
       try {
         const pr = await this.executeGovernancePullRequestSuggestion({
@@ -1519,6 +1626,13 @@ export class Orchestrator extends EventEmitter {
           message: `Executed ${suggestion.title} and opened draft PR #${pr.pr_number}`,
           issue_id: sourceIssue.id,
           issue_identifier: sourceIssue.identifier,
+          governance_action: {
+            outcome_kind: 'unblocked',
+            root_issue_identifier: sourceIssue.identifier,
+            created_issue_identifiers: [],
+            next_recommended_action: null,
+            user_summary: `已为 ${sourceIssue.identifier} 创建治理 PR 草稿 #${pr.pr_number}。`,
+          },
         };
       } catch (error) {
         return {
@@ -1527,30 +1641,106 @@ export class Orchestrator extends EventEmitter {
           message: error instanceof Error ? error.message : String(error),
           issue_id: sourceIssue.id,
           issue_identifier: sourceIssue.identifier,
+          governance_action: {
+            outcome_kind: 'failed',
+            root_issue_identifier: sourceIssue.identifier,
+            created_issue_identifiers: [],
+            next_recommended_action: null,
+            user_summary: error instanceof Error ? error.message : String(error),
+          },
         };
       }
     }
 
-    const title =
+    const recommendedTitle =
       typeof suggestion.detail_json?.recommended_issue_title === 'string' &&
       suggestion.detail_json.recommended_issue_title.trim()
         ? suggestion.detail_json.recommended_issue_title.trim()
         : suggestion.title;
+    const title = recommendedTitle.startsWith('[GOVERNANCE FOLLOW-UP')
+      ? recommendedTitle
+      : `[GOVERNANCE FOLLOW-UP for ${sourceIssue.identifier}] ${recommendedTitle}`;
+    const architecturalTarget = this.normalizeGovernanceArchitecturalTarget(
+      typeof suggestion.detail_json?.architectural_target === 'string'
+        ? suggestion.detail_json.architectural_target
+        : (typeof suggestion.detail_json?.target_area === 'string'
+          ? suggestion.detail_json.target_area
+          : null),
+    );
     const description = [
+      `来源 issue: ${sourceIssue.identifier}`,
+      `创建原因: ${suggestion.summary}`,
+      `目标仓库: ${workItem.github_repo}`,
+      typeof suggestion.detail_json?.target_area === 'string' && suggestion.detail_json.target_area.trim()
+        ? `目标 area: ${suggestion.detail_json.target_area.trim()}`
+        : null,
+      `建议类型: ${suggestion.suggestion_type}`,
+      '完成这个治理子任务后，可以帮助源 issue 回到更清晰的主路径。',
       typeof suggestion.detail_json?.recommended_issue_description === 'string' &&
       suggestion.detail_json.recommended_issue_description.trim()
         ? suggestion.detail_json.recommended_issue_description.trim()
         : null,
-      `Source issue: ${sourceIssue.identifier}`,
-      `Repo: ${workItem.github_repo}`,
-      typeof suggestion.detail_json?.target_area === 'string' && suggestion.detail_json.target_area.trim()
-        ? `Target area: ${suggestion.detail_json.target_area.trim()}`
-        : null,
-      `Suggestion type: ${suggestion.suggestion_type}`,
-      `Reason: ${suggestion.summary}`,
     ]
       .filter((value): value is string => Boolean(value))
       .join('\n');
+
+    const existingChild = this.findEquivalentOpenGovernanceChild({
+      rootIssueId: workItem.governance_root_issue_id ?? sourceIssue.id,
+      githubRepo: workItem.github_repo,
+      architecturalTarget,
+    });
+    if (existingChild) {
+      this.governanceSuggestionRepository.updateStatus(suggestion.id, 'accepted');
+      this.governanceAssessmentRepository.create({
+        id: crypto.randomUUID(),
+        work_item_id: workItem.id,
+        issue_id: sourceIssue.id,
+        decision: workItem.governance_decision ?? 'accept',
+        status: workItem.governance_status ?? 'advisory',
+        summary: `Accepted governance suggestion: ${suggestion.title}`,
+        constitution_hits_json: workItem.constitution_hits,
+        detail_json: {
+          event: 'suggestion_reused_existing_child',
+          suggestion_id: suggestion.id,
+          suggestion_type: suggestion.suggestion_type,
+          reused_issue_id: existingChild.linear_issue_id,
+          reused_issue_identifier: existingChild.linear_identifier,
+          target_area: suggestion.detail_json?.target_area ?? null,
+          architectural_target: architecturalTarget,
+        },
+      });
+      this.emitTimelineEvent(sourceIssue, {
+        level: 'info',
+        category: 'diagnostic',
+        code: 'governance_suggestion_reused_child',
+        message: `Reused existing governance child ${existingChild.linear_identifier} for ${suggestion.title}.`,
+        turn: null,
+        tool_name: null,
+        detail: {
+          suggestion_id: suggestion.id,
+          suggestion_type: suggestion.suggestion_type,
+          reused_issue_identifier: existingChild.linear_identifier,
+          architectural_target: architecturalTarget,
+        },
+      });
+      this.refreshRepoGovernanceIntelligence(sourceIssue, workItem.id, workItem.github_repo);
+      this.emit('state:changed', this.getStateSnapshot());
+
+      return {
+        accepted: true,
+        status: 'accepted',
+        message: `Reused existing governance child ${existingChild.linear_identifier} for ${suggestion.title}`,
+        issue_id: sourceIssue.id,
+        issue_identifier: sourceIssue.identifier,
+        governance_action: {
+          outcome_kind: 'waiting_on_child',
+          root_issue_identifier: sourceIssue.identifier,
+          created_issue_identifiers: [existingChild.linear_identifier],
+          next_recommended_action: `先处理治理子任务 ${existingChild.linear_identifier}`,
+          user_summary: `${sourceIssue.identifier} 已关联到现有治理子任务 ${existingChild.linear_identifier}，不会重复创建等价子单。`,
+        },
+      };
+    }
 
     const created = await this.createIssueInternal({
       title,
@@ -1558,6 +1748,12 @@ export class Orchestrator extends EventEmitter {
       project_slug: sourceIssue.project_slug,
     }, {
       defer_dispatch: true,
+      schedule_tick: false,
+      governance_lineage: {
+        root_issue_id: workItem.governance_root_issue_id ?? sourceIssue.id,
+        parent_issue_id: sourceIssue.id,
+        generation: (workItem.governance_generation ?? 0) + 1,
+      },
     });
     if (!created.accepted) {
       return {
@@ -1566,7 +1762,24 @@ export class Orchestrator extends EventEmitter {
         message: created.message || `Failed to create governance follow-up issue for ${sourceIssue.identifier}`,
         issue_id: sourceIssue.id,
         issue_identifier: sourceIssue.identifier,
+        governance_action: {
+          outcome_kind: 'failed',
+          root_issue_identifier: sourceIssue.identifier,
+          created_issue_identifiers: [],
+          next_recommended_action: null,
+          user_summary: created.message || `Failed to create governance follow-up issue for ${sourceIssue.identifier}`,
+        },
       };
+    }
+
+    if (created.issue_id && architecturalTarget) {
+      const createdWorkItem = this.workItemRepository.findByLinearIssueId(created.issue_id);
+      if (createdWorkItem) {
+        this.workItemRepository.update({
+          id: createdWorkItem.id,
+          architectural_target: architecturalTarget,
+        });
+      }
     }
 
     this.governanceSuggestionRepository.updateStatus(suggestion.id, 'accepted');
@@ -1614,6 +1827,10 @@ export class Orchestrator extends EventEmitter {
       },
     });
     this.refreshRepoGovernanceIntelligence(sourceIssue, workItem.id, workItem.github_repo);
+    this.workItemRepository.update({
+      id: workItem.id,
+      orchestrator_state: 'halted',
+    });
     this.emit('state:changed', this.getStateSnapshot());
 
     return {
@@ -1622,6 +1839,15 @@ export class Orchestrator extends EventEmitter {
       message: `Executed ${suggestion.title} and created ${created.issue_identifier ?? 'a governance issue'}`,
       issue_id: sourceIssue.id,
       issue_identifier: sourceIssue.identifier,
+      governance_action: {
+        outcome_kind: 'waiting_on_child',
+        root_issue_identifier: sourceIssue.identifier,
+        created_issue_identifiers: created.issue_identifier ? [created.issue_identifier] : [],
+        next_recommended_action: created.issue_identifier ? `先处理治理子任务 ${created.issue_identifier}` : null,
+        user_summary: created.issue_identifier
+          ? `已为 ${sourceIssue.identifier} 创建治理子任务 ${created.issue_identifier}，源单仍在等待这个子任务先被处理。`
+          : `已为 ${sourceIssue.identifier} 创建治理子任务。`,
+      },
     };
   }
 
@@ -1849,6 +2075,8 @@ export class Orchestrator extends EventEmitter {
             continue;
           }
 
+          await this.reassessGovernanceBlockedIssueIfNeeded(issue);
+
           if (this.shouldDispatch(issue)) {
             dispatchedThisTick.add(issue.id);
             await this.dispatchIssue(issue, null);
@@ -1930,6 +2158,181 @@ export class Orchestrator extends EventEmitter {
     return availableSlots > 0;
   }
 
+  private findTrackedWorkItem(issue: Issue): WorkItem | null {
+    return this.workItemRepository.findByLinearIssueId(issue.id)
+      ?? this.workItemRepository.findByIdentifier(issue.identifier);
+  }
+
+  private usesGovernanceDispatchBlock(workItem: WorkItem | null, issue: Issue): boolean {
+    return Boolean(
+      workItem &&
+      workItem.orchestrator_state === 'halted' &&
+      workItem.governance_decision &&
+      workItem.governance_decision !== 'accept' &&
+      !this.hasGovernanceOverride(issue),
+    );
+  }
+
+  private usesFailureDispatchBlock(workItem: WorkItem | null, issue: Issue): boolean {
+    if (!workItem || workItem.orchestrator_state !== 'failed') {
+      return false;
+    }
+
+    if ((workItem.linear_state || '').trim().toLowerCase() !== issue.state.trim().toLowerCase()) {
+      return false;
+    }
+
+    if (!issue.updated_at) {
+      return true;
+    }
+
+    return issue.updated_at.getTime() <= workItem.updated_at.getTime();
+  }
+
+  private governanceSourceTimestamp(workItem: WorkItem): Date | null {
+    return workItem.governance_source_updated_at ?? workItem.updated_at ?? null;
+  }
+
+  private shouldReassessGovernanceBlockedIssue(issue: Issue, workItem: WorkItem | null): boolean {
+    if (!this.usesGovernanceDispatchBlock(workItem, issue) || !issue.updated_at) {
+      return false;
+    }
+
+    if (!workItem) {
+      return false;
+    }
+
+    const baseline = this.governanceSourceTimestamp(workItem);
+    if (!baseline) {
+      return true;
+    }
+
+    return issue.updated_at.getTime() > baseline.getTime();
+  }
+
+  private hasActiveGovernanceChildren(workItem: WorkItem | null): boolean {
+    if (!workItem) {
+      return false;
+    }
+
+    return this.workItemRepository
+      .findByGovernanceParentIssueId(workItem.linear_issue_id)
+      .some((child) => (
+        child.linear_issue_id !== workItem.linear_issue_id &&
+        !this.isTerminalTrackerState(child.linear_state)
+      ));
+  }
+
+  private hasBlockingGovernanceSibling(workItem: WorkItem | null): boolean {
+    if (!workItem?.governance_parent_issue_id) {
+      return false;
+    }
+
+    const siblings = this.workItemRepository
+      .findByGovernanceParentIssueId(workItem.governance_parent_issue_id)
+      .sort((left, right) => (
+        left.created_at.getTime() - right.created_at.getTime()
+        || left.linear_identifier.localeCompare(right.linear_identifier)
+      ));
+    const currentIndex = siblings.findIndex((candidate) => candidate.linear_issue_id === workItem.linear_issue_id);
+    if (currentIndex <= 0) {
+      return false;
+    }
+
+    return siblings
+      .slice(0, currentIndex)
+      .some((candidate) => !this.isTerminalTrackerState(candidate.linear_state));
+  }
+
+  private lastGovernanceRewriteTitle(workItemId: string): string | null {
+    const latest = this.governanceAssessmentRepository
+      .findByWorkItemId(workItemId)
+      .find((entry) => typeof entry.detail_json?.rewrite_title === 'string');
+    return typeof latest?.detail_json?.rewrite_title === 'string'
+      ? latest.detail_json.rewrite_title
+      : null;
+  }
+
+  private lastGovernanceSplitSuggestions(workItemId: string): string[] {
+    const latest = this.governanceAssessmentRepository
+      .findByWorkItemId(workItemId)
+      .find((entry) => Array.isArray(entry.detail_json?.split_suggestions));
+    return Array.isArray(latest?.detail_json?.split_suggestions)
+      ? latest.detail_json.split_suggestions.filter((value): value is string => typeof value === 'string')
+      : [];
+  }
+
+  private async reassessGovernanceBlockedIssueIfNeeded(issue: Issue): Promise<void> {
+    const workItem = this.findTrackedWorkItem(issue);
+    if (!this.shouldReassessGovernanceBlockedIssue(issue, workItem) || !workItem) {
+      return;
+    }
+
+    const route = this.tryResolveRepositoryRoute(issue);
+    if (!route) {
+      return;
+    }
+
+    const previousDecision = workItem.governance_decision;
+    const previousSummary = workItem.governance_summary;
+    const previousRewriteTitle = this.lastGovernanceRewriteTitle(workItem.id);
+    const previousSplitSuggestions = this.lastGovernanceSplitSuggestions(workItem.id);
+
+    const repoIntelligence = this.buildRepoIntelligenceContext(route.github_repo_full);
+    const governance = await assessIntakeCritic({
+      issue,
+      route,
+      repositoryRoot: route.local_path,
+      repoSnapshot: repoIntelligence.repoSnapshot,
+      activeFitnessSignals: repoIntelligence.activeSignals,
+    });
+
+    this.refreshWorkItemGovernanceState(workItem.id, issue, governance);
+    const governanceChanged =
+      previousDecision !== governance.decision ||
+      previousSummary !== governance.summary ||
+      previousRewriteTitle !== (governance.rewrite_title ?? null) ||
+      JSON.stringify(previousSplitSuggestions) !== JSON.stringify(governance.split_suggestions);
+
+    if (governanceChanged && previousDecision && previousDecision !== 'accept') {
+      this.acceptGovernanceSuggestions(issue.id, previousDecision);
+    }
+
+    if (governanceChanged && governance.blocks_dispatch) {
+      this.ensureGovernanceSuggestions(issue, workItem.id, route, governance);
+    }
+
+    this.recordGovernanceAssessment(workItem.id, issue.id, governance, {
+      event: 'tracker_issue_updated',
+      previous_decision: previousDecision,
+      previous_summary: previousSummary,
+      issue_updated_at: issue.updated_at?.toISOString() ?? null,
+      rewrite_title: governance.rewrite_title,
+      split_suggestions: governance.split_suggestions,
+      blocks_dispatch: governance.blocks_dispatch,
+    });
+    this.recordGovernanceMemoryOutcome(workItem.id, issue, governance);
+    this.refreshRepoGovernanceIntelligence(issue, workItem.id, route.github_repo_full);
+
+    if (governanceChanged) {
+      this.emitTimelineEvent(issue, {
+        level: governance.blocks_dispatch ? 'warn' : 'info',
+        category: 'diagnostic',
+        code: governance.blocks_dispatch ? 'governance_blocked' : 'governance_assessed',
+        message: governance.summary,
+        turn: null,
+        tool_name: null,
+        detail: {
+          decision: governance.decision,
+          status: governance.status,
+          rewrite_title: governance.rewrite_title,
+          split_suggestions: governance.split_suggestions,
+          source: 'tracker_update',
+        },
+      });
+    }
+  }
+
   /**
    * Check if an issue should be dispatched
    * Section 8.2: Candidate Selection Rules
@@ -1970,6 +2373,26 @@ export class Orchestrator extends EventEmitter {
     // we always allow re-dispatch for review agents.
     const isInReview = issue.state.toLowerCase() === 'in review';
     if (this.state.completed.has(issue.id) && !isInReview) {
+      return false;
+    }
+
+    const trackedWorkItem = this.findTrackedWorkItem(issue);
+    if (this.usesFailureDispatchBlock(trackedWorkItem, issue)) {
+      return false;
+    }
+
+    if (this.usesGovernanceDispatchBlock(trackedWorkItem, issue)) {
+      const baseline = trackedWorkItem ? this.governanceSourceTimestamp(trackedWorkItem) : null;
+      if (!issue.updated_at || !baseline || issue.updated_at.getTime() <= baseline.getTime()) {
+        return false;
+      }
+    }
+
+    if (this.hasActiveGovernanceChildren(trackedWorkItem)) {
+      return false;
+    }
+
+    if (this.hasBlockingGovernanceSibling(trackedWorkItem)) {
       return false;
     }
 
@@ -2448,6 +2871,7 @@ export class Orchestrator extends EventEmitter {
       governance_status: governance.status,
       governance_decision: governance.decision,
       governance_summary: governance.summary,
+      governance_source_updated_at: governance.blocks_dispatch ? issue.updated_at ?? null : null,
       constitution_hits: governance.constitution_hits,
       orchestrator_state:
         governance.blocks_dispatch && !this.hasGovernanceOverride(issue)
@@ -2882,27 +3306,62 @@ export class Orchestrator extends EventEmitter {
     suggestion: string,
     index: number,
     total: number,
-  ): { title: string; description: string } {
+  ): { title: string; description: string; architectural_target: string | null } {
     const normalizedSuggestion = suggestion.replace(/\s+/g, ' ').trim();
     const shortTitle = normalizedSuggestion
       .replace(/^(先|将|把)\s*/u, '')
       .replace(/^先拆出\s*/u, '')
       .replace(/[，,。.!].*$/u, '')
       .trim();
-    const title = shortTitle && shortTitle.length <= 120
+    const baseTitle = shortTitle && shortTitle.length <= 120
       ? shortTitle
       : `${issue.title} · Slice ${index + 1}`;
+    const title = index === 0
+      ? baseTitle
+      : `[GOVERNANCE FOLLOW-UP for ${issue.identifier}] ${baseTitle}`;
 
     const description = [
-      `Split from ${issue.identifier}.`,
-      `Focused slice ${index + 1} of ${total}: ${normalizedSuggestion}`,
-      'Keep this issue limited to one concrete, verifiable task.',
+      `来源 issue: ${issue.identifier}`,
+      `创建原因: 治理层要求先拆分原任务，再继续主线开发。`,
+      `目标切片 ${index + 1}/${total}: ${normalizedSuggestion}`,
+      '完成这个子任务后，可以帮助源 issue 继续推进。',
+      '保持这个任务只做一件可验证的具体工作。',
     ].join('\n');
 
     return {
       title,
       description,
+      architectural_target: this.normalizeGovernanceArchitecturalTarget(shortTitle || normalizedSuggestion),
     };
+  }
+
+  private normalizeGovernanceArchitecturalTarget(value: string | null | undefined): string | null {
+    if (typeof value !== 'string') {
+      return null;
+    }
+    const normalized = value.replace(/\s+/g, ' ').trim().toLowerCase();
+    return normalized || null;
+  }
+
+  private findEquivalentOpenGovernanceChild(params: {
+    rootIssueId: string;
+    githubRepo: string;
+    architecturalTarget: string | null;
+  }): WorkItem | null {
+    const normalizedTarget = this.normalizeGovernanceArchitecturalTarget(params.architecturalTarget);
+    if (!normalizedTarget) {
+      return null;
+    }
+
+    return this.workItemRepository
+      .findByGovernanceRootIssueId(params.rootIssueId)
+      .find((candidate) => (
+        candidate.linear_issue_id !== params.rootIssueId &&
+        candidate.governance_generation > 0 &&
+        candidate.github_repo === params.githubRepo &&
+        !this.isTerminalTrackerState(candidate.linear_state) &&
+        this.normalizeGovernanceArchitecturalTarget(candidate.architectural_target) === normalizedTarget
+      )) ?? null;
   }
 
   private ensureGovernanceSuggestions(
@@ -2913,6 +3372,9 @@ export class Orchestrator extends EventEmitter {
   ): void {
     const existing = this.governanceSuggestionRepository.findPendingByIssueId(issue.id);
     const currentWorkItem = this.workItemRepository.findById(workItemId);
+    if ((currentWorkItem?.governance_generation ?? 0) > 0) {
+      return;
+    }
     const targetArea = governance.target_area ?? this.inferGovernanceTargetArea(issue, currentWorkItem);
     const architectureDetail = {
       architectural_target: currentWorkItem?.architectural_target ?? targetArea,
@@ -3069,6 +3531,7 @@ export class Orchestrator extends EventEmitter {
       governance_status: governance.status,
       governance_decision: governance.decision,
       governance_summary: governance.summary,
+      governance_source_updated_at: governance.blocks_dispatch ? issue.updated_at ?? null : null,
       change_pack_summary: changePackState.summary,
       task_status: changePackState.task_status,
       evidence_summary: changePackState.evidence_summary,
@@ -3986,18 +4449,73 @@ export class Orchestrator extends EventEmitter {
     return path.join(workspacePath, '.symphony', filename);
   }
 
-  private async syncLinearState(issue: Issue, stateName: string): Promise<void> {
+  private async syncLinearState(issue: Issue, stateName: string): Promise<{
+    success: boolean;
+    recovered: boolean;
+    currentState: string | null;
+    error: string | null;
+  }> {
     if (issue.state.toLowerCase() === stateName.toLowerCase()) {
-      return;
+      return {
+        success: true,
+        recovered: false,
+        currentState: issue.state,
+        error: null,
+      };
     }
+
+    const recoverFromTrackerState = async (error: string | null): Promise<{
+      success: boolean;
+      recovered: boolean;
+      currentState: string | null;
+      error: string | null;
+    }> => {
+      try {
+        const fetched = await this.tracker.fetchIssueById(issue.id);
+        const currentState = fetched.issue?.state ?? null;
+        if (currentState && currentState.toLowerCase() === stateName.toLowerCase()) {
+          console.log(
+            `[orchestrator] Recovered Linear state transition for ${issue.identifier}; tracker is already at ${currentState}.`,
+          );
+          return {
+            success: true,
+            recovered: true,
+            currentState,
+            error: null,
+          };
+        }
+
+        return {
+          success: false,
+          recovered: false,
+          currentState,
+          error: error ?? fetched.errorMessage ?? (typeof fetched.error === 'string' ? fetched.error : null),
+        };
+      } catch (fetchError) {
+        return {
+          success: false,
+          recovered: false,
+          currentState: null,
+          error: error ?? (fetchError instanceof Error ? fetchError.message : String(fetchError)),
+        };
+      }
+    };
 
     try {
       const result = await this.tracker.updateIssueState(issue.id, stateName);
       if (!result.success) {
         console.warn(`[orchestrator] Failed to update Linear issue ${issue.identifier} to ${stateName}: ${result.error}`);
+        return recoverFromTrackerState(result.error ?? null);
       }
+      return {
+        success: true,
+        recovered: false,
+        currentState: stateName,
+        error: null,
+      };
     } catch (err) {
       console.warn(`[orchestrator] Exception updating Linear issue ${issue.identifier} to ${stateName}:`, err);
+      return recoverFromTrackerState(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -4052,6 +4570,17 @@ export class Orchestrator extends EventEmitter {
       `Issue: ${issue.identifier}`,
       '',
       handoverContent?.trim() || `Development completed for ${issue.identifier}.`,
+    ].join('\n');
+  }
+
+  private buildNoOpGovernanceChildComment(issue: Issue, summary: string | null): string {
+    return [
+      '## Governance Child no-op Complete',
+      `Issue: ${issue.identifier}`,
+      '',
+      'This governance child finished without a PR because no actionable code diff remained after workflow artifact cleanup.',
+      '',
+      summary?.trim() || 'No actionable diff remained, so Symphony closed this child as a no-op completion.',
     ].join('\n');
   }
 
@@ -4168,6 +4697,27 @@ export class Orchestrator extends EventEmitter {
     }
 
     return baseResult;
+  }
+
+  private isNonRetryableDeliveryCode(code: string | null | undefined): boolean {
+    return [
+      'review_submit_failed',
+      'dirty_workspace_no_commit',
+      'tracker_state_conflict',
+      'no_actionable_diff',
+    ].includes((code ?? '').trim());
+  }
+
+  private persistDeliveryResult(workItemId: string, cliResult: CliCommandResult | null | undefined): void {
+    if (!cliResult) {
+      return;
+    }
+
+    this.workItemRepository.update({
+      id: workItemId,
+      delivery_code: cliResult.delivery_code ?? null,
+      delivery_summary: cliResult.delivery_summary ?? cliResult.feedback ?? null,
+    });
   }
 
   /**
@@ -4671,10 +5221,21 @@ export class Orchestrator extends EventEmitter {
         governedState.effectiveHarness,
         cliResult,
       );
+      this.persistDeliveryResult(workItem.id, cliResult.result ?? null);
 
       if (!cliResult.success || !cliResult.result || !cliResult.result.ok) {
         result.failure_reason = 'cli_business';
-        result.error = cliResult.error || 'CLI business executor failed';
+        result.error =
+          cliResult.result?.delivery_summary
+          || cliResult.result?.feedback
+          || cliResult.error
+          || 'CLI business executor failed';
+        if (this.isNonRetryableDeliveryCode(cliResult.result?.delivery_code)) {
+          result.outcome = 'halted';
+          result.next_action = 'stop';
+          result.completed = false;
+          result.final_state = cliResult.result?.final_state || issue.state;
+        }
         finalizeAgentRun('failed', null, null, result.error);
         return result;
       }
@@ -4756,6 +5317,8 @@ export class Orchestrator extends EventEmitter {
         id: workItem.id,
         linear_state: 'In Review',
         orchestrator_state: 'workspace_ready',
+        delivery_code: null,
+        delivery_summary: null,
       });
     }
   }
@@ -4820,6 +5383,8 @@ export class Orchestrator extends EventEmitter {
       review_round: nextRound,
       last_review_decision: reviewDecision,
       last_review_summary: reviewContent || result.cli_result?.feedback || null,
+      delivery_code: null,
+      delivery_summary: null,
     });
     const refreshedWorkItem = this.workItemRepository.findById(workItem.id) ?? workItem;
     this.governanceMemoryService.recordDebtOutcome(refreshedWorkItem.id, {
@@ -4885,6 +5450,8 @@ export class Orchestrator extends EventEmitter {
       review_round: nextRound,
       last_review_decision: reviewDecision,
       last_review_summary: reviewContent,
+      delivery_code: null,
+      delivery_summary: null,
       missing_requirements: [],
     });
     const refreshedWorkItem = this.workItemRepository.findById(workItem.id) ?? workItem;
@@ -4910,8 +5477,71 @@ export class Orchestrator extends EventEmitter {
       id: result.work_item_id,
       linear_state: finalState,
       orchestrator_state: nextState,
+      delivery_code: result.cli_result?.delivery_code ?? null,
+      delivery_summary: result.cli_result?.delivery_summary ?? result.cli_result?.feedback ?? result.error ?? null,
       cancelled_at: nextState === 'cancelled' ? new Date() : undefined,
     });
+  }
+
+  private async handleNoOpGovernanceChildCompletion(
+    runningEntry: RunningEntry,
+    result: WorkerResult,
+  ): Promise<boolean> {
+    if (result.cli_result?.delivery_code !== 'no_actionable_diff' || !result.work_item_id) {
+      return false;
+    }
+
+    const workItem = this.workItemRepository.findById(result.work_item_id);
+    if (!workItem?.governance_parent_issue_id) {
+      return false;
+    }
+
+    const summary = result.cli_result.delivery_summary ?? result.cli_result.feedback ?? result.error ?? null;
+    const trackerSync = await this.syncLinearState(runningEntry.issue, 'Done');
+    if (!trackerSync.success) {
+      this.workItemRepository.update({
+        id: workItem.id,
+        delivery_code: 'tracker_state_conflict',
+        delivery_summary: trackerSync.error ?? summary,
+      });
+      return false;
+    }
+
+    await this.postLinearComment(
+      runningEntry.issue.id,
+      this.buildNoOpGovernanceChildComment(runningEntry.issue, summary),
+    );
+    this.workItemRepository.update({
+      id: workItem.id,
+      linear_state: 'Done',
+      orchestrator_state: 'completed',
+      merged_at: new Date(),
+      delivery_code: 'no_actionable_diff',
+      delivery_summary: summary,
+    });
+    const refreshedWorkItem = this.workItemRepository.findById(workItem.id) ?? workItem;
+    this.emitTimelineEvent(
+      { ...runningEntry.issue, state: 'Done' },
+      {
+        level: 'info',
+        category: 'diagnostic',
+        code: 'governance_child_noop_closed',
+        message: `Closed governance child ${runningEntry.issue.identifier} as a no-op completion.`,
+        turn: null,
+        tool_name: null,
+        detail: {
+          delivery_code: 'no_actionable_diff',
+          delivery_summary: summary,
+        },
+      },
+    );
+    this.governanceMemoryService.recordDecisionOutcome(refreshedWorkItem.id);
+    this.refreshRepoGovernanceIntelligence(
+      { ...runningEntry.issue, state: 'Done' },
+      refreshedWorkItem.id,
+      refreshedWorkItem.github_repo,
+    );
+    return true;
   }
 
   /**
@@ -5086,6 +5716,32 @@ export class Orchestrator extends EventEmitter {
       );
       this.emit('issue:failed', runningEntry.issue, result.error || 'Review requested changes');
     } else if (result.outcome === 'halted') {
+      const handledNoOpCompletion = await this.handleNoOpGovernanceChildCompletion(runningEntry, result);
+      if (handledNoOpCompletion) {
+        this.setRunningStage(issueId, 'completed');
+        this.state.running.delete(issueId);
+        this.state.claimed.delete(issueId);
+        this.state.completed.add(issueId);
+        if (result.workspace_path) {
+          try {
+            await this.workspaceManager.removeWorkspace(result.workspace_path);
+          } catch (err) {
+            console.warn('[orchestrator] Failed to clean workspace after no-op child completion:', err);
+          }
+        }
+        try {
+          await this.cleanupAllTerminalIssueBranches();
+        } catch (err) {
+          console.warn('[orchestrator] Failed to clean branches after no-op child completion:', err);
+        }
+        if (this.running) {
+          this.scheduleTick(0);
+        }
+        this.emit('issue:completed', runningEntry.issue, true);
+        this.emit('state:changed', this.getStateSnapshot());
+        return;
+      }
+
       await this.handleHaltedWorkItem(runningEntry, result);
       this.setRunningStage(issueId, 'halted');
       this.state.running.delete(issueId);
@@ -5276,13 +5932,17 @@ export class Orchestrator extends EventEmitter {
       child.on('close', code => {
         clearTimeout(timeout);
         const output = (stdout + stderr).trim();
+        const parsedResult = parseCliCommandResult(output);
 
         if (code !== 0) {
-          resolve({ success: false, error: `Command failed with code ${code}: ${output}` });
+          resolve({
+            success: false,
+            result: parsedResult ?? undefined,
+            error: `Command failed with code ${code}: ${output}`,
+          });
           return;
         }
 
-        const parsedResult = parseCliCommandResult(output);
         if (!parsedResult) {
           resolve({ success: false, error: `Command returned no parseable result: ${output}` });
           return;

@@ -47,6 +47,30 @@ export type SyncTargetSystem = 'linear' | 'github';
 export type SyncResult = 'success' | 'failed';
 export type BotWatchTransport = 'telegram' | 'discord';
 export type BotWatchPresetValue = 'default' | 'verbose' | 'failures' | 'status';
+export type BotIssueFollowupRole = 'origin';
+export type BotFollowupCardKind = 'governance_blocked';
+export type BotFollowupDeliveryKind = 'governance_card' | 'lifecycle_digest';
+export type BotLifecycleNotificationClass = 'retrying' | 'failed' | 'done' | 'cancelled';
+export type BotFollowupCardState =
+  | 'open'
+  | 'confirming'
+  | 'executing'
+  | 'waiting_on_child'
+  | 'resolved'
+  | 'failed';
+export type BotTransportEventSource =
+  | 'sync_ack'
+  | 'followup_card'
+  | 'lifecycle_digest'
+  | 'callback_update';
+export type BotTransportEventAction = 'send' | 'edit' | 'fallback';
+export type BotTransportEventResult = 'success' | 'failed';
+export type BotPendingActionStatus =
+  | 'pending_confirm'
+  | 'executing'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
 export type BotPendingIntentKind =
   | 'create_issue'
   | 'watch'
@@ -103,11 +127,17 @@ export interface WorkItem {
   review_round: number;
   last_review_decision: ReviewDecision | null;
   last_review_summary: string | null;
+  delivery_code: string | null;
+  delivery_summary: string | null;
   repo_harness_status: RepositoryHarnessStatus | null;
   constitution_status: ConstitutionStatus | null;
   governance_status: GovernanceStatus | null;
   governance_decision: GovernanceDecision | null;
   governance_summary: string | null;
+  governance_root_issue_id: string | null;
+  governance_parent_issue_id: string | null;
+  governance_generation: number;
+  governance_source_updated_at: Date | null;
   governance_override_at: Date | null;
   governance_override_reason: string | null;
   change_pack_summary: ChangePackSummary | null;
@@ -145,11 +175,17 @@ export interface CreateWorkItem {
   review_round?: number;
   last_review_decision?: ReviewDecision | null;
   last_review_summary?: string | null;
+  delivery_code?: string | null;
+  delivery_summary?: string | null;
   repo_harness_status?: RepositoryHarnessStatus | null;
   constitution_status?: ConstitutionStatus | null;
   governance_status?: GovernanceStatus | null;
   governance_decision?: GovernanceDecision | null;
   governance_summary?: string | null;
+  governance_root_issue_id?: string | null;
+  governance_parent_issue_id?: string | null;
+  governance_generation?: number;
+  governance_source_updated_at?: Date | null;
   governance_override_at?: Date | null;
   governance_override_reason?: string | null;
   change_pack_summary?: ChangePackSummary | null;
@@ -335,11 +371,15 @@ export interface DeleteBotConversationPreferenceRecord {
 export interface BotPendingActionRecord {
   transport: BotWatchTransport;
   conversation_id: string;
+  issue_id: string | null;
   user_id: string | null;
   intent_kind: BotPendingIntentKind;
   normalized_payload: Record<string, unknown>;
   summary_message: string;
   expires_at: Date;
+  status: BotPendingActionStatus;
+  message_id: string | null;
+  card_key: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -347,16 +387,148 @@ export interface BotPendingActionRecord {
 export interface CreateBotPendingActionRecord {
   transport: BotWatchTransport;
   conversation_id: string;
+  issue_id?: string | null;
   user_id?: string | null;
   intent_kind: BotPendingIntentKind;
   normalized_payload: Record<string, unknown>;
   summary_message: string;
   expires_at: Date;
+  status?: BotPendingActionStatus;
+  message_id?: string | null;
+  card_key?: string | null;
+}
+
+export interface BotIssueFollowupRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  issue_id: string;
+  issue_identifier: string | null;
+  user_id: string | null;
+  role: BotIssueFollowupRole;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface CreateBotIssueFollowupRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  issue_id: string;
+  issue_identifier?: string | null;
+  user_id?: string | null;
+  role?: BotIssueFollowupRole;
+}
+
+export interface DeleteBotIssueFollowupRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  issue_id: string;
+  role?: BotIssueFollowupRole;
+}
+
+export interface BotFollowupMessageStateRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  issue_id: string;
+  issue_identifier: string | null;
+  message_id: string;
+  card_kind: BotFollowupCardKind;
+  card_key: string;
+  card_state: BotFollowupCardState;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface BotFollowupDeliveryStateRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  root_issue_id: string;
+  root_issue_identifier: string | null;
+  delivery_kind: BotFollowupDeliveryKind;
+  last_material_key: string | null;
+  last_notification_class: BotLifecycleNotificationClass | null;
+  last_message_id: string | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface CreateBotFollowupDeliveryStateRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  root_issue_id: string;
+  root_issue_identifier?: string | null;
+  delivery_kind: BotFollowupDeliveryKind;
+  last_material_key?: string | null;
+  last_notification_class?: BotLifecycleNotificationClass | null;
+  last_message_id?: string | null;
+}
+
+export interface DeleteBotFollowupDeliveryStateRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  root_issue_id: string;
+  delivery_kind: BotFollowupDeliveryKind;
+}
+
+export interface CreateBotFollowupMessageStateRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  issue_id: string;
+  issue_identifier?: string | null;
+  message_id: string;
+  card_kind: BotFollowupCardKind;
+  card_key: string;
+  card_state?: BotFollowupCardState;
+}
+
+export interface UpdateBotFollowupMessageStateRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  issue_id: string;
+  issue_identifier?: string | null;
+  message_id?: string;
+  card_kind?: BotFollowupCardKind;
+  card_key?: string;
+  card_state?: BotFollowupCardState;
+}
+
+export interface DeleteBotFollowupMessageStateRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  issue_id: string;
 }
 
 export interface DeleteBotPendingActionRecord {
   transport: BotWatchTransport;
   conversation_id: string;
+  issue_id?: string | null;
+}
+
+export interface BotTransportEventRecord {
+  id: number;
+  transport: BotWatchTransport;
+  conversation_id: string;
+  issue_id: string | null;
+  root_issue_id: string | null;
+  source: BotTransportEventSource;
+  message_id: string | null;
+  action: BotTransportEventAction;
+  result: BotTransportEventResult;
+  material_key: string | null;
+  error_message: string | null;
+  created_at: Date;
+}
+
+export interface CreateBotTransportEventRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  issue_id?: string | null;
+  root_issue_id?: string | null;
+  source: BotTransportEventSource;
+  message_id?: string | null;
+  action: BotTransportEventAction;
+  result: BotTransportEventResult;
+  material_key?: string | null;
+  error_message?: string | null;
 }
 
 export interface ShadowHarnessRecord {

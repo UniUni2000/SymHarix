@@ -1,4 +1,8 @@
-import { BotConversationPreferenceRepository, BotPendingActionRepository } from '../database';
+import {
+  BotConversationPreferenceRepository,
+  type BotFollowupMessageStateRepository,
+  BotPendingActionRepository,
+} from '../database';
 import { logger } from '../logging';
 import type { RuntimeControlPlane } from '../runtime/types';
 import { TrackerProjectResolutionService } from '../tracker/projectResolution';
@@ -15,6 +19,7 @@ import type {
   BotRuntimeCopilotContext,
 } from './types';
 import { BotCommandService } from './commandService';
+import { buildGovernanceQuickActions, toGovernanceQuickActionIntent } from './governanceQuickActions';
 import type { BotSubscriptionService } from './subscriptions';
 import { BotRuntimeContextService } from './runtimeContext';
 import { createBotAssistantModelFromEnv, type BotAssistantModel } from './model';
@@ -75,6 +80,19 @@ function isConfirmation(text: string): boolean {
 
 function isCancellation(text: string): boolean {
   return CANCEL_WORDS.has(text.trim().toLowerCase());
+}
+
+function buildConfirmActions() {
+  return [
+    {
+      label: '确认执行',
+      callback_data: 'pending|confirm',
+    },
+    {
+      label: '取消',
+      callback_data: 'pending|cancel',
+    },
+  ] as const;
 }
 
 function coerceIntent(value: Record<string, unknown> | null): BotAssistantIntent | null {
@@ -360,12 +378,34 @@ function explainGovernanceNextStep(focusIssue: BotFocusedIssueContext): string {
 
   return [
     `${focusIssue.issue.identifier} 当前的治理状态是 ${governance.decision || governance.status || 'unknown'}。`,
+    governance.thread_state === 'waiting_on_child' && governance.child_issues[0]
+      ? `当前源单还在等治理子任务 ${governance.child_issues[0].issue_identifier}，所以不会继续自动开发。`
+      : null,
     governance.summary ? `原因：${governance.summary}` : null,
     governance.suggestions[0] ? `建议：${governance.suggestions[0].summary}` : null,
     governance.suggestions[1] ? `备选：${governance.suggestions[1].summary}` : null,
+    governance.child_issues.length > 0
+      ? `治理子任务：${governance.child_issues.map((child) => `${child.issue_identifier} · ${child.title}`).join('；')}`
+      : null,
+    governance.next_recommended_action ? `下一步：${governance.next_recommended_action}` : null,
     governance.suggestions.length > 0
       ? `可引用建议：${governance.suggestions.map((suggestion, index) => `[${index + 1}] ${suggestion.suggestion_type} (${suggestion.id})`).join(' · ')}`
       : null,
+  ].filter(Boolean).join('\n');
+}
+
+function explainGovernanceChildIssuePurpose(focusIssue: BotFocusedIssueContext): string {
+  const firstChild = focusIssue.governance?.child_issues?.[0] ?? null;
+  if (!firstChild) {
+    return explainGovernanceNextStep(focusIssue);
+  }
+
+  return [
+    `${firstChild.issue_identifier} 是为 ${focusIssue.issue.identifier} 拆出来的治理子任务。`,
+    `用途：${firstChild.title}`,
+    firstChild.governance_summary ? `当前状态：${firstChild.governance_summary}` : `当前状态：${firstChild.tracker_state}`,
+    `为什么源单还没继续：${focusIssue.issue.identifier} 还在等待这个子任务先收口。`,
+    focusIssue.governance?.next_recommended_action ? `最推荐下一步：${focusIssue.governance.next_recommended_action}` : null,
   ].filter(Boolean).join('\n');
 }
 
@@ -379,6 +419,16 @@ function extractOrdinal(text: string): number | null {
   }
 
   const match = normalized.match(/第\s*(\d+)\s*(个|条)?/);
+  if (!match?.[1]) {
+    return null;
+  }
+  const value = Number.parseInt(match[1], 10);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function extractBareOrdinal(text: string): number | null {
+  const normalized = text.trim();
+  const match = normalized.match(/^(?:[A-Z][A-Z0-9]+-\d+\s+)?([1-3])$/i);
   if (!match?.[1]) {
     return null;
   }
@@ -413,6 +463,70 @@ function buildHeuristicDecision(
   const availableProjectSlugs = context.available_projects.map((item) => item.project_slug);
   const explicitProject = resolveProjectAlias(trimmed, context.available_projects);
   const focusIssue = context.focus_issue;
+  const bareOrdinal = extractBareOrdinal(trimmed);
+
+  if (bareOrdinal && focusIssue) {
+    const runtimeLikeIssue = {
+      issue_id: focusIssue.issue.issue_id,
+      work_item_id: null,
+      identifier: focusIssue.issue.identifier,
+      title: focusIssue.issue.title,
+      phase: focusIssue.issue.phase,
+      tracker_state: focusIssue.issue.tracker_state,
+      orchestrator_state: focusIssue.issue.orchestrator_state,
+      workspace_path: null,
+      branch_name: focusIssue.issue.branch_name,
+      github_repo: focusIssue.issue.github_repo,
+      github_issue_number: null,
+      active_pr_number: focusIssue.issue.active_pr_number,
+      session: null,
+      repo_harness_status: null,
+      constitution_status: null,
+      change_pack_summary: null,
+      task_status: null,
+      evidence_summary: null,
+      missing_requirements: [],
+      architectural_target: focusIssue.issue.architectural_target,
+      path_families: focusIssue.issue.path_families,
+      boundary_edges: focusIssue.issue.boundary_edges,
+      import_edges: focusIssue.issue.import_edges,
+      governance_status: focusIssue.governance?.status ?? null,
+      governance_decision: focusIssue.governance?.decision ?? null,
+      governance_summary: focusIssue.governance?.summary ?? null,
+      constitution_hits: [],
+      fitness_signals: [],
+      active_governance_suggestions: (focusIssue.governance?.suggestions ?? []).map((suggestion) => ({
+        id: suggestion.id,
+        suggestion_type: suggestion.suggestion_type as any,
+        status: suggestion.status as any,
+        title: suggestion.title,
+        summary: suggestion.summary,
+        can_execute: suggestion.can_execute,
+        can_dismiss: suggestion.can_dismiss,
+      })),
+      governance_override: null,
+      actions: {
+        can_stop: false,
+        can_retry: false,
+        can_override_governance: Boolean(
+          focusIssue.issue.orchestrator_state === 'halted' &&
+          focusIssue.governance?.decision &&
+          focusIssue.governance.decision !== 'accept',
+        ),
+        can_rewrite_governance: focusIssue.governance?.decision === 'accept_with_rewrite',
+        can_split_governance: focusIssue.governance?.decision === 'split_before_implement',
+        can_open_pr: false,
+      },
+      created_at: null,
+      updated_at: null,
+    } as const;
+    const action = buildGovernanceQuickActions(runtimeLikeIssue as any)[bareOrdinal - 1];
+    if (action) {
+      return {
+        intent: toGovernanceQuickActionIntent(action),
+      };
+    }
+  }
 
   if (/如何设置默认项目|default project|怎么设置项目/i.test(trimmed)) {
     return {
@@ -477,6 +591,19 @@ function buildHeuristicDecision(
       intent: {
         kind: 'answer_question',
         answer: explainGovernanceNextStep(focusIssue),
+      },
+    };
+  }
+
+  if (
+    focusIssue &&
+    focusIssue.governance?.thread_state === 'waiting_on_child' &&
+    /这个新单|这个子单|新单.*干嘛|子单.*干嘛|为什么创建.*子单|这个新 issue/i.test(trimmed)
+  ) {
+    return {
+      intent: {
+        kind: 'answer_question',
+        answer: explainGovernanceChildIssuePurpose(focusIssue),
       },
     };
   }
@@ -573,6 +700,15 @@ function buildHeuristicDecision(
         title,
         description: rest,
         project_slug: explicitProject || context.default_project_slug,
+      },
+    };
+  }
+
+  if (focusIssue && focusIssue.governance?.status === 'blocked') {
+    return {
+      intent: {
+        kind: 'answer_question',
+        answer: explainGovernanceNextStep(focusIssue),
       },
     };
   }
@@ -696,6 +832,7 @@ export class BotAssistantService {
     model?: BotAssistantModel,
     private readonly canWrite: (context: BotCommandContext) => boolean = () => true,
     subscriptions: Pick<BotSubscriptionService, 'listByConversation'> | null = null,
+    followupMessageStates: BotFollowupMessageStateRepository | null = null,
   ) {
     this.model = normalizeModel(model);
     this.runtimeContext = new BotRuntimeContextService(
@@ -703,6 +840,7 @@ export class BotAssistantService {
       preferences,
       projectResolver,
       subscriptions,
+      followupMessageStates,
     );
   }
 
@@ -713,7 +851,7 @@ export class BotAssistantService {
   async respondToText(context: BotCommandContext, text: string): Promise<BotCommandResponse> {
     const normalized = text.trim();
     const pending = this.pendingActions
-      ?.findByConversation({
+      ?.findLatestByConversation({
         transport: context.transport,
         conversation_id: context.recipient.conversation_id,
       }) ?? null;
@@ -723,6 +861,7 @@ export class BotAssistantService {
         this.pendingActions?.delete({
           transport: context.transport,
           conversation_id: context.recipient.conversation_id,
+          issue_id: pending.issue_id,
         });
         return {
           message: 'The pending action expired. Please send the request again.',
@@ -734,6 +873,7 @@ export class BotAssistantService {
         this.pendingActions?.delete({
           transport: context.transport,
           conversation_id: context.recipient.conversation_id,
+          issue_id: pending.issue_id,
         });
         return this.commandService.execute(context, request);
       }
@@ -742,6 +882,7 @@ export class BotAssistantService {
         this.pendingActions?.delete({
           transport: context.transport,
           conversation_id: context.recipient.conversation_id,
+          issue_id: pending.issue_id,
         });
         return {
           message: 'Cancelled the pending action.',
@@ -750,6 +891,7 @@ export class BotAssistantService {
 
       return {
         message: `${pending.summary_message}\nReply with 确认 / 取消.`,
+        actions: [...buildConfirmActions()],
       };
     }
 
@@ -927,6 +1069,7 @@ export class BotAssistantService {
 
         return {
           message: summary,
+          actions: [...buildConfirmActions()],
         };
       }
       case 'help':
@@ -1040,6 +1183,7 @@ export class BotAssistantService {
 
         return {
           message,
+          actions: [...buildConfirmActions()],
         };
       }
       case 'watch':
@@ -1099,6 +1243,7 @@ export class BotAssistantService {
 
         return {
           message: summary,
+          actions: [...buildConfirmActions()],
         };
       }
       default:
