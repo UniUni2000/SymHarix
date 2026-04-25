@@ -27,14 +27,15 @@ export class WorkItemRepository {
         id, linear_issue_id, linear_identifier, linear_title, linear_state,
         github_repo, github_issue_number, active_pr_number, branch_name,
         workspace_path, workspace_key, orchestrator_state, dev_attempt_count,
-        review_round, last_review_decision, last_review_summary,
+        review_round, last_review_decision, last_review_summary, delivery_code, delivery_summary,
         repo_harness_status, constitution_status, governance_status, governance_decision,
-        governance_summary, governance_override_at, governance_override_reason, change_pack_summary_json,
-        task_status_json, evidence_summary_json, missing_requirements_json, constitution_hits_json,
+        governance_summary, governance_root_issue_id, governance_parent_issue_id, governance_generation,
+        governance_source_updated_at, governance_override_at, governance_override_reason,
+        change_pack_summary_json, task_status_json, evidence_summary_json, missing_requirements_json, constitution_hits_json,
         touched_paths_json, touched_areas_json, path_families_json, boundary_edges_json, import_edges_json,
         architectural_target,
         fitness_signals_json, cancelled_at, merged_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -54,11 +55,17 @@ export class WorkItemRepository {
       item.review_round ?? 0,
       item.last_review_decision ?? null,
       item.last_review_summary ?? null,
+      item.delivery_code ?? null,
+      item.delivery_summary ?? null,
       item.repo_harness_status ?? null,
       item.constitution_status ?? null,
       item.governance_status ?? null,
       item.governance_decision ?? null,
       item.governance_summary ?? null,
+      item.governance_root_issue_id ?? null,
+      item.governance_parent_issue_id ?? null,
+      item.governance_generation ?? 0,
+      item.governance_source_updated_at?.toISOString() ?? null,
       item.governance_override_at?.toISOString() ?? null,
       item.governance_override_reason ?? null,
       JSON.stringify(item.change_pack_summary ?? null),
@@ -89,14 +96,15 @@ export class WorkItemRepository {
         id, linear_issue_id, linear_identifier, linear_title, linear_state,
         github_repo, github_issue_number, active_pr_number, branch_name,
         workspace_path, workspace_key, orchestrator_state, dev_attempt_count,
-        review_round, last_review_decision, last_review_summary,
+        review_round, last_review_decision, last_review_summary, delivery_code, delivery_summary,
         repo_harness_status, constitution_status, governance_status, governance_decision,
-        governance_summary, governance_override_at, governance_override_reason, change_pack_summary_json,
-        task_status_json, evidence_summary_json, missing_requirements_json, constitution_hits_json,
+        governance_summary, governance_root_issue_id, governance_parent_issue_id, governance_generation,
+        governance_source_updated_at, governance_override_at, governance_override_reason,
+        change_pack_summary_json, task_status_json, evidence_summary_json, missing_requirements_json, constitution_hits_json,
         touched_paths_json, touched_areas_json, path_families_json, boundary_edges_json, import_edges_json,
         architectural_target,
         fitness_signals_json, cancelled_at, merged_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         linear_issue_id = excluded.linear_issue_id,
         linear_identifier = excluded.linear_identifier,
@@ -113,11 +121,17 @@ export class WorkItemRepository {
         review_round = excluded.review_round,
         last_review_decision = excluded.last_review_decision,
         last_review_summary = excluded.last_review_summary,
+        delivery_code = excluded.delivery_code,
+        delivery_summary = excluded.delivery_summary,
         repo_harness_status = excluded.repo_harness_status,
         constitution_status = excluded.constitution_status,
         governance_status = excluded.governance_status,
         governance_decision = excluded.governance_decision,
         governance_summary = excluded.governance_summary,
+        governance_root_issue_id = excluded.governance_root_issue_id,
+        governance_parent_issue_id = excluded.governance_parent_issue_id,
+        governance_generation = excluded.governance_generation,
+        governance_source_updated_at = excluded.governance_source_updated_at,
         governance_override_at = excluded.governance_override_at,
         governance_override_reason = excluded.governance_override_reason,
         change_pack_summary_json = excluded.change_pack_summary_json,
@@ -154,11 +168,17 @@ export class WorkItemRepository {
       item.review_round ?? 0,
       item.last_review_decision ?? null,
       item.last_review_summary ?? null,
+      item.delivery_code ?? null,
+      item.delivery_summary ?? null,
       item.repo_harness_status ?? null,
       item.constitution_status ?? null,
       item.governance_status ?? null,
       item.governance_decision ?? null,
       item.governance_summary ?? null,
+      item.governance_root_issue_id ?? null,
+      item.governance_parent_issue_id ?? null,
+      item.governance_generation ?? 0,
+      item.governance_source_updated_at?.toISOString() ?? null,
       item.governance_override_at?.toISOString() ?? null,
       item.governance_override_reason ?? null,
       JSON.stringify(item.change_pack_summary ?? null),
@@ -195,6 +215,22 @@ export class WorkItemRepository {
   findByIdentifier(identifier: string): WorkItem | null {
     const stmt = this.db.prepare(`SELECT * FROM work_items WHERE linear_identifier = ?`);
     return this.mapToWorkItem(stmt.get(identifier) as Record<string, unknown> | undefined);
+  }
+
+  findByGovernanceParentIssueId(parentIssueId: string): WorkItem[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM work_items WHERE governance_parent_issue_id = ? ORDER BY updated_at DESC
+    `);
+    const rows = stmt.all(parentIssueId) as Record<string, unknown>[];
+    return rows.map((row) => this.mapToWorkItem(row)).filter((item): item is WorkItem => item !== null);
+  }
+
+  findByGovernanceRootIssueId(rootIssueId: string): WorkItem[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM work_items WHERE governance_root_issue_id = ? ORDER BY created_at ASC, id ASC
+    `);
+    const rows = stmt.all(rootIssueId) as Record<string, unknown>[];
+    return rows.map((row) => this.mapToWorkItem(row)).filter((item): item is WorkItem => item !== null);
   }
 
   findByGitHubIssue(repo: string, issueNumber: number): WorkItem | null {
@@ -257,11 +293,17 @@ export class WorkItemRepository {
     if (item.review_round !== undefined) assign('review_round', item.review_round);
     if (item.last_review_decision !== undefined) assign('last_review_decision', item.last_review_decision);
     if (item.last_review_summary !== undefined) assign('last_review_summary', item.last_review_summary);
+    if (item.delivery_code !== undefined) assign('delivery_code', item.delivery_code);
+    if (item.delivery_summary !== undefined) assign('delivery_summary', item.delivery_summary);
     if (item.repo_harness_status !== undefined) assign('repo_harness_status', item.repo_harness_status);
     if (item.constitution_status !== undefined) assign('constitution_status', item.constitution_status);
     if (item.governance_status !== undefined) assign('governance_status', item.governance_status);
     if (item.governance_decision !== undefined) assign('governance_decision', item.governance_decision);
     if (item.governance_summary !== undefined) assign('governance_summary', item.governance_summary);
+    if (item.governance_root_issue_id !== undefined) assign('governance_root_issue_id', item.governance_root_issue_id);
+    if (item.governance_parent_issue_id !== undefined) assign('governance_parent_issue_id', item.governance_parent_issue_id);
+    if (item.governance_generation !== undefined) assign('governance_generation', item.governance_generation);
+    if (item.governance_source_updated_at !== undefined) assign('governance_source_updated_at', item.governance_source_updated_at?.toISOString() ?? null);
     if (item.governance_override_at !== undefined) assign('governance_override_at', item.governance_override_at?.toISOString() ?? null);
     if (item.governance_override_reason !== undefined) assign('governance_override_reason', item.governance_override_reason);
     if (item.change_pack_summary !== undefined) assign('change_pack_summary_json', JSON.stringify(item.change_pack_summary));
@@ -317,11 +359,17 @@ export class WorkItemRepository {
       review_round: (row.review_round as number) ?? 0,
       last_review_decision: row.last_review_decision as WorkItem['last_review_decision'],
       last_review_summary: row.last_review_summary as string | null,
+      delivery_code: row.delivery_code as string | null,
+      delivery_summary: row.delivery_summary as string | null,
       repo_harness_status: (row.repo_harness_status as WorkItem['repo_harness_status']) ?? null,
       constitution_status: (row.constitution_status as WorkItem['constitution_status']) ?? null,
       governance_status: (row.governance_status as WorkItem['governance_status']) ?? null,
       governance_decision: (row.governance_decision as WorkItem['governance_decision']) ?? null,
       governance_summary: row.governance_summary as string | null,
+      governance_root_issue_id: row.governance_root_issue_id as string | null,
+      governance_parent_issue_id: row.governance_parent_issue_id as string | null,
+      governance_generation: Number(row.governance_generation ?? 0),
+      governance_source_updated_at: row.governance_source_updated_at ? new Date(row.governance_source_updated_at as string) : null,
       governance_override_at: row.governance_override_at ? new Date(row.governance_override_at as string) : null,
       governance_override_reason: row.governance_override_reason as string | null,
       change_pack_summary: parseJsonValue(row.change_pack_summary_json, null),

@@ -4,6 +4,7 @@
  * Section 17.7: CLI and Host Lifecycle
  */
 
+import { EventEmitter } from 'events';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as dotenv from 'dotenv';
@@ -22,12 +23,25 @@ import { buildServiceConfig, validateConfigForDispatch } from '../config/loader'
 import { logger } from '../logging';
 import { Issue, AgentEvent, WorkflowDefinition, ServiceConfig } from '../types';
 import { RuntimeHost } from './runtimeHost';
+import { RuntimeHub } from '../runtime/hub';
+import { BotFollowupRepairService } from '../bots/followupRepair';
+import { GlobalRepairService } from '../maintenance/globalRepair';
+import {
+  BotFollowupDeliveryStateRepository,
+  BotFollowupMessageStateRepository,
+  BotIssueFollowupRepository,
+  BotPendingActionRepository,
+  WorkItemRepository,
+} from '../database';
+import { LinearClient } from '../tracker/linear-client';
+import { createGitHubIssueClient } from '../github/issue-client';
 import {
   consumeTimelineEventForCli,
   createCliTimelineRenderState,
   flushCliTimelineState,
   shouldLogStructuredAgentEvent,
 } from './timeline';
+import { parseMaintenanceArgs, type MaintenanceCommand } from '../maintenance/cli';
 import { parseVerifyLiveLifecycleArgs, type VerifyLiveLifecycleCommand } from '../verification/cli';
 import { LiveLifecycleVerifier } from '../verification/liveLifecycleVerifier';
 
@@ -38,6 +52,7 @@ function parseArgs(): {
   workflowPath?: string;
   port?: number;
   kill?: boolean;
+  maintenance?: MaintenanceCommand;
   verifyLiveLifecycle?: VerifyLiveLifecycleCommand;
 } {
   const args = process.argv.slice(2);
@@ -45,8 +60,18 @@ function parseArgs(): {
     workflowPath?: string;
     port?: number;
     kill?: boolean;
+    maintenance?: MaintenanceCommand;
     verifyLiveLifecycle?: VerifyLiveLifecycleCommand;
   } = {};
+
+  if (args[0] === 'repair') {
+    const parsed = parseMaintenanceArgs(args.slice(1));
+    if (!parsed.ok) {
+      throw new Error(parsed.error);
+    }
+    result.maintenance = parsed.command;
+    return result;
+  }
 
   if (args[0] === 'verify-live-lifecycle') {
     const parsed = parseVerifyLiveLifecycleArgs(args.slice(1));
@@ -88,6 +113,8 @@ Usage: symphony [options] [workflow-path]
 Options:
   --port <number>    Enable HTTP server on specified port
   --kill             Stop all running symphony agent processes
+  repair bot-followups
+  repair all
   verify-live-lifecycle --project-slug <slug> [--timeout-ms <n>] [--json] [--title-suffix <text>]
   --help             Show this help message
 
@@ -99,8 +126,61 @@ Examples:
   symphony path/to/WORKFLOW.md    # Use specified workflow file
   symphony --port 3000            # Enable HTTP server on port 3000
   symphony --kill                 # Stop all running agents
+  symphony repair bot-followups   # Repair persisted Telegram follow-up/card state
+  symphony repair all             # Repair Telegram follow-up state plus GitHub orphan issue/PR artifacts
   symphony verify-live-lifecycle --project-slug 1d3a3f95809d
 `);
+}
+
+function createMaintenanceRuntimeHub(db: ReturnType<typeof createDatabase>): RuntimeHub {
+  const controller = Object.assign(new EventEmitter(), {
+    getStateSnapshot: () => ({
+      generated_at: new Date().toISOString(),
+      counts: { running: 0, retrying: 0 },
+      running: [],
+      retrying: [],
+      codex_totals: {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        seconds_running: 0,
+      },
+      rate_limits: null,
+    }),
+    async createIssue() {
+      return {
+        accepted: false as const,
+        status: 'rejected' as const,
+        message: 'maintenance runtime is read-only',
+        issue_id: null,
+        issue_identifier: null,
+        issue: null,
+      };
+    },
+    async stopIssue() {
+      return { accepted: false as const, status: 'rejected' as const, message: 'maintenance runtime is read-only', issue_id: null, issue_identifier: null };
+    },
+    async retryIssue() {
+      return { accepted: false as const, status: 'rejected' as const, message: 'maintenance runtime is read-only', issue_id: null, issue_identifier: null };
+    },
+    async overrideGovernance() {
+      return { accepted: false as const, status: 'rejected' as const, message: 'maintenance runtime is read-only', issue_id: null, issue_identifier: null };
+    },
+    async rewriteGovernance() {
+      return { accepted: false as const, status: 'rejected' as const, message: 'maintenance runtime is read-only', issue_id: null, issue_identifier: null };
+    },
+    async splitGovernance() {
+      return { accepted: false as const, status: 'rejected' as const, message: 'maintenance runtime is read-only', issue_id: null, issue_identifier: null };
+    },
+    async executeGovernanceSuggestion() {
+      return { accepted: false as const, status: 'rejected' as const, message: 'maintenance runtime is read-only', issue_id: null, issue_identifier: null };
+    },
+    async dismissGovernanceSuggestion() {
+      return { accepted: false as const, status: 'rejected' as const, message: 'maintenance runtime is read-only', issue_id: null, issue_identifier: null };
+    },
+  });
+
+  return new RuntimeHub(db, controller);
 }
 
 async function killKnownSymphonyProcesses(currentPid?: number): Promise<void> {
@@ -314,6 +394,68 @@ async function main(): Promise<void> {
   const db = createDatabase({
     path: path.join(config.projectRoot, 'symphony.db'),
   });
+
+  if (args.maintenance?.kind === 'repair_bot_followups') {
+    const runtimeHub = createMaintenanceRuntimeHub(db);
+    const summary = new BotFollowupRepairService(
+      runtimeHub,
+      new WorkItemRepository(db),
+      new BotIssueFollowupRepository(db),
+      new BotFollowupMessageStateRepository(db),
+      new BotFollowupDeliveryStateRepository(db),
+      new BotPendingActionRepository(db),
+    ).repair();
+    runtimeHub.dispose();
+
+    console.log('[repair] Bot follow-up repair complete');
+    console.log(`[repair] Folded descendant follow-ups: ${summary.descendant_followups_folded}`);
+    console.log(`[repair] Deleted descendant card states: ${summary.descendant_message_states_deleted}`);
+    console.log(`[repair] Deleted descendant pending actions: ${summary.descendant_pending_actions_deleted}`);
+    console.log(`[repair] Deleted expired pending actions: ${summary.expired_pending_actions_deleted}`);
+    console.log(`[repair] Seeded delivery baselines: ${summary.delivery_baselines_seeded}`);
+    process.exit(0);
+  }
+
+  if (args.maintenance?.kind === 'repair_all') {
+    const runtimeHub = createMaintenanceRuntimeHub(db);
+    const botSummary = new BotFollowupRepairService(
+      runtimeHub,
+      new WorkItemRepository(db),
+      new BotIssueFollowupRepository(db),
+      new BotFollowupMessageStateRepository(db),
+      new BotFollowupDeliveryStateRepository(db),
+      new BotPendingActionRepository(db),
+    ).repair();
+    runtimeHub.dispose();
+
+    const tracker = new LinearClient({
+      endpoint: config.trackerEndpoint,
+      apiKey: config.trackerApiKey,
+      projectSlugs: Object.keys(config.repositories.routing),
+    });
+    const githubSummary = await new GlobalRepairService({
+      config,
+      tracker,
+      workItemRepository: new WorkItemRepository(db),
+      githubClientFactory: (repo) => createGitHubIssueClient(
+        config.githubToken,
+        repo,
+        config.githubOwner,
+      ),
+    }).repair();
+
+    console.log('[repair] Global repair complete');
+    console.log(`[repair] Folded descendant follow-ups: ${botSummary.descendant_followups_folded}`);
+    console.log(`[repair] Deleted descendant card states: ${botSummary.descendant_message_states_deleted}`);
+    console.log(`[repair] Deleted descendant pending actions: ${botSummary.descendant_pending_actions_deleted}`);
+    console.log(`[repair] Deleted expired pending actions: ${botSummary.expired_pending_actions_deleted}`);
+    console.log(`[repair] Seeded delivery baselines: ${botSummary.delivery_baselines_seeded}`);
+    console.log(`[repair] Terminal issues scanned: ${githubSummary.terminal_issues_scanned}`);
+    console.log(`[repair] Repos scanned: ${githubSummary.repos_scanned}`);
+    console.log(`[repair] GitHub issues closed: ${githubSummary.github_issues_closed}`);
+    console.log(`[repair] GitHub PRs closed: ${githubSummary.github_prs_closed}`);
+    process.exit(0);
+  }
 
   if (args.verifyLiveLifecycle) {
     const verifyConfig: ServiceConfig = {

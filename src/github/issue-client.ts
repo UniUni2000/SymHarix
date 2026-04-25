@@ -264,6 +264,17 @@ export class GitHubIssueClient {
     });
   }
 
+  async listOpenIssues(): Promise<GitHubIssueDetails[]> {
+    const response = await this.request('/issues?state=open&per_page=100');
+    const data = await response.json();
+    if (!Array.isArray(data)) {
+      return [];
+    }
+    return data
+      .filter((item: any) => !item?.pull_request)
+      .map((item: any) => this.mapIssue(item));
+  }
+
   async getPullRequest(prNumber: number): Promise<PullRequestDetails> {
     const response = await this.request(`/pulls/${prNumber}`);
     const data = await response.json();
@@ -301,6 +312,12 @@ export class GitHubIssueClient {
     });
     const data = await response.json();
     return this.mapPullRequest(data);
+  }
+
+  async listOpenPullRequests(): Promise<PullRequestDetails[]> {
+    const response = await this.request('/pulls?state=open&per_page=100');
+    const data = await response.json();
+    return Array.isArray(data) ? data.map((item: any) => this.mapPullRequest(item)) : [];
   }
 
   async addPullRequestComment(prNumber: number, body: string): Promise<void> {
@@ -405,4 +422,20 @@ export class GitHubIssueClient {
 
     throw new Error(`Failed to merge pull request: ${data.message || 'Unknown error'}`);
   }
+}
+
+export function createGitHubIssueClient(
+  token: string,
+  githubRepoFull: string,
+  fallbackOwner: string,
+): GitHubIssueClient {
+  const trimmed = githubRepoFull.trim();
+  const slashIndex = trimmed.indexOf('/');
+  const owner = slashIndex >= 0 ? trimmed.slice(0, slashIndex) : fallbackOwner;
+  const repo = slashIndex >= 0 ? trimmed.slice(slashIndex + 1) : trimmed;
+  return new GitHubIssueClient({
+    token,
+    owner,
+    repo,
+  });
 }

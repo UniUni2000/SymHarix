@@ -1,4 +1,4 @@
-import { BotConversationPreferenceRepository } from '../database';
+import { BotConversationPreferenceRepository, type BotFollowupMessageStateRepository } from '../database';
 import type { RuntimeControlPlane, RuntimeIssueView, RuntimeTimelineEvent } from '../runtime/types';
 import { TrackerProjectResolutionService } from '../tracker/projectResolution';
 import type {
@@ -33,6 +33,23 @@ function toIssueContextView(issue: RuntimeIssueView): BotIssueContextView {
     boundary_edges: issue.boundary_edges ?? [],
     import_edges: issue.import_edges ?? [],
     fitness_signals: (issue.fitness_signals ?? []).map((signal) => signal.code),
+    governance_root_issue_identifier: issue.governance_root_issue_identifier ?? issue.identifier,
+    governance_thread_state: issue.governance_thread_state ?? null,
+    governance_child_issues: (issue.governance_child_issues ?? []).map((child) => ({
+      issue_id: child.issue_id,
+      issue_identifier: child.issue_identifier,
+      title: child.title,
+      tracker_state: child.tracker_state,
+      orchestrator_state: child.orchestrator_state,
+      governance_decision: child.governance_decision,
+      governance_summary: child.governance_summary,
+      delivery_code: child.delivery_code ?? null,
+      delivery_summary: child.delivery_summary ?? null,
+    })),
+    next_recommended_action: issue.next_recommended_action ?? null,
+    delivery_state: issue.delivery_state ?? null,
+    delivery_code: issue.delivery_code ?? null,
+    delivery_summary: issue.delivery_summary ?? null,
     repo_harness_status: issue.repo_harness_status
       ? {
           status: issue.repo_harness_status.status,
@@ -52,11 +69,19 @@ function compareTimeline(left: RuntimeTimelineEvent, right: RuntimeTimelineEvent
 function resolveFocusIssue(
   runtime: RuntimeControlPlane,
   overviewIssues: RuntimeIssueView[],
+  openFollowupIssueId: string | null,
   text: string,
 ): RuntimeIssueView | null {
   const identifier = extractIssueIdentifier(text);
   if (identifier) {
     return runtime.getIssue(identifier);
+  }
+
+  if (openFollowupIssueId) {
+    const openFollowupIssue = runtime.getIssue(openFollowupIssueId);
+    if (openFollowupIssue) {
+      return openFollowupIssue;
+    }
   }
 
   const runningIssues = overviewIssues.filter((issue) => issue.actions.can_stop);
@@ -84,6 +109,7 @@ export class BotRuntimeContextService {
     private readonly preferences: BotConversationPreferenceRepository | null,
     private readonly projectResolver: TrackerProjectResolutionService | null,
     private readonly subscriptions: Pick<BotSubscriptionService, 'listByConversation'> | null,
+    private readonly followupMessageStates: BotFollowupMessageStateRepository | null = null,
   ) {}
 
   buildContext(
@@ -104,7 +130,16 @@ export class BotRuntimeContextService {
       .filter((issue) => issue.actions.can_stop || issue.actions.can_retry)
       .slice(0, 8)
       .map(toIssueContextView);
-    const focusIssue = resolveFocusIssue(this.runtime, overview.issues, text);
+    const openGovernanceCards = this.followupMessageStates?.findOpenByConversation({
+      transport: context.transport,
+      conversation_id: context.recipient.conversation_id,
+    }).filter((record) => record.card_kind === 'governance_blocked') ?? [];
+    const focusIssue = resolveFocusIssue(
+      this.runtime,
+      overview.issues,
+      openGovernanceCards.length === 1 ? openGovernanceCards[0]?.issue_id ?? null : null,
+      text,
+    );
     const historyView = focusIssue ? this.runtime.getHistoryView(focusIssue.issue_id, 3) : null;
     const recentTimeline = focusIssue
       ? this.runtime.getTimeline(focusIssue.issue_id, 6).slice().sort(compareTimeline)
@@ -118,6 +153,16 @@ export class BotRuntimeContextService {
             status: focusIssue.governance_status ?? null,
             decision: focusIssue.governance_decision ?? null,
             summary: focusIssue.governance_summary ?? null,
+            root_issue_identifier: focusIssue.governance_root_issue_identifier ?? focusIssue.identifier,
+            thread_state: focusIssue.governance_thread_state ?? null,
+            child_issues: (focusIssue.governance_child_issues ?? []).map((child) => ({
+              issue_identifier: child.issue_identifier,
+              title: child.title,
+              tracker_state: child.tracker_state,
+              governance_decision: child.governance_decision ?? null,
+              governance_summary: child.governance_summary ?? null,
+            })),
+            next_recommended_action: focusIssue.next_recommended_action ?? null,
             suggestions: (focusIssue.active_governance_suggestions ?? []).map((suggestion) => ({
               id: suggestion.id,
               suggestion_type: suggestion.suggestion_type,
