@@ -111,9 +111,13 @@ bun --env-file=.env run src/cli/index.ts verify-live-lifecycle --project-slug 1d
 - `SYMPHONY_BOT_LLM_MODEL`
 - `SYMPHONY_BOT_LLM_API_KEY`
 - `SYMPHONY_BOT_LLM_BASE_URL`
+- `SYMPHONY_BOT_LLM_TIMEOUT_MS`
+- `SYMPHONY_BOT_LLM_HTTP_TRANSPORT`
 - `SYMPHONY_DISCORD_BOT_TOKEN`
 - `SYMPHONY_DISCORD_PUBLIC_KEY`
 - `SYMPHONY_DISCORD_OPERATOR_IDS`
+
+Bot LLM 的运行参数统一放在 `.env`。建议本地 Telegram 使用 `SYMPHONY_BOT_LLM_TIMEOUT_MS=15000` 和 `SYMPHONY_BOT_LLM_HTTP_TRANSPORT=fetch`；`auto` 会启用 curl 到 fetch 的客户端 fallback，排障有用，但最坏情况下会拉长等待时间。
 
 Phase 4 之后的几个实用点：
 
