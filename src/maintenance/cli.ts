@@ -1,5 +1,5 @@
 export interface MaintenanceCommand {
-  kind: 'repair_bot_followups';
+  kind: 'repair_bot_followups' | 'repair_all';
 }
 
 export type MaintenanceCommandParseResult =
@@ -22,8 +22,17 @@ export function parseMaintenanceArgs(args: string[]): MaintenanceCommandParseRes
     };
   }
 
+  if (args[0] === 'all' && args.length === 1) {
+    return {
+      ok: true,
+      command: {
+        kind: 'repair_all',
+      },
+    };
+  }
+
   return {
     ok: false,
-    error: 'repair requires the supported subcommand: bot-followups',
+    error: 'repair requires a supported subcommand: bot-followups | all',
   };
 }

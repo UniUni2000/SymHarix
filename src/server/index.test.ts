@@ -439,14 +439,12 @@ describe('SymphonyServer', () => {
 
     const html = await response.text();
     expect(html).toContain('Symphony Runtime');
-    expect(html).toContain('Access');
-    expect(html).toContain('Save Token');
-    expect(html).toContain('Create Issue');
-    expect(html).toContain('History Replay');
-    expect(html).toContain('Stop');
-    expect(html).toContain('Retry');
-    expect(html).toContain('Execute Suggestion');
-    expect(html).toContain('Dismiss Suggestion');
+    expect(html).toContain('Command Deck');
+    expect(html).toContain('Access token');
+    expect(html).toContain('New Issue');
+    expect(html).toContain('Hot queue');
+    expect(html).toContain('High-signal timeline');
+    expect(html).toContain('Focus inspector');
     expect(html).toContain('/api/v1/runtime/overview');
   });
 
@@ -673,6 +671,64 @@ describe('SymphonyServer', () => {
     const payload = await readJson<any>(response);
     expect(payload.type).toBe(4);
     expect(discordInteractionCalls).toBe(1);
+  });
+
+  test('start bootstraps bot inbound integration against the local server URL', async () => {
+    const bootstrapCalls: Array<{ localBaseUrl: string; inboundPath?: string }> = [];
+    const bootstrapGateway: BotGateway = {
+      getManifest: () => ({
+        transports: {
+          telegram: {
+            enabled: true,
+            inbound_enabled: true,
+            outbound_enabled: true,
+            watch_supported: true,
+            write_requires_operator: false,
+            inbound_path: '/api/v1/bots/telegram/webhook',
+          },
+          discord: {
+            enabled: false,
+            inbound_enabled: false,
+            outbound_enabled: false,
+            watch_supported: false,
+            write_requires_operator: false,
+            inbound_path: '/api/v1/bots/discord/interactions',
+          },
+        },
+        commands: ['help'],
+        watch_presets: ['default'],
+        assistant: {
+          provider: null,
+          model: null,
+          configured: false,
+          health: 'unconfigured',
+          fallback_available: true,
+          last_error_code: null,
+        },
+      }) as any,
+      initializeInboundIntegration: async (params) => {
+        bootstrapCalls.push(params);
+      },
+      handleTelegramWebhook: async () => ({ ok: true, status: 200, body: { ok: true } }),
+      handleDiscordInteraction: async () => ({ status: 200, body: { ok: true } }),
+    };
+
+    const startedServer = new SymphonyServer(
+      db,
+      { port: 0 },
+      null,
+      bootstrapGateway,
+      createRuntimeAccessController(),
+    );
+
+    try {
+      await startedServer.start();
+      expect(bootstrapCalls).toHaveLength(1);
+      expect(bootstrapCalls[0]?.localBaseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(bootstrapCalls[0]?.inboundPath).toBe('/api/v1/bots/telegram/webhook');
+    } finally {
+      await startedServer.stop();
+    }
   });
 
   test('POST runtime mutations require a write token when runtime access is protected', async () => {

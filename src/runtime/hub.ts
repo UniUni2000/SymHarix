@@ -5,10 +5,11 @@ import {
   GovernanceSuggestionRepository,
   ReviewEventRepository,
   ShadowHarnessRepository,
+  SupervisorSessionRepository,
   SyncEventRepository,
   WorkItemRepository,
 } from '../database';
-import type { WorkItem } from '../database/types';
+import type { SupervisorSessionRecord, WorkItem } from '../database/types';
 import type { OrchestratorStateSnapshot } from '../orchestrator';
 import type { AgentEvent, AgentTimelinePayload, Issue } from '../types';
 import type {
@@ -118,6 +119,7 @@ export class RuntimeHub implements RuntimeControlPlane {
   private readonly syncEventRepository: SyncEventRepository;
   private readonly governanceSuggestionRepository: GovernanceSuggestionRepository;
   private readonly shadowHarnessRepository: ShadowHarnessRepository;
+  private readonly supervisorSessionRepository: SupervisorSessionRepository;
   private readonly timelineHistoryLimit: number;
   private readonly issueCacheById = new Map<string, Issue>();
   private readonly timelineByIssueId = new Map<string, RuntimeTimelineEvent[]>();
@@ -138,6 +140,7 @@ export class RuntimeHub implements RuntimeControlPlane {
     this.syncEventRepository = new SyncEventRepository(db);
     this.governanceSuggestionRepository = new GovernanceSuggestionRepository(db);
     this.shadowHarnessRepository = new ShadowHarnessRepository(db);
+    this.supervisorSessionRepository = new SupervisorSessionRepository(db);
     this.timelineHistoryLimit = Math.max(10, options.timelineHistoryLimit ?? 200);
     this.controller = controller;
     this.bindControllerListeners();
@@ -547,6 +550,10 @@ export class RuntimeHub implements RuntimeControlPlane {
     const governanceThread = governanceRootIssueId === workItem.linear_issue_id
       ? this.buildGovernanceThreadProjection(workItem)
       : null;
+    const supervisorProjection = this.buildSupervisorProjection(
+      governanceRootIssueId,
+      governanceThread,
+    );
     const governanceThreadState = governanceThread?.state ?? (
       workItem.orchestrator_state === 'halted' &&
       Boolean(workItem.governance_decision && workItem.governance_decision !== 'accept')
@@ -626,6 +633,8 @@ export class RuntimeHub implements RuntimeControlPlane {
       delivery_state: delivery.state,
       delivery_code: delivery.code,
       delivery_summary: delivery.summary,
+      supervisor_session_state: supervisorProjection.state,
+      supervisor_plan_summary: supervisorProjection.summary,
       constitution_hits: workItem.constitution_hits,
       fitness_signals: workItem.fitness_signals,
       active_governance_suggestions: this.governanceSuggestionRepository
@@ -710,6 +719,8 @@ export class RuntimeHub implements RuntimeControlPlane {
       delivery_state: null,
       delivery_code: null,
       delivery_summary: null,
+      supervisor_session_state: null,
+      supervisor_plan_summary: null,
       constitution_hits: [],
       fitness_signals: [],
       active_governance_suggestions: [],
@@ -1156,5 +1167,57 @@ export class RuntimeHub implements RuntimeControlPlane {
         ? `先处理治理子任务 ${currentChild.issue_identifier}`
         : '等待根治理线程重新评估。',
     };
+  }
+
+  private buildSupervisorProjection(
+    rootIssueId: string,
+    governanceThread: ReturnType<RuntimeHub['buildGovernanceThreadProjection']>,
+  ): {
+    state: string | null;
+    summary: string | null;
+  } {
+    const session = this.supervisorSessionRepository.findByRootIssueId(rootIssueId);
+    if (!session) {
+      return {
+        state: null,
+        summary: null,
+      };
+    }
+
+    return {
+      state: session.state,
+      summary: this.describeSupervisorSession(session, governanceThread),
+    };
+  }
+
+  private describeSupervisorSession(
+    session: SupervisorSessionRecord,
+    governanceThread: ReturnType<RuntimeHub['buildGovernanceThreadProjection']>,
+  ): string {
+    const planTitle = session.plan_card?.title ?? '当前计划线程';
+    const currentChild = governanceThread?.currentChild ?? null;
+    if (currentChild) {
+      return `计划「${planTitle}」正在执行；当前子任务 ${currentChild.issue_identifier}，后续子任务会按顺序接力。`;
+    }
+
+    if (session.delivery_summary) {
+      return `计划「${planTitle}」当前状态：${session.delivery_summary}`;
+    }
+
+    switch (session.state) {
+      case 'clarifying':
+        return `计划「${planTitle}」还在补充信息。`;
+      case 'awaiting_user_approval':
+      case 'plan_ready':
+        return `计划「${planTitle}」正在等待 Telegram 批准。`;
+      case 'awaiting_user_decision':
+        return `计划「${planTitle}」正在等待你决定下一步。`;
+      case 'completed':
+        return `计划「${planTitle}」已经完成。`;
+      case 'cancelled':
+        return `计划「${planTitle}」已经取消。`;
+      default:
+        return `计划「${planTitle}」正在推进。`;
+    }
   }
 }

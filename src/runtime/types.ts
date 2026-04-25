@@ -170,6 +170,8 @@ export interface RuntimeIssueView {
   delivery_state?: RuntimeDeliveryState | null;
   delivery_code?: RuntimeDeliveryCode | null;
   delivery_summary?: string | null;
+  supervisor_session_state?: string | null;
+  supervisor_plan_summary?: string | null;
   constitution_hits?: ConstitutionHit[];
   fitness_signals?: Array<{ code: string; summary: string; severity: 'low' | 'medium' | 'high' }>;
   active_governance_suggestions?: GovernanceSuggestion[];

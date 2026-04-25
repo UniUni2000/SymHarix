@@ -165,7 +165,7 @@ export class SymphonyServer {
    */
   async start(): Promise<{ port: number; hostname: string }> {
     return new Promise((resolve, reject) => {
-      try {
+      void (async () => {
         this.server = Bun.serve({
           port: this.config.port,
           hostname: this.config.hostname,
@@ -177,13 +177,19 @@ export class SymphonyServer {
         );
         const port = this.server.port ?? this.config.port ?? 0;
 
+        const localHost = this.config.hostname === '0.0.0.0' ? '127.0.0.1' : this.config.hostname;
+        await this.botGateway?.initializeInboundIntegration?.({
+          localBaseUrl: `http://${localHost}:${port}`,
+          inboundPath: '/api/v1/bots/telegram/webhook',
+        });
+
         resolve({
           port,
           hostname: this.config.hostname,
         });
-      } catch (error) {
+      })().catch((error) => {
         reject(error);
-      }
+      });
     });
   }
 

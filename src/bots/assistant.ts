@@ -23,6 +23,7 @@ import { buildGovernanceQuickActions, toGovernanceQuickActionIntent } from './go
 import type { BotSubscriptionService } from './subscriptions';
 import { BotRuntimeContextService } from './runtimeContext';
 import { createBotAssistantModelFromEnv, type BotAssistantModel } from './model';
+import { SupervisorSessionService } from '../supervisor/sessionService';
 
 const CONFIRM_WORDS = new Set(['确认', 'yes', 'y', 'ok', 'okay', '好', '执行', '继续', 'confirm']);
 const CANCEL_WORDS = new Set(['取消', 'cancel', 'no', 'n', '停止']);
@@ -704,6 +705,18 @@ function buildHeuristicDecision(
     };
   }
 
+  if (isLikelyRepositoryWorkRequest(trimmed)) {
+    const title = lines[0] || trimmed;
+    return {
+      intent: {
+        kind: 'create_issue',
+        title,
+        description: rest,
+        project_slug: explicitProject || context.default_project_slug,
+      },
+    };
+  }
+
   if (focusIssue && focusIssue.governance?.status === 'blocked') {
     return {
       intent: {
@@ -718,6 +731,18 @@ function buildHeuristicDecision(
       kind: 'help',
     },
   };
+}
+
+function isLikelyRepositoryWorkRequest(text: string): boolean {
+  if (!text.trim()) {
+    return false;
+  }
+
+  if (/默认项目|当前.*状态|现在怎么样|为什么|怎么设置|怎么用|help|帮助/i.test(text)) {
+    return false;
+  }
+
+  return /(?:清空|清理|删除|移除|删掉|处理|整理|收掉|干掉).*(?:残余|垃圾|遗留|多余|无用|文件|目录|仓库|项目|issue|pr)|(?:残余|垃圾|遗留|多余|无用).*(?:清空|清理|删除|移除|删掉|处理|整理)|把.+(?:清空|清理|删除|移除|删掉|处理|整理)|(?:实现|修掉|解决|重构|优化|支持|完成).+(?:功能|页面|接口|流程|测试|验证|闭环|问题|bug)/i.test(text);
 }
 
 function parseModelDecision(output: BotAssistantModelOutput): BotAssistantDecision | null {
@@ -833,6 +858,7 @@ export class BotAssistantService {
     private readonly canWrite: (context: BotCommandContext) => boolean = () => true,
     subscriptions: Pick<BotSubscriptionService, 'listByConversation'> | null = null,
     followupMessageStates: BotFollowupMessageStateRepository | null = null,
+    private readonly supervisorSessionService: SupervisorSessionService | null = null,
   ) {
     this.model = normalizeModel(model);
     this.runtimeContext = new BotRuntimeContextService(
@@ -901,6 +927,27 @@ export class BotAssistantService {
       this.getDiagnostics(),
     );
 
+    const fastHeuristic = buildHeuristicDecision(text, runtimeContext);
+    if (
+      context.transport === 'telegram' &&
+      this.supervisorSessionService &&
+      (
+        fastHeuristic.intent.kind === 'create_issue' ||
+        this.supervisorSessionService.hasActiveSession(context)
+      )
+    ) {
+      const supervisorResponse = await this.supervisorSessionService.respond({
+        context,
+        text,
+        intent: fastHeuristic.intent.kind === 'help' ? null : fastHeuristic.intent,
+        runtimeContext,
+        canWrite: this.canWrite(context),
+      });
+      if (supervisorResponse) {
+        return supervisorResponse;
+      }
+    }
+
     let decision: BotAssistantDecision | null = null;
     let modelDiagnostics = this.getDiagnostics();
     let usedFallback = false;
@@ -935,7 +982,7 @@ export class BotAssistantService {
       }, error instanceof Error ? error : undefined);
     }
 
-    const heuristic = buildHeuristicDecision(text, runtimeContext);
+    const heuristic = fastHeuristic;
     if (!decision || decision.intent.kind === 'help') {
       if (!decision || heuristic.intent.kind !== 'help') {
         decision = heuristic;
@@ -962,6 +1009,26 @@ export class BotAssistantService {
           usedFallback,
         ),
       };
+    }
+
+    if (
+      context.transport === 'telegram' &&
+      this.supervisorSessionService &&
+      (
+        decision.intent.kind === 'create_issue' ||
+        this.supervisorSessionService.hasActiveSession(context)
+      )
+    ) {
+      const supervisorResponse = await this.supervisorSessionService.respond({
+        context,
+        text,
+        intent: decision.intent,
+        runtimeContext,
+        canWrite: this.canWrite(context),
+      });
+      if (supervisorResponse) {
+        return supervisorResponse;
+      }
     }
 
     if (decision.intent.kind === 'help') {
