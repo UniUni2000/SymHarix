@@ -30,6 +30,18 @@ bun run start -- --port 3000
 bun run dev
 ```
 
+停止所有本地 Symphony 后台进程：
+
+```bash
+bun run start -- --kill
+```
+
+等价 CLI 命令：
+
+```bash
+bun src/cli/index.ts --kill
+```
+
 ## 必要配置
 
 1. 准备 `.env`
@@ -94,13 +106,18 @@ bun --env-file=.env run src/cli/index.ts verify-live-lifecycle --project-slug 1d
 - `SYMPHONY_TELEGRAM_BOT_TOKEN`
 - `SYMPHONY_TELEGRAM_WEBHOOK_SECRET`
 - `SYMPHONY_TELEGRAM_OPERATOR_IDS`
+- `SYMPHONY_TELEGRAM_OPERATIONS_CHAT_ID`
 - `SYMPHONY_BOT_LLM_PROVIDER`
 - `SYMPHONY_BOT_LLM_MODEL`
 - `SYMPHONY_BOT_LLM_API_KEY`
 - `SYMPHONY_BOT_LLM_BASE_URL`
+- `SYMPHONY_BOT_LLM_TIMEOUT_MS`
+- `SYMPHONY_BOT_LLM_HTTP_TRANSPORT`
 - `SYMPHONY_DISCORD_BOT_TOKEN`
 - `SYMPHONY_DISCORD_PUBLIC_KEY`
 - `SYMPHONY_DISCORD_OPERATOR_IDS`
+
+Bot LLM 的运行参数统一放在 `.env`。建议本地 Telegram 使用 `SYMPHONY_BOT_LLM_TIMEOUT_MS=15000` 和 `SYMPHONY_BOT_LLM_HTTP_TRANSPORT=fetch`；`auto` 会启用 curl 到 fetch 的客户端 fallback，排障有用，但最坏情况下会拉长等待时间。
 
 Phase 4 之后的几个实用点：
 
@@ -108,6 +125,26 @@ Phase 4 之后的几个实用点：
 - bot `watch` 支持 `default` / `verbose` / `failures` / `status`，并会在重启后自动恢复
 - `status` 和运行态详情会显示 digest 摘要与历史回放（包含 agent/review/sync 轨迹）
 - Telegram / Discord 的自然语言默认走专用 bot LLM；如果没配好或后端异常，会透明降级到本地 parser，并提示当前是“简化理解模式”
+
+Telegram 额外说明：
+
+- 只要配置了 `SYMPHONY_TELEGRAM_BOT_TOKEN`，`bun run start -- --port 3000` 就会在启动时自动初始化 Telegram webhook
+- 如果你已经有公网地址，设置 `SYMPHONY_PUBLIC_BASE_URL=https://your-host`
+- 如果没给公网地址，系统会尝试自动调用 `cloudflared` 建一条临时 tunnel；也可以通过 `SYMPHONY_TELEGRAM_TUNNEL_COMMAND` 覆盖命令
+- 如果想关闭自动 Telegram bootstrap，设置 `SYMPHONY_TELEGRAM_BOOTSTRAP=off`
+- 如果本机没有 `cloudflared`，也没给 `SYMPHONY_PUBLIC_BASE_URL`，服务仍会启动，但 Telegram inbound 不会接通
+- `SYMPHONY_TELEGRAM_OPERATIONS_CHAT_ID` 用来指定固定运维会话；不配置时，只有已经绑定到 issue 的来源会话或手工 watch 会收到主动 follow-up
+
+一键修复 bot/GitHub 遗留：
+
+```bash
+bun src/cli/index.ts repair all
+```
+
+它会同时：
+
+- 修复 stale Telegram follow-up / card / pending action
+- 按 terminal issue 扫描并关闭 orphan GitHub issue / PR
 
 bot 命令例子：
 

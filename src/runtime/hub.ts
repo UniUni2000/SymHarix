@@ -5,10 +5,11 @@ import {
   GovernanceSuggestionRepository,
   ReviewEventRepository,
   ShadowHarnessRepository,
+  SupervisorSessionRepository,
   SyncEventRepository,
   WorkItemRepository,
 } from '../database';
-import type { WorkItem } from '../database/types';
+import type { SupervisorSessionRecord, WorkItem } from '../database/types';
 import type { OrchestratorStateSnapshot } from '../orchestrator';
 import type { AgentEvent, AgentTimelinePayload, Issue } from '../types';
 import type {
@@ -16,7 +17,9 @@ import type {
   CreateIssueResult,
   RuntimeActionResult,
   RuntimeControlPlane,
+  RuntimeDeliveryState,
   RuntimeFileActivity,
+  RuntimeGovernanceChildIssueView,
   RuntimeHistoryEntry,
   RuntimeIssueDigest,
   RuntimeIssueHistoryView,
@@ -104,6 +107,10 @@ function normalizeSummary(value: string | null | undefined, fallback: string, ma
   return `${normalized.slice(0, maxLength - 3)}...`;
 }
 
+function compareDatesAscending(left: Date, right: Date): number {
+  return left.getTime() - right.getTime();
+}
+
 export class RuntimeHub implements RuntimeControlPlane {
   private readonly workItemRepository: WorkItemRepository;
   private readonly agentRunRepository: AgentRunRepository;
@@ -112,6 +119,7 @@ export class RuntimeHub implements RuntimeControlPlane {
   private readonly syncEventRepository: SyncEventRepository;
   private readonly governanceSuggestionRepository: GovernanceSuggestionRepository;
   private readonly shadowHarnessRepository: ShadowHarnessRepository;
+  private readonly supervisorSessionRepository: SupervisorSessionRepository;
   private readonly timelineHistoryLimit: number;
   private readonly issueCacheById = new Map<string, Issue>();
   private readonly timelineByIssueId = new Map<string, RuntimeTimelineEvent[]>();
@@ -132,6 +140,7 @@ export class RuntimeHub implements RuntimeControlPlane {
     this.syncEventRepository = new SyncEventRepository(db);
     this.governanceSuggestionRepository = new GovernanceSuggestionRepository(db);
     this.shadowHarnessRepository = new ShadowHarnessRepository(db);
+    this.supervisorSessionRepository = new SupervisorSessionRepository(db);
     this.timelineHistoryLimit = Math.max(10, options.timelineHistoryLimit ?? 200);
     this.controller = controller;
     this.bindControllerListeners();
@@ -533,6 +542,36 @@ export class RuntimeHub implements RuntimeControlPlane {
       ? this.shadowHarnessRepository.findByRepoKey(workItem.github_repo)
       : null;
     const inferredDetails = shadowHarness?.inference_details_json ?? null;
+    const governanceRootIssueId = workItem.governance_root_issue_id ?? workItem.linear_issue_id;
+    const governanceRootWorkItem = governanceRootIssueId === workItem.linear_issue_id
+      ? workItem
+      : this.workItemRepository.findByLinearIssueId(governanceRootIssueId);
+    const delivery = this.buildDeliveryProjection(workItem);
+    const governanceThread = governanceRootIssueId === workItem.linear_issue_id
+      ? this.buildGovernanceThreadProjection(workItem)
+      : null;
+    const supervisorProjection = this.buildSupervisorProjection(
+      governanceRootIssueId,
+      governanceThread,
+    );
+    const governanceThreadState = governanceThread?.state ?? (
+      workItem.orchestrator_state === 'halted' &&
+      Boolean(workItem.governance_decision && workItem.governance_decision !== 'accept')
+        ? 'blocked'
+        : null
+    );
+    const nextRecommendedAction = governanceThread?.nextRecommendedAction
+      ?? (
+        workItem.governance_decision === 'split_before_implement'
+          ? '按推荐拆成更聚焦的任务'
+          : workItem.governance_decision === 'accept_with_rewrite'
+            ? '先把需求改写成一个更聚焦的任务'
+            : null
+      );
+    const effectiveOrchestratorState =
+      ['waiting_on_child', 'child_failed'].includes(governanceThreadState ?? '') && !running && !retrying
+        ? 'halted'
+        : workItem.orchestrator_state;
 
     return {
       issue_id: workItem.linear_issue_id,
@@ -541,7 +580,7 @@ export class RuntimeHub implements RuntimeControlPlane {
       title: workItem.linear_title,
       phase: derivePhase(workItem.linear_state),
       tracker_state: workItem.linear_state,
-      orchestrator_state: workItem.orchestrator_state,
+      orchestrator_state: effectiveOrchestratorState,
       workspace_path: workItem.workspace_path,
       branch_name: workItem.branch_name,
       github_repo: workItem.github_repo,
@@ -584,6 +623,18 @@ export class RuntimeHub implements RuntimeControlPlane {
       governance_status: workItem.governance_status,
       governance_decision: workItem.governance_decision,
       governance_summary: workItem.governance_summary,
+      governance_root_issue_id: governanceRootIssueId,
+      governance_root_issue_identifier: governanceRootWorkItem?.linear_identifier ?? workItem.linear_identifier,
+      governance_thread_state: governanceThreadState,
+      governance_child_issues: governanceThread?.children ?? [],
+      governance_current_child: governanceThread?.currentChild ?? null,
+      governance_child_queue: governanceThread?.childQueue ?? [],
+      next_recommended_action: nextRecommendedAction,
+      delivery_state: delivery.state,
+      delivery_code: delivery.code,
+      delivery_summary: delivery.summary,
+      supervisor_session_state: supervisorProjection.state,
+      supervisor_plan_summary: supervisorProjection.summary,
       constitution_hits: workItem.constitution_hits,
       fitness_signals: workItem.fitness_signals,
       active_governance_suggestions: this.governanceSuggestionRepository
@@ -658,6 +709,18 @@ export class RuntimeHub implements RuntimeControlPlane {
       governance_status: null,
       governance_decision: null,
       governance_summary: null,
+      governance_root_issue_id: issue.id,
+      governance_root_issue_identifier: issue.identifier,
+      governance_thread_state: null,
+      governance_child_issues: [],
+      governance_current_child: null,
+      governance_child_queue: [],
+      next_recommended_action: null,
+      delivery_state: null,
+      delivery_code: null,
+      delivery_summary: null,
+      supervisor_session_state: null,
+      supervisor_plan_summary: null,
       constitution_hits: [],
       fitness_signals: [],
       active_governance_suggestions: [],
@@ -726,6 +789,11 @@ export class RuntimeHub implements RuntimeControlPlane {
                 `${latestHistory.title} · ${latestHistory.summary}`,
                 'Recent orchestration history is available.',
               )
+            : issue.delivery_summary
+              ? normalizeSummary(
+                  issue.delivery_summary,
+                  'Recent delivery status is available.',
+                )
             : normalizeSummary(issue.session?.last_message, 'No recent live or historical updates yet.');
 
     return {
@@ -975,5 +1043,181 @@ export class RuntimeHub implements RuntimeControlPlane {
     return ['done', 'cancelled', 'canceled', 'duplicate', 'closed'].includes(
       state.toLowerCase(),
     );
+  }
+
+  private buildDeliveryProjection(workItem: WorkItem): {
+    state: RuntimeDeliveryState | null;
+    code: RuntimeIssueView['delivery_code'];
+    summary: string | null;
+  } {
+    const evidenceSummary = workItem.evidence_summary;
+    const missingCount = evidenceSummary?.missing ?? workItem.missing_requirements.length;
+    const proofSatisfied = Boolean(
+      evidenceSummary &&
+      (evidenceSummary.total_requirements ?? 0) > 0 &&
+      missingCount === 0,
+    );
+    const agentRuns = this.agentRunRepository.findByWorkItemId(workItem.id);
+    const latestRun = agentRuns[agentRuns.length - 1] ?? null;
+    const latestFailure = latestRun?.run_status === 'failed'
+      ? normalizeSummary(
+          latestRun.error ?? latestRun.output_summary ?? latestRun.decision,
+          `${latestRun.phase} run failed.`,
+          240,
+        )
+      : null;
+
+    if (this.isTerminalState(workItem.linear_state)) {
+      return {
+        state: 'completed',
+        code: null,
+        summary: normalizeSummary(
+          workItem.last_review_summary
+            ?? latestRun?.output_summary
+            ?? latestRun?.decision
+            ?? `${workItem.linear_identifier} 已完成最终交付。`,
+          `${workItem.linear_identifier} 已完成最终交付。`,
+          240,
+        ),
+      };
+    }
+
+    if (proofSatisfied && (workItem.orchestrator_state === 'failed' || latestFailure)) {
+      return {
+        state: 'delivery_failed',
+        code: workItem.delivery_code ?? null,
+        summary: normalizeSummary(
+          workItem.delivery_summary ?? `证据已满足，但交付卡在 ${latestFailure ?? '最终交付动作失败'}。`,
+          '证据已满足，但最终交付失败。',
+          260,
+        ),
+      };
+    }
+
+    if (proofSatisfied) {
+      return {
+        state: 'proof_satisfied',
+        code: workItem.delivery_code ?? null,
+        summary: '证据已满足，正在等待最终交付动作完成。',
+      };
+    }
+
+    return {
+      state: null,
+      code: workItem.delivery_code ?? null,
+      summary: null,
+    };
+  }
+
+  private buildGovernanceThreadProjection(workItem: WorkItem): {
+    state: RuntimeIssueView['governance_thread_state'];
+    currentChild: RuntimeGovernanceChildIssueView | null;
+    childQueue: RuntimeGovernanceChildIssueView[];
+    children: RuntimeGovernanceChildIssueView[];
+    nextRecommendedAction: string | null;
+  } | null {
+    const children = this.workItemRepository
+      .findByGovernanceParentIssueId(workItem.linear_issue_id)
+      .filter((child) => child.linear_issue_id !== workItem.linear_issue_id)
+      .sort((left, right) =>
+        compareDatesAscending(left.created_at, right.created_at)
+        || left.linear_identifier.localeCompare(right.linear_identifier),
+      );
+
+    if (children.length === 0) {
+      return null;
+    }
+
+    const firstActiveIndex = children.findIndex((child) => !this.isTerminalState(child.linear_state));
+    const currentChildIndex = firstActiveIndex >= 0 ? firstActiveIndex : -1;
+    const childViews = children.map((child, index) => {
+      const delivery = this.buildDeliveryProjection(child);
+      const queueState = this.isTerminalState(child.linear_state)
+        ? 'completed'
+        : index === currentChildIndex
+          ? 'current'
+          : currentChildIndex >= 0 && index > currentChildIndex
+            ? 'queued'
+            : 'blocked';
+
+      return {
+        issue_id: child.linear_issue_id,
+        issue_identifier: child.linear_identifier,
+        title: child.linear_title,
+        tracker_state: child.linear_state,
+        orchestrator_state: child.orchestrator_state,
+        governance_decision: child.governance_decision,
+        governance_summary: child.governance_summary,
+        queue_state: queueState,
+        delivery_state: delivery.state,
+        delivery_code: delivery.code,
+        delivery_summary: delivery.summary,
+      } satisfies RuntimeGovernanceChildIssueView;
+    });
+    const currentChild = currentChildIndex >= 0 ? childViews[currentChildIndex] ?? null : null;
+
+    return {
+      state: currentChild?.delivery_state === 'delivery_failed' || currentChild?.orchestrator_state === 'failed'
+        ? 'child_failed'
+        : 'waiting_on_child',
+      currentChild,
+      childQueue: childViews,
+      children: childViews,
+      nextRecommendedAction: currentChild
+        ? `先处理治理子任务 ${currentChild.issue_identifier}`
+        : '等待根治理线程重新评估。',
+    };
+  }
+
+  private buildSupervisorProjection(
+    rootIssueId: string,
+    governanceThread: ReturnType<RuntimeHub['buildGovernanceThreadProjection']>,
+  ): {
+    state: string | null;
+    summary: string | null;
+  } {
+    const session = this.supervisorSessionRepository.findByRootIssueId(rootIssueId);
+    if (!session) {
+      return {
+        state: null,
+        summary: null,
+      };
+    }
+
+    return {
+      state: session.state,
+      summary: this.describeSupervisorSession(session, governanceThread),
+    };
+  }
+
+  private describeSupervisorSession(
+    session: SupervisorSessionRecord,
+    governanceThread: ReturnType<RuntimeHub['buildGovernanceThreadProjection']>,
+  ): string {
+    const planTitle = session.plan_card?.title ?? '当前计划线程';
+    const currentChild = governanceThread?.currentChild ?? null;
+    if (currentChild) {
+      return `计划「${planTitle}」正在执行；当前子任务 ${currentChild.issue_identifier}，后续子任务会按顺序接力。`;
+    }
+
+    if (session.delivery_summary) {
+      return `计划「${planTitle}」当前状态：${session.delivery_summary}`;
+    }
+
+    switch (session.state) {
+      case 'clarifying':
+        return `计划「${planTitle}」还在补充信息。`;
+      case 'awaiting_user_approval':
+      case 'plan_ready':
+        return `计划「${planTitle}」正在等待 Telegram 批准。`;
+      case 'awaiting_user_decision':
+        return `计划「${planTitle}」正在等待你决定下一步。`;
+      case 'completed':
+        return `计划「${planTitle}」已经完成。`;
+      case 'cancelled':
+        return `计划「${planTitle}」已经取消。`;
+      default:
+        return `计划「${planTitle}」正在推进。`;
+    }
   }
 }

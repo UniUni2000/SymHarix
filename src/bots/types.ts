@@ -28,6 +28,46 @@ export interface BotRecipient {
   label?: string | null;
 }
 
+export interface BotTransportAction {
+  label: string;
+  style?: 'default' | 'danger';
+  callback_data: string;
+}
+
+export type BotTransportMessageFormat = 'plain' | 'telegram_html';
+
+export interface BotTransportMessageRef {
+  provider_message_id: string;
+}
+
+export interface BotTransportMessage {
+  text: string;
+  format?: BotTransportMessageFormat;
+  actions?: BotTransportAction[];
+  action_rows?: BotTransportAction[][];
+}
+
+export type BotMessageEditFailureKind =
+  | 'not_modified'
+  | 'message_not_found'
+  | 'hard_failure';
+
+export class BotMessageEditError extends Error {
+  constructor(
+    public readonly kind: BotMessageEditFailureKind,
+    message: string,
+    public readonly status: number | null = null,
+    public readonly description: string | null = null,
+  ) {
+    super(message);
+    this.name = 'BotMessageEditError';
+  }
+}
+
+export function getBotMessageEditFailureKind(error: unknown): BotMessageEditFailureKind | null {
+  return error instanceof BotMessageEditError ? error.kind : null;
+}
+
 export interface BotCommandContext {
   transport: BotTransport;
   recipient: BotRecipient;
@@ -46,8 +86,13 @@ export interface BotCommandRequest {
 
 export interface BotCommandResponse {
   message: string;
+  format?: BotTransportMessageFormat;
+  actions?: BotTransportAction[];
+  action_rows?: BotTransportAction[][];
   watch_registered?: boolean;
   issue_id?: string | null;
+  session_id?: string | null;
+  material_key?: string | null;
 }
 
 export interface BotWatchSubscription {
@@ -60,7 +105,8 @@ export interface BotWatchSubscription {
 }
 
 export interface BotTransportNotifier {
-  sendMessage(recipient: BotRecipient, message: string): Promise<void>;
+  sendMessage(recipient: BotRecipient, message: BotTransportMessage): Promise<BotTransportMessageRef>;
+  editMessage(recipient: BotRecipient, messageRef: BotTransportMessageRef, message: BotTransportMessage): Promise<BotTransportMessageRef>;
 }
 
 export interface BotTransportManifest {
@@ -70,6 +116,15 @@ export interface BotTransportManifest {
   watch_supported: boolean;
   write_requires_operator: boolean;
   inbound_path: string;
+  proactive_followups_supported?: boolean;
+  inline_actions_supported?: boolean;
+  operations_chat_configured?: boolean;
+  health?: 'healthy' | 'degraded' | 'unconfigured';
+  webhook_url?: string | null;
+  webhook_pending_update_count?: number | null;
+  webhook_last_error_message?: string | null;
+  webhook_last_error_at?: string | null;
+  callback_ingress_recently_ok?: boolean;
 }
 
 export interface BotManifest {
@@ -82,6 +137,10 @@ export interface BotManifest {
 
 export interface BotGateway {
   getManifest(): BotManifest;
+  initializeInboundIntegration?(params: {
+    localBaseUrl: string;
+    inboundPath?: string;
+  }): Promise<void>;
   handleTelegramWebhook(body: unknown, headers?: Headers | Record<string, string | undefined>): Promise<{
     ok: boolean;
     status: number;
@@ -96,6 +155,35 @@ export interface BotGateway {
 
 export interface RuntimeBackedBotComponent {
   runtime: RuntimeControlPlane;
+}
+
+export interface TelegramWebhookDiagnostics {
+  health: 'healthy' | 'degraded' | 'unconfigured';
+  webhook_url: string | null;
+  webhook_pending_update_count: number | null;
+  webhook_last_error_message: string | null;
+  webhook_last_error_at: string | null;
+  callback_ingress_recently_ok: boolean;
+}
+
+export interface TelegramCallbackAuditRecord {
+  callback_id: string | null;
+  chat_id: string | null;
+  message_id: string | null;
+  callback_data: string | null;
+  issue_id: string | null;
+  action_kind: string | null;
+  result:
+    | 'received'
+    | 'parsed'
+    | 'acked'
+    | 'executing'
+    | 'completed'
+    | 'edited'
+    | 'sent_fallback'
+    | 'failed';
+  error_message: string | null;
+  timestamp: string;
 }
 
 export type RuntimeEventListener = (event: RuntimeStreamEvent) => void;
@@ -199,6 +287,23 @@ export interface BotIssueContextView {
   boundary_edges: string[];
   import_edges: string[];
   fitness_signals: string[];
+  governance_root_issue_identifier: string | null;
+  governance_thread_state: string | null;
+  governance_child_issues: Array<{
+    issue_id: string;
+    issue_identifier: string;
+    title: string;
+    tracker_state: string;
+    orchestrator_state: string | null;
+    governance_decision: string | null;
+    governance_summary: string | null;
+    delivery_code?: string | null;
+    delivery_summary?: string | null;
+  }>;
+  next_recommended_action: string | null;
+  delivery_state?: string | null;
+  delivery_code?: string | null;
+  delivery_summary?: string | null;
   repo_harness_status: {
     status: string;
     learning_confidence: string | null;
@@ -220,6 +325,16 @@ export interface BotFocusedIssueContext {
     status: string | null;
     decision: string | null;
     summary: string | null;
+    root_issue_identifier?: string | null;
+    thread_state?: string | null;
+    child_issues?: Array<{
+      issue_identifier: string;
+      title: string;
+      tracker_state: string;
+      governance_decision: string | null;
+      governance_summary: string | null;
+    }>;
+    next_recommended_action?: string | null;
     suggestions: Array<{
       id: string;
       suggestion_type: string;

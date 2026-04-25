@@ -27,11 +27,17 @@ export const WORK_ITEMS_TABLE_SCHEMA = `
     review_round INTEGER NOT NULL DEFAULT 0,
     last_review_decision TEXT,
     last_review_summary TEXT,
+    delivery_code TEXT,
+    delivery_summary TEXT,
     repo_harness_status TEXT,
     constitution_status TEXT,
     governance_status TEXT,
     governance_decision TEXT,
     governance_summary TEXT,
+    governance_root_issue_id TEXT,
+    governance_parent_issue_id TEXT,
+    governance_generation INTEGER NOT NULL DEFAULT 0,
+    governance_source_updated_at TEXT,
     governance_override_at TEXT,
     governance_override_reason TEXT,
     change_pack_summary_json TEXT,
@@ -169,14 +175,134 @@ export const BOT_PENDING_ACTIONS_TABLE_SCHEMA = `
   CREATE TABLE IF NOT EXISTS bot_pending_actions (
     transport TEXT NOT NULL,
     conversation_id TEXT NOT NULL,
+    issue_id TEXT NOT NULL DEFAULT '',
     user_id TEXT,
     intent_kind TEXT NOT NULL,
     normalized_payload_json TEXT NOT NULL,
     summary_message TEXT NOT NULL,
     expires_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending_confirm',
+    message_id TEXT,
+    card_key TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    PRIMARY KEY (transport, conversation_id)
+    PRIMARY KEY (transport, conversation_id, issue_id)
+  );
+`;
+
+/**
+ * SQL schema for bot_issue_followups table
+ * Persists Telegram-originated issue follow-up bindings separately from manual watches
+ */
+export const BOT_ISSUE_FOLLOWUPS_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS bot_issue_followups (
+    transport TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    issue_id TEXT NOT NULL,
+    issue_identifier TEXT,
+    user_id TEXT,
+    role TEXT NOT NULL DEFAULT 'origin',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (transport, conversation_id, issue_id, role)
+  );
+`;
+
+/**
+ * SQL schema for bot_followup_message_states table
+ * Persists the current proactive Telegram card per conversation and issue
+ */
+export const BOT_FOLLOWUP_MESSAGE_STATES_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS bot_followup_message_states (
+    transport TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    issue_id TEXT NOT NULL,
+    issue_identifier TEXT,
+    message_id TEXT NOT NULL,
+    card_kind TEXT NOT NULL,
+    card_key TEXT NOT NULL,
+    card_state TEXT NOT NULL DEFAULT 'open',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (transport, conversation_id, issue_id)
+  );
+`;
+
+/**
+ * SQL schema for bot_followup_delivery_states table
+ * Persists per-thread delivery baselines so Telegram dedupe survives restarts
+ */
+export const BOT_FOLLOWUP_DELIVERY_STATES_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS bot_followup_delivery_states (
+    transport TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    root_issue_id TEXT NOT NULL,
+    root_issue_identifier TEXT,
+    delivery_kind TEXT NOT NULL,
+    last_material_key TEXT,
+    last_notification_class TEXT,
+    last_message_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (transport, conversation_id, root_issue_id, delivery_kind)
+  );
+`;
+
+/**
+ * SQL schema for bot_transport_events table
+ * Persists outbound bot delivery audit records for replay and debugging
+ */
+export const BOT_TRANSPORT_EVENTS_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS bot_transport_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    transport TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    issue_id TEXT,
+    root_issue_id TEXT,
+    source TEXT NOT NULL,
+    message_id TEXT,
+    action TEXT NOT NULL,
+    result TEXT NOT NULL,
+    material_key TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL
+  );
+`;
+
+export const SUPERVISOR_SESSIONS_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS supervisor_sessions (
+    id TEXT PRIMARY KEY,
+    transport TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    user_id TEXT,
+    state TEXT NOT NULL,
+    repo_ref TEXT,
+    intake_mode TEXT,
+    approval_mode TEXT,
+    plan_card_json TEXT,
+    plan_version INTEGER NOT NULL DEFAULT 1,
+    root_issue_id TEXT,
+    root_work_item_id TEXT,
+    current_child_issue_id TEXT,
+    active_decision_kind TEXT,
+    delivery_state TEXT,
+    delivery_summary TEXT,
+    last_material_outcome_json TEXT,
+    last_message_id TEXT,
+    last_card_key TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+`;
+
+export const SUPERVISOR_SESSION_EVENTS_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS supervisor_session_events (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    event_kind TEXT NOT NULL,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES supervisor_sessions(id) ON DELETE CASCADE
   );
 `;
 
@@ -302,6 +428,20 @@ export const CONTROL_PLANE_INDEXES_SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_bot_conversation_preferences_transport_conversation ON bot_conversation_preferences(transport, conversation_id);
   CREATE INDEX IF NOT EXISTS idx_bot_pending_actions_expires_at ON bot_pending_actions(expires_at);
   CREATE INDEX IF NOT EXISTS idx_bot_pending_actions_transport_conversation ON bot_pending_actions(transport, conversation_id);
+  CREATE INDEX IF NOT EXISTS idx_bot_pending_actions_transport_conversation_issue ON bot_pending_actions(transport, conversation_id, issue_id);
+  CREATE INDEX IF NOT EXISTS idx_bot_issue_followups_issue_id ON bot_issue_followups(issue_id);
+  CREATE INDEX IF NOT EXISTS idx_bot_issue_followups_transport_conversation ON bot_issue_followups(transport, conversation_id);
+  CREATE INDEX IF NOT EXISTS idx_bot_followup_message_states_transport_conversation ON bot_followup_message_states(transport, conversation_id);
+  CREATE INDEX IF NOT EXISTS idx_bot_followup_message_states_issue_id ON bot_followup_message_states(issue_id);
+  CREATE INDEX IF NOT EXISTS idx_bot_followup_delivery_states_transport_conversation ON bot_followup_delivery_states(transport, conversation_id);
+  CREATE INDEX IF NOT EXISTS idx_bot_followup_delivery_states_root_issue ON bot_followup_delivery_states(root_issue_id);
+  CREATE INDEX IF NOT EXISTS idx_bot_transport_events_transport_conversation ON bot_transport_events(transport, conversation_id);
+  CREATE INDEX IF NOT EXISTS idx_bot_transport_events_root_issue ON bot_transport_events(root_issue_id);
+  CREATE INDEX IF NOT EXISTS idx_bot_transport_events_created_at ON bot_transport_events(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_sessions_transport_conversation ON supervisor_sessions(transport, conversation_id);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_sessions_root_issue ON supervisor_sessions(root_issue_id);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_sessions_state ON supervisor_sessions(state);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_session_events_session ON supervisor_session_events(session_id, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_service_leases_expires_at ON service_leases(expires_at);
   CREATE INDEX IF NOT EXISTS idx_shadow_harnesses_repo_key ON shadow_harnesses(repo_key);
   CREATE INDEX IF NOT EXISTS idx_governance_assessments_issue_id ON governance_assessments(issue_id);
@@ -324,6 +464,87 @@ function ensureColumn(db: Database, tableName: string, columnName: string, colum
   db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition};`);
 }
 
+function tableExists(db: Database, tableName: string): boolean {
+  const row = db
+    .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(tableName) as { name?: string } | null;
+  return Boolean(row?.name);
+}
+
+function migrateBotPendingActionsTable(db: Database): void {
+  if (!tableExists(db, 'bot_pending_actions')) {
+    return;
+  }
+
+  const rows = db
+    .query('PRAGMA table_info(bot_pending_actions)')
+    .all() as Array<{ name?: string; pk?: number }>;
+  const hasIssueId = rows.some((row) => row.name === 'issue_id');
+  const pkColumns = rows
+    .filter((row) => Number(row.pk) > 0)
+    .sort((left, right) => Number(left.pk) - Number(right.pk))
+    .map((row) => row.name);
+
+  if (
+    hasIssueId &&
+    pkColumns.length === 3 &&
+    pkColumns[0] === 'transport' &&
+    pkColumns[1] === 'conversation_id' &&
+    pkColumns[2] === 'issue_id'
+  ) {
+    return;
+  }
+
+  db.exec('DROP TABLE IF EXISTS bot_pending_actions_v2;');
+  db.exec(`
+    CREATE TABLE bot_pending_actions_v2 (
+      transport TEXT NOT NULL,
+      conversation_id TEXT NOT NULL,
+      issue_id TEXT NOT NULL DEFAULT '',
+      user_id TEXT,
+      intent_kind TEXT NOT NULL,
+      normalized_payload_json TEXT NOT NULL,
+      summary_message TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending_confirm',
+      message_id TEXT,
+      card_key TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (transport, conversation_id, issue_id)
+    );
+  `);
+
+  const columnNames = new Set(rows.map((row) => row.name).filter((name): name is string => Boolean(name)));
+  const selectClauses = [
+    'transport',
+    'conversation_id',
+    columnNames.has('issue_id') ? "COALESCE(issue_id, '')" : "''",
+    'user_id',
+    'intent_kind',
+    'normalized_payload_json',
+    'summary_message',
+    'expires_at',
+    columnNames.has('status') ? "COALESCE(status, 'pending_confirm')" : "'pending_confirm'",
+    columnNames.has('message_id') ? 'message_id' : 'NULL',
+    columnNames.has('card_key') ? 'card_key' : 'NULL',
+    'created_at',
+    'updated_at',
+  ];
+
+  db.exec(`
+    INSERT INTO bot_pending_actions_v2 (
+      transport, conversation_id, issue_id, user_id, intent_kind, normalized_payload_json,
+      summary_message, expires_at, status, message_id, card_key, created_at, updated_at
+    )
+    SELECT ${selectClauses.join(', ')}
+    FROM bot_pending_actions;
+  `);
+
+  db.exec('DROP TABLE bot_pending_actions;');
+  db.exec('ALTER TABLE bot_pending_actions_v2 RENAME TO bot_pending_actions;');
+}
+
 /**
  * Initialize the database schema
  * Creates all tables and indexes if they don't exist
@@ -337,6 +558,13 @@ export function initializeSchema(db: Database): void {
   db.exec(BOT_WATCH_SUBSCRIPTIONS_TABLE_SCHEMA);
   db.exec(BOT_CONVERSATION_PREFERENCES_TABLE_SCHEMA);
   db.exec(BOT_PENDING_ACTIONS_TABLE_SCHEMA);
+  migrateBotPendingActionsTable(db);
+  db.exec(BOT_ISSUE_FOLLOWUPS_TABLE_SCHEMA);
+  db.exec(BOT_FOLLOWUP_MESSAGE_STATES_TABLE_SCHEMA);
+  db.exec(BOT_FOLLOWUP_DELIVERY_STATES_TABLE_SCHEMA);
+  db.exec(BOT_TRANSPORT_EVENTS_TABLE_SCHEMA);
+  db.exec(SUPERVISOR_SESSIONS_TABLE_SCHEMA);
+  db.exec(SUPERVISOR_SESSION_EVENTS_TABLE_SCHEMA);
   db.exec(SERVICE_LEASES_TABLE_SCHEMA);
   db.exec(SHADOW_HARNESSES_TABLE_SCHEMA);
   db.exec(GOVERNANCE_ASSESSMENTS_TABLE_SCHEMA);
@@ -345,12 +573,22 @@ export function initializeSchema(db: Database): void {
   db.exec(DEBT_SIGNALS_TABLE_SCHEMA);
   db.exec(GOVERNANCE_SUGGESTIONS_TABLE_SCHEMA);
   ensureColumn(db, 'work_items', 'repo_harness_status', 'TEXT');
+  ensureColumn(db, 'work_items', 'delivery_code', 'TEXT');
+  ensureColumn(db, 'work_items', 'delivery_summary', 'TEXT');
   ensureColumn(db, 'work_items', 'constitution_status', 'TEXT');
   ensureColumn(db, 'work_items', 'governance_status', 'TEXT');
   ensureColumn(db, 'work_items', 'governance_decision', 'TEXT');
   ensureColumn(db, 'work_items', 'governance_summary', 'TEXT');
+  ensureColumn(db, 'work_items', 'governance_root_issue_id', 'TEXT');
+  ensureColumn(db, 'work_items', 'governance_parent_issue_id', 'TEXT');
+  ensureColumn(db, 'work_items', 'governance_generation', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'work_items', 'governance_source_updated_at', 'TEXT');
   ensureColumn(db, 'work_items', 'governance_override_at', 'TEXT');
   ensureColumn(db, 'work_items', 'governance_override_reason', 'TEXT');
+  ensureColumn(db, 'bot_pending_actions', 'issue_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'bot_pending_actions', 'status', "TEXT NOT NULL DEFAULT 'pending_confirm'");
+  ensureColumn(db, 'bot_pending_actions', 'message_id', 'TEXT');
+  ensureColumn(db, 'bot_pending_actions', 'card_key', 'TEXT');
   ensureColumn(db, 'work_items', 'change_pack_summary_json', 'TEXT');
   ensureColumn(db, 'work_items', 'task_status_json', 'TEXT');
   ensureColumn(db, 'work_items', 'evidence_summary_json', 'TEXT');
@@ -377,7 +615,13 @@ export function dropAllTables(db: Database): void {
   db.exec('DROP TABLE IF EXISTS governance_assessments;');
   db.exec('DROP TABLE IF EXISTS shadow_harnesses;');
   db.exec('DROP TABLE IF EXISTS service_leases;');
+  db.exec('DROP TABLE IF EXISTS bot_transport_events;');
+  db.exec('DROP TABLE IF EXISTS supervisor_session_events;');
+  db.exec('DROP TABLE IF EXISTS supervisor_sessions;');
+  db.exec('DROP TABLE IF EXISTS bot_followup_delivery_states;');
+  db.exec('DROP TABLE IF EXISTS bot_followup_message_states;');
   db.exec('DROP TABLE IF EXISTS bot_pending_actions;');
+  db.exec('DROP TABLE IF EXISTS bot_issue_followups;');
   db.exec('DROP TABLE IF EXISTS bot_conversation_preferences;');
   db.exec('DROP TABLE IF EXISTS bot_watch_subscriptions;');
   db.exec('DROP TABLE IF EXISTS sync_events;');
