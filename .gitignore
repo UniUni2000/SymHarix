@@ -42,6 +42,7 @@ scripts/hooks/*
 !scripts/hooks/review.py
 repos/
 .claude/
+.superpowers/
 
 # Python
 __pycache__/
