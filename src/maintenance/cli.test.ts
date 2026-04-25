@@ -11,6 +11,15 @@ describe('parseMaintenanceArgs', () => {
     });
   });
 
+  test('parses the all-in-one maintenance repair command', () => {
+    expect(parseMaintenanceArgs(['all'])).toEqual({
+      ok: true,
+      command: {
+        kind: 'repair_all',
+      },
+    });
+  });
+
   test('fails closed when the repair subcommand is missing or unsupported', () => {
     const parsed = parseMaintenanceArgs([]);
 

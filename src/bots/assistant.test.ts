@@ -10,10 +10,13 @@ import {
   BotConversationPreferenceRepository,
   BotFollowupMessageStateRepository,
   BotPendingActionRepository,
+  SupervisorSessionEventRepository,
+  SupervisorSessionRepository,
   initializeSchema,
 } from '../database';
 import type { RuntimeControlPlane, RuntimeStreamEvent } from '../runtime/types';
 import { TrackerProjectResolutionService } from '../tracker/projectResolution';
+import { SupervisorSessionService } from '../supervisor/sessionService';
 
 function createRuntimeControlPlane(): RuntimeControlPlane & {
   emit: (event: RuntimeStreamEvent) => void;
@@ -254,7 +257,7 @@ describe('BotAssistantService', () => {
     expect(runtime.createIssueCalls).toHaveLength(0);
 
     const confirmed = await assistant.respondToText(context, '确认');
-    expect(confirmed.message).toContain('Created');
+    expect(confirmed.message).toContain('已创建');
     expect(runtime.createIssueCalls).toHaveLength(1);
     expect(runtime.createIssueCalls[0]?.project_slug).toBe('test2');
     expect(
@@ -265,6 +268,192 @@ describe('BotAssistantService', () => {
     ).toBeNull();
 
     subscriptions.dispose();
+  });
+
+  test('routes Telegram create-issue requests through the supervisor session when the supervisor plane is enabled', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const sessions = new SupervisorSessionRepository(db);
+    const sessionEvents = new SupervisorSessionEventRepository(db);
+    preferences.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-supervisor',
+      default_project_slug: 'test2',
+    });
+
+    const projectResolver = new TrackerProjectResolutionService(
+      {
+        listProjects: async () => ({
+          projects: [
+            { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' },
+          ],
+        }),
+        findProjectBySlug: async (projectSlug: string) => ({
+          project: projectSlug === 'test2'
+            ? { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' }
+            : null,
+        }),
+      } as any,
+      {
+        test2: {
+          github_owner: 'UniUni2000',
+          github_repo: 'test2',
+          local_path: null,
+        },
+      },
+    );
+
+    const supervisorService = new SupervisorSessionService(
+      runtime,
+      projectResolver,
+      sessions,
+      sessionEvents,
+    );
+    const commandService = new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver);
+    const assistant = new BotAssistantService(
+      runtime,
+      commandService,
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => ({
+          intent: {
+            kind: 'create_issue',
+            title: 'Refactor runtime API and rewrite Telegram copy together',
+            description: 'Do both in one issue.',
+            project_slug: 'test2',
+          },
+        }),
+      },
+      undefined,
+      subscriptions,
+      null,
+      supervisorService,
+    );
+
+    const context = {
+      transport: 'telegram' as const,
+      recipient: { transport: 'telegram' as const, conversation_id: 'chat-supervisor' },
+      identity: { user_id: 'user-1', display_name: 'Alice' },
+    };
+
+    const first = await assistant.respondToText(context, '把 runtime API 和 Telegram 文案一起改掉');
+    expect(first.message).toContain('计划待你批准');
+    expect(first.format).toBe('telegram_html');
+    expect(first.action_rows?.[0]?.[0]?.label).toBe('按推荐继续');
+    expect(runtime.createIssueCalls).toHaveLength(0);
+    expect(
+      pending.findByConversation({
+        transport: 'telegram',
+        conversation_id: 'chat-supervisor',
+      }),
+    ).toBeNull();
+
+    const second = await assistant.respondToText(context, '按推荐继续');
+    expect(second.message).toContain('已创建');
+    expect(runtime.createIssueCalls).toHaveLength(1);
+
+    subscriptions.dispose();
+    supervisorService.dispose();
+  });
+
+  test('uses deterministic supervisor intake for repository cleanup requests when the model times out', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const sessions = new SupervisorSessionRepository(db);
+    const sessionEvents = new SupervisorSessionEventRepository(db);
+    preferences.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-cleanup',
+      default_project_slug: 'test2',
+    });
+
+    const projectResolver = new TrackerProjectResolutionService(
+      {
+        listProjects: async () => ({
+          projects: [
+            { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' },
+          ],
+        }),
+        findProjectBySlug: async (projectSlug: string) => ({
+          project: projectSlug === 'test2'
+            ? { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' }
+            : null,
+        }),
+      } as any,
+      {
+        test2: {
+          github_owner: 'UniUni2000',
+          github_repo: 'test2',
+          local_path: null,
+        },
+      },
+    );
+
+    const supervisorService = new SupervisorSessionService(
+      runtime,
+      projectResolver,
+      sessions,
+      sessionEvents,
+    );
+    const commandService = new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver);
+    let modelCalls = 0;
+    const assistant = new BotAssistantService(
+      runtime,
+      commandService,
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => {
+          modelCalls += 1;
+          return null;
+        },
+        getDiagnostics: () => ({
+          provider: 'openai',
+          model: 'slow-model',
+          configured: true,
+          health: 'degraded',
+          fallback_available: true,
+          last_error_code: 'timeout',
+        }),
+      },
+      undefined,
+      subscriptions,
+      null,
+      supervisorService,
+    );
+
+    const response = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-cleanup' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      '这个仓库还有文件残余，把它都清空',
+    );
+
+    expect(response.message).toContain('计划待你批准');
+    expect(response.message).toContain('这个仓库还有文件残余，把它都清空');
+    expect(response.message).not.toContain('当前自然语言模型暂不可用');
+    expect(response.format).toBe('telegram_html');
+    expect(response.action_rows?.[0]?.[0]?.label).toBe('按推荐继续');
+    expect(runtime.createIssueCalls).toHaveLength(0);
+    expect(modelCalls).toBe(0);
+
+    subscriptions.dispose();
+    supervisorService.dispose();
   });
 
   test('answers natural-language status questions without creating a pending action', async () => {

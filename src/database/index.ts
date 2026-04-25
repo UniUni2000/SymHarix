@@ -131,3 +131,5 @@ export { GovernanceSuggestionRepository } from './repositories/governanceSuggest
 export { DecisionMemoryRepository } from './repositories/decisionMemoryRepository';
 export { ConflictMemoryRepository } from './repositories/conflictMemoryRepository';
 export { DebtSignalRepository } from './repositories/debtSignalRepository';
+export { SupervisorSessionRepository } from './repositories/supervisorSessionRepository';
+export { SupervisorSessionEventRepository } from './repositories/supervisorSessionEventRepository';

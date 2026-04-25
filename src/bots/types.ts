@@ -86,9 +86,13 @@ export interface BotCommandRequest {
 
 export interface BotCommandResponse {
   message: string;
+  format?: BotTransportMessageFormat;
   actions?: BotTransportAction[];
+  action_rows?: BotTransportAction[][];
   watch_registered?: boolean;
   issue_id?: string | null;
+  session_id?: string | null;
+  material_key?: string | null;
 }
 
 export interface BotWatchSubscription {
@@ -133,6 +137,10 @@ export interface BotManifest {
 
 export interface BotGateway {
   getManifest(): BotManifest;
+  initializeInboundIntegration?(params: {
+    localBaseUrl: string;
+    inboundPath?: string;
+  }): Promise<void>;
   handleTelegramWebhook(body: unknown, headers?: Headers | Record<string, string | undefined>): Promise<{
     ok: boolean;
     status: number;

@@ -90,6 +90,21 @@ export type GovernanceSuggestionType =
   | 'constitution_update'
   | 'harness_adoption';
 export type GovernanceSuggestionStatus = 'pending' | 'accepted' | 'dismissed';
+export type SupervisorSessionState =
+  | 'drafting'
+  | 'clarifying'
+  | 'plan_ready'
+  | 'awaiting_user_approval'
+  | 'approved_for_materialization'
+  | 'materialized'
+  | 'executing'
+  | 'awaiting_user_decision'
+  | 'completed'
+  | 'cancelled';
+export type SupervisorIntakeMode = 'direct_run' | 'clarify_then_plan' | 'plan_then_approve';
+export type SupervisorApprovalMode = 'auto' | 'explicit_user_approval' | 'explicit_reapproval';
+export type SupervisorDecisionKind = 'plan_approval' | 'plan_revision' | 'execution_decision';
+export type SupervisorMaterializationMode = 'root_only' | 'root_with_split_queue';
 
 export interface ServiceLease {
   lease_key: string;
@@ -529,6 +544,106 @@ export interface CreateBotTransportEventRecord {
   result: BotTransportEventResult;
   material_key?: string | null;
   error_message?: string | null;
+}
+
+export interface SupervisorPlanCardOption {
+  label: string;
+  summary: string;
+}
+
+export interface SupervisorPlanCard {
+  title: string;
+  user_goal: string;
+  in_scope: string[];
+  out_of_scope: string[];
+  acceptance: string[];
+  known_risks: string[];
+  execution_strategy: string;
+  needs_user_approval: boolean;
+  repo_ref: string | null;
+  project_slug: string | null;
+  clarification_question: string | null;
+  materialization_mode: SupervisorMaterializationMode;
+  recommended_option: SupervisorPlanCardOption;
+  alternate_option: SupervisorPlanCardOption | null;
+  governance_preview: {
+    decision: string | null;
+    summary: string | null;
+    split_suggestions: string[];
+    rewrite_title: string | null;
+    rewrite_description: string | null;
+  } | null;
+}
+
+export interface SupervisorSessionRecord {
+  id: string;
+  transport: BotWatchTransport;
+  conversation_id: string;
+  user_id: string | null;
+  state: SupervisorSessionState;
+  repo_ref: string | null;
+  intake_mode: SupervisorIntakeMode | null;
+  approval_mode: SupervisorApprovalMode | null;
+  plan_card: SupervisorPlanCard | null;
+  plan_version: number;
+  root_issue_id: string | null;
+  root_work_item_id: string | null;
+  current_child_issue_id: string | null;
+  active_decision_kind: SupervisorDecisionKind | null;
+  delivery_state: string | null;
+  delivery_summary: string | null;
+  last_material_outcome: Record<string, unknown> | null;
+  last_message_id: string | null;
+  last_card_key: string | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface CreateSupervisorSessionRecord {
+  id: string;
+  transport: BotWatchTransport;
+  conversation_id: string;
+  user_id?: string | null;
+  state: SupervisorSessionState;
+  repo_ref?: string | null;
+  intake_mode?: SupervisorIntakeMode | null;
+  approval_mode?: SupervisorApprovalMode | null;
+  plan_card?: SupervisorPlanCard | null;
+  plan_version?: number;
+  root_issue_id?: string | null;
+  root_work_item_id?: string | null;
+  current_child_issue_id?: string | null;
+  active_decision_kind?: SupervisorDecisionKind | null;
+  delivery_state?: string | null;
+  delivery_summary?: string | null;
+  last_material_outcome?: Record<string, unknown> | null;
+  last_message_id?: string | null;
+  last_card_key?: string | null;
+}
+
+export interface UpdateSupervisorSessionRecord extends Partial<Omit<SupervisorSessionRecord, 'id' | 'transport' | 'conversation_id' | 'created_at' | 'updated_at'>> {
+  id: string;
+}
+
+export interface FindSupervisorSessionConversationKey {
+  transport: BotWatchTransport;
+  conversation_id: string;
+}
+
+export interface SupervisorSessionEventRecord {
+  id: string;
+  session_id: string;
+  event_kind: string;
+  payload_json: Record<string, unknown> | null;
+  created_at: Date;
+}
+
+export interface CreateSupervisorSessionEventRecord {
+  id: string;
+  session_id: string;
+  event_kind: string;
+  payload_json?: Record<string, unknown> | null;
+  created_at?: Date;
 }
 
 export interface ShadowHarnessRecord {

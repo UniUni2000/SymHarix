@@ -409,4 +409,67 @@ describe('LiveLifecycleVerifier', () => {
     expect(result.failure_code).toBe('review_not_approved');
     expect(result.review_decision).toBe('REQUEST_CHANGES');
   });
+
+  test('adds unique non-conflicting guidance to live verification issues', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const config = makeConfig();
+    const createIssue = mock(async () => ({
+      accepted: true,
+      status: 'accepted' as const,
+      message: 'created',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      issue: null,
+    }));
+
+    const runtime: RuntimeControlPlane = {
+      getOverview: () => ({ generated_at: '', counts: { running: 0, retrying: 0, total: 0 }, issues: [] }),
+      getIssue: () => null,
+      getTimeline: () => [],
+      getHistoryView: () => null,
+      createIssue,
+      stopIssue: async () => ({ accepted: true, status: 'accepted', message: 'stopped', issue_id: 'issue-1', issue_identifier: 'INT-1' }),
+      retryIssue: async () => ({ accepted: true, status: 'queued', message: 'retried', issue_id: 'issue-1', issue_identifier: 'INT-1' }),
+      rewriteGovernance: async () => ({ accepted: true, status: 'accepted', message: 'rewritten', issue_id: 'issue-1', issue_identifier: 'INT-1' }),
+      splitGovernance: async () => ({ accepted: true, status: 'accepted', message: 'split', issue_id: 'issue-1', issue_identifier: 'INT-1' }),
+      createStream: () => new ReadableStream(),
+      subscribe: () => () => undefined,
+    };
+
+    let nowMs = new Date('2026-04-25T03:00:00.000Z').getTime();
+    const verifier = new LiveLifecycleVerifier({
+      db,
+      config,
+      workflow: makeWorkflow(),
+      runtimeHostFactory: async () => new FakeRuntimeHost(runtime, config, () => ({
+        running_issue_count: 0,
+        retry_count: 0,
+        worker_process_count: 0,
+        active_session_count: 0,
+        claimed_issue_count: 0,
+        leadership_lease_held: true,
+      })) as any,
+      sleep: async () => undefined,
+      runGitCommand: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      now: () => {
+        const current = nowMs;
+        nowMs += 10;
+        return current;
+      },
+    });
+
+    await verifier.verify({
+      projectSlug: 'test2',
+      timeoutMs: 1,
+      titleSuffix: 'uniqueness-check',
+    });
+
+    expect(createIssue).toHaveBeenCalledTimes(1);
+    const request = createIssue.mock.calls[0]?.[0];
+    expect(request?.description).toContain('Verification nonce:');
+    expect(request?.description).toContain('Create or update one uniquely named smoke-test file');
+    expect(request?.description).toContain('Avoid editing previously touched smoke-test files');
+  });
 });

@@ -269,6 +269,43 @@ export const BOT_TRANSPORT_EVENTS_TABLE_SCHEMA = `
   );
 `;
 
+export const SUPERVISOR_SESSIONS_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS supervisor_sessions (
+    id TEXT PRIMARY KEY,
+    transport TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    user_id TEXT,
+    state TEXT NOT NULL,
+    repo_ref TEXT,
+    intake_mode TEXT,
+    approval_mode TEXT,
+    plan_card_json TEXT,
+    plan_version INTEGER NOT NULL DEFAULT 1,
+    root_issue_id TEXT,
+    root_work_item_id TEXT,
+    current_child_issue_id TEXT,
+    active_decision_kind TEXT,
+    delivery_state TEXT,
+    delivery_summary TEXT,
+    last_material_outcome_json TEXT,
+    last_message_id TEXT,
+    last_card_key TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+`;
+
+export const SUPERVISOR_SESSION_EVENTS_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS supervisor_session_events (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    event_kind TEXT NOT NULL,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES supervisor_sessions(id) ON DELETE CASCADE
+  );
+`;
+
 /**
  * SQL schema for service_leases table
  * Stores short-lived singleton leadership leases for control-plane services
@@ -401,6 +438,10 @@ export const CONTROL_PLANE_INDEXES_SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_bot_transport_events_transport_conversation ON bot_transport_events(transport, conversation_id);
   CREATE INDEX IF NOT EXISTS idx_bot_transport_events_root_issue ON bot_transport_events(root_issue_id);
   CREATE INDEX IF NOT EXISTS idx_bot_transport_events_created_at ON bot_transport_events(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_sessions_transport_conversation ON supervisor_sessions(transport, conversation_id);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_sessions_root_issue ON supervisor_sessions(root_issue_id);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_sessions_state ON supervisor_sessions(state);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_session_events_session ON supervisor_session_events(session_id, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_service_leases_expires_at ON service_leases(expires_at);
   CREATE INDEX IF NOT EXISTS idx_shadow_harnesses_repo_key ON shadow_harnesses(repo_key);
   CREATE INDEX IF NOT EXISTS idx_governance_assessments_issue_id ON governance_assessments(issue_id);
@@ -522,6 +563,8 @@ export function initializeSchema(db: Database): void {
   db.exec(BOT_FOLLOWUP_MESSAGE_STATES_TABLE_SCHEMA);
   db.exec(BOT_FOLLOWUP_DELIVERY_STATES_TABLE_SCHEMA);
   db.exec(BOT_TRANSPORT_EVENTS_TABLE_SCHEMA);
+  db.exec(SUPERVISOR_SESSIONS_TABLE_SCHEMA);
+  db.exec(SUPERVISOR_SESSION_EVENTS_TABLE_SCHEMA);
   db.exec(SERVICE_LEASES_TABLE_SCHEMA);
   db.exec(SHADOW_HARNESSES_TABLE_SCHEMA);
   db.exec(GOVERNANCE_ASSESSMENTS_TABLE_SCHEMA);
@@ -573,6 +616,8 @@ export function dropAllTables(db: Database): void {
   db.exec('DROP TABLE IF EXISTS shadow_harnesses;');
   db.exec('DROP TABLE IF EXISTS service_leases;');
   db.exec('DROP TABLE IF EXISTS bot_transport_events;');
+  db.exec('DROP TABLE IF EXISTS supervisor_session_events;');
+  db.exec('DROP TABLE IF EXISTS supervisor_sessions;');
   db.exec('DROP TABLE IF EXISTS bot_followup_delivery_states;');
   db.exec('DROP TABLE IF EXISTS bot_followup_message_states;');
   db.exec('DROP TABLE IF EXISTS bot_pending_actions;');

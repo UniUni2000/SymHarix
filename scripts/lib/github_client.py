@@ -56,6 +56,19 @@ class GitHubClient:
                 return None
             raise
 
+    def get_authenticated_user(self) -> Optional[dict]:
+        """Get the authenticated GitHub user for the current token."""
+        try:
+            response = requests.get(
+                "https://api.github.com/user",
+                headers=self.headers,
+                timeout=30,
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.HTTPError:
+            return None
+
     def get_pull_request_by_branch(self, branch: str, state: str = "all") -> Optional[dict]:
         """Get pull request by head branch."""
         try:

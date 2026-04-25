@@ -144,6 +144,7 @@ type TestContext = {
   syncEventRepository: SyncEventRepository;
   governanceSuggestionRepository: GovernanceSuggestionRepository;
   githubSyncService: Record<string, ReturnType<typeof mock>>;
+  githubIssueClient: Record<string, ReturnType<typeof mock>>;
 };
 
 function createTestDatabase(): Database {
@@ -268,6 +269,24 @@ function createOrchestrator(
     postPullRequestComment: mock(async () => undefined),
     postIssueComment: mock(async () => undefined),
   };
+  const githubIssueClient = {
+    closeIssue: mock(async () => undefined),
+    listOpenIssues: mock(async () => []),
+    listOpenPullRequests: mock(async () => []),
+    updatePullRequest: mock(async (prNumber: number, params: { state?: 'open' | 'closed' }) => ({
+      number: prNumber,
+      url: `https://github.com/owner/repo/pull/${prNumber}`,
+      title: 'PR title',
+      body: null,
+      state: params.state ?? 'open',
+      draft: false,
+      head_branch: 'feature/int-1',
+      head_sha: 'abc123',
+      base_branch: 'main',
+      mergeable: null,
+      mergeable_state: null,
+    })),
+  };
 
   const supervisor = {
     decideNextAction: mock(async () => ({ kind: 'finish', reason: 'ready for post-processing' })),
@@ -328,6 +347,7 @@ function createOrchestrator(
     githubSyncService: githubSyncService as any,
     supervisor: supervisor as any,
     projectResolutionService,
+    githubIssueClientFactory: mock(() => githubIssueClient) as any,
   });
 
   const workspaceManager = {
@@ -375,6 +395,7 @@ function createOrchestrator(
     syncEventRepository,
     governanceSuggestionRepository,
     githubSyncService,
+    githubIssueClient,
   };
 }
 
@@ -1329,6 +1350,23 @@ describe('Orchestrator Stability', () => {
     expect(ctx.supervisor.decideNextAction).not.toHaveBeenCalled();
   });
 
+  it('gives live lifecycle verification issues at least two dev turns to avoid first-turn retry churn', () => {
+    const issue = makeIssue({
+      state: 'Todo',
+      title: 'Live lifecycle smoke test [live-lifecycle 2026-04-25-00-00-00]',
+      description: [
+        'Create a tiny repository-safe change and verify the full lifecycle.',
+        '',
+        'Verification nonce: 2026-04-25-00-00-00',
+        'Create or update one uniquely named smoke-test file or tiny repo-safe change that includes this nonce.',
+      ].join('\n'),
+    });
+    const ctx = createOrchestrator(issue, { maxTurns: 3 });
+    orchestrator = ctx.orchestrator;
+
+    expect((orchestrator as any).getTurnBudget('dev', issue)).toBe(2);
+  });
+
   it('fails closed and schedules a review retry when the turn budget is exhausted without a canonical review report', async () => {
     const issue = makeIssue({
       state: 'In Review',
@@ -1638,7 +1676,33 @@ describe('Orchestrator Stability', () => {
     expect(workItem?.merged_at).not.toBeNull();
     expect(latestReview?.decision).toBe('APPROVE');
     expect(ctx.tracker.updateIssueState).toHaveBeenCalledWith(issue.id, 'Done');
+    expect(ctx.githubIssueClient.closeIssue).toHaveBeenCalledWith(501);
     expect(ctx.workspaceManager.removeWorkspace).toHaveBeenCalled();
+  });
+
+  it('closes the mapped GitHub issue when merge success is handled directly', async () => {
+    const issue = makeIssue({ state: 'In Review' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+    (orchestrator as any).cleanupAllTerminalIssueBranches = mock(async () => undefined);
+
+    ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: 'In Review',
+      github_repo: 'owner/repo',
+      github_issue_number: 501,
+      workspace_path: '/tmp/symphony-tests/repo/INT-1',
+      orchestrator_state: 'workspace_ready',
+    });
+
+    const result = await orchestrator.handleMergeSuccess(issue);
+
+    expect(result).toEqual({ success: true });
+    expect(ctx.tracker.updateIssueState).toHaveBeenCalledWith(issue.id, 'Done');
+    expect(ctx.githubIssueClient.closeIssue).toHaveBeenCalledWith(501);
   });
 
   it('records decision memory when a review completes with approval and no missing requirements', async () => {
@@ -3307,5 +3371,118 @@ describe('Orchestrator Stability', () => {
     expect(result.status).toBe('completed');
     expect((orchestrator as any).state.retry_attempts.has(issue.id)).toBe(false);
     expect((orchestrator as any).state.claimed.has(issue.id)).toBe(false);
+  });
+
+  it('startup terminal cleanup closes mapped GitHub issues for terminal tracker items', async () => {
+    const terminalIssue = makeIssue({ state: 'Canceled' });
+    const ctx = createOrchestrator(terminalIssue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.tracker.fetchIssuesByStates = mock(async () => ({ issues: [terminalIssue], error: null }));
+    ctx.workItemRepository.create({
+      id: terminalIssue.id,
+      linear_issue_id: terminalIssue.id,
+      linear_identifier: terminalIssue.identifier,
+      linear_title: terminalIssue.title,
+      linear_state: 'In Progress',
+      github_repo: 'owner/repo',
+      github_issue_number: 501,
+      workspace_path: '/tmp/symphony-tests/repo/INT-1',
+      orchestrator_state: 'failed',
+    });
+
+    await (orchestrator as any).startupTerminalCleanup();
+
+    expect(ctx.workspaceManager.removeWorkspace).toHaveBeenCalledWith('/tmp/symphony-tests/repo/INT-1');
+    expect(ctx.githubIssueClient.closeIssue).toHaveBeenCalledWith(501);
+  });
+
+  it('startup terminal cleanup globally repairs orphan GitHub issues and PRs for terminal tracker identifiers', async () => {
+    const terminalIssue = makeIssue({ state: 'Done' });
+    const ctx = createOrchestrator(terminalIssue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.tracker.fetchIssuesByStates = mock(async () => ({ issues: [terminalIssue], error: null }));
+    ctx.githubIssueClient.listOpenIssues = mock(async () => [{
+      number: 611,
+      url: 'https://github.com/owner/repo/issues/611',
+      title: '[INT-1] orphan issue',
+      body: '## Linear Issue\nINT-1',
+      labels: [],
+      state: 'open',
+    }]);
+    ctx.githubIssueClient.listOpenPullRequests = mock(async () => [{
+      number: 612,
+      url: 'https://github.com/owner/repo/pull/612',
+      title: '[INT-1] orphan pull request',
+      body: null,
+      state: 'open',
+      draft: false,
+      head_branch: 'feature/int-1',
+      head_sha: 'abc123',
+      base_branch: 'main',
+      mergeable: null,
+      mergeable_state: null,
+    }]);
+
+    await (orchestrator as any).startupTerminalCleanup();
+
+    expect(ctx.githubIssueClient.closeIssue).toHaveBeenCalledWith(611);
+    expect(ctx.githubIssueClient.updatePullRequest).toHaveBeenCalledWith(612, { state: 'closed' });
+  });
+
+  it('startup terminal cleanup keeps startup alive when global orphan repair hits GitHub API noise', async () => {
+    const terminalIssue = makeIssue({ state: 'Done' });
+    const ctx = createOrchestrator(terminalIssue);
+    orchestrator = ctx.orchestrator;
+    const warnSpy = mock(() => undefined);
+    const originalWarn = console.warn;
+    console.warn = warnSpy;
+
+    ctx.tracker.fetchIssuesByStates = mock(async () => ({ issues: [terminalIssue], error: null }));
+    ctx.githubIssueClient.listOpenIssues = mock(async () => {
+      throw new Error('GitHub API unavailable');
+    });
+
+    try {
+      await expect((orchestrator as any).startupTerminalCleanup()).resolves.toBeUndefined();
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  it('reconcileRunningIssues closes mapped GitHub issues when a running issue becomes canceled', async () => {
+    const cancelledIssue = makeIssue({ state: 'Canceled' });
+    const ctx = createOrchestrator(cancelledIssue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.workItemRepository.create({
+      id: cancelledIssue.id,
+      linear_issue_id: cancelledIssue.id,
+      linear_identifier: cancelledIssue.identifier,
+      linear_title: cancelledIssue.title,
+      linear_state: 'In Progress',
+      github_repo: 'owner/repo',
+      github_issue_number: 501,
+      workspace_path: '/tmp/symphony-tests/repo/INT-1',
+      orchestrator_state: 'dev_running',
+    });
+
+    (orchestrator as any).state.running.set(cancelledIssue.id, {
+      issue: makeIssue({ id: cancelledIssue.id, identifier: cancelledIssue.identifier, state: 'In Progress' }),
+      identifier: cancelledIssue.identifier,
+      workspace_path: '/tmp/symphony-tests/repo/INT-1',
+      branch_name: null,
+      started_at: new Date(),
+      last_codex_timestamp: new Date(),
+      retry_attempt: 0,
+      stage: 'dev',
+    });
+
+    await (orchestrator as any).reconcileRunningIssues();
+
+    expect(ctx.workspaceManager.removeWorkspace).toHaveBeenCalledWith('/tmp/symphony-tests/repo/INT-1');
+    expect(ctx.githubIssueClient.closeIssue).toHaveBeenCalledWith(501);
   });
 });

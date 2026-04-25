@@ -216,6 +216,43 @@ class ReviewHook:
             return False
 
         try:
+            current_user = self.github.get_authenticated_user() if self.github else None
+        except Exception:
+            current_user = None
+        try:
+            pr = self.github.get_pull_request(pr_number) if self.github else None
+        except Exception:
+            pr = None
+
+        reviewer_login = (current_user or {}).get("login")
+        pr_author_login = (pr or {}).get("user", {}).get("login")
+        if reviewer_login and pr_author_login and reviewer_login == pr_author_login:
+            try:
+                self.github.add_pull_request_comment(
+                    pr_number,
+                    "\n".join([
+                        f"## Automated Review (Self-Review Fallback): {review_decision}",
+                        "",
+                        review_report.strip(),
+                    ]).strip(),
+                )
+                print(
+                    f"[REVIEW] Skipped native review for PR #{pr_number} because "
+                    f"{reviewer_login} is the PR author; posted a PR comment instead"
+                )
+                self._clear_delivery_failure()
+                return True
+            except Exception as e:
+                detail = (
+                    f"Failed to post self-review fallback comment to PR #{pr_number}: {e} "
+                    f"| reviewer={reviewer_login} | author={pr_author_login}"
+                )
+                print(f"[REVIEW] ERROR: {detail}")
+                self.store.set_error(detail)
+                self._set_delivery_failure("review_submit_failed", detail)
+                return False
+
+        try:
             self._clear_delivery_failure()
             self.github.submit_pull_request_review(pr_number, event, body=body)
             print(f"[REVIEW] Submitted native review to PR #{pr_number} ({event})")

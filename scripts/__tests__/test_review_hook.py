@@ -133,6 +133,26 @@ def test_review_hook_merges_and_closes_issue_on_approval(tmp_path):
     assert hook.store.get_current_state_enum().value == "DONE"
 
 
+def test_review_hook_skips_native_self_review_and_merges_with_comment_fallback(tmp_path):
+    hook = make_hook(tmp_path)
+    report_path = hook.store.symphony_dir.path / "REVIEW_REPORT.md"
+    report_path.write_text("## Review Decision: APPROVE\n\n## Review Summary\nLooks good to merge.\n")
+
+    state = hook.store.get_state()
+    state["metadata"]["github_issue_number"] = 88
+    hook.store.symphony_dir.write_state(state)
+    hook.github.get_authenticated_user.return_value = {"login": "UniUni2000"}
+    hook.github.get_pull_request.return_value = {"number": 25, "user": {"login": "UniUni2000"}}
+    hook.github.merge_pull_request.return_value = {"merged": True}
+
+    assert hook.run() is True
+    hook.github.submit_pull_request_review.assert_not_called()
+    hook.github.add_pull_request_comment.assert_called_once()
+    hook.github.merge_pull_request.assert_called_once_with(25)
+    hook.github.close_issue.assert_called_once_with(88)
+    assert hook.store.get_current_state_enum().value == "DONE"
+
+
 def test_review_hook_reports_merge_blocked_feedback_without_faking_rejection(tmp_path):
     hook = make_hook(tmp_path)
     report_path = hook.store.symphony_dir.path / "REVIEW_REPORT.md"

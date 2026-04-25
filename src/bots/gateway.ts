@@ -20,6 +20,8 @@ import {
   BotConversationPreferenceRepository,
   BotIssueFollowupRepository,
   BotPendingActionRepository,
+  SupervisorSessionEventRepository,
+  SupervisorSessionRepository,
   BotTransportEventRepository,
   BotWatchSubscriptionRepository,
   WorkItemRepository,
@@ -45,7 +47,9 @@ import {
   DefaultTelegramWebhookDiagnosticsService,
   type TelegramWebhookDiagnosticsService,
 } from './telegramDiagnostics';
+import { TelegramWebhookBootstrapService } from './telegramBootstrap';
 import { logger } from '../logging';
+import { SupervisorSessionService } from '../supervisor/sessionService';
 
 interface TelegramUpdate {
   message?: {
@@ -106,7 +110,7 @@ interface DiscordAdapterConfig {
   operatorIds: Set<string>;
 }
 
-type TelegramCallbackKind = 'select_governance_action' | 'confirm_pending' | 'cancel_pending' | 'unknown';
+type TelegramCallbackKind = 'select_governance_action' | 'confirm_pending' | 'cancel_pending' | 'supervisor_action' | 'unknown';
 
 interface DiscordRequestVerifier {
   verify(params: {
@@ -447,6 +451,10 @@ export class DefaultBotGateway implements BotGateway {
   private readonly pendingActions: BotPendingActionRepository | null;
   private readonly transportEvents: BotTransportEventRepository | null;
   private readonly telegramDiagnostics: TelegramWebhookDiagnosticsService;
+  private readonly telegramBootstrap: TelegramWebhookBootstrapService | null;
+  private readonly supervisorSessions: SupervisorSessionRepository | null;
+  private readonly supervisorSessionEvents: SupervisorSessionEventRepository | null;
+  private readonly supervisorSessionService: SupervisorSessionService | null;
 
   constructor(
     private readonly runtime: RuntimeControlPlane,
@@ -461,20 +469,34 @@ export class DefaultBotGateway implements BotGateway {
       followupMessageStateRepository?: BotFollowupMessageStateRepository | null;
       followupDeliveryStateRepository?: BotFollowupDeliveryStateRepository | null;
       transportEventRepository?: BotTransportEventRepository | null;
+      supervisorSessionRepository?: SupervisorSessionRepository | null;
+      supervisorSessionEventRepository?: SupervisorSessionEventRepository | null;
+      supervisorSessionService?: SupervisorSessionService | null;
       workItemRepository?: WorkItemRepository | null;
       projectResolver?: TrackerProjectResolutionService | null;
       assistantModel?: BotAssistantModel;
       telegramDiagnostics?: TelegramWebhookDiagnosticsService;
+      telegramBootstrapService?: TelegramWebhookBootstrapService | null;
     } = {},
   ) {
     this.followupMessageStates = options.followupMessageStateRepository ?? null;
     this.followupDeliveryStates = options.followupDeliveryStateRepository ?? null;
     this.pendingActions = options.pendingActionRepository ?? null;
     this.transportEvents = options.transportEventRepository ?? null;
+    this.supervisorSessions = options.supervisorSessionRepository ?? null;
+    this.supervisorSessionEvents = options.supervisorSessionEventRepository ?? null;
     this.telegramNotifier = telegramConfig.botToken ? new TelegramNotifier(telegramConfig) : null;
     this.discordNotifier = discordConfig.botToken ? new DiscordNotifier(discordConfig) : null;
     this.telegramDiagnostics = options.telegramDiagnostics
       ?? new DefaultTelegramWebhookDiagnosticsService(telegramConfig.botToken);
+    this.telegramBootstrap = telegramConfig.botToken
+      ? (options.telegramBootstrapService ?? new TelegramWebhookBootstrapService({
+          botToken: telegramConfig.botToken,
+          webhookSecret: telegramConfig.webhookSecret,
+          publicBaseUrl: process.env.SYMPHONY_PUBLIC_BASE_URL || null,
+          bootstrapMode: process.env.SYMPHONY_TELEGRAM_BOOTSTRAP === 'off' ? 'off' : 'auto',
+        }))
+      : null;
     this.subscriptions = new BotSubscriptionService(runtime, {
       telegram: this.telegramNotifier ?? undefined,
       discord: this.discordNotifier ?? undefined,
@@ -491,6 +513,15 @@ export class DefaultBotGateway implements BotGateway {
       options.projectResolver ?? null,
       options.followupRepository ?? null,
     );
+    this.supervisorSessionService = options.supervisorSessionService
+      ?? ((this.supervisorSessions && this.supervisorSessionEvents)
+        ? new SupervisorSessionService(
+            runtime,
+            options.projectResolver ?? null,
+            this.supervisorSessions,
+            this.supervisorSessionEvents,
+          )
+        : null);
     this.assistantService = new BotAssistantService(
       runtime,
       this.commandService,
@@ -501,6 +532,7 @@ export class DefaultBotGateway implements BotGateway {
       canWrite,
       this.subscriptions,
       options.followupMessageStateRepository ?? null,
+      this.supervisorSessionService,
     );
     new BotFollowupRepairService(
       runtime,
@@ -517,6 +549,7 @@ export class DefaultBotGateway implements BotGateway {
           telegramOperationsChatId: this.telegramConfig.operationsChatId,
           deliveryStateRepository: options.followupDeliveryStateRepository ?? null,
           transportEventRepository: options.transportEventRepository ?? null,
+          supervisorSessionRepository: this.supervisorSessions,
         })
       : null;
   }
@@ -564,9 +597,32 @@ export class DefaultBotGateway implements BotGateway {
     };
   }
 
+  async initializeInboundIntegration(params: {
+    localBaseUrl: string;
+    inboundPath?: string;
+  }): Promise<void> {
+    if (!this.telegramBootstrap) {
+      return;
+    }
+
+    try {
+      await this.telegramBootstrap.bootstrap({
+        localBaseUrl: params.localBaseUrl,
+        inboundPath: params.inboundPath ?? '/api/v1/bots/telegram/webhook',
+      });
+      this.telegramDiagnostics.maybeRefresh();
+    } catch (error) {
+      logger.warn('Telegram inbound bootstrap failed', {
+        local_base_url: params.localBaseUrl,
+      }, error instanceof Error ? error : undefined);
+    }
+  }
+
   dispose(): void {
     this.subscriptions.dispose();
     this.followups?.dispose();
+    this.supervisorSessionService?.dispose();
+    void this.telegramBootstrap?.dispose();
   }
 
   async handleTelegramWebhook(
@@ -658,6 +714,53 @@ export class DefaultBotGateway implements BotGateway {
       };
 
       try {
+        if (parsedCallback.kind === 'supervisor_action') {
+          const recipient = {
+            transport: 'telegram' as const,
+            conversation_id: conversationId,
+          };
+          const supervisorResult = await this.handleSupervisorCallback({
+            context,
+            parsed: parsedCallback,
+          });
+          await this.telegramNotifier.answerCallbackQuery(
+            callbackQuery.id || 'unknown-callback',
+            supervisorResult.toastText,
+          );
+          this.recordTelegramCallbackAudit({
+            ...auditBase,
+            result: 'acked',
+            error_message: null,
+            timestamp: new Date().toISOString(),
+          });
+          const delivered = await this.deliverTelegramCallbackMessage({
+            recipient,
+            originalMessageId: messageId !== undefined && messageId !== null ? String(messageId) : null,
+            message: supervisorResult.outbound,
+            issue: callbackIssue,
+            materialKey: supervisorResult.materialKey,
+          });
+          this.recordTelegramCallbackAudit({
+            ...auditBase,
+            result: delivered.mode === 'edited' ? 'edited' : 'sent_fallback',
+            error_message: null,
+            timestamp: new Date().toISOString(),
+          });
+          if (supervisorResult.sessionId) {
+            this.supervisorSessionService?.recordOutboundMessage(
+              supervisorResult.sessionId,
+              delivered.ref.provider_message_id,
+              supervisorResult.materialKey,
+            );
+          }
+          this.telegramDiagnostics.recordCallbackSuccess();
+          return {
+            ok: true,
+            status: 200,
+            body: { ok: true },
+          };
+        }
+
         const callbackResult = await this.handleTelegramCallback(
           context,
           parsedCallback,
@@ -1013,6 +1116,8 @@ export class DefaultBotGateway implements BotGateway {
     kind: TelegramCallbackKind;
     issueIdentifier: string | null;
     ordinal: number | null;
+    sessionId?: string | null;
+    supervisorAction?: 'approve' | 'edit' | 'alternate' | null;
   } {
     if (data === 'pending|confirm') {
       return {
@@ -1036,6 +1141,19 @@ export class DefaultBotGateway implements BotGateway {
         kind: 'select_governance_action',
         issueIdentifier: governanceSelection[1].toUpperCase(),
         ordinal: Number.parseInt(governanceSelection[2], 10),
+        sessionId: null,
+        supervisorAction: null,
+      };
+    }
+
+    const supervisorSelection = data.match(/^sup\|([^|]+)\|(approve|edit|alternate)$/i);
+    if (supervisorSelection?.[1] && supervisorSelection?.[2]) {
+      return {
+        kind: 'supervisor_action',
+        issueIdentifier: null,
+        ordinal: null,
+        sessionId: supervisorSelection[1],
+        supervisorAction: supervisorSelection[2].toLowerCase() as 'approve' | 'edit' | 'alternate',
       };
     }
 
@@ -1043,6 +1161,40 @@ export class DefaultBotGateway implements BotGateway {
       kind: 'unknown',
       issueIdentifier: null,
       ordinal: null,
+      sessionId: null,
+      supervisorAction: null,
+    };
+  }
+
+  private async handleSupervisorCallback(params: {
+    context: BotCommandContext;
+    parsed: {
+      sessionId?: string | null;
+      supervisorAction?: 'approve' | 'edit' | 'alternate' | null;
+    };
+  }): Promise<{
+    outbound: BotTransportMessage;
+    toastText: string;
+    sessionId: string | null;
+    materialKey: string | null;
+  }> {
+    const text =
+      params.parsed.supervisorAction === 'approve'
+        ? '按推荐继续'
+        : params.parsed.supervisorAction === 'alternate'
+          ? '换用备选方案'
+          : '改一下计划';
+    const response = await this.assistantService.respondToText(params.context, text);
+    return {
+      outbound: {
+        text: response.message,
+        format: response.format,
+        actions: response.actions,
+        action_rows: response.action_rows,
+      },
+      toastText: '已收到，正在处理',
+      sessionId: response.session_id ?? params.parsed.sessionId ?? null,
+      materialKey: response.material_key ?? null,
     };
   }
 
@@ -1609,16 +1761,25 @@ export class DefaultBotGateway implements BotGateway {
         is_command: text.startsWith('/'),
       });
 
-      await this.telegramNotifier!.sendMessage(
+      const sent = await this.telegramNotifier!.sendMessage(
         {
           transport: 'telegram',
           conversation_id: context.recipient.conversation_id,
         },
         {
           text: response.message,
+          format: response.format,
           actions: response.actions,
+          action_rows: response.action_rows,
         },
       );
+      if (response.session_id) {
+        this.supervisorSessionService?.recordOutboundMessage(
+          response.session_id,
+          sent.provider_message_id,
+          response.material_key ?? null,
+        );
+      }
       const issue = response.issue_id ? this.runtime.getIssue(response.issue_id) : null;
       this.recordTransportEvent({
         recipient: {
@@ -1789,6 +1950,8 @@ export function createBotGatewayFromEnv(
   const followupMessageStateRepository = db ? new BotFollowupMessageStateRepository(db) : null;
   const followupDeliveryStateRepository = db ? new BotFollowupDeliveryStateRepository(db) : null;
   const transportEventRepository = db ? new BotTransportEventRepository(db) : null;
+  const supervisorSessionRepository = db ? new SupervisorSessionRepository(db) : null;
+  const supervisorSessionEventRepository = db ? new SupervisorSessionEventRepository(db) : null;
   const workItemRepository = db ? new WorkItemRepository(db) : null;
   const telegramDiagnostics = new DefaultTelegramWebhookDiagnosticsService(
     process.env.SYMPHONY_TELEGRAM_BOT_TOKEN || null,
@@ -1811,6 +1974,8 @@ export function createBotGatewayFromEnv(
     followupMessageStateRepository,
     followupDeliveryStateRepository,
     transportEventRepository,
+    supervisorSessionRepository,
+    supervisorSessionEventRepository,
     workItemRepository,
     projectResolver: options.projectResolver ?? null,
     assistantModel: options.assistantModel,
