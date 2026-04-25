@@ -199,9 +199,13 @@ bun --env-file=.env run src/cli/index.ts verify-live-lifecycle --project-slug 1d
 - `SYMPHONY_BOT_LLM_MODEL`
 - `SYMPHONY_BOT_LLM_API_KEY`
 - `SYMPHONY_BOT_LLM_BASE_URL`
+- `SYMPHONY_BOT_LLM_TIMEOUT_MS`
+- `SYMPHONY_BOT_LLM_HTTP_TRANSPORT`
 - `SYMPHONY_DISCORD_BOT_TOKEN`
 - `SYMPHONY_DISCORD_PUBLIC_KEY`
 - `SYMPHONY_DISCORD_OPERATOR_IDS`
+
+Bot LLM 配置全部走 `.env`。`SYMPHONY_BOT_LLM_TIMEOUT_MS` 默认 15000；`SYMPHONY_BOT_LLM_HTTP_TRANSPORT=fetch` 默认只用 Bun fetch，避免 `curl -> fetch` 双 transport fallback 把一次 provider 长尾放大成接近双倍等待。需要诊断 HTTP 客户端兼容性时可设为 `curl`；确实需要客户端级 fallback 时再设为 `auto`。
 
 `/api/v1/runtime/manifest` 会返回当前 viewer 的 access mode、viewer role 和 Phase 4 feature flags。
 
