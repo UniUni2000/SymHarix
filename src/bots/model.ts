@@ -44,11 +44,22 @@ export interface BotAssistantModelOptions {
   fallbackTransport?: BotAssistantHttpTransport | null;
 }
 
-const DEFAULT_TIMEOUT_MS = 45_000;
+const DEFAULT_TIMEOUT_MS = 15_000;
+const MIN_TIMEOUT_MS = 1_000;
+const MAX_TIMEOUT_MS = 120_000;
 
 function normalizeConfigValue(value: string | null | undefined): string | null {
   const normalized = value?.trim();
   return normalized ? normalized : null;
+}
+
+function parsePositiveInteger(value: string | null | undefined): number | undefined {
+  const normalized = normalizeConfigValue(value);
+  if (!normalized) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(normalized, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 function normalizeProvider(value: string | null | undefined): 'anthropic' | 'openai' | null {
@@ -395,7 +406,10 @@ abstract class BaseHttpBotAssistantModel implements BotAssistantModel {
     this.model = config.model;
     this.apiKey = config.apiKey;
     this.baseUrl = config.baseUrl.replace(/\/$/, '');
-    this.timeoutMs = Math.max(1_000, config.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    this.timeoutMs = Math.min(
+      MAX_TIMEOUT_MS,
+      Math.max(MIN_TIMEOUT_MS, config.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+    );
     this.diagnostics = buildDiagnostics({
       provider: this.provider,
       model: this.model,
@@ -617,10 +631,21 @@ export function createBotAssistantModel(
 }
 
 export function createBotAssistantModelFromEnv(fetchImpl: typeof fetch = fetch): BotAssistantModel {
+  const transportMode = normalizeConfigValue(process.env.SYMPHONY_BOT_LLM_HTTP_TRANSPORT)?.toLowerCase() ?? 'fetch';
+  const fetchTransport = new FetchBotAssistantHttpTransport(fetchImpl);
+  const curlTransport = new CurlBotAssistantHttpTransport();
+  const transportOptions: BotAssistantModelOptions =
+    transportMode === 'auto' || transportMode === 'curl_fetch_fallback'
+      ? { primaryTransport: curlTransport, fallbackTransport: fetchTransport }
+      : transportMode === 'curl'
+        ? { primaryTransport: curlTransport, fallbackTransport: null }
+        : { primaryTransport: fetchTransport, fallbackTransport: null };
+
   return createBotAssistantModel({
     provider: process.env.SYMPHONY_BOT_LLM_PROVIDER ?? null,
     model: process.env.SYMPHONY_BOT_LLM_MODEL ?? null,
     apiKey: process.env.SYMPHONY_BOT_LLM_API_KEY ?? null,
     baseUrl: process.env.SYMPHONY_BOT_LLM_BASE_URL ?? null,
-  }, fetchImpl);
+    timeoutMs: parsePositiveInteger(process.env.SYMPHONY_BOT_LLM_TIMEOUT_MS),
+  }, fetchImpl, transportOptions);
 }
