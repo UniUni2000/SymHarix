@@ -3,8 +3,10 @@ import type {
   BotFollowupMessageStateRepository,
   BotIssueFollowupRepository,
   BotTransportEventRepository,
+  SupervisorSessionRepository,
 } from '../database';
 import type { RuntimeControlPlane, RuntimeIssueView, RuntimeStreamEvent, RuntimeTimelineEvent } from '../runtime/types';
+import { buildSupervisorSessionFollowupMessage } from '../supervisor/sessionService';
 import {
   buildGovernanceBlockedMessage,
   buildGovernanceCardKey,
@@ -25,6 +27,7 @@ interface BotFollowupServiceOptions {
   bootstrapCurrentGovernanceCards?: boolean;
   deliveryStateRepository?: BotFollowupDeliveryStateRepository | null;
   transportEventRepository?: BotTransportEventRepository | null;
+  supervisorSessionRepository?: SupervisorSessionRepository | null;
 }
 
 export type LifecycleNotificationClass = 'retrying' | 'failed' | 'done' | 'cancelled';
@@ -175,13 +178,17 @@ export class BotFollowupService {
       if (recipients.length === 0) {
         return;
       }
-
-      if (isGovernanceThreadActive(threadIssue)) {
-        await this.upsertGovernanceCard(recipients, threadIssue);
+      const followupRecipients = await this.upsertSupervisorSessionCards(recipients, threadIssue);
+      if (followupRecipients.length === 0) {
         return;
       }
 
-      const resolved = await this.resolveGovernanceCards(recipients, threadIssue);
+      if (isGovernanceThreadActive(threadIssue)) {
+        await this.upsertGovernanceCard(followupRecipients, threadIssue);
+        return;
+      }
+
+      const resolved = await this.resolveGovernanceCards(followupRecipients, threadIssue);
       if (resolved) {
         return;
       }
@@ -194,7 +201,7 @@ export class BotFollowupService {
       if (!notificationClass) {
         return;
       }
-      await this.sendLifecycleDigest(recipients, threadIssue, notificationClass);
+      await this.sendLifecycleDigest(followupRecipients, threadIssue, notificationClass);
       return;
     }
 
@@ -223,6 +230,10 @@ export class BotFollowupService {
     if (recipients.length === 0) {
       return;
     }
+    const followupRecipients = await this.upsertSupervisorSessionCards(recipients, threadIssue);
+    if (followupRecipients.length === 0) {
+      return;
+    }
 
     if (['governance_blocked', 'governance_assessed', 'governance_suggestion_created', 'governance_override_approved'].includes(event.data.code)) {
       const governanceKey = [
@@ -235,11 +246,11 @@ export class BotFollowupService {
       this.governanceEventKeys.set(threadIssue.issue_id, governanceKey);
 
       if (isGovernanceThreadActive(threadIssue)) {
-        await this.upsertGovernanceCard(recipients, threadIssue);
+        await this.upsertGovernanceCard(followupRecipients, threadIssue);
         return;
       }
 
-      const resolved = await this.resolveGovernanceCards(recipients, threadIssue);
+      const resolved = await this.resolveGovernanceCards(followupRecipients, threadIssue);
       if (resolved) {
         return;
       }
@@ -249,11 +260,11 @@ export class BotFollowupService {
       return;
     }
 
-    if (this.hasActiveGovernanceCard(recipients, threadIssue.issue_id)) {
+    if (this.hasActiveGovernanceCard(followupRecipients, threadIssue.issue_id)) {
       return;
     }
 
-    await this.send(recipients, buildTimelineDigestMessage(threadIssue, event.data));
+    await this.send(followupRecipients, buildTimelineDigestMessage(threadIssue, event.data));
   }
 
   private async syncCurrentGovernanceCards(): Promise<void> {
@@ -503,6 +514,112 @@ export class BotFollowupService {
         });
       }
     }));
+  }
+
+  private async upsertSupervisorSessionCards(
+    recipients: BotRecipient[],
+    issue: RuntimeIssueView,
+  ): Promise<BotRecipient[]> {
+    const sessionRepository = this.options.supervisorSessionRepository;
+    if (!sessionRepository) {
+      return recipients;
+    }
+
+    const remaining: BotRecipient[] = [];
+    await Promise.allSettled(recipients.map(async (recipient) => {
+      const session = sessionRepository.findActiveByConversation({
+        transport: recipient.transport,
+        conversation_id: recipient.conversation_id,
+      });
+      if (!session || session.root_issue_id !== issue.issue_id) {
+        remaining.push(recipient);
+        return;
+      }
+
+      const notifier = this.notifiers[recipient.transport];
+      if (!notifier) {
+        return;
+      }
+
+      const card = buildSupervisorSessionFollowupMessage(session, issue);
+      const message: BotTransportMessage = {
+        text: card.message,
+        format: card.format,
+        action_rows: card.action_rows,
+      };
+      if (session.last_card_key === card.material_key) {
+        return;
+      }
+
+      if (session.last_message_id) {
+        try {
+          await notifier.editMessage(
+            recipient,
+            { provider_message_id: session.last_message_id },
+            message,
+          );
+          sessionRepository.update({
+            id: session.id,
+            last_card_key: card.material_key,
+          });
+          this.recordTransportEvent({
+            recipient,
+            issue,
+            source: 'followup_card',
+            action: 'edit',
+            result: 'success',
+            messageId: session.last_message_id,
+            materialKey: card.material_key,
+          });
+          return;
+        } catch (error) {
+          if (getBotMessageEditFailureKind(error) === 'not_modified') {
+            sessionRepository.update({
+              id: session.id,
+              last_card_key: card.material_key,
+            });
+            this.recordTransportEvent({
+              recipient,
+              issue,
+              source: 'followup_card',
+              action: 'edit',
+              result: 'success',
+              messageId: session.last_message_id,
+              materialKey: card.material_key,
+            });
+            return;
+          }
+          this.recordTransportEvent({
+            recipient,
+            issue,
+            source: 'followup_card',
+            action: 'edit',
+            result: 'failed',
+            messageId: session.last_message_id,
+            materialKey: card.material_key,
+            errorMessage: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      const messageRef = await notifier.sendMessage(recipient, message);
+      sessionRepository.update({
+        id: session.id,
+        last_message_id: messageRef.provider_message_id,
+        last_card_key: card.material_key,
+      });
+      this.recordTransportEvent({
+        recipient,
+        issue,
+        source: 'followup_card',
+        action: session.last_message_id ? 'fallback' : 'send',
+        result: 'success',
+        messageId: messageRef.provider_message_id,
+        materialKey: card.material_key,
+      });
+    }));
+
+    return remaining;
   }
 
   private async upsertGovernanceCard(recipients: BotRecipient[], issue: RuntimeIssueView): Promise<void> {

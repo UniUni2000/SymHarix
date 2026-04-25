@@ -79,6 +79,10 @@ interface LiveLifecycleVerifierOptions {
   now?: () => number;
 }
 
+function formatVerificationNonce(epochMs: number): string {
+  return new Date(epochMs).toISOString().replace(/[:.]/g, '-');
+}
+
 type VerificationObservation = {
   issueView: RuntimeIssueView | null;
   timeline: RuntimeTimelineEvent[];
@@ -216,7 +220,7 @@ export class LiveLifecycleVerifier {
       const runtime = host.getRuntimeHub();
       const created = await runtime.createIssue({
         title: this.buildIssueTitle(scenario, input.titleSuffix),
-        description: scenario.description,
+        description: this.buildIssueDescription(scenario, input.titleSuffix),
         project_slug: input.projectSlug,
       });
 
@@ -427,6 +431,22 @@ export class LiveLifecycleVerifier {
   ): string {
     const base = `${scenario.title} [live-lifecycle ${new Date(this.now()).toISOString().slice(0, 19).replace(/[:T]/g, '-')}]`;
     return titleSuffix?.trim() ? `${base} ${titleSuffix.trim()}` : base;
+  }
+
+  private buildIssueDescription(
+    scenario: LiveLifecycleScenarioConfig,
+    titleSuffix?: string | null,
+  ): string {
+    const nonceBase = titleSuffix?.trim() || formatVerificationNonce(this.now());
+    const nonce = nonceBase.replace(/\s+/g, '-');
+    return [
+      scenario.description.trim(),
+      '',
+      `Verification nonce: ${nonce}`,
+      'Create or update one uniquely named smoke-test file or tiny repo-safe change that includes this nonce.',
+      'Avoid editing previously touched smoke-test files or common demo files from earlier verification runs.',
+      'Keep the change tiny, safe to merge, and easy to clean up after the PR lands.',
+    ].join('\n');
   }
 
   private resolveScenario(projectSlug: string): LiveLifecycleScenarioConfig | null {

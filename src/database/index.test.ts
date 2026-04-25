@@ -22,6 +22,8 @@ import {
   ReviewEventRepository,
   ServiceLeaseRepository,
   ShadowHarnessRepository,
+  SupervisorSessionEventRepository,
+  SupervisorSessionRepository,
   SyncEventRepository,
   WorkItemRepository,
 } from './index';
@@ -60,6 +62,8 @@ describe('database schema', () => {
     expect(tableNames).toContain('conflict_memories');
     expect(tableNames).toContain('debt_signals');
     expect(tableNames).toContain('governance_suggestions');
+    expect(tableNames).toContain('supervisor_sessions');
+    expect(tableNames).toContain('supervisor_session_events');
     expect(tableNames).not.toContain('tasks');
     expect(tableNames).not.toContain('execution_events');
   });

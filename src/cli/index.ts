@@ -25,6 +25,7 @@ import { Issue, AgentEvent, WorkflowDefinition, ServiceConfig } from '../types';
 import { RuntimeHost } from './runtimeHost';
 import { RuntimeHub } from '../runtime/hub';
 import { BotFollowupRepairService } from '../bots/followupRepair';
+import { GlobalRepairService } from '../maintenance/globalRepair';
 import {
   BotFollowupDeliveryStateRepository,
   BotFollowupMessageStateRepository,
@@ -32,6 +33,8 @@ import {
   BotPendingActionRepository,
   WorkItemRepository,
 } from '../database';
+import { LinearClient } from '../tracker/linear-client';
+import { createGitHubIssueClient } from '../github/issue-client';
 import {
   consumeTimelineEventForCli,
   createCliTimelineRenderState,
@@ -111,6 +114,7 @@ Options:
   --port <number>    Enable HTTP server on specified port
   --kill             Stop all running symphony agent processes
   repair bot-followups
+  repair all
   verify-live-lifecycle --project-slug <slug> [--timeout-ms <n>] [--json] [--title-suffix <text>]
   --help             Show this help message
 
@@ -123,6 +127,7 @@ Examples:
   symphony --port 3000            # Enable HTTP server on port 3000
   symphony --kill                 # Stop all running agents
   symphony repair bot-followups   # Repair persisted Telegram follow-up/card state
+  symphony repair all             # Repair Telegram follow-up state plus GitHub orphan issue/PR artifacts
   symphony verify-live-lifecycle --project-slug 1d3a3f95809d
 `);
 }
@@ -408,6 +413,47 @@ async function main(): Promise<void> {
     console.log(`[repair] Deleted descendant pending actions: ${summary.descendant_pending_actions_deleted}`);
     console.log(`[repair] Deleted expired pending actions: ${summary.expired_pending_actions_deleted}`);
     console.log(`[repair] Seeded delivery baselines: ${summary.delivery_baselines_seeded}`);
+    process.exit(0);
+  }
+
+  if (args.maintenance?.kind === 'repair_all') {
+    const runtimeHub = createMaintenanceRuntimeHub(db);
+    const botSummary = new BotFollowupRepairService(
+      runtimeHub,
+      new WorkItemRepository(db),
+      new BotIssueFollowupRepository(db),
+      new BotFollowupMessageStateRepository(db),
+      new BotFollowupDeliveryStateRepository(db),
+      new BotPendingActionRepository(db),
+    ).repair();
+    runtimeHub.dispose();
+
+    const tracker = new LinearClient({
+      endpoint: config.trackerEndpoint,
+      apiKey: config.trackerApiKey,
+      projectSlugs: Object.keys(config.repositories.routing),
+    });
+    const githubSummary = await new GlobalRepairService({
+      config,
+      tracker,
+      workItemRepository: new WorkItemRepository(db),
+      githubClientFactory: (repo) => createGitHubIssueClient(
+        config.githubToken,
+        repo,
+        config.githubOwner,
+      ),
+    }).repair();
+
+    console.log('[repair] Global repair complete');
+    console.log(`[repair] Folded descendant follow-ups: ${botSummary.descendant_followups_folded}`);
+    console.log(`[repair] Deleted descendant card states: ${botSummary.descendant_message_states_deleted}`);
+    console.log(`[repair] Deleted descendant pending actions: ${botSummary.descendant_pending_actions_deleted}`);
+    console.log(`[repair] Deleted expired pending actions: ${botSummary.expired_pending_actions_deleted}`);
+    console.log(`[repair] Seeded delivery baselines: ${botSummary.delivery_baselines_seeded}`);
+    console.log(`[repair] Terminal issues scanned: ${githubSummary.terminal_issues_scanned}`);
+    console.log(`[repair] Repos scanned: ${githubSummary.repos_scanned}`);
+    console.log(`[repair] GitHub issues closed: ${githubSummary.github_issues_closed}`);
+    console.log(`[repair] GitHub PRs closed: ${githubSummary.github_prs_closed}`);
     process.exit(0);
   }
 

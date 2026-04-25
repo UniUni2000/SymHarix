@@ -8,6 +8,7 @@ import {
   GovernanceSuggestionRepository,
   ReviewEventRepository,
   ShadowHarnessRepository,
+  SupervisorSessionRepository,
   SyncEventRepository,
   WorkItemRepository,
 } from '../database';
@@ -472,6 +473,109 @@ describe('RuntimeHub', () => {
     expect(currentChild?.delivery_state).toBe('delivery_failed');
     expect(currentChild?.delivery_summary).toContain('Workspace for feature/int-45 has uncommitted changes');
     expect(currentChild?.delivery_summary).toContain('证据已满足');
+
+    hub.dispose();
+  });
+
+  test('projects supervisor session state and summary onto runtime issue views', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workItemRepository = new WorkItemRepository(db);
+    const supervisorSessions = new SupervisorSessionRepository(db);
+
+    workItemRepository.create({
+      id: 'issue-root',
+      linear_issue_id: 'issue-root',
+      linear_identifier: 'INT-52',
+      linear_title: 'Root issue with supervisor thread',
+      linear_state: 'In Progress',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'halted',
+      governance_status: 'blocked',
+      governance_decision: 'split_before_implement',
+      governance_summary: 'Split this issue before dispatch.',
+      governance_root_issue_id: 'issue-root',
+      governance_parent_issue_id: null,
+      governance_generation: 0,
+    });
+    workItemRepository.create({
+      id: 'issue-child',
+      linear_issue_id: 'issue-child',
+      linear_identifier: 'INT-53',
+      linear_title: 'Current child',
+      linear_state: 'Todo',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'discovering',
+      governance_status: 'degraded',
+      governance_decision: 'accept',
+      governance_summary: 'Current child is being prepared.',
+      governance_root_issue_id: 'issue-root',
+      governance_parent_issue_id: 'issue-root',
+      governance_generation: 1,
+    });
+
+    supervisorSessions.create({
+      id: 'session-1',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'executing',
+      repo_ref: 'acme/repo',
+      intake_mode: 'plan_then_approve',
+      approval_mode: 'explicit_user_approval',
+      plan_version: 2,
+      root_issue_id: 'issue-root',
+      current_child_issue_id: 'issue-child',
+      plan_card: {
+        title: 'Root issue with supervisor thread',
+        user_goal: 'Root issue with supervisor thread',
+        in_scope: ['拆分 root issue 并顺序执行 child queue'],
+        out_of_scope: ['不并发放行多个 child'],
+        acceptance: ['当前 child 完成后自动接力下一个 child'],
+        known_risks: ['这条线程仍在等待当前 child 推进。'],
+        execution_strategy: 'root issue 保持主线程，只放行 current child。',
+        needs_user_approval: true,
+        repo_ref: 'acme/repo',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_with_split_queue',
+        recommended_option: {
+          label: '按推荐继续',
+          summary: '继续推进当前 child。',
+        },
+        alternate_option: {
+          label: '改一下计划',
+          summary: '先改计划再继续。',
+        },
+        governance_preview: null,
+      },
+    });
+
+    const controller = new FakeController();
+    controller.getStateSnapshot = () => ({
+      generated_at: '2026-01-01T00:00:00.000Z',
+      counts: {
+        running: 0,
+        retrying: 0,
+      },
+      running: [],
+      retrying: [],
+      codex_totals: {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        seconds_running: 0,
+      },
+      rate_limits: null,
+    });
+
+    const hub = new RuntimeHub(db, controller);
+    const issue = hub.getIssue('INT-52');
+
+    expect(issue?.supervisor_session_state).toBe('executing');
+    expect(issue?.supervisor_plan_summary).toContain('当前子任务');
+    expect(issue?.supervisor_plan_summary).toContain('INT-53');
 
     hub.dispose();
   });

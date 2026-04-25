@@ -6,8 +6,11 @@ import {
   BotTransportEventRepository,
   BotFollowupMessageStateRepository,
   BotPendingActionRepository,
+  SupervisorSessionEventRepository,
+  SupervisorSessionRepository,
   initializeSchema,
 } from '../database';
+import { SupervisorSessionService } from '../supervisor/sessionService';
 
 function createRuntimeControlPlane(): RuntimeControlPlane {
   return {
@@ -516,6 +519,159 @@ describe('DefaultBotGateway', () => {
         [{ text: '强制继续开发', callback_data: 'govsel|INT-2|2' }],
       ],
     });
+  });
+
+  test('handles Telegram supervisor approval callbacks by editing the same message into a materialized plan result', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const sessions = new SupervisorSessionRepository(db);
+    const sessionEvents = new SupervisorSessionEventRepository(db);
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body || '{}')),
+      });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 101 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const baseRuntime = createRuntimeControlPlane();
+    const runtime = {
+      ...baseRuntime,
+      createIssue: async (input) => ({
+        accepted: true as const,
+        status: 'accepted' as const,
+        message: `Created ${input.title}`,
+        issue_id: 'issue-32',
+        issue_identifier: 'INT-32',
+        issue: {
+          ...baseRuntime.getOverview().issues[0]!,
+          issue_id: 'issue-32',
+          work_item_id: 'issue-32',
+          identifier: 'INT-32',
+          title: input.title,
+          governance_root_issue_id: 'issue-32',
+          governance_root_issue_identifier: 'INT-32',
+        },
+      }),
+      getIssue: (id: string) => ['issue-32', 'INT-32'].includes(id)
+        ? {
+            ...baseRuntime.getOverview().issues[0]!,
+            issue_id: 'issue-32',
+            work_item_id: 'issue-32',
+            identifier: 'INT-32',
+            title: 'Materialized plan',
+            governance_root_issue_id: 'issue-32',
+            governance_root_issue_identifier: 'INT-32',
+          }
+        : null,
+    } as RuntimeControlPlane;
+
+    const supervisorService = new SupervisorSessionService(
+      runtime,
+      null,
+      sessions,
+      sessionEvents,
+    );
+
+    const session = sessions.create({
+      id: 'session-1',
+      transport: 'telegram',
+      conversation_id: '42',
+      user_id: '9',
+      state: 'awaiting_user_approval',
+      repo_ref: 'test2',
+      intake_mode: 'plan_then_approve',
+      approval_mode: 'explicit_user_approval',
+      plan_version: 1,
+      plan_card: {
+        title: 'Refactor runtime API and rewrite Telegram copy together',
+        user_goal: 'Refactor runtime API and rewrite Telegram copy together',
+        in_scope: ['Refactor runtime API and rewrite Telegram copy together'],
+        out_of_scope: ['Do not expand into unrelated areas.'],
+        acceptance: ['Both pieces are delivered.'],
+        known_risks: ['This spans multiple surfaces.'],
+        execution_strategy: 'Create the root thread first.',
+        needs_user_approval: true,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '按推荐继续',
+          summary: '按当前计划物化执行。',
+        },
+        alternate_option: {
+          label: '改一下计划',
+          summary: '先调整计划再执行。',
+        },
+        governance_preview: null,
+      },
+      last_message_id: '101',
+      last_card_key: 'supervisor|session-1|approval',
+    });
+
+    const gateway = new DefaultBotGateway(
+      runtime,
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        assistantModel: {
+          decide: async () => null,
+          getDiagnostics: () => ({
+            provider: null,
+            model: null,
+            configured: false,
+            health: 'unconfigured',
+            fallback_available: true,
+            last_error_code: 'unconfigured',
+          }),
+        },
+        supervisorSessionRepository: sessions,
+        supervisorSessionEventRepository: sessionEvents,
+        supervisorSessionService: supervisorService,
+      } as any,
+    );
+
+    const result = await gateway.handleTelegramWebhook(
+      {
+        callback_query: {
+          id: 'callback-supervisor-1',
+          data: `sup|${session.id}|approve`,
+          message: {
+            chat: { id: 42 },
+            message_id: 101,
+          },
+          from: { id: 9, username: 'alice' },
+        },
+      } as any,
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(result.status).toBe(200);
+    expect(requests.find((request) => request.url.includes('answerCallbackQuery'))?.body.text).toBe('已收到，正在处理');
+    expect(String(requests.find((request) => request.url.includes('editMessageText'))?.body.text)).toContain('已创建');
+    expect(sessions.findById(session.id)?.root_issue_id).toBe('issue-32');
+
+    gateway.dispose();
+    supervisorService.dispose();
+    db.close();
   });
 
   test('handles Telegram governance callbacks by editing the same card into a confirming HTML card', async () => {

@@ -90,6 +90,7 @@ import {
 } from '../contracts/repositoryContracts';
 import { assessIntakeCritic } from '../governance/intakeCritic';
 import { analyzeTouchedPathsArchitecture } from '../governance/architectureIntelligence';
+import { GlobalRepairService } from '../maintenance/globalRepair';
 import {
   deriveArchitectureTarget,
   deriveTouchedPathsFromTimeline,
@@ -275,6 +276,9 @@ export interface OrchestratorDependencies {
   githubMappingService?: GitHubMappingService;
   githubContextService?: GitHubContextService;
   githubSyncService?: GitHubSyncService;
+  githubIssueClientFactory?: (
+    githubRepoFull: string
+  ) => Pick<GitHubIssueClient, 'closeIssue' | 'listOpenIssues' | 'listOpenPullRequests' | 'updatePullRequest'>;
   supervisor?: SupervisorService;
   projectResolutionService?: TrackerProjectResolutionService;
 }
@@ -332,6 +336,9 @@ export class Orchestrator extends EventEmitter {
   private githubMappingService: GitHubMappingService;
   private githubContextService: GitHubContextService;
   private githubSyncService: GitHubSyncService;
+  private githubIssueClientFactory: (
+    githubRepoFull: string
+  ) => Pick<GitHubIssueClient, 'closeIssue' | 'listOpenIssues' | 'listOpenPullRequests' | 'updatePullRequest'>;
   private supervisor: SupervisorService;
   private repositoryRoutingService: RepositoryRoutingService;
   private projectResolutionService: TrackerProjectResolutionService;
@@ -435,6 +442,11 @@ export class Orchestrator extends EventEmitter {
         config.githubOwner,
       ),
     });
+    this.githubIssueClientFactory = dependencies.githubIssueClientFactory ?? ((githubRepoFull: string) => createGitHubIssueClient(
+      config.githubToken,
+      githubRepoFull,
+      config.githubOwner,
+    ));
     this.supervisor = dependencies.supervisor ?? new AnthropicSupervisorService();
     this.projectResolutionService =
       dependencies.projectResolutionService ??
@@ -4259,6 +4271,10 @@ export class Orchestrator extends EventEmitter {
     mode: 'dev' | 'review',
     issue: Issue,
   ): number {
+    if (mode === 'dev' && this.isLiveLifecycleVerificationIssue(issue)) {
+      return Math.min(this.config.maxTurns, 2);
+    }
+
     const complexity = judgeComplexity(issue).complexity;
 
     if (mode === 'review') {
@@ -4330,6 +4346,19 @@ export class Orchestrator extends EventEmitter {
     }
 
     return signalCount >= 3;
+  }
+
+  private isLiveLifecycleVerificationIssue(issue: Issue): boolean {
+    const title = issue.title.toLowerCase();
+    const description = (issue.description || '').toLowerCase();
+    const combinedText = `${title}\n${description}`;
+
+    return (
+      combinedText.includes('live-lifecycle')
+      || combinedText.includes('verification nonce:')
+      || (combinedText.includes('smoke-test') && combinedText.includes('full lifecycle'))
+      || (combinedText.includes('smoke test') && combinedText.includes('full lifecycle'))
+    );
   }
 
   private shouldAutoFinishAfterTurn(
@@ -4531,6 +4560,23 @@ export class Orchestrator extends EventEmitter {
       }
     } catch (err) {
       console.warn(`[orchestrator] Exception posting Linear comment for ${issueId}:`, err);
+    }
+  }
+
+  private async closeMappedGitHubIssue(workItem: WorkItem | null, context: string): Promise<void> {
+    if (!workItem?.github_issue_number) {
+      return;
+    }
+
+    try {
+      const client = this.githubIssueClientFactory(workItem.github_repo);
+      await client.closeIssue(workItem.github_issue_number);
+      console.log(`[orchestrator] Closed GitHub issue #${workItem.github_issue_number} for ${context}`);
+    } catch (err) {
+      console.warn(
+        `[orchestrator] Failed to close GitHub issue #${workItem.github_issue_number} for ${context}:`,
+        err,
+      );
     }
   }
 
@@ -5454,6 +5500,7 @@ export class Orchestrator extends EventEmitter {
       delivery_summary: null,
       missing_requirements: [],
     });
+    await this.closeMappedGitHubIssue(workItem, `${runningEntry.issue.identifier} review completion`);
     const refreshedWorkItem = this.workItemRepository.findById(workItem.id) ?? workItem;
     this.governanceMemoryService.recordDecisionOutcome(refreshedWorkItem.id);
     this.refreshRepoGovernanceIntelligence(
@@ -6040,17 +6087,18 @@ export class Orchestrator extends EventEmitter {
       const isActive = this.config.activeStates.some(s => s.toLowerCase() === stateLower);
 
       // Check for Cancelled state FIRST (highest priority)
-      if (stateLower === 'cancelled') {
+      if (stateLower === 'cancelled' || stateLower === 'canceled') {
         // Immediate cleanup for cancelled issues
         console.log(`[orchestrator] Issue ${runningEntry.identifier} was CANCELLED - immediate cleanup`);
         const workItem = this.workItemRepository.findByLinearIssueId(issue.id);
         if (workItem) {
-          this.workItemRepository.update({
+          const updatedWorkItem = this.workItemRepository.update({
             id: workItem.id,
             linear_state: issue.state,
             orchestrator_state: 'cancelled',
             cancelled_at: new Date(),
           });
+          await this.closeMappedGitHubIssue(updatedWorkItem ?? workItem, `${runningEntry.identifier} cancellation`);
         }
 
         // 1. Remove from running state
@@ -6083,6 +6131,18 @@ export class Orchestrator extends EventEmitter {
       if (isTerminal) {
         // Terminal state - terminate worker and clean workspace
         console.log('[orchestrator] Issue terminal, stopping:', runningEntry.identifier);
+        const workItem = this.workItemRepository.findByLinearIssueId(issue.id);
+        if (workItem) {
+          const updatedWorkItem = this.workItemRepository.update({
+            id: workItem.id,
+            linear_state: issue.state,
+            orchestrator_state: 'completed',
+          });
+          await this.closeMappedGitHubIssue(
+            updatedWorkItem ?? workItem,
+            `${runningEntry.identifier} terminal state ${issue.state}`,
+          );
+        }
         await this.terminateRunningIssue(runningEntry, true);
       } else if (isActive) {
         // Still active - update in-memory state
@@ -6182,11 +6242,12 @@ export class Orchestrator extends EventEmitter {
         await this.workspaceManager.removeWorkspace(workspacePath);
         console.log('[orchestrator] Cleaned up terminal workspace:', issue.identifier);
         if (workItem) {
-          this.workItemRepository.update({
+          const updatedWorkItem = this.workItemRepository.update({
             id: workItem.id,
             linear_state: issue.state,
             orchestrator_state: this.isTerminalTrackerState(issue.state) ? 'completed' : 'halted',
           });
+          await this.closeMappedGitHubIssue(updatedWorkItem ?? workItem, `${issue.identifier} during startup cleanup`);
         }
       } catch (err) {
         console.warn('[orchestrator] Failed to clean workspace:', issue.identifier, err);
@@ -6194,6 +6255,16 @@ export class Orchestrator extends EventEmitter {
     }
 
     await this.cleanupAllTerminalIssueBranches();
+    try {
+      await new GlobalRepairService({
+        config: this.config,
+        tracker: this.tracker,
+        workItemRepository: this.workItemRepository,
+        githubClientFactory: this.githubIssueClientFactory,
+      }).repairFromTerminalIssues(issues);
+    } catch (error) {
+      console.warn('[orchestrator] Global orphan repair failed during startup cleanup, continuing anyway:', error);
+    }
   }
 
   // ============================================================================
@@ -6237,6 +6308,7 @@ export class Orchestrator extends EventEmitter {
         orchestrator_state: 'completed',
         merged_at: new Date(),
       });
+      await this.closeMappedGitHubIssue(workItem, `${issue.identifier} merge success`);
     }
 
     // Step 3: Clean up the workspace
@@ -6296,6 +6368,17 @@ export class Orchestrator extends EventEmitter {
       // Check for Cancelled state
       if (stateLower === 'cancelled' || stateLower === 'canceled') {
         console.log(`[orchestrator] Reconcile detected cancelled issue: ${runningEntry.identifier}`);
+
+        const workItem = this.workItemRepository.findByLinearIssueId(issue.id);
+        if (workItem) {
+          const updatedWorkItem = this.workItemRepository.update({
+            id: workItem.id,
+            linear_state: issue.state,
+            orchestrator_state: 'cancelled',
+            cancelled_at: new Date(),
+          });
+          await this.closeMappedGitHubIssue(updatedWorkItem ?? workItem, `${runningEntry.identifier} reconciliation`);
+        }
 
         // Remove from running state
         this.state.running.delete(issue.id);

@@ -6,6 +6,7 @@ import {
   BotIssueFollowupRepository,
   BotTransportEventRepository,
   GovernanceSuggestionRepository,
+  SupervisorSessionRepository,
   WorkItemRepository,
   initializeSchema,
 } from '../database';
@@ -266,6 +267,91 @@ describe('BotFollowupService', () => {
     expect(notifier.messages[0]?.message.action_rows?.[1]?.[0]?.label).toBe('强制继续开发');
     expect(notifier.messages[0]?.message.action_rows?.[1]?.[0]?.style).toBe('danger');
     expect(notifier.messages[1]?.recipient.conversation_id).toBe('chat-ops');
+
+    service.dispose();
+    db.close();
+  });
+
+  test('edits the active supervisor session card instead of sending a second governance card to the same Telegram chat', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const notifier = new MemoryNotifier();
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+    const sessions = new SupervisorSessionRepository(db);
+
+    followups.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      user_id: 'user-1',
+      role: 'origin',
+    });
+    sessions.create({
+      id: 'session-1',
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      user_id: 'user-1',
+      state: 'awaiting_user_approval',
+      repo_ref: 'test2',
+      intake_mode: 'plan_then_approve',
+      approval_mode: 'explicit_user_approval',
+      plan_version: 1,
+      root_issue_id: 'issue-1',
+      plan_card: {
+        title: 'Governance blocked issue',
+        user_goal: 'Governance blocked issue',
+        in_scope: ['Governance blocked issue'],
+        out_of_scope: ['不顺手扩展到无关模块。'],
+        acceptance: ['完成 blocked issue，并让结果可验证。'],
+        known_risks: ['当前治理层要求先拆分。'],
+        execution_strategy: 'Create the root thread first.',
+        needs_user_approval: true,
+        repo_ref: 'acme/repo',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_with_split_queue',
+        recommended_option: {
+          label: '按推荐继续',
+          summary: '按推荐先拆分后执行。',
+        },
+        alternate_option: {
+          label: '改一下计划',
+          summary: '先改计划再执行。',
+        },
+        governance_preview: {
+          decision: 'split_before_implement',
+          summary: 'Split this issue before dispatch.',
+          split_suggestions: ['Split runtime and bot work.'],
+          rewrite_title: null,
+          rewrite_description: null,
+        },
+      },
+      last_message_id: 'msg-99',
+      last_card_key: 'session|old',
+    });
+
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, messageStates, {
+      bootstrapCurrentGovernanceCards: false,
+      supervisorSessionRepository: sessions,
+    });
+
+    runtime.emit({
+      type: 'issue',
+      data: runtime.getIssue('issue-1')!,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(notifier.messages).toHaveLength(0);
+    expect(notifier.edits).toHaveLength(1);
+    expect(notifier.edits[0]?.messageRef.provider_message_id).toBe('msg-99');
+    expect(notifier.edits[0]?.message.format).toBe('telegram_html');
+    expect(notifier.edits[0]?.message.text).toContain('计划待你批准');
 
     service.dispose();
     db.close();
