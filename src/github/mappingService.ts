@@ -76,6 +76,9 @@ export class GitHubMappingService {
       review_round: existing?.review_round ?? 0,
       last_review_decision: existing?.last_review_decision ?? null,
       last_review_summary: existing?.last_review_summary ?? null,
+      governance_root_issue_id: existing?.governance_root_issue_id ?? issue.id,
+      governance_parent_issue_id: existing?.governance_parent_issue_id ?? null,
+      governance_generation: existing?.governance_generation ?? 0,
       cancelled_at: existing?.cancelled_at ?? null,
       merged_at: existing?.merged_at ?? null,
     });

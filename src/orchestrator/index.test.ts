@@ -144,6 +144,7 @@ type TestContext = {
   syncEventRepository: SyncEventRepository;
   governanceSuggestionRepository: GovernanceSuggestionRepository;
   githubSyncService: Record<string, ReturnType<typeof mock>>;
+  githubIssueClient: Record<string, ReturnType<typeof mock>>;
 };
 
 function createTestDatabase(): Database {
@@ -268,6 +269,24 @@ function createOrchestrator(
     postPullRequestComment: mock(async () => undefined),
     postIssueComment: mock(async () => undefined),
   };
+  const githubIssueClient = {
+    closeIssue: mock(async () => undefined),
+    listOpenIssues: mock(async () => []),
+    listOpenPullRequests: mock(async () => []),
+    updatePullRequest: mock(async (prNumber: number, params: { state?: 'open' | 'closed' }) => ({
+      number: prNumber,
+      url: `https://github.com/owner/repo/pull/${prNumber}`,
+      title: 'PR title',
+      body: null,
+      state: params.state ?? 'open',
+      draft: false,
+      head_branch: 'feature/int-1',
+      head_sha: 'abc123',
+      base_branch: 'main',
+      mergeable: null,
+      mergeable_state: null,
+    })),
+  };
 
   const supervisor = {
     decideNextAction: mock(async () => ({ kind: 'finish', reason: 'ready for post-processing' })),
@@ -328,6 +347,7 @@ function createOrchestrator(
     githubSyncService: githubSyncService as any,
     supervisor: supervisor as any,
     projectResolutionService,
+    githubIssueClientFactory: mock(() => githubIssueClient) as any,
   });
 
   const workspaceManager = {
@@ -375,6 +395,7 @@ function createOrchestrator(
     syncEventRepository,
     governanceSuggestionRepository,
     githubSyncService,
+    githubIssueClient,
   };
 }
 
@@ -401,12 +422,22 @@ function clearRetryTimers(orchestrator: Orchestrator): void {
   }
 }
 
+function clearScheduledTick(orchestrator: Orchestrator): void {
+  const pollTimer = (orchestrator as any).pollTimer as Timer | null;
+  if (pollTimer) {
+    clearTimeout(pollTimer);
+    (orchestrator as any).pollTimer = null;
+  }
+  (orchestrator as any).running = false;
+}
+
 describe('Orchestrator Stability', () => {
   let orchestrator: Orchestrator;
 
   afterEach(() => {
     if (orchestrator) {
       clearRetryTimers(orchestrator);
+      clearScheduledTick(orchestrator);
       const db = (orchestrator as any).db as Database | undefined;
       db?.close();
     }
@@ -422,6 +453,8 @@ describe('Orchestrator Stability', () => {
       final_state: 'Done',
       review_decision: 'APPROVED',
       feedback: null,
+      delivery_code: null,
+      delivery_summary: null,
       retry_hint: null,
       linear_api_calls: 2,
       github_api_calls: 1,
@@ -1317,6 +1350,23 @@ describe('Orchestrator Stability', () => {
     expect(ctx.supervisor.decideNextAction).not.toHaveBeenCalled();
   });
 
+  it('gives live lifecycle verification issues at least two dev turns to avoid first-turn retry churn', () => {
+    const issue = makeIssue({
+      state: 'Todo',
+      title: 'Live lifecycle smoke test [live-lifecycle 2026-04-25-00-00-00]',
+      description: [
+        'Create a tiny repository-safe change and verify the full lifecycle.',
+        '',
+        'Verification nonce: 2026-04-25-00-00-00',
+        'Create or update one uniquely named smoke-test file or tiny repo-safe change that includes this nonce.',
+      ].join('\n'),
+    });
+    const ctx = createOrchestrator(issue, { maxTurns: 3 });
+    orchestrator = ctx.orchestrator;
+
+    expect((orchestrator as any).getTurnBudget('dev', issue)).toBe(2);
+  });
+
   it('fails closed and schedules a review retry when the turn budget is exhausted without a canonical review report', async () => {
     const issue = makeIssue({
       state: 'In Review',
@@ -1431,6 +1481,65 @@ describe('Orchestrator Stability', () => {
     });
 
     await awaitWorker(orchestrator, issue.id);
+  });
+
+  it('does not redispatch a governance-blocked halted issue when the tracker content has not changed', async () => {
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-governance-unchanged-'));
+    try {
+      fs.writeFileSync(
+        path.join(repoRoot, '.symphony-constitution.md'),
+        [
+          '# Constitution',
+          '',
+          '## Main Path',
+          '- Keep one control plane.',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const issue = makeIssue({
+        id: 'issue-blocked',
+        identifier: 'INT-92',
+        title: 'Runtime and bot and server cleanup together',
+        description: 'Do all three at once.',
+        updated_at: new Date('2026-01-01T00:00:00Z'),
+        project_slug: 'proj',
+        project_name: 'repo',
+      });
+      const ctx = createOrchestrator(issue, {
+        repositories: {
+          routing: {
+            proj: {
+              github_owner: 'owner',
+              github_repo: 'repo',
+              local_path: repoRoot,
+            },
+          },
+        },
+      });
+      orchestrator = ctx.orchestrator;
+
+      ctx.tracker.createIssue = mock(async () => ({ success: true, issue }));
+      ctx.tracker.fetchCandidateIssues = mock(async () => ({ issues: [issue], error: null }));
+      (orchestrator as any).tracker = ctx.tracker;
+
+      await orchestrator.createIssue({
+        title: issue.title,
+        description: issue.description,
+        project_slug: 'proj',
+      });
+
+      (orchestrator as any).running = true;
+      (orchestrator as any).dispatchIssue = mock(async () => undefined);
+      (orchestrator as any).scheduleTick = mock(() => undefined);
+
+      (orchestrator as any).executeTick();
+      await (orchestrator as any).currentTickPromise;
+
+      expect((orchestrator as any).dispatchIssue).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(repoRoot, { recursive: true, force: true });
+    }
   });
 
   it('syncs dev completion into work_items and advances Linear to In Review', async () => {
@@ -1567,7 +1676,33 @@ describe('Orchestrator Stability', () => {
     expect(workItem?.merged_at).not.toBeNull();
     expect(latestReview?.decision).toBe('APPROVE');
     expect(ctx.tracker.updateIssueState).toHaveBeenCalledWith(issue.id, 'Done');
+    expect(ctx.githubIssueClient.closeIssue).toHaveBeenCalledWith(501);
     expect(ctx.workspaceManager.removeWorkspace).toHaveBeenCalled();
+  });
+
+  it('closes the mapped GitHub issue when merge success is handled directly', async () => {
+    const issue = makeIssue({ state: 'In Review' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+    (orchestrator as any).cleanupAllTerminalIssueBranches = mock(async () => undefined);
+
+    ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: 'In Review',
+      github_repo: 'owner/repo',
+      github_issue_number: 501,
+      workspace_path: '/tmp/symphony-tests/repo/INT-1',
+      orchestrator_state: 'workspace_ready',
+    });
+
+    const result = await orchestrator.handleMergeSuccess(issue);
+
+    expect(result).toEqual({ success: true });
+    expect(ctx.tracker.updateIssueState).toHaveBeenCalledWith(issue.id, 'Done');
+    expect(ctx.githubIssueClient.closeIssue).toHaveBeenCalledWith(501);
   });
 
   it('records decision memory when a review completes with approval and no missing requirements', async () => {
@@ -1982,6 +2117,7 @@ describe('Orchestrator Stability', () => {
       expect(workItem?.governance_decision).toBe('split_before_implement');
       expect(workItem?.governance_status).toBe('advisory');
       expect(workItem?.orchestrator_state).toBe('halted');
+      expect(workItem?.governance_source_updated_at?.toISOString()).toBe(issue.updated_at?.toISOString());
       expect(suggestions).toHaveLength(1);
       expect(suggestions[0]?.suggestion_type).toBe('architecture_alignment');
       expect(suggestions[0]?.title).toContain('Split');
@@ -2190,18 +2326,321 @@ describe('Orchestrator Stability', () => {
 
       const result = await (orchestrator as any).splitGovernance(currentIssue.id);
       const workItem = ctx.workItemRepository.findByLinearIssueId(currentIssue.id);
+      const childWorkItems = childIssues.map((childIssue) => ctx.workItemRepository.findByLinearIssueId(childIssue.id));
       const pendingSuggestions = ctx.governanceSuggestionRepository.findPendingByIssueId(currentIssue.id);
 
       expect(result.accepted).toBe(true);
       expect(result.message).toContain('Split applied');
+      expect(result.governance_action?.outcome_kind).toBe('waiting_on_child');
+      expect(result.governance_action?.created_issue_identifiers).toEqual(childIssues.map((childIssue) => childIssue.identifier));
       expect(childIssues.length).toBeGreaterThanOrEqual(1);
       expect(ctx.tracker.updateIssueContent).toHaveBeenCalledTimes(1);
       expect(workItem?.governance_decision).toBe('accept');
-      expect(workItem?.orchestrator_state).not.toBe('halted');
+      expect(workItem?.orchestrator_state).toBe('halted');
+      expect(workItem?.governance_root_issue_id).toBe(currentIssue.id);
+      expect(workItem?.governance_parent_issue_id).toBeNull();
+      expect(workItem?.governance_generation).toBe(0);
+      expect(childWorkItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            governance_root_issue_id: currentIssue.id,
+            governance_parent_issue_id: currentIssue.id,
+            governance_generation: 1,
+          }),
+        ]),
+      );
       expect(pendingSuggestions).toHaveLength(0);
     } finally {
       fs.rmSync(repoRoot, { recursive: true, force: true });
     }
+  });
+
+  it('splitGovernance keeps the root issue waiting on child work instead of redispatching it', async () => {
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-split-root-waiting-'));
+    try {
+      fs.writeFileSync(
+        path.join(repoRoot, '.symphony-constitution.md'),
+        [
+          '# Constitution',
+          '',
+          '## Main Path',
+          '- Keep one control plane.',
+        ].join('\n'),
+        'utf8',
+      );
+
+      let currentIssue = makeIssue({
+        id: 'issue-split-root-waiting',
+        identifier: 'INT-911',
+        title: 'Refactor runtime API and redesign the web dashboard and rewrite Telegram copy',
+        description: 'Do all three in one issue and also clean related files.',
+        project_slug: 'proj',
+        project_name: 'repo',
+        state: 'In Progress',
+        labels: [],
+      });
+
+      const childIssues: Issue[] = [];
+      const ctx = createOrchestrator(currentIssue, {
+        repositories: {
+          routing: {
+            proj: {
+              github_owner: 'owner',
+              github_repo: 'repo',
+              local_path: repoRoot,
+            },
+          },
+        },
+      });
+      orchestrator = ctx.orchestrator;
+      ctx.tracker.createIssue = mock(async (input: { title: string; description?: string | null }) => {
+        if (input.title === currentIssue.title) {
+          return { success: true, issue: currentIssue };
+        }
+
+        const childIssue: Issue = {
+          ...makeIssue({
+            id: `child-root-waiting-${childIssues.length + 1}`,
+            identifier: `INT-911${childIssues.length + 2}`,
+            title: input.title,
+            description: input.description ?? null,
+            project_slug: 'proj',
+            project_name: 'repo',
+          }),
+        };
+        childIssues.push(childIssue);
+        return { success: true, issue: childIssue };
+      });
+      ctx.tracker.fetchIssueById = mock(async () => ({ issue: currentIssue, error: null }));
+      ctx.tracker.updateIssueContent = mock(async (_issueId: string, input: { title?: string | null; description?: string | null }) => {
+        currentIssue = {
+          ...currentIssue,
+          title: input.title ?? currentIssue.title,
+          description: input.description ?? currentIssue.description,
+        };
+        return { success: true };
+      });
+      (orchestrator as any).tracker = ctx.tracker;
+      (orchestrator as any).running = true;
+      const dispatchIssue = mock(async () => {
+        throw new Error('root issue should wait on governance children instead of redispatching');
+      });
+      (orchestrator as any).dispatchIssue = dispatchIssue;
+
+      await orchestrator.createIssue({
+        title: currentIssue.title,
+        description: currentIssue.description,
+        project_slug: 'proj',
+      });
+
+      const result = await (orchestrator as any).splitGovernance(currentIssue.id);
+      const workItem = ctx.workItemRepository.findByLinearIssueId(currentIssue.id);
+
+      expect(result.accepted).toBe(true);
+      expect(result.governance_action?.outcome_kind).toBe('waiting_on_child');
+      expect(result.governance_action?.created_issue_identifiers).toEqual(childIssues.map((childIssue) => childIssue.identifier));
+      expect(dispatchIssue).not.toHaveBeenCalled();
+      expect((orchestrator as any).shouldDispatch(currentIssue)).toBe(false);
+      expect(workItem?.orchestrator_state).toBe('halted');
+    } finally {
+      fs.rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('serializes split governance children so only the earliest non-terminal child can dispatch', async () => {
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-split-serialized-'));
+    try {
+      fs.writeFileSync(
+        path.join(repoRoot, '.symphony-constitution.md'),
+        [
+          '# Constitution',
+          '',
+          '## Main Path',
+          '- Keep one control plane.',
+        ].join('\n'),
+        'utf8',
+      );
+
+      let currentIssue = makeIssue({
+        id: 'issue-split-serialized',
+        identifier: 'INT-912',
+        title: 'Refactor runtime API and redesign the web dashboard and rewrite Telegram copy',
+        description: 'Do all three in one issue and also clean related files.',
+        project_slug: 'proj',
+        project_name: 'repo',
+        state: 'In Progress',
+        labels: [],
+      });
+
+      const childIssues: Issue[] = [];
+      const ctx = createOrchestrator(currentIssue, {
+        repositories: {
+          routing: {
+            proj: {
+              github_owner: 'owner',
+              github_repo: 'repo',
+              local_path: repoRoot,
+            },
+          },
+        },
+      });
+      orchestrator = ctx.orchestrator;
+      ctx.tracker.createIssue = mock(async (input: { title: string; description?: string | null }) => {
+        if (input.title === currentIssue.title) {
+          return { success: true, issue: currentIssue };
+        }
+
+        const childIssue: Issue = {
+          ...makeIssue({
+            id: `child-serialized-${childIssues.length + 1}`,
+            identifier: `INT-912${childIssues.length + 2}`,
+            title: input.title,
+            description: input.description ?? null,
+            project_slug: 'proj',
+            project_name: 'repo',
+          }),
+        };
+        childIssues.push(childIssue);
+        return { success: true, issue: childIssue };
+      });
+      ctx.tracker.fetchIssueById = mock(async () => ({ issue: currentIssue, error: null }));
+      ctx.tracker.updateIssueContent = mock(async (_issueId: string, input: { title?: string | null; description?: string | null }) => {
+        currentIssue = {
+          ...currentIssue,
+          title: input.title ?? currentIssue.title,
+          description: input.description ?? currentIssue.description,
+        };
+        return { success: true };
+      });
+      (orchestrator as any).tracker = ctx.tracker;
+
+      await orchestrator.createIssue({
+        title: currentIssue.title,
+        description: currentIssue.description,
+        project_slug: 'proj',
+      });
+
+      const result = await (orchestrator as any).splitGovernance(currentIssue.id);
+      expect(result.accepted).toBe(true);
+      expect(childIssues.length).toBeGreaterThanOrEqual(2);
+
+      const [firstChild, secondChild, thirdChild] = childIssues;
+      if (!firstChild || !secondChild) {
+        throw new Error('Expected at least two split governance children');
+      }
+
+      expect((orchestrator as any).shouldDispatch(firstChild)).toBe(true);
+      expect((orchestrator as any).shouldDispatch(secondChild)).toBe(false);
+      expect(ctx.workItemRepository.findByLinearIssueId(secondChild.id)?.orchestrator_state).toBe('halted');
+      if (thirdChild) {
+        expect((orchestrator as any).shouldDispatch(thirdChild)).toBe(false);
+        expect(ctx.workItemRepository.findByLinearIssueId(thirdChild.id)?.orchestrator_state).toBe('halted');
+      }
+
+      firstChild.state = 'Done';
+      ctx.workItemRepository.update({
+        id: firstChild.id,
+        linear_state: 'Done',
+        orchestrator_state: 'completed',
+      });
+
+      expect((orchestrator as any).shouldDispatch(secondChild)).toBe(true);
+      if (thirdChild) {
+        expect((orchestrator as any).shouldDispatch(thirdChild)).toBe(false);
+      }
+
+      secondChild.state = 'Done';
+      ctx.workItemRepository.update({
+        id: secondChild.id,
+        linear_state: 'Done',
+        orchestrator_state: 'completed',
+      });
+
+      if (thirdChild) {
+        expect((orchestrator as any).shouldDispatch(thirdChild)).toBe(true);
+      }
+    } finally {
+      fs.rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('does not redispatch an unchanged in-review issue after it has failed and requires manual intervention', async () => {
+    const issue = makeIssue({
+      id: 'issue-manual-review-stop',
+      identifier: 'INT-913',
+      state: 'In Review',
+      updated_at: new Date('2025-01-01T00:00:00Z'),
+    });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: issue.state,
+      github_repo: 'owner/repo',
+      orchestrator_state: 'failed',
+    });
+
+    expect((orchestrator as any).shouldDispatch(issue)).toBe(false);
+  });
+
+  it('allows redispatch after a failed in-review issue has materially changed in the tracker', async () => {
+    const issue = makeIssue({
+      id: 'issue-manual-review-updated',
+      identifier: 'INT-914',
+      state: 'In Review',
+      updated_at: new Date(Date.now() + 60_000),
+    });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: issue.state,
+      github_repo: 'owner/repo',
+      orchestrator_state: 'failed',
+    });
+
+    expect((orchestrator as any).shouldDispatch(issue)).toBe(true);
+  });
+
+  it('recovers tracker state conflicts when the tracker is already at the requested state', async () => {
+    const issue = makeIssue({
+      id: 'issue-tracker-conflict',
+      identifier: 'INT-914A',
+      state: 'Todo',
+    });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.tracker.updateIssueState = mock(async () => ({
+      success: false,
+      error: 'Issue issue-tracker-conflict already in state IN_REVIEW',
+    }));
+    ctx.tracker.fetchIssueById = mock(async () => ({
+      issue: {
+        ...issue,
+        state: 'In Review',
+      },
+      error: null,
+    }));
+    (orchestrator as any).tracker = ctx.tracker;
+
+    const result = await (orchestrator as any).syncLinearState(issue, 'In Review');
+
+    expect(result).toEqual({
+      success: true,
+      recovered: true,
+      currentState: 'In Review',
+      error: null,
+    });
+    expect(ctx.tracker.fetchIssueById).toHaveBeenCalledWith(issue.id);
   });
 
   it('executeGovernanceSuggestion creates a governance follow-up issue and dismissGovernanceSuggestion hides it from active suggestions', async () => {
@@ -2270,6 +2709,149 @@ describe('Orchestrator Stability', () => {
     expect(dismissed.message).toContain('Dismissed');
   });
 
+  it('executeGovernanceSuggestion creates only one governance descendant layer and suppresses descendant governance suggestions', async () => {
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-governance-descendant-'));
+    try {
+      fs.writeFileSync(
+        path.join(repoRoot, '.symphony-constitution.md'),
+        [
+          '# Constitution',
+          '',
+          '## Main Path',
+          '- Keep one control plane.',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const issue = makeIssue({
+        id: 'issue-governance-root',
+        identifier: 'INT-94',
+        state: 'Done',
+      });
+      const ctx = createOrchestrator(issue, {
+        repositories: {
+          routing: {
+            proj: {
+              github_owner: 'owner',
+              github_repo: 'repo',
+              local_path: repoRoot,
+            },
+          },
+        },
+      });
+      orchestrator = ctx.orchestrator;
+
+      ctx.workItemRepository.create({
+        id: issue.id,
+        linear_issue_id: issue.id,
+        linear_identifier: issue.identifier,
+        linear_title: issue.title,
+        linear_state: issue.state,
+        github_repo: 'owner/repo',
+        orchestrator_state: 'completed',
+      });
+      ctx.governanceSuggestionRepository.create({
+        id: 'suggestion-descendant-stop',
+        work_item_id: issue.id,
+        issue_id: issue.id,
+        suggestion_type: 'cleanup',
+        title: '[GOVERNANCE] Consolidate runtime and bot cleanup',
+        summary: 'Create a focused cleanup follow-up.',
+        detail_json: {
+          target_area: 'runtime',
+          recommended_issue_title: '[GOVERNANCE FOLLOW-UP for INT-94] Runtime and bot cleanup',
+          recommended_issue_description: 'Clean runtime + bot cleanup in a single focused task.',
+        },
+      });
+
+      const createdGovernanceIssue = makeIssue({
+        id: 'issue-governance-child',
+        identifier: 'INT-95',
+        title: '[GOVERNANCE FOLLOW-UP for INT-94] Runtime and bot cleanup',
+        description: 'Clean runtime, bot copy, and webhook flow together.',
+        state: 'Todo',
+      });
+      ctx.tracker.fetchIssueById = mock(async () => ({ issue, error: null }));
+      ctx.tracker.createIssue = mock(async () => ({ success: true, issue: createdGovernanceIssue }));
+      (orchestrator as any).tracker = ctx.tracker;
+
+      const executed = await (orchestrator as any).executeGovernanceSuggestion(issue.id, 'suggestion-descendant-stop');
+      const childWorkItem = ctx.workItemRepository.findByLinearIssueId(createdGovernanceIssue.id);
+
+      expect(executed.accepted).toBe(true);
+      expect(executed.governance_action?.outcome_kind).toBe('waiting_on_child');
+      expect(executed.governance_action?.created_issue_identifiers).toEqual(['INT-95']);
+      expect(childWorkItem?.governance_root_issue_id).toBe(issue.id);
+      expect(childWorkItem?.governance_parent_issue_id).toBe(issue.id);
+      expect(childWorkItem?.governance_generation).toBe(1);
+      expect(ctx.governanceSuggestionRepository.findPendingByIssueId(createdGovernanceIssue.id)).toHaveLength(0);
+    } finally {
+      fs.rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('executeGovernanceSuggestion reuses an equivalent open governance child instead of creating a duplicate', async () => {
+    const issue = makeIssue({
+      id: 'issue-governance-dedupe',
+      identifier: 'INT-941',
+      state: 'Done',
+    });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: issue.state,
+      github_repo: 'owner/repo',
+      orchestrator_state: 'completed',
+    });
+    ctx.workItemRepository.create({
+      id: 'issue-governance-existing-child',
+      linear_issue_id: 'issue-governance-existing-child',
+      linear_identifier: 'INT-942',
+      linear_title: '[GOVERNANCE FOLLOW-UP for INT-941] Clean runtime duplication',
+      linear_state: 'Todo',
+      github_repo: 'owner/repo',
+      orchestrator_state: 'halted',
+      governance_root_issue_id: issue.id,
+      governance_parent_issue_id: issue.id,
+      governance_generation: 1,
+      architectural_target: 'runtime<->server',
+    });
+    ctx.governanceSuggestionRepository.create({
+      id: 'suggestion-dedupe',
+      work_item_id: issue.id,
+      issue_id: issue.id,
+      suggestion_type: 'cleanup',
+      title: '[GOVERNANCE] Clean up runtime duplication',
+      summary: 'Repeated review churn suggests a cleanup follow-up.',
+      detail_json: {
+        target_area: 'runtime',
+        architectural_target: 'runtime<->server',
+        recommended_issue_title: '[GOVERNANCE FOLLOW-UP for INT-941] Clean runtime duplication',
+        recommended_issue_description: 'Source issue: INT-941\nRepo: owner/repo\nTarget area: runtime',
+      },
+    });
+
+    ctx.tracker.fetchIssueById = mock(async () => ({ issue, error: null }));
+    ctx.tracker.createIssue = mock(async () => {
+      throw new Error('duplicate governance child should be reused instead of recreated');
+    });
+    (orchestrator as any).tracker = ctx.tracker;
+
+    const executed = await (orchestrator as any).executeGovernanceSuggestion(issue.id, 'suggestion-dedupe');
+
+    expect(executed.accepted).toBe(true);
+    expect(executed.message).toContain('INT-942');
+    expect(executed.governance_action?.outcome_kind).toBe('waiting_on_child');
+    expect(executed.governance_action?.created_issue_identifiers).toEqual(['INT-942']);
+    expect(ctx.tracker.createIssue).not.toHaveBeenCalled();
+    expect(ctx.governanceSuggestionRepository.findById('suggestion-dedupe')?.status).toBe('accepted');
+  });
+
   it('executeGovernanceSuggestion does not synchronously dispatch the created governance issue', async () => {
     const issue = makeIssue({
       id: 'issue-governance-nonblocking',
@@ -2324,6 +2906,132 @@ describe('Orchestrator Stability', () => {
     expect(executed.message).toContain('INT-99');
     expect(dispatchIssue).not.toHaveBeenCalled();
     expect(ctx.governanceSuggestionRepository.findById('suggestion-nonblocking')?.status).toBe('accepted');
+  });
+
+  it('closes governance child issues as no-op completions when delivery finds no actionable diff', async () => {
+    const rootIssue = makeIssue({
+      id: 'issue-root-noop',
+      identifier: 'INT-950',
+      state: 'In Progress',
+    });
+    const childIssue = makeIssue({
+      id: 'issue-child-noop',
+      identifier: 'INT-951',
+      title: '[GOVERNANCE FOLLOW-UP for INT-950] Validate cleanup',
+      state: 'In Progress',
+      updated_at: new Date('2025-01-01T00:05:00Z'),
+    });
+    const siblingIssue = makeIssue({
+      id: 'issue-child-next',
+      identifier: 'INT-952',
+      title: '[GOVERNANCE FOLLOW-UP for INT-950] Real cleanup',
+      state: 'Todo',
+      updated_at: new Date('2025-01-01T00:06:00Z'),
+    });
+    const ctx = createOrchestrator(childIssue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.workItemRepository.create({
+      id: rootIssue.id,
+      linear_issue_id: rootIssue.id,
+      linear_identifier: rootIssue.identifier,
+      linear_title: rootIssue.title,
+      linear_state: rootIssue.state,
+      github_repo: 'owner/repo',
+      orchestrator_state: 'halted',
+    });
+    ctx.workItemRepository.create({
+      id: childIssue.id,
+      linear_issue_id: childIssue.id,
+      linear_identifier: childIssue.identifier,
+      linear_title: childIssue.title,
+      linear_state: childIssue.state,
+      github_repo: 'owner/repo',
+      workspace_path: '/tmp/symphony-tests/repo/INT-951',
+      orchestrator_state: 'dev_post_processing',
+      governance_root_issue_id: rootIssue.id,
+      governance_parent_issue_id: rootIssue.id,
+      governance_generation: 1,
+      delivery_code: 'no_actionable_diff',
+      delivery_summary: 'No commits found after workflow artifact cleanup.',
+    });
+    ctx.workItemRepository.create({
+      id: siblingIssue.id,
+      linear_issue_id: siblingIssue.id,
+      linear_identifier: siblingIssue.identifier,
+      linear_title: siblingIssue.title,
+      linear_state: siblingIssue.state,
+      github_repo: 'owner/repo',
+      orchestrator_state: 'halted',
+      governance_root_issue_id: rootIssue.id,
+      governance_parent_issue_id: rootIssue.id,
+      governance_generation: 1,
+    });
+
+    const runningEntry = {
+      worker_handle: Promise.resolve(),
+      identifier: childIssue.identifier,
+      issue: childIssue,
+      stage: 'post_process_dev',
+      session_id: null,
+      codex_app_server_pid: null,
+      last_codex_message: null,
+      last_codex_event: null,
+      last_codex_timestamp: null,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      last_reported_input_tokens: 0,
+      last_reported_output_tokens: 0,
+      last_reported_total_tokens: 0,
+      retry_attempt: 0,
+      started_at: new Date('2025-01-01T00:00:00Z'),
+      turn_count: 1,
+      workspace_path: '/tmp/symphony-tests/repo/INT-951',
+      branch_name: 'owner/int-951',
+    } as const;
+
+    (orchestrator as any).state.running.set(childIssue.id, runningEntry);
+    (orchestrator as any).state.claimed.add(childIssue.id);
+    (orchestrator as any).running = true;
+
+    const scheduleTick = mock(() => undefined);
+    (orchestrator as any).scheduleTick = scheduleTick;
+
+    await (orchestrator as any).handleWorkerExit(childIssue.id, {
+      success: true,
+      outcome: 'halted',
+      completed: false,
+      next_action: 'stop',
+      final_state: childIssue.state,
+      cleanup_workspace: false,
+      workspace_path: '/tmp/symphony-tests/repo/INT-951',
+      work_item_id: childIssue.id,
+      turns: 1,
+      tokens: { input: 0, output: 0, total: 0 },
+      claude_api_calls: 0,
+      linear_api_calls: 0,
+      github_api_calls: 0,
+      cli_result: makeCliResult({
+        ok: false,
+        final_state: childIssue.state,
+        delivery_code: 'no_actionable_diff',
+        delivery_summary: 'No commits found after workflow artifact cleanup.',
+      }),
+    } as WorkerResult);
+
+    const closedChild = ctx.workItemRepository.findByLinearIssueId(childIssue.id);
+
+    expect(closedChild?.linear_state).toBe('Done');
+    expect(closedChild?.orchestrator_state).toBe('completed');
+    expect(closedChild?.delivery_code).toBe('no_actionable_diff');
+    expect(ctx.tracker.updateIssueState).toHaveBeenCalledWith(childIssue.id, 'Done');
+    expect(ctx.tracker.postComment).toHaveBeenCalledWith(
+      childIssue.id,
+      expect.stringContaining('no-op'),
+    );
+    expect((orchestrator as any).shouldDispatch(siblingIssue)).toBe(true);
+    expect(scheduleTick).toHaveBeenCalledWith(0);
   });
 
   it('executeGovernanceSuggestion creates a draft governance PR for constitution updates', async () => {
@@ -2663,5 +3371,118 @@ describe('Orchestrator Stability', () => {
     expect(result.status).toBe('completed');
     expect((orchestrator as any).state.retry_attempts.has(issue.id)).toBe(false);
     expect((orchestrator as any).state.claimed.has(issue.id)).toBe(false);
+  });
+
+  it('startup terminal cleanup closes mapped GitHub issues for terminal tracker items', async () => {
+    const terminalIssue = makeIssue({ state: 'Canceled' });
+    const ctx = createOrchestrator(terminalIssue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.tracker.fetchIssuesByStates = mock(async () => ({ issues: [terminalIssue], error: null }));
+    ctx.workItemRepository.create({
+      id: terminalIssue.id,
+      linear_issue_id: terminalIssue.id,
+      linear_identifier: terminalIssue.identifier,
+      linear_title: terminalIssue.title,
+      linear_state: 'In Progress',
+      github_repo: 'owner/repo',
+      github_issue_number: 501,
+      workspace_path: '/tmp/symphony-tests/repo/INT-1',
+      orchestrator_state: 'failed',
+    });
+
+    await (orchestrator as any).startupTerminalCleanup();
+
+    expect(ctx.workspaceManager.removeWorkspace).toHaveBeenCalledWith('/tmp/symphony-tests/repo/INT-1');
+    expect(ctx.githubIssueClient.closeIssue).toHaveBeenCalledWith(501);
+  });
+
+  it('startup terminal cleanup globally repairs orphan GitHub issues and PRs for terminal tracker identifiers', async () => {
+    const terminalIssue = makeIssue({ state: 'Done' });
+    const ctx = createOrchestrator(terminalIssue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.tracker.fetchIssuesByStates = mock(async () => ({ issues: [terminalIssue], error: null }));
+    ctx.githubIssueClient.listOpenIssues = mock(async () => [{
+      number: 611,
+      url: 'https://github.com/owner/repo/issues/611',
+      title: '[INT-1] orphan issue',
+      body: '## Linear Issue\nINT-1',
+      labels: [],
+      state: 'open',
+    }]);
+    ctx.githubIssueClient.listOpenPullRequests = mock(async () => [{
+      number: 612,
+      url: 'https://github.com/owner/repo/pull/612',
+      title: '[INT-1] orphan pull request',
+      body: null,
+      state: 'open',
+      draft: false,
+      head_branch: 'feature/int-1',
+      head_sha: 'abc123',
+      base_branch: 'main',
+      mergeable: null,
+      mergeable_state: null,
+    }]);
+
+    await (orchestrator as any).startupTerminalCleanup();
+
+    expect(ctx.githubIssueClient.closeIssue).toHaveBeenCalledWith(611);
+    expect(ctx.githubIssueClient.updatePullRequest).toHaveBeenCalledWith(612, { state: 'closed' });
+  });
+
+  it('startup terminal cleanup keeps startup alive when global orphan repair hits GitHub API noise', async () => {
+    const terminalIssue = makeIssue({ state: 'Done' });
+    const ctx = createOrchestrator(terminalIssue);
+    orchestrator = ctx.orchestrator;
+    const warnSpy = mock(() => undefined);
+    const originalWarn = console.warn;
+    console.warn = warnSpy;
+
+    ctx.tracker.fetchIssuesByStates = mock(async () => ({ issues: [terminalIssue], error: null }));
+    ctx.githubIssueClient.listOpenIssues = mock(async () => {
+      throw new Error('GitHub API unavailable');
+    });
+
+    try {
+      await expect((orchestrator as any).startupTerminalCleanup()).resolves.toBeUndefined();
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  it('reconcileRunningIssues closes mapped GitHub issues when a running issue becomes canceled', async () => {
+    const cancelledIssue = makeIssue({ state: 'Canceled' });
+    const ctx = createOrchestrator(cancelledIssue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.workItemRepository.create({
+      id: cancelledIssue.id,
+      linear_issue_id: cancelledIssue.id,
+      linear_identifier: cancelledIssue.identifier,
+      linear_title: cancelledIssue.title,
+      linear_state: 'In Progress',
+      github_repo: 'owner/repo',
+      github_issue_number: 501,
+      workspace_path: '/tmp/symphony-tests/repo/INT-1',
+      orchestrator_state: 'dev_running',
+    });
+
+    (orchestrator as any).state.running.set(cancelledIssue.id, {
+      issue: makeIssue({ id: cancelledIssue.id, identifier: cancelledIssue.identifier, state: 'In Progress' }),
+      identifier: cancelledIssue.identifier,
+      workspace_path: '/tmp/symphony-tests/repo/INT-1',
+      branch_name: null,
+      started_at: new Date(),
+      last_codex_timestamp: new Date(),
+      retry_attempt: 0,
+      stage: 'dev',
+    });
+
+    await (orchestrator as any).reconcileRunningIssues();
+
+    expect(ctx.workspaceManager.removeWorkspace).toHaveBeenCalledWith('/tmp/symphony-tests/repo/INT-1');
+    expect(ctx.githubIssueClient.closeIssue).toHaveBeenCalledWith(501);
   });
 });

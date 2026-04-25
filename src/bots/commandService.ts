@@ -1,5 +1,5 @@
 import type { CreateIssueRequest, RuntimeControlPlane, RuntimeIssueView } from '../runtime/types';
-import { BotConversationPreferenceRepository } from '../database';
+import { BotConversationPreferenceRepository, type BotIssueFollowupRepository } from '../database';
 import { TrackerProjectResolutionService } from '../tracker/projectResolution';
 import { BotSubscriptionService } from './subscriptions';
 import type {
@@ -102,6 +102,14 @@ function formatGovernanceSuggestions(issue: RuntimeIssueView): string {
       return `- [${index + 1}] ${suggestion.suggestion_type} · ${compact(suggestion.title, 80)} · id ${suggestion.id}${actions ? ` · ${actions}` : ''}`;
     }),
   ].join('\n');
+}
+
+function formatGovernanceSummary(issue: RuntimeIssueView): string {
+  const parts = [
+    issue.governance_summary ? `governance ${issue.governance_summary}` : null,
+    formatGovernanceSuggestions(issue),
+  ].filter(Boolean);
+  return parts.join('\n');
 }
 
 function parseWatchArgs(inlineArgs: string): {
@@ -236,6 +244,7 @@ export class BotCommandService {
     private readonly canWrite: (context: BotCommandContext) => boolean = () => true,
     private readonly preferences: BotConversationPreferenceRepository | null = null,
     private readonly projectResolver: TrackerProjectResolutionService | null = null,
+    private readonly followups: BotIssueFollowupRepository | null = null,
   ) {}
 
   async execute(
@@ -372,10 +381,21 @@ export class BotCommandService {
     }
 
     const issue = result.issue_id ? this.runtime.getIssue(result.issue_id) : null;
+    if (result.accepted && result.issue_id && context.transport === 'telegram') {
+      this.followups?.upsert({
+        transport: context.transport,
+        conversation_id: context.recipient.conversation_id,
+        issue_id: result.issue_id,
+        issue_identifier: result.issue_identifier ?? issue?.identifier ?? null,
+        user_id: context.identity.user_id,
+        role: 'origin',
+      });
+    }
+
     return {
       message: issue
-        ? `Created issue\n${formatIssue(issue)}`
-        : result.message,
+        ? `已收到，已创建 ${issue.identifier} · ${issue.title}`
+        : `已收到，已创建 ${result.issue_identifier ?? '新任务'}`,
       issue_id: result.issue_id,
     };
   }
@@ -518,6 +538,7 @@ export class BotCommandService {
     }
 
     const result = await this.runtime.stopIssue(issueId);
+    this.registerOriginFollowup(context, result);
     return {
       message: result.message,
       issue_id: result.issue_id,
@@ -541,6 +562,7 @@ export class BotCommandService {
     }
 
     const result = await this.runtime.retryIssue(issueId);
+    this.registerOriginFollowup(context, result);
     return {
       message: result.message,
       issue_id: result.issue_id,
@@ -564,6 +586,7 @@ export class BotCommandService {
     }
 
     const result = await this.runtime.overrideGovernance(issueId);
+    this.registerOriginFollowup(context, result);
     return {
       message: result.message,
       issue_id: result.issue_id,
@@ -587,6 +610,7 @@ export class BotCommandService {
     }
 
     const result = await this.runtime.rewriteGovernance(issueId);
+    this.registerOriginFollowup(context, result);
     return {
       message: result.message,
       issue_id: result.issue_id,
@@ -610,6 +634,7 @@ export class BotCommandService {
     }
 
     const result = await this.runtime.splitGovernance(issueId);
+    this.registerOriginFollowup(context, result);
     return {
       message: result.message,
       issue_id: result.issue_id,
@@ -633,6 +658,7 @@ export class BotCommandService {
     }
 
     const result = await this.runtime.executeGovernanceSuggestion(issueId, suggestionId);
+    this.registerOriginFollowup(context, result);
     return {
       message: result.message,
       issue_id: result.issue_id,
@@ -656,9 +682,28 @@ export class BotCommandService {
     }
 
     const result = await this.runtime.dismissGovernanceSuggestion(issueId, suggestionId);
+    this.registerOriginFollowup(context, result);
     return {
       message: result.message,
       issue_id: result.issue_id,
     };
+  }
+
+  private registerOriginFollowup(
+    context: BotCommandContext,
+    result: { accepted: boolean; issue_id: string | null; issue_identifier: string | null },
+  ): void {
+    if (!result.accepted || !result.issue_id || context.transport !== 'telegram') {
+      return;
+    }
+
+    this.followups?.upsert({
+      transport: context.transport,
+      conversation_id: context.recipient.conversation_id,
+      issue_id: result.issue_id,
+      issue_identifier: result.issue_identifier,
+      user_id: context.identity.user_id,
+      role: 'origin',
+    });
   }
 }

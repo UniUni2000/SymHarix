@@ -45,6 +45,8 @@ class DevHook:
         self.linear_state = linear_state
         self.github_repo = github_repo
         self.branch = branch
+        self.last_delivery_code: Optional[str] = None
+        self.last_delivery_summary: Optional[str] = None
 
         # Use provided clients or load from config
         if config:
@@ -68,6 +70,14 @@ class DevHook:
             self.github = github_client
 
         self.store = StateStore(workspace_root, issue_id)
+
+    def _set_delivery_failure(self, code: str, summary: str) -> None:
+        self.last_delivery_code = code
+        self.last_delivery_summary = summary
+
+    def _clear_delivery_failure(self) -> None:
+        self.last_delivery_code = None
+        self.last_delivery_summary = None
 
     def initialize(self) -> None:
         """Initialize state.json for the issue."""
@@ -117,11 +127,14 @@ class DevHook:
 
         # Step 3: Create PR if not exists
         try:
+            self._clear_delivery_failure()
             pr_info = self._ensure_pr_exists()
         except Exception as e:
             error_message = str(e) or "Failed to create PR"
             print(f"[DEV] ERROR: {error_message}")
             self.store.set_error(error_message)
+            if not self.last_delivery_summary:
+                self.last_delivery_summary = error_message
             return False
 
         # Step 4: Transition local state to IN_REVIEW
@@ -237,13 +250,17 @@ Agent completed the task for issue [{self.issue_id}](https://linear.app/inteliwa
         ahead_count = self._count_commits_ahead(base_ref)
         if ahead_count <= 0:
             if self._workspace_has_uncommitted_changes():
-                raise RuntimeError(
+                message = (
                     f"Workspace for {self.branch} has uncommitted changes but no commits "
                     f"relative to {base_ref}; commit and push are required before PR creation"
                 )
-            raise RuntimeError(
+                self._set_delivery_failure("dirty_workspace_no_commit", message)
+                raise RuntimeError(message)
+            message = (
                 f"No commits found on {self.branch} relative to {base_ref}; skipping PR creation"
             )
+            self._set_delivery_failure("no_actionable_diff", message)
+            raise RuntimeError(message)
 
         local_head = self._git_stdout("rev-parse", "HEAD")
         remote_ref = f"refs/remotes/origin/{self.branch}"
