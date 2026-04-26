@@ -42,7 +42,11 @@ import {
   shouldLogStructuredAgentEvent,
 } from './timeline';
 import { parseMaintenanceArgs, type MaintenanceCommand } from '../maintenance/cli';
-import { parseVerifyLiveLifecycleArgs, type VerifyLiveLifecycleCommand } from '../verification/cli';
+import {
+  parseVerifyLiveLifecycleArgs,
+  parseVerifyLiveSupervisorArgs,
+  type VerifyLiveLifecycleCommand,
+} from '../verification/cli';
 import { LiveLifecycleVerifier } from '../verification/liveLifecycleVerifier';
 import { ensureEmbeddedClaudeRuntimeReady } from '../agent/embeddedClaudeRuntime';
 
@@ -55,6 +59,7 @@ function parseArgs(): {
   kill?: boolean;
   maintenance?: MaintenanceCommand;
   verifyLiveLifecycle?: VerifyLiveLifecycleCommand;
+  verifyLiveSupervisor?: VerifyLiveLifecycleCommand;
 } {
   const args = process.argv.slice(2);
   const result: {
@@ -63,6 +68,7 @@ function parseArgs(): {
     kill?: boolean;
     maintenance?: MaintenanceCommand;
     verifyLiveLifecycle?: VerifyLiveLifecycleCommand;
+    verifyLiveSupervisor?: VerifyLiveLifecycleCommand;
   } = {};
 
   if (args[0] === 'repair') {
@@ -80,6 +86,15 @@ function parseArgs(): {
       throw new Error(parsed.error);
     }
     result.verifyLiveLifecycle = parsed.command;
+    return result;
+  }
+
+  if (args[0] === 'verify-live-supervisor') {
+    const parsed = parseVerifyLiveSupervisorArgs(args.slice(1));
+    if (!parsed.ok) {
+      throw new Error(parsed.error);
+    }
+    result.verifyLiveSupervisor = parsed.command;
     return result;
   }
 
@@ -117,6 +132,7 @@ Options:
   repair bot-followups
   repair all
   verify-live-lifecycle --project-slug <slug> [--timeout-ms <n>] [--json] [--title-suffix <text>]
+  verify-live-supervisor --project-slug <slug> [--timeout-ms <n>] [--json] [--title-suffix <text>]
   --help             Show this help message
 
 Arguments:
@@ -130,6 +146,7 @@ Examples:
   symphony repair bot-followups   # Repair persisted Telegram follow-up/card state
   symphony repair all             # Repair Telegram follow-up state plus GitHub orphan issue/PR artifacts
   symphony verify-live-lifecycle --project-slug 1d3a3f95809d
+  symphony verify-live-supervisor --project-slug 1d3a3f95809d
 `);
 }
 
@@ -489,7 +506,8 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  if (args.verifyLiveLifecycle) {
+  const liveVerificationCommand = args.verifyLiveSupervisor ?? args.verifyLiveLifecycle ?? null;
+  if (liveVerificationCommand) {
     const verifyConfig: ServiceConfig = {
       ...config,
       serverPort: null,
@@ -506,17 +524,18 @@ async function main(): Promise<void> {
     });
 
     const result = await verifier.verify({
-      projectSlug: args.verifyLiveLifecycle.projectSlug,
-      timeoutMs: args.verifyLiveLifecycle.timeoutMs,
-      titleSuffix: args.verifyLiveLifecycle.titleSuffix,
+      projectSlug: liveVerificationCommand.projectSlug,
+      timeoutMs: liveVerificationCommand.timeoutMs,
+      titleSuffix: liveVerificationCommand.titleSuffix,
+      supervisorScenario: liveVerificationCommand.supervisorScenario,
       reporter: (message) => {
-        if (!args.verifyLiveLifecycle?.json) {
+        if (!liveVerificationCommand.json) {
           console.log(`[verify] ${message}`);
         }
       },
     });
 
-    if (args.verifyLiveLifecycle.json) {
+    if (liveVerificationCommand.json) {
       console.log(JSON.stringify(result, null, 2));
     } else {
       console.log(`[verify] ${result.success ? 'PASS' : 'FAIL'} ${result.message}`);

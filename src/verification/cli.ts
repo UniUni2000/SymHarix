@@ -3,6 +3,7 @@ export interface VerifyLiveLifecycleCommand {
   timeoutMs: number | null;
   json: boolean;
   titleSuffix: string | null;
+  supervisorScenario?: boolean;
 }
 
 export type VerifyLiveLifecycleArgsParseResult =
@@ -73,6 +74,24 @@ export function parseVerifyLiveLifecycleArgs(args: string[]): VerifyLiveLifecycl
       timeoutMs,
       json,
       titleSuffix,
+    },
+  };
+}
+
+export function parseVerifyLiveSupervisorArgs(args: string[]): VerifyLiveLifecycleArgsParseResult {
+  const parsed = parseVerifyLiveLifecycleArgs(args);
+  if (!parsed.ok) {
+    return {
+      ok: false,
+      error: parsed.error.replace('verify-live-lifecycle', 'verify-live-supervisor'),
+    };
+  }
+  return {
+    ok: true,
+    command: {
+      ...parsed.command,
+      supervisorScenario: true,
+      titleSuffix: parsed.command.titleSuffix ?? 'supervisor-e2e',
     },
   };
 }

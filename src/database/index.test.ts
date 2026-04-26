@@ -23,6 +23,7 @@ import {
   ServiceLeaseRepository,
   ShadowHarnessRepository,
   SupervisorSessionEventRepository,
+  SupervisorMemoryRepository,
   SupervisorSessionRepository,
   SyncEventRepository,
   WorkItemRepository,
@@ -64,6 +65,7 @@ describe('database schema', () => {
     expect(tableNames).toContain('governance_suggestions');
     expect(tableNames).toContain('supervisor_sessions');
     expect(tableNames).toContain('supervisor_session_events');
+    expect(tableNames).toContain('supervisor_memories');
     expect(tableNames).not.toContain('tasks');
     expect(tableNames).not.toContain('execution_events');
   });
@@ -76,6 +78,54 @@ describe('database schema', () => {
       .all() as Array<{ name: string }>;
 
     expect(rows).toEqual([]);
+  });
+});
+
+describe('SupervisorMemoryRepository', () => {
+  test('upserts and retrieves repo-scoped supervisor memories by recency', () => {
+    const repository = new SupervisorMemoryRepository(db);
+
+    repository.upsert({
+      repo_ref: 'UniUni2000/test2',
+      memory_kind: 'architecture_preference',
+      subject_key: 'runtime-cleanup',
+      summary: 'Runtime cleanup should preserve Telegram root-thread semantics.',
+      evidence: { session_id: 'session-1' },
+      confidence: 0.8,
+      created_at: new Date('2026-01-01T00:00:00.000Z'),
+      updated_at: new Date('2026-01-01T00:00:00.000Z'),
+    });
+    repository.upsert({
+      repo_ref: 'UniUni2000/test2',
+      memory_kind: 'delivery_failure',
+      subject_key: 'github-review-422',
+      summary: 'GitHub review 422 should be classified as non-retryable unless equivalent review exists.',
+      evidence: { delivery_code: 'review_submit_failed' },
+      confidence: 0.9,
+      created_at: new Date('2026-01-02T00:00:00.000Z'),
+      updated_at: new Date('2026-01-02T00:00:00.000Z'),
+    });
+
+    const memories = repository.listRelevant('UniUni2000/test2', 10);
+
+    expect(memories.map((memory) => memory.subject_key)).toEqual([
+      'github-review-422',
+      'runtime-cleanup',
+    ]);
+    expect(memories[0]?.evidence).toEqual({ delivery_code: 'review_submit_failed' });
+
+    repository.upsert({
+      repo_ref: 'UniUni2000/test2',
+      memory_kind: 'delivery_failure',
+      subject_key: 'github-review-422',
+      summary: 'Updated failure memory.',
+      confidence: 0.7,
+      updated_at: new Date('2026-01-03T00:00:00.000Z'),
+    });
+
+    const updated = repository.listRelevant('UniUni2000/test2', 1)[0];
+    expect(updated?.summary).toBe('Updated failure memory.');
+    expect(updated?.confidence).toBe(0.7);
   });
 });
 

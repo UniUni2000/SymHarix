@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { parseVerifyLiveLifecycleArgs } from './cli';
+import { parseVerifyLiveLifecycleArgs, parseVerifyLiveSupervisorArgs } from './cli';
 
 describe('parseVerifyLiveLifecycleArgs', () => {
   test('parses the required project slug plus optional flags', () => {
@@ -29,5 +29,26 @@ describe('parseVerifyLiveLifecycleArgs', () => {
 
     expect(parsed.ok).toBe(false);
     expect(parsed.error).toContain('--project-slug');
+  });
+});
+
+describe('parseVerifyLiveSupervisorArgs', () => {
+  test('marks the live verification command as a supervisor scenario', () => {
+    const parsed = parseVerifyLiveSupervisorArgs([
+      '--project-slug',
+      'test2',
+      '--json',
+    ]);
+
+    expect(parsed).toEqual({
+      ok: true,
+      command: {
+        projectSlug: 'test2',
+        timeoutMs: null,
+        json: true,
+        titleSuffix: 'supervisor-e2e',
+        supervisorScenario: true,
+      },
+    });
   });
 });
