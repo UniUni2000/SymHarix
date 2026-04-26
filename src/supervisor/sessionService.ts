@@ -162,6 +162,10 @@ function isScopeChangeText(text: string): boolean {
   return SCOPE_CHANGE_PATTERNS.some((pattern) => pattern.test(text));
 }
 
+function isPlanMemoryQuestion(text: string): boolean {
+  return /计划|范围|验收|完成算什么|目标|为什么|子任务|子单|plan|scope|acceptance|goal/i.test(text);
+}
+
 function shouldClarifyAcceptance(text: string, description: string | null): boolean {
   const combined = `${text}\n${description || ''}`;
   if (isRiskyCleanupRequest(combined)) {
@@ -667,6 +671,9 @@ export class SupervisorSessionService {
       }
 
       const rootIssue = session.root_issue_id ? this.runtime.getIssue(session.root_issue_id) : null;
+      if (isPlanMemoryQuestion(params.text)) {
+        return this.renderPlanMemoryAnswer(session, rootIssue);
+      }
       return {
         ...this.withSessionMetadata(
           session,
@@ -1266,6 +1273,55 @@ export class SupervisorSessionService {
         action_rows: [],
       },
       `executing:${issue?.identifier ?? 'none'}:${currentChild?.issue_identifier ?? 'none'}:${queue.map((child) => `${child.issue_identifier}:${child.queue_state ?? ''}`).join(',')}`,
+    );
+  }
+
+  private renderPlanMemoryAnswer(
+    session: SupervisorSessionRecord,
+    issue: RuntimeIssueView | null,
+  ): BotCommandResponse {
+    const planCard = session.plan_card;
+    if (!planCard) {
+      return this.withSessionMetadata(
+        session,
+        {
+          message: '这条计划线程还没有形成稳定计划卡。',
+        },
+        'plan-memory-missing',
+      );
+    }
+
+    const currentChild = issue?.governance_current_child
+      ?? issue?.governance_child_queue?.find((child) => child.queue_state === 'current')
+      ?? null;
+
+    return this.withSessionMetadata(
+      session,
+      {
+        format: 'telegram_html',
+        message: joinHtmlLines([
+          `<b>计划记忆 · v${session.plan_version}</b>`,
+          '这是当前 Telegram 线程里我正在守住的执行计划。',
+          null,
+          '<b>用户目标</b>',
+          escapeHtml(planCard.user_goal),
+          null,
+          '<b>本次范围</b>',
+          escapeHtml(textList(planCard.in_scope, '按当前目标推进。')),
+          null,
+          '<b>暂不处理</b>',
+          escapeHtml(textList(planCard.out_of_scope, '不扩大到无关模块。')),
+          null,
+          '<b>完成算什么</b>',
+          escapeHtml(textList(planCard.acceptance, '结果可验证。')),
+          currentChild ? '<b>当前子任务</b>' : null,
+          currentChild ? `${escapeHtml(currentChild.issue_identifier)} · ${escapeHtml(currentChild.title)}` : null,
+          null,
+          '<b>下一步</b>',
+          escapeHtml(issue?.next_recommended_action || planCard.recommended_option.summary),
+        ]),
+      },
+      `plan-memory:${issue?.identifier ?? 'none'}:${currentChild?.issue_identifier ?? 'none'}`,
     );
   }
 
