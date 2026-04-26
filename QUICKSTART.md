@@ -118,6 +118,11 @@ bun --env-file=.env run src/cli/index.ts verify-live-lifecycle --project-slug 1d
 - `SYMPHONY_SUPERVISOR_LLM_API_KEY`
 - `SYMPHONY_SUPERVISOR_LLM_BASE_URL`
 - `SYMPHONY_SUPERVISOR_LLM_TIMEOUT_MS`
+- `SYMPHONY_SUPERVISOR_OVERSEER_PROVIDER`
+- `SYMPHONY_SUPERVISOR_OVERSEER_MODEL`
+- `SYMPHONY_SUPERVISOR_OVERSEER_API_KEY`
+- `SYMPHONY_SUPERVISOR_OVERSEER_BASE_URL`
+- `SYMPHONY_SUPERVISOR_OVERSEER_TIMEOUT_MS`
 - `SYMPHONY_DISCORD_BOT_TOKEN`
 - `SYMPHONY_DISCORD_PUBLIC_KEY`
 - `SYMPHONY_DISCORD_OPERATOR_IDS`
@@ -125,6 +130,8 @@ bun --env-file=.env run src/cli/index.ts verify-live-lifecycle --project-slug 1d
 Bot LLM 的运行参数统一放在 `.env`。建议本地 Telegram 使用 `SYMPHONY_BOT_LLM_TIMEOUT_MS=15000` 和 `SYMPHONY_BOT_LLM_HTTP_TRANSPORT=fetch`；`auto` 会启用 curl 到 fetch 的客户端 fallback，排障有用，但最坏情况下会拉长等待时间。
 
 Supervisor planning brain 默认复用 `SYMPHONY_BOT_LLM_*` 的 provider/model/key/base URL，但使用自己的超时预算，默认 `45000ms`；需要单独模型或超时时再设置 `SYMPHONY_SUPERVISOR_LLM_*`。它失败时会自动回落到本地计划规则。
+
+Supervisor execution overseer 默认复用 `SYMPHONY_SUPERVISOR_LLM_*`，再回退到 `SYMPHONY_BOT_LLM_*`；需要独立模型或更短超时时再设置 `SYMPHONY_SUPERVISOR_OVERSEER_*`。它只生成监督判断和下一轮 dev 指令，模型失败或输出不安全时会自动回落到本地 overseer。
 
 Phase 4 之后的几个实用点：
 

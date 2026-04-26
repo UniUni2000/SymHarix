@@ -5,6 +5,7 @@ import { TrackerProjectResolutionService } from '../tracker/projectResolution';
 import type { RuntimeControlPlane, RuntimeIssueView, RuntimeStreamEvent } from '../runtime/types';
 import type { BotAssistantIntent, BotCommandContext, BotRuntimeCopilotContext } from '../bots/types';
 import { SupervisorSessionService, type SupervisorPlanBrain } from './sessionService';
+import type { SupervisorExecutionOverseer } from './executionOverseer';
 
 function createIssueView(overrides: Partial<RuntimeIssueView> = {}): RuntimeIssueView {
   return {
@@ -1428,5 +1429,98 @@ describe('SupervisorSessionService', () => {
       .listBySession(session.id)
       .filter((event) => event.event_kind === 'supervisor_oversight');
     expect(String(oversightEvents[0]?.payload_json?.user_summary)).toContain('dirty workspace');
+  });
+
+  test('records asynchronous LLM oversight after the runtime milestone is received', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const asyncOverseer: SupervisorExecutionOverseer = {
+      assess: async ({ session, milestone }) => {
+        await Promise.resolve();
+        return milestone
+          ? {
+              decision: 'continue',
+              reason: 'llm_supervision',
+              dev_instruction: `继续按计划 ${session.plan_card?.title ?? ''} 推进，并先验证当前 diff。`,
+              user_summary: '监督脑已给 dev agent 下一轮指令。',
+              active_decision_kind: null,
+              key: `async|${milestone.key}`,
+              source: 'llm',
+              fallback_reason: null,
+            }
+          : null;
+      },
+    };
+    new SupervisorSessionService(
+      runtime,
+      createProjectResolver(),
+      sessions,
+      events,
+      null,
+      null,
+      asyncOverseer,
+    );
+    const session = sessions.create({
+      id: 'session-async-overseer',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'executing',
+      repo_ref: 'test2',
+      intake_mode: 'direct_run',
+      approval_mode: 'auto',
+      plan_version: 1,
+      root_issue_id: 'issue-root',
+      plan_card: {
+        title: '清理仓库残余文件',
+        user_goal: '安全清理仓库残余文件',
+        in_scope: ['识别并清理无用文件'],
+        out_of_scope: ['不删除业务源码'],
+        acceptance: ['清理结果可解释', '测试通过'],
+        known_risks: ['误删风险较高'],
+        execution_strategy: '先识别再清理。',
+        needs_user_approval: false,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '自动执行',
+          summary: '继续推进实现。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    runtime.emit({
+      type: 'issue',
+      data: createIssueView({
+        issue_id: 'issue-root',
+        identifier: 'INT-1',
+        title: '清理仓库残余文件',
+        orchestrator_state: 'retry_scheduled',
+        governance_root_issue_id: 'issue-root',
+        updated_at: '2026-01-01T01:00:00.000Z',
+      }),
+    });
+
+    expect(events.listBySession(session.id).filter((event) => event.event_kind === 'orchestrator_milestone')).toHaveLength(1);
+    expect(events.listBySession(session.id).filter((event) => event.event_kind === 'supervisor_oversight')).toHaveLength(0);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const oversightEvents = events
+      .listBySession(session.id)
+      .filter((event) => event.event_kind === 'supervisor_oversight');
+    expect(oversightEvents).toHaveLength(1);
+    expect(oversightEvents[0]?.payload_json?.reason).toBe('llm_supervision');
+    expect(oversightEvents[0]?.payload_json?.source).toBe('llm');
+    expect(sessions.findById(session.id)?.last_material_outcome?.dev_instruction).toContain('验证当前 diff');
+    expect(sessions.findById(session.id)?.last_material_outcome?.oversight_source).toBe('llm');
   });
 });

@@ -61,6 +61,10 @@ import type { SupervisorRepoIntelligenceResolver } from '../supervisor/repoIntel
 import { DefaultSupervisorRepoIntelligenceResolver } from '../supervisor/repoIntelligence';
 import { SupervisorWorker } from '../supervisor/worker';
 import { createSupervisorPlanBrainFromEnv } from '../supervisor/planBrain';
+import {
+  createSupervisorExecutionOverseerFromEnv,
+  type SupervisorExecutionOverseer,
+} from '../supervisor/executionOverseer';
 import { GovernanceMemoryService } from '../governance/repoIntelligence';
 
 interface TelegramUpdate {
@@ -486,6 +490,7 @@ export class DefaultBotGateway implements BotGateway {
       supervisorSessionEventRepository?: SupervisorSessionEventRepository | null;
       supervisorSessionService?: SupervisorSessionService | null;
       supervisorPlanBrain?: SupervisorPlanBrain | null;
+      supervisorExecutionOverseer?: SupervisorExecutionOverseer | null;
       supervisorRepoIntelligenceResolver?: SupervisorRepoIntelligenceResolver | null;
       workItemRepository?: WorkItemRepository | null;
       projectResolver?: TrackerProjectResolutionService | null;
@@ -537,6 +542,7 @@ export class DefaultBotGateway implements BotGateway {
             this.supervisorSessionEvents,
             options.supervisorRepoIntelligenceResolver ?? null,
             options.supervisorPlanBrain ?? null,
+            options.supervisorExecutionOverseer ?? createSupervisorExecutionOverseerFromEnv(),
           )
         : null);
     this.assistantService = new BotAssistantService(
@@ -2080,6 +2086,7 @@ export function createBotGatewayFromEnv(
     supervisorSessionEventRepository,
     supervisorRepoIntelligenceResolver,
     supervisorPlanBrain: createSupervisorPlanBrainFromEnv(),
+    supervisorExecutionOverseer: createSupervisorExecutionOverseerFromEnv(),
     workItemRepository,
     projectResolver: options.projectResolver ?? null,
     assistantModel: options.assistantModel,

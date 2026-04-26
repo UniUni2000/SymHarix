@@ -207,6 +207,11 @@ bun --env-file=.env run src/cli/index.ts verify-live-lifecycle --project-slug 1d
 - `SYMPHONY_SUPERVISOR_LLM_API_KEY`
 - `SYMPHONY_SUPERVISOR_LLM_BASE_URL`
 - `SYMPHONY_SUPERVISOR_LLM_TIMEOUT_MS`
+- `SYMPHONY_SUPERVISOR_OVERSEER_PROVIDER`
+- `SYMPHONY_SUPERVISOR_OVERSEER_MODEL`
+- `SYMPHONY_SUPERVISOR_OVERSEER_API_KEY`
+- `SYMPHONY_SUPERVISOR_OVERSEER_BASE_URL`
+- `SYMPHONY_SUPERVISOR_OVERSEER_TIMEOUT_MS`
 - `SYMPHONY_DISCORD_BOT_TOKEN`
 - `SYMPHONY_DISCORD_PUBLIC_KEY`
 - `SYMPHONY_DISCORD_OPERATOR_IDS`
@@ -214,6 +219,8 @@ bun --env-file=.env run src/cli/index.ts verify-live-lifecycle --project-slug 1d
 Bot LLM 配置全部走 `.env`。`SYMPHONY_BOT_LLM_TIMEOUT_MS` 默认 15000；`SYMPHONY_BOT_LLM_HTTP_TRANSPORT=fetch` 默认只用 Bun fetch，避免 `curl -> fetch` 双 transport fallback 把一次 provider 长尾放大成接近双倍等待。需要诊断 HTTP 客户端兼容性时可设为 `curl`；确实需要客户端级 fallback 时再设为 `auto`。
 
 Supervisor planning brain 默认复用 `SYMPHONY_BOT_LLM_*` 的 provider/model/key/base URL，但使用自己的超时预算，默认 `45000ms`；也可以用 `SYMPHONY_SUPERVISOR_LLM_*` 单独覆盖。它只增强 Telegram 计划卡和澄清策略；模型失败时会回落到本地确定性计划，不阻断 `/new` 或自然语言建单。
+
+Supervisor execution overseer 默认复用 `SYMPHONY_SUPERVISOR_LLM_*`，再回退到 `SYMPHONY_BOT_LLM_*`；也可以用 `SYMPHONY_SUPERVISOR_OVERSEER_*` 单独覆盖。它负责在 dev/review milestone 后生成下一轮监督判断和 dev agent 指令；模型超时、返回无效 JSON、或试图绕过 delivery failure 时，会自动回落到确定性 overseer。
 
 `/api/v1/runtime/manifest` 会返回当前 viewer 的 access mode、viewer role 和 Phase 4 feature flags。
 

@@ -30,6 +30,7 @@ import type {
 import { describeSupervisorThread } from './threadSummary';
 import {
   DefaultSupervisorExecutionOverseer,
+  type SupervisorOversightAssessment,
   type SupervisorExecutionOverseer,
 } from './executionOverseer';
 
@@ -1699,7 +1700,6 @@ export class SupervisorSessionService {
 
   private syncFromIssue(issue: RuntimeIssueView): void {
     const rootIssueId = issue.governance_root_issue_id ?? issue.issue_id;
-    const isRootIssueEvent = rootIssueId === issue.issue_id;
     const session = this.sessions.findByRootIssueId(rootIssueId);
     if (!session) {
       return;
@@ -1708,14 +1708,6 @@ export class SupervisorSessionService {
     const milestone = deriveSupervisorMilestone(issue);
     const previousMilestoneKey = typeof session.last_material_outcome?.milestone_key === 'string'
       ? session.last_material_outcome.milestone_key
-      : null;
-    const oversight = this.executionOverseer.assess({
-      session,
-      issue,
-      milestone,
-    });
-    const previousOversightKey = typeof session.last_material_outcome?.oversight_key === 'string'
-      ? session.last_material_outcome.oversight_key
       : null;
     if (milestone && milestone.key !== previousMilestoneKey) {
       this.recordEvent(session.id, 'orchestrator_milestone', {
@@ -1730,6 +1722,46 @@ export class SupervisorSessionService {
         current_child_issue_id: milestone.current_child_issue_id ?? null,
       });
     }
+
+    const oversightResult = this.executionOverseer.assess({
+      session,
+      issue,
+      milestone,
+    });
+    if (oversightResult && typeof (oversightResult as Promise<unknown>).then === 'function') {
+      void (oversightResult as Promise<SupervisorOversightAssessment | null>)
+        .then((oversight) => {
+          const freshSession = this.sessions.findById(session.id);
+          if (!freshSession) {
+            return;
+          }
+          this.applyIssueOversightUpdate(freshSession, issue, milestone, oversight);
+        })
+        .catch(() => {
+          // The overseer owns fallback behavior; a rejected async brain must not break runtime event fanout.
+        });
+      return;
+    }
+
+    this.applyIssueOversightUpdate(
+      session,
+      issue,
+      milestone,
+      oversightResult as SupervisorOversightAssessment | null,
+    );
+  }
+
+  private applyIssueOversightUpdate(
+    session: SupervisorSessionRecord,
+    issue: RuntimeIssueView,
+    milestone: SupervisorMilestone | null,
+    oversight: SupervisorOversightAssessment | null,
+  ): void {
+    const rootIssueId = issue.governance_root_issue_id ?? issue.issue_id;
+    const isRootIssueEvent = rootIssueId === issue.issue_id;
+    const previousOversightKey = typeof session.last_material_outcome?.oversight_key === 'string'
+      ? session.last_material_outcome.oversight_key
+      : null;
     if (oversight && oversight.key !== previousOversightKey) {
       this.recordEvent(session.id, 'supervisor_oversight', {
         decision: oversight.decision,
@@ -1737,6 +1769,8 @@ export class SupervisorSessionService {
         dev_instruction: oversight.dev_instruction,
         user_summary: oversight.user_summary,
         active_decision_kind: oversight.active_decision_kind,
+        source: oversight.source ?? null,
+        fallback_reason: oversight.fallback_reason ?? null,
         issue_id: issue.issue_id,
         issue_identifier: issue.identifier,
         milestone_kind: milestone?.kind ?? null,
@@ -1788,6 +1822,8 @@ export class SupervisorSessionService {
         supervisor_reason: oversight?.reason ?? session.last_material_outcome?.supervisor_reason ?? null,
         dev_instruction: oversight?.dev_instruction ?? session.last_material_outcome?.dev_instruction ?? null,
         user_summary: oversight?.user_summary ?? session.last_material_outcome?.user_summary ?? null,
+        oversight_source: oversight?.source ?? session.last_material_outcome?.oversight_source ?? null,
+        oversight_fallback_reason: oversight?.fallback_reason ?? session.last_material_outcome?.oversight_fallback_reason ?? null,
       },
     });
   }
