@@ -1,4 +1,5 @@
 import type { WorkItemOrchestratorState } from '../database/types';
+import type { SupervisorExecutionIntent } from '../supervisor/types';
 import type {
   AgentTimelinePayload,
   ChangePackSummary,
@@ -247,6 +248,7 @@ export interface CreateIssueRequest {
   project_slug?: string | null;
   project_id?: string | null;
   state_id?: string | null;
+  supervisor_execution_intent?: SupervisorExecutionIntent | null;
 }
 
 export interface RuntimeActionResult {
