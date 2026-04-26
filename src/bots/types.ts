@@ -282,6 +282,8 @@ export interface BotIssueContextView {
   active_pr_number: number | null;
   session_stage: string | null;
   session_message: string | null;
+  supervisor_session_state?: string | null;
+  supervisor_plan_summary?: string | null;
   architectural_target: string | null;
   path_families: string[];
   boundary_edges: string[];

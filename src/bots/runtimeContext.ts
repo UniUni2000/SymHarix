@@ -28,6 +28,8 @@ function toIssueContextView(issue: RuntimeIssueView): BotIssueContextView {
     active_pr_number: issue.active_pr_number,
     session_stage: issue.session?.stage ?? null,
     session_message: issue.session?.last_message ?? null,
+    supervisor_session_state: issue.supervisor_session_state ?? null,
+    supervisor_plan_summary: issue.supervisor_plan_summary ?? null,
     architectural_target: issue.architectural_target ?? null,
     path_families: issue.path_families ?? [],
     boundary_edges: issue.boundary_edges ?? [],

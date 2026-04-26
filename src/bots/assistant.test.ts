@@ -61,6 +61,8 @@ function createRuntimeControlPlane(): RuntimeControlPlane & {
           github_issue_number: null,
           active_pr_number: null,
           session: null,
+          supervisor_session_state: 'executing',
+          supervisor_plan_summary: '计划「Hello world」正在推进。',
           actions: {
             can_stop: false,
             can_retry: true,
@@ -361,6 +363,45 @@ describe('BotAssistantService', () => {
 
     subscriptions.dispose();
     supervisorService.dispose();
+  });
+
+  test('passes supervisor session projection into the model runtime context', async () => {
+    const runtime = createRuntimeControlPlane();
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    let capturedContext: any = null;
+    const assistant = new BotAssistantService(
+      runtime,
+      new BotCommandService(runtime, subscriptions),
+      null,
+      null,
+      null,
+      {
+        decide: async ({ context }) => {
+          capturedContext = context;
+          return {
+            intent: {
+              kind: 'answer_question',
+              answer: 'ok',
+            },
+          };
+        },
+      },
+    );
+
+    const response = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-ctx' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      'INT-31 当前计划是什么？',
+    );
+
+    expect(response.message).toBe('ok');
+    expect(capturedContext?.focus_issue?.issue?.supervisor_session_state).toBe('executing');
+    expect(capturedContext?.focus_issue?.issue?.supervisor_plan_summary).toContain('Hello world');
+
+    subscriptions.dispose();
   });
 
   test('uses deterministic supervisor intake for repository cleanup requests when the model times out', async () => {
