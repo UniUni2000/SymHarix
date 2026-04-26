@@ -451,6 +451,55 @@ describe('SupervisorSessionService', () => {
     expect(updated?.state).toBe('executing');
   });
 
+  test('stores clarification answers in the plan before auto materializing a focused issue', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+    const context = createContext();
+
+    const first = await service.respond({
+      context,
+      text: '改善用户体验',
+      intent: {
+        kind: 'create_issue',
+        title: '改善用户体验',
+        description: null,
+        project_slug: 'test2',
+      },
+      runtimeContext: createRuntimeContext(),
+      canWrite: true,
+    });
+
+    expect(first).not.toBeNull();
+    expect(first?.message).toContain('还缺什么');
+    expect(runtime.createIssueCalls).toHaveLength(0);
+    const session = sessions.findActiveByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(session?.state).toBe('clarifying');
+
+    const second = await service.respond({
+      context,
+      text: '完成后能在 /settings 页面保存主题，测试通过',
+      intent: null,
+      runtimeContext: createRuntimeContext(),
+      canWrite: true,
+    });
+
+    expect(second).not.toBeNull();
+    expect(second?.message).toContain('计划已进入执行');
+    expect(runtime.createIssueCalls).toHaveLength(1);
+    expect(String(runtime.createIssueCalls[0]?.description)).toContain('/settings 页面保存主题');
+    const updated = sessions.findById(session!.id);
+    expect(updated?.plan_card?.acceptance.join('\n')).toContain('/settings 页面保存主题');
+    expect(events.listBySession(session!.id).some((event) => event.event_kind === 'clarification_answer_recorded')).toBe(true);
+  });
+
   test('executes the recommended governance action from an awaiting-user-decision session', async () => {
     db = new Database(':memory:');
     initializeSchema(db);
@@ -533,5 +582,191 @@ describe('SupervisorSessionService', () => {
     expect(response?.message).toContain('INT-2');
     expect(runtime.splitGovernanceCalls).toEqual(['issue-1']);
     expect(sessions.findById(session.id)?.state).toBe('executing');
+  });
+
+  test('records high-signal runtime milestones into supervisor session memory without duplicating unchanged updates', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+    const session = sessions.create({
+      id: 'session-1',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'executing',
+      repo_ref: 'test2',
+      intake_mode: 'plan_then_approve',
+      approval_mode: 'explicit_user_approval',
+      plan_version: 1,
+      root_issue_id: 'issue-1',
+      plan_card: {
+        title: 'Root issue',
+        user_goal: 'Root issue',
+        in_scope: ['Root issue'],
+        out_of_scope: ['不顺手扩展到无关模块。'],
+        acceptance: ['完成 root issue，并让结果可验证。'],
+        known_risks: [],
+        execution_strategy: 'root issue 保持主线程推进。',
+        needs_user_approval: true,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '按推荐继续',
+          summary: '继续推进。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    const deliveryFailed = createIssueView({
+      issue_id: 'issue-1',
+      identifier: 'INT-1',
+      governance_root_issue_id: 'issue-1',
+      delivery_state: 'delivery_failed',
+      delivery_code: 'dirty_workspace_no_commit',
+      delivery_summary: '证据已满足，但工作区有未提交改动，PR 没建成。',
+    });
+
+    runtime.emit({ type: 'issue', data: deliveryFailed });
+    runtime.emit({ type: 'issue', data: deliveryFailed });
+
+    const milestoneEvents = events
+      .listBySession(session.id)
+      .filter((event) => event.event_kind === 'orchestrator_milestone');
+    expect(milestoneEvents).toHaveLength(1);
+    expect(milestoneEvents[0]?.payload_json?.milestone_kind).toBe('delivery_failed');
+    expect(sessions.findById(session.id)?.delivery_summary).toContain('PR 没建成');
+  });
+
+  test('rewrites the plan card and requires reapproval when execution receives a scope-changing user message', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+    const session = sessions.create({
+      id: 'session-1',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'executing',
+      repo_ref: 'test2',
+      intake_mode: 'direct_run',
+      approval_mode: 'auto',
+      plan_version: 1,
+      root_issue_id: 'issue-1',
+      plan_card: {
+        title: '做设置页面',
+        user_goal: '做设置页面',
+        in_scope: ['实现设置页面主题保存'],
+        out_of_scope: ['不改登录流程'],
+        acceptance: ['能在 /settings 保存主题，测试通过'],
+        known_risks: [],
+        execution_strategy: '保持单目标推进，避免顺手扩大范围。',
+        needs_user_approval: false,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '按推荐继续',
+          summary: '继续推进当前设置页面任务。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    const response = await service.respond({
+      context: createContext(),
+      text: '顺便把登录页主题也一起改了',
+      intent: null,
+      runtimeContext: createRuntimeContext(),
+      canWrite: true,
+    });
+
+    expect(response).not.toBeNull();
+    expect(response?.format).toBe('telegram_html');
+    expect(response?.message).toContain('计划待你批准 · v2');
+    expect(response?.message).toContain('顺便把登录页主题也一起改了');
+    const updated = sessions.findById(session.id);
+    expect(updated?.state).toBe('awaiting_user_approval');
+    expect(updated?.approval_mode).toBe('explicit_reapproval');
+    expect(updated?.plan_version).toBe(2);
+    expect(updated?.plan_card?.in_scope.join('\n')).toContain('顺便把登录页主题也一起改了');
+    expect(events.listBySession(session.id).some((event) => event.event_kind === 'scope_change_detected')).toBe(true);
+  });
+
+  test('reapproval of an executing session resumes the existing root thread instead of creating a duplicate issue', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    runtime.issues.set('issue-1', createIssueView({
+      issue_id: 'issue-1',
+      identifier: 'INT-1',
+      title: '做设置页面',
+      orchestrator_state: 'dev_running',
+    }));
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+    const session = sessions.create({
+      id: 'session-1',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'awaiting_user_approval',
+      repo_ref: 'test2',
+      intake_mode: 'direct_run',
+      approval_mode: 'explicit_reapproval',
+      plan_version: 2,
+      root_issue_id: 'issue-1',
+      plan_card: {
+        title: '做设置页面',
+        user_goal: '做设置页面',
+        in_scope: ['实现设置页面主题保存', '新增范围候选：顺便把登录页主题也一起改了'],
+        out_of_scope: ['不扩大到无关模块'],
+        acceptance: ['能在 /settings 保存主题，测试通过'],
+        known_risks: ['执行中出现范围变化，需要重新批准后再继续，避免静默漂移。'],
+        execution_strategy: '保持单目标推进，避免顺手扩大范围。',
+        needs_user_approval: true,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '批准第新版计划',
+          summary: '确认新增范围后，再继续推进执行线程。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    const response = await service.respond({
+      context: createContext(),
+      text: '按推荐继续',
+      intent: null,
+      runtimeContext: createRuntimeContext(),
+      canWrite: true,
+    });
+
+    expect(response).not.toBeNull();
+    expect(response?.message).toContain('第 2 版计划已批准');
+    expect(runtime.createIssueCalls).toHaveLength(0);
+    const updated = sessions.findById(session.id);
+    expect(updated?.state).toBe('executing');
+    expect(updated?.root_issue_id).toBe('issue-1');
+    expect(events.listBySession(session.id).some((event) => event.event_kind === 'plan_revision_approved')).toBe(true);
   });
 });
