@@ -115,7 +115,12 @@ describe('governanceCards', () => {
   });
 
   test('renders waiting-on-child cards when the root issue is still blocked behind a governance child issue', () => {
-    const message = buildGovernanceWaitingOnChildMessage(createGovernanceBlockedIssue(), {
+    const issue = createGovernanceBlockedIssue();
+    issue.governance_pause_reason = '源单当前暂停在 INT-38；完成这张子任务前不会放行后续 sibling。';
+    issue.governance_expected_handoff = '处理完 INT-38 后，会自动接力 INT-39。';
+    issue.governance_queued_child_identifiers = ['INT-39'];
+
+    const message = buildGovernanceWaitingOnChildMessage(issue, {
       createdIssueIdentifiers: ['INT-38'],
       childSummaries: ['INT-38：先把 runtime cleanup 收成一个单独任务'],
       nextRecommendedAction: '先处理治理子任务 INT-38',
@@ -127,6 +132,8 @@ describe('governanceCards', () => {
     expect(message.text).toContain('当前先处理下面这张子任务');
     expect(message.text).toContain('INT-38');
     expect(message.text).toContain('源单仍暂停');
+    expect(message.text).toContain('源单当前暂停在 INT-38');
+    expect(message.text).toContain('处理完 INT-38 后，会自动接力 INT-39');
     expect(message.text).toContain('先处理治理子任务 INT-38');
     expect(message.action_rows ?? []).toHaveLength(0);
   });
@@ -158,6 +165,28 @@ describe('governanceCards', () => {
     }];
 
     expect(buildGovernanceCardKey(issue)).toBe(initialKey);
+  });
+
+  test('updates the waiting-on-child card key when the structured pause reason changes materially', () => {
+    const issue = createGovernanceBlockedIssue();
+    issue.governance_thread_state = 'waiting_on_child';
+    issue.next_recommended_action = '先处理治理子任务 INT-38';
+    issue.governance_pause_reason = '源单当前暂停在 INT-38；完成这张子任务前不会放行后续 sibling。';
+    issue.governance_expected_handoff = '处理完 INT-38 后，会自动接力 INT-39。';
+    issue.governance_child_issues = [{
+      issue_id: 'issue-2',
+      issue_identifier: 'INT-38',
+      title: '[GOVERNANCE FOLLOW-UP for INT-37] Runtime cleanup',
+      tracker_state: 'Todo',
+      orchestrator_state: 'halted',
+      governance_decision: null,
+      governance_summary: '等待处理。',
+    }];
+
+    const initialKey = buildGovernanceCardKey(issue);
+    issue.governance_pause_reason = '源单当前暂停在 INT-38；这张子任务先要补完 review 交付。';
+
+    expect(buildGovernanceCardKey(issue)).not.toBe(initialKey);
   });
 
   test('keeps the blocked card key stable when secondary suggestion text churns but the primary action stays the same', () => {

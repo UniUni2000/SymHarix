@@ -303,6 +303,9 @@ export interface BotIssueContextView {
     delivery_summary?: string | null;
   }>;
   next_recommended_action: string | null;
+  governance_pause_reason?: string | null;
+  governance_expected_handoff?: string | null;
+  governance_queued_child_identifiers?: string[];
   delivery_state?: string | null;
   delivery_code?: string | null;
   delivery_summary?: string | null;
@@ -337,6 +340,9 @@ export interface BotFocusedIssueContext {
       governance_summary: string | null;
     }>;
     next_recommended_action?: string | null;
+    pause_reason?: string | null;
+    expected_handoff?: string | null;
+    queued_child_identifiers?: string[];
     suggestions: Array<{
       id: string;
       suggestion_type: string;

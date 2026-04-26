@@ -453,6 +453,7 @@ function createAdapterRuntime() {
     seenTurnRequestIds: new Set(),
     childStdoutBuffer: '',
     childStderrBuffer: '',
+    lastChildErrorMessage: null,
     timelineState: createTimelineState(),
     pendingToolUses: new Map(),
     nextRuntimeRequestId: 1,
@@ -610,6 +611,16 @@ function startAdapter({
     runtime.apiCallCount = 0;
   }
 
+  function describeUnavailableChildProcess() {
+    const lastError = typeof runtime.lastChildErrorMessage === 'string'
+      ? runtime.lastChildErrorMessage.trim()
+      : '';
+    if (lastError) {
+      return `Claude process unavailable: ${lastError}`;
+    }
+    return 'Claude process not spawned or stdin closed.';
+  }
+
   function sendClaudeControlResponse(requestId, result, error) {
     if (!runtime.childProcess || !runtime.childProcess.stdin || !runtime.childProcess.stdin.writable) {
       emitDebugLog(`Claude stdin unavailable while answering control request ${requestId}`);
@@ -731,6 +742,7 @@ function startAdapter({
     runtime.childStderrBuffer = lines.pop() || '';
     for (const line of lines) {
       if (line.trim()) {
+        runtime.lastChildErrorMessage = line.trim();
         emitDebugLog(`Claude stderr: ${line.trim()}`);
       }
     }
@@ -869,6 +881,7 @@ function startAdapter({
         runtime.childCwd = cwd;
         runtime.childStdoutBuffer = '';
         runtime.childStderrBuffer = '';
+        runtime.lastChildErrorMessage = null;
         runtime.timelineState = createTimelineState();
         runtime.pendingToolUses.clear();
         emitDebugLog(`Received thread/start. Spawning Claude Code at ${cwd}`);
@@ -893,7 +906,17 @@ function startAdapter({
 
         runtime.childProcess.stdout.on('data', processClaudeStdoutChunk);
         runtime.childProcess.stderr.on('data', processClaudeStderrChunk);
+        runtime.childProcess.on('error', (error) => {
+          runtime.lastChildErrorMessage = error instanceof Error ? error.message : String(error);
+          emitDebugLog(`Claude process spawn error: ${runtime.lastChildErrorMessage}`);
+        });
         runtime.childProcess.on('exit', (code) => {
+          const trailingStderr = runtime.childStderrBuffer.trim();
+          if (trailingStderr) {
+            runtime.lastChildErrorMessage = trailingStderr;
+          } else if (!runtime.lastChildErrorMessage && code !== 0) {
+            runtime.lastChildErrorMessage = `process exited with code ${code}`;
+          }
           emitDebugLog(`Claude process exited with code ${code}`);
         });
 
@@ -952,7 +975,7 @@ function startAdapter({
             })}\n`,
           );
         } else {
-          failCurrentTurn('Claude process not spawned or stdin closed.');
+          failCurrentTurn(describeUnavailableChildProcess());
         }
       }
     } catch (err) {

@@ -178,6 +178,40 @@ export const runtimePageClient = `
     return 'No delivery summary yet.';
   }
 
+  function getQueuedChildIdentifiers(issue) {
+    if (!issue) {
+      return [];
+    }
+    if (Array.isArray(issue.governance_queued_child_identifiers) && issue.governance_queued_child_identifiers.length) {
+      return issue.governance_queued_child_identifiers.filter(Boolean);
+    }
+    const queue = Array.isArray(issue.governance_child_queue) ? issue.governance_child_queue : [];
+    return queue
+      .filter((item) => item && item.queue_state === 'queued' && item.issue_identifier)
+      .map((item) => item.issue_identifier);
+  }
+
+  function buildQueuedChildSummary(issue) {
+    const identifiers = getQueuedChildIdentifiers(issue);
+    if (!identifiers.length) {
+      return 'No queued children right now.';
+    }
+    return identifiers.join(' · ');
+  }
+
+  function buildSupervisorSessionSummary(issue) {
+    if (!issue) {
+      return 'No supervisor session is linked yet.';
+    }
+    if (issue.supervisor_plan_summary) {
+      return issue.supervisor_plan_summary;
+    }
+    if (issue.supervisor_session_state) {
+      return 'Supervisor session state: ' + issue.supervisor_session_state + '.';
+    }
+    return 'No supervisor plan summary yet.';
+  }
+
   function getCurrentChild(issue) {
     if (!issue) {
       return null;
@@ -226,7 +260,7 @@ export const runtimePageClient = `
       };
     }
 
-    if (issue.governance_thread_state === 'waiting_on_child') {
+    if (issue.governance_thread_state === 'waiting_on_child' || issue.governance_thread_state === 'child_failed') {
       const currentChild = getCurrentChild(issue);
       if (currentChild) {
         return {
@@ -366,24 +400,30 @@ export const runtimePageClient = `
       };
     }
 
-    if (issue && issue.governance_thread_state === 'waiting_on_child') {
+    if (issue && (issue.governance_thread_state === 'waiting_on_child' || issue.governance_thread_state === 'child_failed')) {
+      const pauseReason = issue.governance_pause_reason
+        || (currentChild
+          ? currentChild.issue_identifier + ' is the current child. Remaining children stay queued until it finishes.'
+          : 'The root thread is waiting on child work before it can continue.');
+      const handoffSummary = issue.governance_expected_handoff
+        || (currentChild && currentChild.governance_summary
+          ? currentChild.governance_summary
+          : 'Once the current child reaches a terminal state, the next child can take over automatically.');
       return {
         kind: 'waiting_on_child',
-        priority: 2,
+        priority: issue.governance_thread_state === 'child_failed' ? 1 : 2,
         queueTone: 'warn',
         focusTone: 'delivery_failed',
-        statusLabel: 'Waiting on child',
+        statusLabel: issue.governance_thread_state === 'child_failed' ? 'Child failed' : 'Waiting on child',
         headline: issue.identifier + ' is paused while ' + (currentChild ? currentChild.issue_identifier : 'a child issue') + ' moves first',
-        summary: 'The root thread stays paused while the current child handles the next concrete slice of work.',
-        reason: currentChild
-          ? currentChild.issue_identifier + ' is the current child. Remaining children stay queued until it finishes.'
-          : 'The root thread is waiting on child work before it can continue.',
+        summary: issue.governance_thread_state === 'child_failed'
+          ? 'The root thread is paused on a child delivery problem and needs attention before the queue can continue.'
+          : 'The root thread stays paused while the current child handles the next concrete slice of work.',
+        reason: pauseReason,
         recommendationLabel: 'Current child',
         recommendationText: currentChild ? currentChild.issue_identifier + ' · ' + currentChild.title : 'Inspect child queue',
         supportingLabel: 'Next handoff',
-        supportingText: currentChild && currentChild.governance_summary
-          ? currentChild.governance_summary
-          : 'Once the current child reaches a terminal state, the next child can take over automatically.',
+        supportingText: handoffSummary,
       };
     }
 
@@ -651,6 +691,9 @@ export const runtimePageClient = `
           suggestionId: state.pending.actionSuggestionId,
         }
       : null;
+    const queuedChildSummary = buildQueuedChildSummary(issue);
+    const showQueueHandoff = issue.governance_thread_state === 'waiting_on_child' || issue.governance_thread_state === 'child_failed';
+    const supervisorSummary = buildSupervisorSessionSummary(issue);
     const actionButtons = [
       renderActionButton(recommendation, pendingAction),
       ...secondaryActions.map((action) => renderActionButton(action, pendingAction)),
@@ -676,7 +719,13 @@ export const runtimePageClient = `
       '</div>',
       '<div class="focus-side">',
       '<div class="focus-side-card"><span class="focus-callout-label">Issue</span><span class="focus-callout-value">' + escapeHtml(issue.identifier) + '</span><p class="panel-copy">Phase ' + escapeHtml(issue.phase) + ' · tracker ' + escapeHtml(issue.tracker_state) + ' · orchestrator ' + escapeHtml(issue.orchestrator_state || 'unknown') + '</p></div>',
+      issue.supervisor_session_state || issue.supervisor_plan_summary
+        ? '<div class="focus-side-card"><span class="focus-callout-label">Supervisor plan</span><span class="focus-callout-value">' + escapeHtml(supervisorSummary) + '</span><p class="panel-copy">Session state: ' + escapeHtml(issue.supervisor_session_state || 'n/a') + '</p></div>'
+        : '',
       '<div class="focus-side-card"><span class="focus-callout-label">Why now</span><span class="focus-callout-value">' + escapeHtml(model.reason) + '</span></div>',
+      showQueueHandoff
+        ? '<div class="focus-side-card"><span class="focus-callout-label">Queue handoff</span><span class="focus-callout-value">' + escapeHtml(issue.governance_expected_handoff || queuedChildSummary) + '</span><p class="panel-copy">Queued next: ' + escapeHtml(queuedChildSummary) + '</p></div>'
+        : '',
       '</div>',
       '</div>',
     ].join('');
@@ -810,6 +859,16 @@ export const runtimePageClient = `
     const architectureSummary = buildArchitectureSummary(issue);
     const evidenceSummary = buildEvidenceSummary(issue);
     const deliverySummary = buildDeliverySummary(issue);
+    const queuedChildSummary = buildQueuedChildSummary(issue);
+    const supervisorSummary = buildSupervisorSessionSummary(issue);
+    const pauseReason = issue.governance_pause_reason
+      || (currentChild
+        ? currentChild.issue_identifier + ' is the current child keeping the root thread paused.'
+        : 'The root thread is not currently paused on a child issue.');
+    const expectedHandoff = issue.governance_expected_handoff
+      || (queuedChildSummary !== 'No queued children right now.'
+        ? 'After the current child finishes, the queue will hand off to ' + queuedChildSummary + '.'
+        : 'No queued handoff is waiting right now.');
 
     inspectorContent.innerHTML = [
       '<div class="insight-grid">',
@@ -819,6 +878,26 @@ export const runtimePageClient = `
       '<div class="insight-stat"><span class="insight-stat-label">Delivery</span><strong class="insight-stat-value">' + escapeHtml(issue.delivery_code || issue.delivery_state || 'ok') + '</strong></div>',
       '</div>',
       '<div class="summary-stack">',
+      buildSummaryCard('Supervisor plan', supervisorSummary, JSON.stringify({
+        supervisor_session_state: issue.supervisor_session_state || null,
+        supervisor_plan_summary: issue.supervisor_plan_summary || null,
+      }, null, 2)),
+      buildSummaryCard('Session state', issue.supervisor_session_state || 'n/a', JSON.stringify({
+        supervisor_session_state: issue.supervisor_session_state || null,
+      }, null, 2)),
+      buildSummaryCard('Root-thread pause', pauseReason, JSON.stringify({
+        governance_pause_reason: issue.governance_pause_reason || null,
+        governance_thread_state: issue.governance_thread_state || null,
+        governance_current_child: currentChild || null,
+      }, null, 2)),
+      buildSummaryCard('Expected handoff', expectedHandoff, JSON.stringify({
+        governance_expected_handoff: issue.governance_expected_handoff || null,
+        governance_queued_child_identifiers: issue.governance_queued_child_identifiers || [],
+      }, null, 2)),
+      buildSummaryCard('Queued children', queuedChildSummary, JSON.stringify({
+        governance_queued_child_identifiers: issue.governance_queued_child_identifiers || [],
+        governance_child_queue: childQueue,
+      }, null, 2)),
       buildSummaryCard('Governance summary', governanceSummary, issue.governance_summary || null),
       buildSummaryCard('Evidence summary', evidenceSummary, evidence ? JSON.stringify(evidence, null, 2) : null),
       buildSummaryCard('Architecture summary', architectureSummary, JSON.stringify({

@@ -63,6 +63,9 @@ function createRuntimeControlPlane(): RuntimeControlPlane & {
           session: null,
           supervisor_session_state: 'executing',
           supervisor_plan_summary: '计划「Hello world」正在推进。',
+          governance_pause_reason: '当前先推进 INT-31，源线程仍在等待这一张单。',
+          governance_expected_handoff: '完成 INT-31 后，再自动接力 INT-32。',
+          governance_queued_child_identifiers: ['INT-32'],
           actions: {
             can_stop: false,
             can_retry: true,
@@ -348,7 +351,7 @@ describe('BotAssistantService', () => {
     const first = await assistant.respondToText(context, '把 runtime API 和 Telegram 文案一起改掉');
     expect(first.message).toContain('计划待你批准');
     expect(first.format).toBe('telegram_html');
-    expect(first.action_rows?.[0]?.[0]?.label).toBe('按推荐继续');
+    expect(first.action_rows?.[0]?.[0]?.label).toBe('批准并开始');
     expect(runtime.createIssueCalls).toHaveLength(0);
     expect(
       pending.findByConversation({
@@ -400,6 +403,9 @@ describe('BotAssistantService', () => {
     expect(response.message).toBe('ok');
     expect(capturedContext?.focus_issue?.issue?.supervisor_session_state).toBe('executing');
     expect(capturedContext?.focus_issue?.issue?.supervisor_plan_summary).toContain('Hello world');
+    expect(capturedContext?.focus_issue?.issue?.governance_pause_reason).toContain('INT-31');
+    expect(capturedContext?.focus_issue?.issue?.governance_expected_handoff).toContain('INT-32');
+    expect(capturedContext?.focus_issue?.issue?.governance_queued_child_identifiers).toEqual(['INT-32']);
 
     subscriptions.dispose();
   });
@@ -489,7 +495,7 @@ describe('BotAssistantService', () => {
     expect(response.message).toContain('这个仓库还有文件残余，把它都清空');
     expect(response.message).not.toContain('当前自然语言模型暂不可用');
     expect(response.format).toBe('telegram_html');
-    expect(response.action_rows?.[0]?.[0]?.label).toBe('按推荐继续');
+    expect(response.action_rows?.[0]?.[0]?.label).toBe('批准并开始');
     expect(runtime.createIssueCalls).toHaveLength(0);
     expect(modelCalls).toBe(0);
 
@@ -1042,6 +1048,111 @@ describe('BotAssistantService', () => {
     expect(response.message).toContain('INT-31');
     expect(response.message).toContain('split_before_implement');
     expect(response.message).toContain('Separate runtime cleanup');
+
+    subscriptions.dispose();
+  });
+
+  test('explains paused root-thread cause and handoff from structured governance fields when the user asks about a child issue', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const rootIssue = {
+      ...runtime.getOverview().issues[0]!,
+      issue_id: 'issue-31',
+      work_item_id: 'issue-31',
+      identifier: 'INT-31',
+      title: 'Root governance thread',
+      tracker_state: 'In Progress',
+      orchestrator_state: 'halted',
+      github_repo: 'UniUni2000/test2',
+      governance_status: 'advisory' as const,
+      governance_decision: 'split_before_implement' as const,
+      governance_thread_state: 'waiting_on_child' as const,
+      governance_root_issue_identifier: 'INT-31',
+      governance_child_issues: [
+        {
+          issue_id: 'issue-32',
+          issue_identifier: 'INT-32',
+          title: 'Runtime cleanup child',
+          tracker_state: 'In Progress',
+          orchestrator_state: 'dev_running',
+          governance_decision: null,
+          governance_summary: '当前正在收口 runtime cleanup。',
+          delivery_code: null,
+          delivery_summary: null,
+        },
+      ],
+      next_recommended_action: '先处理治理子任务 INT-32；完成后会自动接力 INT-33。',
+      governance_pause_reason: '源单当前暂停在 INT-32；完成这张子任务前不会放行后续 sibling。',
+      governance_expected_handoff: '处理完 INT-32 后，会自动接力 INT-33。',
+      governance_queued_child_identifiers: ['INT-33'],
+      active_governance_suggestions: [],
+      actions: {
+        can_stop: false,
+        can_retry: true,
+        can_override_governance: false,
+        can_rewrite_governance: false,
+        can_split_governance: false,
+        can_open_pr: false,
+      },
+    };
+    runtime.getOverview = () => ({
+      generated_at: '2026-01-01T00:00:00.000Z',
+      counts: { running: 0, retrying: 0, total: 1 },
+      issues: [rootIssue],
+    });
+    runtime.getIssue = (id: string) => ['INT-31', 'issue-31'].includes(id) ? rootIssue : null;
+
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const followupStates = new BotFollowupMessageStateRepository(db);
+    followupStates.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-structured',
+      issue_id: 'issue-31',
+      issue_identifier: 'INT-31',
+      message_id: '101',
+      card_kind: 'governance_blocked',
+      card_key: 'card-1',
+      card_state: 'waiting_on_child',
+    });
+    const projectResolver = new TrackerProjectResolutionService(
+      {
+        listProjects: async () => ({ projects: [] }),
+      } as any,
+      {},
+    );
+    const commandService = new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver);
+    const assistant = new BotAssistantService(
+      runtime,
+      commandService,
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => {
+          throw new Error('Anthropic unavailable');
+        },
+      },
+      () => true,
+      subscriptions,
+      followupStates,
+    );
+
+    const response = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-structured' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      '这个新单是干嘛的，接下来会怎么接力？',
+    );
+
+    expect(response.message).toContain('INT-32');
+    expect(response.message).toContain('源单当前暂停在 INT-32');
+    expect(response.message).toContain('INT-33');
 
     subscriptions.dispose();
   });

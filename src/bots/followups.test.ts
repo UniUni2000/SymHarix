@@ -175,6 +175,20 @@ class MemoryNotifier implements BotTransportNotifier {
   }
 }
 
+class DeferredNotifier extends MemoryNotifier {
+  constructor(private readonly sendGate: Promise<void>) {
+    super();
+  }
+
+  override async sendMessage(recipient: BotRecipient, message: BotTransportMessage): Promise<BotTransportMessageRef> {
+    this.messages.push({ recipient, message });
+    await this.sendGate;
+    return {
+      provider_message_id: `msg-${this.messages.length}`,
+    };
+  }
+}
+
 describe('BotFollowupService', () => {
   test('deduplicates origin and ops recipients when they point to the same Telegram chat', async () => {
     const db = new Database(':memory:');
@@ -352,6 +366,94 @@ describe('BotFollowupService', () => {
     expect(notifier.edits[0]?.messageRef.provider_message_id).toBe('msg-99');
     expect(notifier.edits[0]?.message.format).toBe('telegram_html');
     expect(notifier.edits[0]?.message.text).toContain('计划待你批准');
+
+    service.dispose();
+    db.close();
+  });
+
+  test('keeps completed supervisor threads on the existing plan card instead of sending a lifecycle done digest', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const issue = runtime.getIssue('issue-1')!;
+    Object.assign(issue, {
+      title: 'Supervisor plan completed',
+      tracker_state: 'Done',
+      orchestrator_state: 'completed',
+      governance_status: null,
+      governance_decision: null,
+      governance_summary: null,
+      delivery_state: 'completed',
+      delivery_summary: 'PR 已合并，计划线程完成。',
+    });
+    const notifier = new MemoryNotifier();
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+    const sessions = new SupervisorSessionRepository(db);
+
+    followups.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      user_id: 'user-1',
+      role: 'origin',
+    });
+    sessions.create({
+      id: 'session-1',
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      user_id: 'user-1',
+      state: 'completed',
+      repo_ref: 'acme/repo',
+      intake_mode: 'direct_run',
+      approval_mode: 'auto',
+      plan_version: 1,
+      root_issue_id: 'issue-1',
+      delivery_state: 'completed',
+      delivery_summary: 'PR 已合并，计划线程完成。',
+      last_message_id: 'msg-existing',
+      last_card_key: 'session|session-1|stale',
+      plan_card: {
+        title: 'Supervisor plan completed',
+        user_goal: 'Complete the supervisor plan',
+        in_scope: ['完成文档和验证'],
+        out_of_scope: ['不扩展其他模块'],
+        acceptance: ['PR 合并后完成'],
+        known_risks: [],
+        execution_strategy: '单步执行并验证。',
+        needs_user_approval: false,
+        repo_ref: 'acme/repo',
+        project_slug: 'repo',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '自动执行',
+          summary: '直接执行小任务。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, messageStates, {
+      bootstrapCurrentGovernanceCards: false,
+      supervisorSessionRepository: sessions,
+    });
+
+    runtime.emit({
+      type: 'issue',
+      data: issue,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(notifier.edits).toHaveLength(1);
+    expect(notifier.edits[0]?.messageRef.provider_message_id).toBe('msg-existing');
+    expect(notifier.edits[0]?.message.text).toContain('计划已完成');
+    expect(notifier.messages).toHaveLength(0);
 
     service.dispose();
     db.close();
@@ -787,6 +889,91 @@ describe('BotFollowupService', () => {
     expect(notifier.messages).toHaveLength(1);
 
     secondService.dispose();
+    db.close();
+  });
+
+  test('suppresses duplicate retrying digests while the first lifecycle send is still in flight', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const ordinaryIssue = runtime.getIssue('issue-1');
+    if (!ordinaryIssue) {
+      throw new Error('Expected issue-1 to exist');
+    }
+
+    ordinaryIssue.title = 'Ordinary lifecycle issue';
+    ordinaryIssue.tracker_state = 'In Progress';
+    ordinaryIssue.orchestrator_state = 'retry_scheduled';
+    ordinaryIssue.governance_status = null;
+    ordinaryIssue.governance_decision = null;
+    ordinaryIssue.governance_summary = null;
+    ordinaryIssue.active_governance_suggestions = [];
+    ordinaryIssue.actions = {
+      can_stop: false,
+      can_retry: true,
+      can_override_governance: false,
+      can_rewrite_governance: false,
+      can_split_governance: false,
+      can_open_pr: false,
+    };
+
+    let releaseSend: (() => void) | null = null;
+    const sendGate = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    const notifier = new DeferredNotifier(sendGate);
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+    const deliveryStates = new BotFollowupDeliveryStateRepository(db);
+
+    followups.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      user_id: 'user-1',
+      role: 'origin',
+    });
+
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, messageStates, {
+      bootstrapCurrentGovernanceCards: false,
+      deliveryStateRepository: deliveryStates,
+    });
+
+    runtime.emit({
+      type: 'issue',
+      data: {
+        ...ordinaryIssue,
+        orchestrator_state: 'retry_scheduled',
+      },
+    });
+    runtime.emit({
+      type: 'issue',
+      data: {
+        ...ordinaryIssue,
+        orchestrator_state: 'retry_scheduled',
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    releaseSend?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(notifier.messages).toHaveLength(1);
+    expect(
+      deliveryStates.findByKey({
+        transport: 'telegram',
+        conversation_id: 'chat-origin',
+        root_issue_id: 'issue-1',
+        delivery_kind: 'lifecycle_digest',
+      }),
+    ).toEqual(expect.objectContaining({
+      last_notification_class: 'retrying',
+    }));
+
+    service.dispose();
     db.close();
   });
 
@@ -1372,6 +1559,67 @@ describe('BotFollowupService', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(notifier.messages).toHaveLength(1);
+
+    service.dispose();
+    db.close();
+  });
+
+  test('does not push degraded governance boilerplate as a standalone timeline digest', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const issue = runtime.getIssue('issue-1')!;
+    issue.governance_status = 'degraded';
+    issue.governance_decision = 'accept';
+    issue.governance_summary = 'No .symphony-constitution.md found yet, so governance is running in degraded mode.';
+    issue.orchestrator_state = 'dev_running';
+    issue.actions = {
+      can_stop: true,
+      can_retry: false,
+      can_override_governance: false,
+      can_rewrite_governance: false,
+      can_split_governance: false,
+      can_open_pr: false,
+    };
+    const notifier = new MemoryNotifier();
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+
+    followups.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      user_id: 'user-1',
+      role: 'origin',
+    });
+
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, messageStates, {
+      bootstrapCurrentGovernanceCards: false,
+    });
+
+    runtime.emit({
+      type: 'timeline',
+      data: {
+        id: 'event-degraded',
+        issue_id: 'issue-1',
+        issue_identifier: 'INT-1',
+        timestamp: '2026-01-01T00:01:00.000Z',
+        level: 'info',
+        category: 'diagnostic',
+        code: 'governance_assessed',
+        message: 'No .symphony-constitution.md found yet, so governance is running in degraded mode.',
+        turn: null,
+        tool_name: null,
+        detail: {},
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(notifier.messages).toHaveLength(0);
 
     service.dispose();
     db.close();

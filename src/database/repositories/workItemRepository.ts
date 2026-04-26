@@ -31,11 +31,12 @@ export class WorkItemRepository {
         repo_harness_status, constitution_status, governance_status, governance_decision,
         governance_summary, governance_root_issue_id, governance_parent_issue_id, governance_generation,
         governance_source_updated_at, governance_override_at, governance_override_reason,
+        supervisor_root_session_id, supervisor_plan_summary, supervisor_acceptance_summary, supervisor_execution_mode,
         change_pack_summary_json, task_status_json, evidence_summary_json, missing_requirements_json, constitution_hits_json,
         touched_paths_json, touched_areas_json, path_families_json, boundary_edges_json, import_edges_json,
         architectural_target,
         fitness_signals_json, cancelled_at, merged_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -68,6 +69,10 @@ export class WorkItemRepository {
       item.governance_source_updated_at?.toISOString() ?? null,
       item.governance_override_at?.toISOString() ?? null,
       item.governance_override_reason ?? null,
+      item.supervisor_root_session_id ?? null,
+      item.supervisor_plan_summary ?? null,
+      item.supervisor_acceptance_summary ?? null,
+      item.supervisor_execution_mode ?? null,
       JSON.stringify(item.change_pack_summary ?? null),
       JSON.stringify(item.task_status ?? null),
       JSON.stringify(item.evidence_summary ?? null),
@@ -100,11 +105,12 @@ export class WorkItemRepository {
         repo_harness_status, constitution_status, governance_status, governance_decision,
         governance_summary, governance_root_issue_id, governance_parent_issue_id, governance_generation,
         governance_source_updated_at, governance_override_at, governance_override_reason,
+        supervisor_root_session_id, supervisor_plan_summary, supervisor_acceptance_summary, supervisor_execution_mode,
         change_pack_summary_json, task_status_json, evidence_summary_json, missing_requirements_json, constitution_hits_json,
         touched_paths_json, touched_areas_json, path_families_json, boundary_edges_json, import_edges_json,
         architectural_target,
         fitness_signals_json, cancelled_at, merged_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         linear_issue_id = excluded.linear_issue_id,
         linear_identifier = excluded.linear_identifier,
@@ -134,6 +140,10 @@ export class WorkItemRepository {
         governance_source_updated_at = excluded.governance_source_updated_at,
         governance_override_at = excluded.governance_override_at,
         governance_override_reason = excluded.governance_override_reason,
+        supervisor_root_session_id = excluded.supervisor_root_session_id,
+        supervisor_plan_summary = excluded.supervisor_plan_summary,
+        supervisor_acceptance_summary = excluded.supervisor_acceptance_summary,
+        supervisor_execution_mode = excluded.supervisor_execution_mode,
         change_pack_summary_json = excluded.change_pack_summary_json,
         task_status_json = excluded.task_status_json,
         evidence_summary_json = excluded.evidence_summary_json,
@@ -181,6 +191,10 @@ export class WorkItemRepository {
       item.governance_source_updated_at?.toISOString() ?? null,
       item.governance_override_at?.toISOString() ?? null,
       item.governance_override_reason ?? null,
+      item.supervisor_root_session_id ?? null,
+      item.supervisor_plan_summary ?? null,
+      item.supervisor_acceptance_summary ?? null,
+      item.supervisor_execution_mode ?? null,
       JSON.stringify(item.change_pack_summary ?? null),
       JSON.stringify(item.task_status ?? null),
       JSON.stringify(item.evidence_summary ?? null),
@@ -306,6 +320,10 @@ export class WorkItemRepository {
     if (item.governance_source_updated_at !== undefined) assign('governance_source_updated_at', item.governance_source_updated_at?.toISOString() ?? null);
     if (item.governance_override_at !== undefined) assign('governance_override_at', item.governance_override_at?.toISOString() ?? null);
     if (item.governance_override_reason !== undefined) assign('governance_override_reason', item.governance_override_reason);
+    if (item.supervisor_root_session_id !== undefined) assign('supervisor_root_session_id', item.supervisor_root_session_id);
+    if (item.supervisor_plan_summary !== undefined) assign('supervisor_plan_summary', item.supervisor_plan_summary);
+    if (item.supervisor_acceptance_summary !== undefined) assign('supervisor_acceptance_summary', item.supervisor_acceptance_summary);
+    if (item.supervisor_execution_mode !== undefined) assign('supervisor_execution_mode', item.supervisor_execution_mode);
     if (item.change_pack_summary !== undefined) assign('change_pack_summary_json', JSON.stringify(item.change_pack_summary));
     if (item.task_status !== undefined) assign('task_status_json', JSON.stringify(item.task_status));
     if (item.evidence_summary !== undefined) assign('evidence_summary_json', JSON.stringify(item.evidence_summary));
@@ -372,6 +390,10 @@ export class WorkItemRepository {
       governance_source_updated_at: row.governance_source_updated_at ? new Date(row.governance_source_updated_at as string) : null,
       governance_override_at: row.governance_override_at ? new Date(row.governance_override_at as string) : null,
       governance_override_reason: row.governance_override_reason as string | null,
+      supervisor_root_session_id: row.supervisor_root_session_id as string | null,
+      supervisor_plan_summary: row.supervisor_plan_summary as string | null,
+      supervisor_acceptance_summary: row.supervisor_acceptance_summary as string | null,
+      supervisor_execution_mode: (row.supervisor_execution_mode as WorkItem['supervisor_execution_mode']) ?? null,
       change_pack_summary: parseJsonValue(row.change_pack_summary_json, null),
       task_status: parseJsonValue(row.task_status_json, null),
       evidence_summary: parseJsonValue(row.evidence_summary_json, null),

@@ -114,6 +114,7 @@ export function buildDevPrompt(
   existingLog?: string,
   githubContext?: string,
   harnessGuidance?: string,
+  supervisorGuidance?: string,
 ): string {
   const judgment = judgeComplexity(issue);
 
@@ -128,6 +129,7 @@ ${issue.branch_name ? `- **Branch**: ${issue.branch_name}` : ''}
 
 ${githubContext ? `${githubContext}\n` : ''}
 ${harnessGuidance ? `${harnessGuidance}\n` : ''}
+${supervisorGuidance ? `${supervisorGuidance}\n` : ''}
 
 ## Complexity Assessment
 - **Complexity**: ${judgment.complexity.toUpperCase()}

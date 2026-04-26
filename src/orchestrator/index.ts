@@ -59,10 +59,12 @@ import {
   ReviewEventRepository,
   ServiceLeaseRepository,
   ShadowHarnessRepository,
+  SupervisorSessionEventRepository,
+  SupervisorSessionRepository,
   SyncEventRepository,
   WorkItemRepository
 } from '../database';
-import type { ReviewDecision } from '../database/types';
+import type { ReviewDecision, SupervisorSessionRecord } from '../database/types';
 import type { WorkItem } from '../database/types';
 import { buildReviewPrompt, parseCanonicalReviewReport } from '../hooks/review-prompt';
 import { buildDevPrompt, judgeComplexity } from '../hooks/dev-prompt';
@@ -327,6 +329,8 @@ export class Orchestrator extends EventEmitter {
   private reviewEventRepository: ReviewEventRepository;
   private syncEventRepository: SyncEventRepository;
   private serviceLeaseRepository: ServiceLeaseRepository;
+  private supervisorSessionRepository: SupervisorSessionRepository;
+  private supervisorSessionEventRepository: SupervisorSessionEventRepository;
   private shadowHarnessRepository: ShadowHarnessRepository;
   private governanceAssessmentRepository: GovernanceAssessmentRepository;
   private governanceSuggestionRepository: GovernanceSuggestionRepository;
@@ -406,6 +410,8 @@ export class Orchestrator extends EventEmitter {
     this.reviewEventRepository = dependencies.reviewEventRepository ?? new ReviewEventRepository(this.db);
     this.syncEventRepository = dependencies.syncEventRepository ?? new SyncEventRepository(this.db);
     this.serviceLeaseRepository = dependencies.serviceLeaseRepository ?? new ServiceLeaseRepository(this.db);
+    this.supervisorSessionRepository = new SupervisorSessionRepository(this.db);
+    this.supervisorSessionEventRepository = new SupervisorSessionEventRepository(this.db);
     this.shadowHarnessRepository = dependencies.shadowHarnessRepository ?? new ShadowHarnessRepository(this.db);
     this.governanceAssessmentRepository =
       dependencies.governanceAssessmentRepository ?? new GovernanceAssessmentRepository(this.db);
@@ -703,6 +709,10 @@ export class Orchestrator extends EventEmitter {
         governance_root_issue_id: lineage?.root_issue_id ?? issue.id,
         governance_parent_issue_id: lineage?.parent_issue_id ?? null,
         governance_generation: lineage?.generation ?? 0,
+        supervisor_root_session_id: input.supervisor_execution_intent?.root_session_id ?? workItem.supervisor_root_session_id,
+        supervisor_plan_summary: input.supervisor_execution_intent?.plan_summary ?? workItem.supervisor_plan_summary,
+        supervisor_acceptance_summary: input.supervisor_execution_intent?.acceptance_summary ?? workItem.supervisor_acceptance_summary,
+        supervisor_execution_mode: input.supervisor_execution_intent?.approved_execution_mode ?? workItem.supervisor_execution_mode,
       }) ?? workItem;
       const targetArea = this.inferGovernanceTargetArea(issue, normalizedWorkItem);
       const repoIntelligence = this.buildRepoIntelligenceContext(route.github_repo_full);
@@ -1371,6 +1381,7 @@ export class Orchestrator extends EventEmitter {
       if (created.issue_id) {
         const childWorkItem = this.workItemRepository.findByLinearIssueId(created.issue_id);
         if (childWorkItem) {
+          this.inheritSupervisorContext(workItem, childWorkItem.id);
           this.workItemRepository.update({
             id: childWorkItem.id,
             orchestrator_state: index > 1 ? 'halted' : childWorkItem.orchestrator_state,
@@ -1784,13 +1795,16 @@ export class Orchestrator extends EventEmitter {
       };
     }
 
-    if (created.issue_id && architecturalTarget) {
+    if (created.issue_id) {
       const createdWorkItem = this.workItemRepository.findByLinearIssueId(created.issue_id);
       if (createdWorkItem) {
-        this.workItemRepository.update({
-          id: createdWorkItem.id,
-          architectural_target: architecturalTarget,
-        });
+        this.inheritSupervisorContext(workItem, createdWorkItem.id);
+        if (architecturalTarget) {
+          this.workItemRepository.update({
+            id: createdWorkItem.id,
+            architectural_target: architecturalTarget,
+          });
+        }
       }
     }
 
@@ -2201,6 +2215,26 @@ export class Orchestrator extends EventEmitter {
     return issue.updated_at.getTime() <= workItem.updated_at.getTime();
   }
 
+  private usesManualStopDispatchBlock(workItem: WorkItem | null, issue: Issue): boolean {
+    if (
+      !workItem ||
+      workItem.orchestrator_state !== 'halted' ||
+      workItem.delivery_code !== 'manual_stop'
+    ) {
+      return false;
+    }
+
+    if ((workItem.linear_state || '').trim().toLowerCase() !== issue.state.trim().toLowerCase()) {
+      return false;
+    }
+
+    if (!issue.updated_at) {
+      return true;
+    }
+
+    return issue.updated_at.getTime() <= workItem.updated_at.getTime();
+  }
+
   private governanceSourceTimestamp(workItem: WorkItem): Date | null {
     return workItem.governance_source_updated_at ?? workItem.updated_at ?? null;
   }
@@ -2390,6 +2424,10 @@ export class Orchestrator extends EventEmitter {
 
     const trackedWorkItem = this.findTrackedWorkItem(issue);
     if (this.usesFailureDispatchBlock(trackedWorkItem, issue)) {
+      return false;
+    }
+
+    if (this.usesManualStopDispatchBlock(trackedWorkItem, issue)) {
       return false;
     }
 
@@ -3865,6 +3903,129 @@ export class Orchestrator extends EventEmitter {
     ].filter(Boolean).join('\n');
   }
 
+  private buildSupervisorPromptSection(workItem: WorkItem | null | undefined): string | undefined {
+    const session = this.findSupervisorSessionForWorkItem(workItem);
+    if (
+      !workItem?.supervisor_plan_summary &&
+      !workItem?.supervisor_acceptance_summary &&
+      !session
+    ) {
+      return undefined;
+    }
+
+    const recentEvents = session
+      ? this.supervisorSessionEventRepository.listBySession(session.id).slice(-8)
+      : [];
+    const planCard = session?.plan_card ?? null;
+    const lastOutcome = session?.last_material_outcome
+      ? JSON.stringify(session.last_material_outcome)
+      : null;
+    const latestSupervisorInstruction = typeof session?.last_material_outcome?.dev_instruction === 'string'
+      ? session.last_material_outcome.dev_instruction
+      : null;
+    const latestSupervisorDecision = typeof session?.last_material_outcome?.supervisor_decision === 'string'
+      ? session.last_material_outcome.supervisor_decision
+      : null;
+    const latestSupervisorReason = typeof session?.last_material_outcome?.supervisor_reason === 'string'
+      ? session.last_material_outcome.supervisor_reason
+      : null;
+
+    return [
+      '## Supervisor-Approved Plan',
+      session
+        ? `- Session: ${session.id} (${session.state}, plan v${session.plan_version})`
+        : null,
+      workItem?.supervisor_plan_summary || planCard?.title
+        ? `- Plan Summary: ${workItem?.supervisor_plan_summary ?? planCard?.title}`
+        : null,
+      planCard?.user_goal
+        ? `- User Goal: ${planCard.user_goal}`
+        : null,
+      workItem?.supervisor_acceptance_summary || planCard?.acceptance?.length
+        ? `- Acceptance Summary: ${workItem?.supervisor_acceptance_summary ?? planCard?.acceptance.join('；')}`
+        : null,
+      planCard?.in_scope?.length
+        ? `- In Scope: ${planCard.in_scope.join('；')}`
+        : null,
+      planCard?.out_of_scope?.length
+        ? `- Out of Scope: ${planCard.out_of_scope.join('；')}`
+        : null,
+      workItem?.supervisor_execution_mode || planCard?.materialization_mode
+        ? `- Execution Mode: ${(workItem?.supervisor_execution_mode ?? planCard?.materialization_mode)?.toUpperCase()}`
+        : null,
+      session?.current_child_issue_id
+        ? `- Current Child Issue ID: ${session.current_child_issue_id}`
+        : null,
+      session?.active_decision_kind
+        ? `- Waiting Decision: ${session.active_decision_kind}`
+        : null,
+      session?.delivery_state || session?.delivery_summary
+        ? `- Delivery State: ${session.delivery_state ?? 'unknown'}${session.delivery_summary ? ` - ${session.delivery_summary}` : ''}`
+        : null,
+      lastOutcome
+        ? `- Last Material Outcome: ${lastOutcome.slice(0, 900)}`
+        : null,
+      latestSupervisorInstruction || latestSupervisorDecision || latestSupervisorReason
+        ? [
+            '## Supervisor Oversight',
+            latestSupervisorDecision ? `- Decision: ${latestSupervisorDecision}` : null,
+            latestSupervisorReason ? `- Reason: ${latestSupervisorReason}` : null,
+            latestSupervisorInstruction ? `- Next Instruction: ${latestSupervisorInstruction}` : null,
+          ].filter(Boolean).join('\n')
+        : null,
+      recentEvents.length > 0
+        ? [
+            '## Supervisor Session Memory',
+            ...recentEvents.map((event) => {
+              const payload = event.payload_json ? JSON.stringify(event.payload_json) : '{}';
+              return `- ${event.event_kind}: ${payload.slice(0, 700)}`;
+            }),
+          ].join('\n')
+        : null,
+      '- Treat this as the approved execution contract unless a later runtime milestone explicitly pauses for a new decision.',
+    ].filter(Boolean).join('\n');
+  }
+
+  private findSupervisorSessionForWorkItem(
+    workItem: WorkItem | null | undefined,
+  ): SupervisorSessionRecord | null {
+    if (!workItem) {
+      return null;
+    }
+
+    if (workItem.supervisor_root_session_id) {
+      const byId = this.supervisorSessionRepository.findById(workItem.supervisor_root_session_id);
+      if (byId) {
+        return byId;
+      }
+    }
+
+    const rootIssueId = workItem.governance_root_issue_id ?? workItem.linear_issue_id;
+    return this.supervisorSessionRepository.findByRootIssueId(rootIssueId);
+  }
+
+  private inheritSupervisorContext(
+    sourceWorkItem: WorkItem,
+    targetWorkItemId: string,
+  ): void {
+    if (
+      !sourceWorkItem.supervisor_root_session_id &&
+      !sourceWorkItem.supervisor_plan_summary &&
+      !sourceWorkItem.supervisor_acceptance_summary &&
+      !sourceWorkItem.supervisor_execution_mode
+    ) {
+      return;
+    }
+
+    this.workItemRepository.update({
+      id: targetWorkItemId,
+      supervisor_root_session_id: sourceWorkItem.supervisor_root_session_id,
+      supervisor_plan_summary: sourceWorkItem.supervisor_plan_summary,
+      supervisor_acceptance_summary: sourceWorkItem.supervisor_acceptance_summary,
+      supervisor_execution_mode: sourceWorkItem.supervisor_execution_mode,
+    });
+  }
+
   private async updateWorkspaceStateMetadata(
     workspacePath: string,
     updater: (metadata: Record<string, unknown>) => void,
@@ -4930,6 +5091,7 @@ export class Orchestrator extends EventEmitter {
           undefined,
           buildReviewAgentContextMarkdown(reviewContext),
           this.buildHarnessPromptSection(governedState.effectiveHarness),
+          this.buildSupervisorPromptSection(workItem),
         );
         inputSummary = summarizeReviewContext(reviewContext);
         workItem = this.workItemRepository.update({
@@ -4943,6 +5105,7 @@ export class Orchestrator extends EventEmitter {
           undefined,
           buildDevAgentContextMarkdown(devContext),
           this.buildHarnessPromptSection(governedState.effectiveHarness),
+          this.buildSupervisorPromptSection(workItem),
         );
         inputSummary = summarizeDevContext(devContext);
         workItem = this.workItemRepository.update({
@@ -5635,6 +5798,17 @@ export class Orchestrator extends EventEmitter {
           ...result,
           work_item_id: workItemId,
           final_state: runningEntry.issue.state,
+          cli_result: {
+            ok: false,
+            final_state: runningEntry.issue.state,
+            review_decision: null,
+            feedback: 'Stopped by user',
+            delivery_code: 'manual_stop',
+            delivery_summary: '这张单已被手动停止；除非用户显式 retry 或更新 tracker 内容，否则不会自动重启。',
+            retry_hint: 'stop',
+            linear_api_calls: 0,
+            github_api_calls: 0,
+          },
         });
       }
 

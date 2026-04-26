@@ -16,6 +16,7 @@ interface TelegramWebhookInfoPayload {
 export interface TelegramWebhookDiagnosticsService {
   getSnapshot(): TelegramWebhookDiagnostics;
   maybeRefresh(): void;
+  refreshNow(): Promise<void>;
   recordCallbackSuccess(): void;
   recordCallbackFailure(error?: Error | null): void;
   recordAudit(record: TelegramCallbackAuditRecord): void;
@@ -90,6 +91,21 @@ export class DefaultTelegramWebhookDiagnosticsService implements TelegramWebhook
     this.refreshInFlight = this.refresh().finally(() => {
       this.refreshInFlight = null;
     });
+  }
+
+  async refreshNow(): Promise<void> {
+    if (!this.botToken) {
+      return;
+    }
+
+    if (this.refreshInFlight) {
+      await this.refreshInFlight;
+    }
+
+    this.refreshInFlight = this.refresh().finally(() => {
+      this.refreshInFlight = null;
+    });
+    await this.refreshInFlight;
   }
 
   recordCallbackSuccess(): void {

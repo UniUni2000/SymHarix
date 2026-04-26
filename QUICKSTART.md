@@ -113,11 +113,18 @@ bun --env-file=.env run src/cli/index.ts verify-live-lifecycle --project-slug 1d
 - `SYMPHONY_BOT_LLM_BASE_URL`
 - `SYMPHONY_BOT_LLM_TIMEOUT_MS`
 - `SYMPHONY_BOT_LLM_HTTP_TRANSPORT`
+- `SYMPHONY_SUPERVISOR_LLM_PROVIDER`
+- `SYMPHONY_SUPERVISOR_LLM_MODEL`
+- `SYMPHONY_SUPERVISOR_LLM_API_KEY`
+- `SYMPHONY_SUPERVISOR_LLM_BASE_URL`
+- `SYMPHONY_SUPERVISOR_LLM_TIMEOUT_MS`
 - `SYMPHONY_DISCORD_BOT_TOKEN`
 - `SYMPHONY_DISCORD_PUBLIC_KEY`
 - `SYMPHONY_DISCORD_OPERATOR_IDS`
 
 Bot LLM 的运行参数统一放在 `.env`。建议本地 Telegram 使用 `SYMPHONY_BOT_LLM_TIMEOUT_MS=15000` 和 `SYMPHONY_BOT_LLM_HTTP_TRANSPORT=fetch`；`auto` 会启用 curl 到 fetch 的客户端 fallback，排障有用，但最坏情况下会拉长等待时间。
+
+Supervisor planning brain 默认复用 `SYMPHONY_BOT_LLM_*` 的 provider/model/key/base URL，但使用自己的超时预算，默认 `45000ms`；需要单独模型或超时时再设置 `SYMPHONY_SUPERVISOR_LLM_*`。它失败时会自动回落到本地计划规则。
 
 Phase 4 之后的几个实用点：
 
@@ -130,7 +137,7 @@ Telegram 额外说明：
 
 - 只要配置了 `SYMPHONY_TELEGRAM_BOT_TOKEN`，`bun run start -- --port 3000` 就会在启动时自动初始化 Telegram webhook
 - 如果你已经有公网地址，设置 `SYMPHONY_PUBLIC_BASE_URL=https://your-host`
-- 如果没给公网地址，系统会尝试自动调用 `cloudflared` 建一条临时 tunnel；也可以通过 `SYMPHONY_TELEGRAM_TUNNEL_COMMAND` 覆盖命令
+- 如果没给公网地址，系统会尝试自动调用 `cloudflared` 建一条临时 tunnel，默认使用更稳的 `--protocol http2`；也可以通过 `SYMPHONY_TELEGRAM_TUNNEL_COMMAND` / `SYMPHONY_TELEGRAM_TUNNEL_PROTOCOL` 覆盖
 - 如果想关闭自动 Telegram bootstrap，设置 `SYMPHONY_TELEGRAM_BOOTSTRAP=off`
 - 如果本机没有 `cloudflared`，也没给 `SYMPHONY_PUBLIC_BASE_URL`，服务仍会启动，但 Telegram inbound 不会接通
 - `SYMPHONY_TELEGRAM_OPERATIONS_CHAT_ID` 用来指定固定运维会话；不配置时，只有已经绑定到 issue 的来源会话或手工 watch 会收到主动 follow-up

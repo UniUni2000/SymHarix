@@ -21,6 +21,10 @@ export interface TelegramWebhookBootstrapOptions {
   bootstrapMode?: 'auto' | 'off';
   tunnelProvider?: TelegramTunnelProvider;
   fetcher?: typeof fetch;
+  retryDelayMs?: number;
+  retryAttempts?: number;
+  tunnelReadyDelayMs?: number;
+  tunnelReadyAttempts?: number;
 }
 
 function normalizeBaseUrl(value: string | null | undefined): string | null {
@@ -40,6 +44,18 @@ async function defaultFetch(input: RequestInfo | URL, init?: RequestInit): Promi
   return fetch(input, init);
 }
 
+function isRetryableTunnelWebhookError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /setWebhook failed/i.test(message) && /failed to resolve host|host.*not known|dns/i.test(message);
+}
+
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export function createCloudflaredTunnelProvider(
   tunnelCommand: string = process.env.SYMPHONY_TELEGRAM_TUNNEL_COMMAND?.trim() || 'cloudflared',
   timeoutMs: number = 15_000,
@@ -47,9 +63,10 @@ export function createCloudflaredTunnelProvider(
   return async (localBaseUrl: string) => {
     return new Promise<TelegramTunnelHandle>((resolve, reject) => {
       let settled = false;
+      const protocol = process.env.SYMPHONY_TELEGRAM_TUNNEL_PROTOCOL?.trim() || 'http2';
       const child = spawn(
         tunnelCommand,
-        ['tunnel', '--url', localBaseUrl, '--no-autoupdate'],
+        ['tunnel', '--url', localBaseUrl, '--protocol', protocol, '--no-autoupdate'],
         {
           stdio: ['ignore', 'pipe', 'pipe'],
           env: process.env,
@@ -129,6 +146,10 @@ export class TelegramWebhookBootstrapService {
   private readonly fetcher: typeof fetch;
   private readonly bootstrapMode: 'auto' | 'off';
   private readonly tunnelProvider: TelegramTunnelProvider;
+  private readonly retryDelayMs: number;
+  private readonly retryAttempts: number;
+  private readonly tunnelReadyDelayMs: number;
+  private readonly tunnelReadyAttempts: number;
   private tunnelHandle: TelegramTunnelHandle | null = null;
   private activePublicBaseUrl: string | null = null;
   private activeWebhookUrl: string | null = null;
@@ -138,6 +159,10 @@ export class TelegramWebhookBootstrapService {
     this.fetcher = options.fetcher ?? defaultFetch;
     this.bootstrapMode = options.bootstrapMode ?? 'auto';
     this.tunnelProvider = options.tunnelProvider ?? createCloudflaredTunnelProvider();
+    this.retryDelayMs = Math.max(0, options.retryDelayMs ?? 1_500);
+    this.retryAttempts = Math.max(1, options.retryAttempts ?? 3);
+    this.tunnelReadyDelayMs = Math.max(0, options.tunnelReadyDelayMs ?? 1_000);
+    this.tunnelReadyAttempts = Math.max(1, options.tunnelReadyAttempts ?? 10);
   }
 
   async bootstrap(params: {
@@ -163,11 +188,9 @@ export class TelegramWebhookBootstrapService {
     }
 
     let publicBaseUrl = normalizeBaseUrl(this.options.publicBaseUrl);
-    let usedTunnel = false;
+    const usedTunnel = !publicBaseUrl;
     if (!publicBaseUrl) {
-      this.tunnelHandle = await this.tunnelProvider(params.localBaseUrl);
-      publicBaseUrl = normalizeBaseUrl(this.tunnelHandle.publicBaseUrl);
-      usedTunnel = true;
+      publicBaseUrl = await this.createReachableTunnel(params.localBaseUrl);
     }
 
     if (!publicBaseUrl) {
@@ -175,11 +198,7 @@ export class TelegramWebhookBootstrapService {
     }
 
     const webhookUrl = buildWebhookUrl(publicBaseUrl, params.inboundPath);
-    await this.callTelegram('setWebhook', {
-      url: webhookUrl,
-      secret_token: this.options.webhookSecret || undefined,
-      allowed_updates: ['message', 'callback_query'],
-    });
+    await this.setWebhookWithRetry(webhookUrl, usedTunnel);
 
     this.activePublicBaseUrl = publicBaseUrl;
     this.activeWebhookUrl = webhookUrl;
@@ -211,6 +230,83 @@ export class TelegramWebhookBootstrapService {
     this.activePublicBaseUrl = null;
     this.activeWebhookUrl = null;
     this.usedTunnel = false;
+  }
+
+  private async createReachableTunnel(localBaseUrl: string): Promise<string> {
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= this.retryAttempts; attempt += 1) {
+      const tunnelHandle = await this.tunnelProvider(localBaseUrl);
+      const publicBaseUrl = normalizeBaseUrl(tunnelHandle.publicBaseUrl);
+      if (!publicBaseUrl) {
+        await tunnelHandle.dispose();
+        throw new Error('Telegram tunnel provider returned an empty public URL');
+      }
+
+      try {
+        await this.waitForTunnelReachability(publicBaseUrl);
+        this.tunnelHandle = tunnelHandle;
+        return publicBaseUrl;
+      } catch (error) {
+        lastError = error;
+        await tunnelHandle.dispose();
+        if (attempt >= this.retryAttempts) {
+          break;
+        }
+        await sleep(this.retryDelayMs);
+      }
+    }
+
+    throw lastError instanceof Error
+      ? lastError
+      : new Error('Telegram bootstrap could not create a reachable tunnel');
+  }
+
+  private async setWebhookWithRetry(webhookUrl: string, usedTunnel: boolean): Promise<void> {
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= this.retryAttempts; attempt += 1) {
+      try {
+        await this.callTelegram('setWebhook', {
+          url: webhookUrl,
+          secret_token: this.options.webhookSecret || undefined,
+          allowed_updates: ['message', 'callback_query'],
+        });
+        return;
+      } catch (error) {
+        lastError = error;
+        const shouldRetry = usedTunnel
+          && attempt < this.retryAttempts
+          && isRetryableTunnelWebhookError(error);
+        if (!shouldRetry) {
+          throw error;
+        }
+        await sleep(this.retryDelayMs);
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  private async waitForTunnelReachability(publicBaseUrl: string): Promise<void> {
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= this.tunnelReadyAttempts; attempt += 1) {
+      try {
+        const response = await this.fetcher(publicBaseUrl, {
+          method: 'GET',
+        });
+        if (response.status >= 500) {
+          throw new Error(`Telegram tunnel URL is not ready yet (status ${response.status})`);
+        }
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt >= this.tunnelReadyAttempts) {
+          break;
+        }
+        await sleep(this.tunnelReadyDelayMs);
+      }
+    }
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(`Timed out waiting for Telegram tunnel URL to become reachable: ${publicBaseUrl}`);
   }
 
   private async callTelegram(method: 'setWebhook' | 'deleteWebhook', payload: Record<string, unknown>): Promise<void> {

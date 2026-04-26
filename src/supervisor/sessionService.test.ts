@@ -4,7 +4,7 @@ import { initializeSchema, SupervisorSessionEventRepository, SupervisorSessionRe
 import { TrackerProjectResolutionService } from '../tracker/projectResolution';
 import type { RuntimeControlPlane, RuntimeIssueView, RuntimeStreamEvent } from '../runtime/types';
 import type { BotAssistantIntent, BotCommandContext, BotRuntimeCopilotContext } from '../bots/types';
-import { SupervisorSessionService } from './sessionService';
+import { SupervisorSessionService, type SupervisorPlanBrain } from './sessionService';
 
 function createIssueView(overrides: Partial<RuntimeIssueView> = {}): RuntimeIssueView {
   return {
@@ -334,7 +334,7 @@ describe('SupervisorSessionService', () => {
     expect(first?.format).toBe('telegram_html');
     expect(first?.session_id).toBeTruthy();
     expect(first?.material_key).toContain('session');
-    expect(first?.action_rows?.[0]?.[0]?.label).toBe('按推荐继续');
+    expect(first?.action_rows?.[0]?.[0]?.label).toBe('批准并开始');
     expect(runtime.createIssueCalls).toHaveLength(0);
     const session = sessions.findActiveByConversation({
       transport: 'telegram',
@@ -373,6 +373,146 @@ describe('SupervisorSessionService', () => {
     expect(eventKinds).toContain('materialized_plan_created');
   });
 
+  test('folds repo intelligence into the plan card before approval', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(
+      runtime,
+      createProjectResolver(),
+      sessions,
+      events,
+      {
+        resolve: async () => ({
+          repo_ref: 'UniUni2000/test2',
+          harness_status: 'shadow',
+          constitution_status: 'missing',
+          decision_memory_count: 2,
+          related_conflict_count: 3,
+          related_debt_signal_count: 2,
+          top_conflict_summary: '最近几次相关需求都在 runtime ↔ bots 边界上反复冲突。',
+          top_debt_summary: 'runtime 控制面已经积累了待清理债务。',
+        }),
+      },
+    );
+
+    const response = await service.respond({
+      context: createContext(),
+      text: '把 runtime API、bot copy 和控制面清理一起做掉',
+      intent: {
+        kind: 'create_issue',
+        title: '把 runtime API、bot copy 和控制面清理一起做掉',
+        description: '希望这轮一起收口',
+        project_slug: 'test2',
+      },
+      runtimeContext: createRuntimeContext(),
+      canWrite: true,
+    });
+
+    expect(response).not.toBeNull();
+    expect(response?.message).toContain('shadow harness');
+    expect(response?.message).toContain('.symphony-constitution.md');
+    expect(response?.message).toContain('runtime 控制面已经积累了待清理债务');
+    const session = sessions.findActiveByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(session?.state).toBe('awaiting_user_approval');
+    expect(session?.plan_card?.known_risks).toEqual(expect.arrayContaining([
+      expect.stringContaining('shadow harness'),
+      expect.stringContaining('.symphony-constitution.md'),
+      expect.stringContaining('3 条相关冲突记忆'),
+      expect.stringContaining('2 条相关 debt signal'),
+    ]));
+    expect(session?.plan_card?.execution_strategy).toContain('先把源目标收成 root thread');
+  });
+
+  test('lets the memoryful planning brain refine the plan card using session events and repo intelligence', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const seenInputs: Array<Parameters<SupervisorPlanBrain['refinePlan']>[0]> = [];
+    const planBrain: SupervisorPlanBrain = {
+      refinePlan: async (input) => {
+        seenInputs.push(input);
+        return {
+          state: 'awaiting_user_approval',
+          approvalMode: 'explicit_user_approval',
+          rationale: 'cleanup request needs bounded acceptance and explicit approval',
+          planCard: {
+            title: '受控清理仓库残余文件',
+            user_goal: '清理仓库残余文件，同时保留有效源码和配置',
+            in_scope: ['识别未跟踪/流程残余文件', '删除确认无用的临时产物'],
+            out_of_scope: ['不删除业务源码', '不改动真实用户数据'],
+            acceptance: ['git status 只剩预期变更', '清理清单写入交付说明'],
+            known_risks: ['清理类操作需要避免误删有效文件'],
+            execution_strategy: '先让 dev agent 列出候选残余，再按最小安全范围清理和验证。',
+            materialization_mode: 'root_only',
+            recommended_option: {
+              label: '批准受控清理',
+              summary: '按安全清理计划建单并执行。',
+            },
+          },
+        };
+      },
+    };
+    const service = new SupervisorSessionService(
+      runtime,
+      createProjectResolver(),
+      sessions,
+      events,
+      {
+        resolve: async () => ({
+          repo_ref: 'UniUni2000/test2',
+          harness_status: 'formal',
+          constitution_status: 'present',
+          decision_memory_count: 4,
+          related_conflict_count: 1,
+          related_debt_signal_count: 0,
+          top_conflict_summary: '历史清理任务曾误碰 workflow artifacts。',
+          top_debt_summary: null,
+        }),
+      },
+      planBrain,
+    );
+
+    const response = await service.respond({
+      context: createContext(),
+      text: '这个仓库还有文件残余，把它都清空',
+      intent: {
+        kind: 'create_issue',
+        title: '这个仓库还有文件残余，把它都清空',
+        description: null,
+        project_slug: 'test2',
+      },
+      runtimeContext: createRuntimeContext(),
+      canWrite: true,
+    });
+
+    expect(response).not.toBeNull();
+    expect(response?.message).toContain('受控清理仓库残余文件');
+    expect(response?.message).toContain('不删除业务源码');
+    expect(response?.message).toContain('批准受控清理');
+    expect(runtime.createIssueCalls).toHaveLength(0);
+    expect(seenInputs).toHaveLength(1);
+    expect(seenInputs[0]?.repoIntelligence?.decision_memory_count).toBe(4);
+    expect(seenInputs[0]?.recentEvents.map((event) => event.event_kind)).toContain('user_message');
+
+    const session = sessions.findActiveByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(session?.state).toBe('awaiting_user_approval');
+    expect(session?.plan_card?.title).toBe('受控清理仓库残余文件');
+    expect(events.listBySession(session!.id).map((event) => event.event_kind)).toContain('plan_brain_applied');
+  });
+
   test('auto-starts a small focused issue after generating a compact plan card', async () => {
     db = new Database(':memory:');
     initializeSchema(db);
@@ -397,7 +537,7 @@ describe('SupervisorSessionService', () => {
 
     expect(response).not.toBeNull();
     expect(response?.format).toBe('telegram_html');
-    expect(response?.message).toContain('计划已进入执行');
+    expect(response?.message).toContain('计划执行中');
     expect(response?.session_id).toBeTruthy();
     expect(runtime.createIssueCalls).toHaveLength(1);
     const session = sessions.findActiveByConversation({
@@ -406,6 +546,41 @@ describe('SupervisorSessionService', () => {
     });
     expect(session?.state).toBe('executing');
     expect(session?.approval_mode).toBe('auto');
+  });
+
+  test('honors explicit user request to wait for approval even for a focused issue', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+
+    const response = await service.respond({
+      context: createContext(),
+      text: '帮我新增 supervisor live smoke 文档，完成后跑测试。先给我计划卡，我批准后再做。',
+      intent: {
+        kind: 'create_issue',
+        title: '帮我新增 supervisor live smoke 文档，完成后跑测试。先给我计划卡，我批准后再做。',
+        description: null,
+        project_slug: 'test2',
+      },
+      runtimeContext: createRuntimeContext(),
+      canWrite: true,
+    });
+
+    expect(response).not.toBeNull();
+    expect(response?.format).toBe('telegram_html');
+    expect(response?.message).toContain('计划待你批准');
+    expect(response?.action_rows?.[0]?.[0]?.label).toBe('批准并开始');
+    expect(runtime.createIssueCalls).toHaveLength(0);
+    const session = sessions.findActiveByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(session?.state).toBe('awaiting_user_approval');
+    expect(session?.approval_mode).toBe('explicit_user_approval');
   });
 
   test('asks for a repo first when the request does not yet bind to a project and resumes once the repo is clarified', async () => {
@@ -454,11 +629,64 @@ describe('SupervisorSessionService', () => {
 
     expect(second).not.toBeNull();
     expect(second?.format).toBe('telegram_html');
-    expect(second?.message).toContain('计划已进入执行');
+    expect(second?.message).toContain('计划执行中');
     expect(runtime.createIssueCalls).toHaveLength(1);
     const updated = sessions.findById(session!.id);
     expect(updated?.repo_ref).toBe('test2');
     expect(updated?.state).toBe('executing');
+  });
+
+  test('preserves explicit approval gate after repo clarification', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+    const context = createContext();
+
+    const first = await service.respond({
+      context,
+      text: '帮我新增 supervisor live smoke 文档，完成后跑测试。先给我计划卡，我批准后再做。',
+      intent: {
+        kind: 'create_issue',
+        title: '帮我新增 supervisor live smoke 文档，完成后跑测试。先给我计划卡，我批准后再做。',
+        description: null,
+        project_slug: null,
+      },
+      runtimeContext: createRuntimeContext({
+        default_project_slug: null,
+      }),
+      canWrite: true,
+    });
+
+    expect(first).not.toBeNull();
+    expect(first?.message).toContain('一起补计划');
+    expect(runtime.createIssueCalls).toHaveLength(0);
+    const session = sessions.findActiveByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+
+    const second = await service.respond({
+      context,
+      text: '仓库 test2',
+      intent: null,
+      runtimeContext: createRuntimeContext({
+        default_project_slug: null,
+      }),
+      canWrite: true,
+    });
+
+    expect(second).not.toBeNull();
+    expect(second?.message).toContain('计划待你批准');
+    expect(second?.action_rows?.[0]?.[0]?.label).toBe('批准并开始');
+    expect(runtime.createIssueCalls).toHaveLength(0);
+    const updated = sessions.findById(session!.id);
+    expect(updated?.repo_ref).toBe('test2');
+    expect(updated?.state).toBe('awaiting_user_approval');
+    expect(updated?.approval_mode).toBe('explicit_user_approval');
   });
 
   test('stores clarification answers in the plan before auto materializing a focused issue', async () => {
@@ -502,12 +730,91 @@ describe('SupervisorSessionService', () => {
     });
 
     expect(second).not.toBeNull();
-    expect(second?.message).toContain('计划已进入执行');
+    expect(second?.message).toContain('计划执行中');
     expect(runtime.createIssueCalls).toHaveLength(1);
     expect(String(runtime.createIssueCalls[0]?.description)).toContain('/settings 页面保存主题');
     const updated = sessions.findById(session!.id);
     expect(updated?.plan_card?.acceptance.join('\n')).toContain('/settings 页面保存主题');
     expect(events.listBySession(session!.id).some((event) => event.event_kind === 'clarification_answer_recorded')).toBe(true);
+  });
+
+  test('walks a Telegram-first supervisor session from repo clarification to approval to materialized execution', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+    const context = createContext();
+
+    const first = await service.respond({
+      context,
+      text: '把 runtime API 和 Telegram 文案一起收口',
+      intent: {
+        kind: 'create_issue',
+        title: '把 runtime API 和 Telegram 文案一起收口',
+        description: '希望这轮一起推进，但我还没指定仓库',
+        project_slug: null,
+      },
+      runtimeContext: createRuntimeContext({
+        default_project_slug: null,
+      }),
+      canWrite: true,
+    });
+
+    expect(first).not.toBeNull();
+    expect(first?.format).toBe('telegram_html');
+    expect(first?.message).toContain('一起补计划');
+    expect(first?.message).toContain('还缺什么');
+    expect(first?.message).toContain('直接回复即可');
+    const session = sessions.findActiveByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(session?.state).toBe('clarifying');
+    expect(runtime.createIssueCalls).toHaveLength(0);
+
+    const second = await service.respond({
+      context,
+      text: '仓库 test2',
+      intent: null,
+      runtimeContext: createRuntimeContext({
+        default_project_slug: null,
+      }),
+      canWrite: true,
+    });
+
+    expect(second).not.toBeNull();
+    expect(second?.format).toBe('telegram_html');
+    expect(second?.message).toContain('计划待你批准');
+    expect(second?.message).toContain('我已理解的计划');
+    expect(second?.message).toContain('批准后会发生什么');
+    expect(second?.action_rows?.[0]?.[0]?.label).toBe('批准并开始');
+    const updated = sessions.findById(session!.id);
+    expect(updated?.state).toBe('awaiting_user_approval');
+    expect(updated?.repo_ref).toBe('test2');
+
+    const third = await service.respond({
+      context,
+      text: '批准并开始',
+      intent: null,
+      runtimeContext: createRuntimeContext({
+        default_project_slug: null,
+      }),
+      canWrite: true,
+    });
+
+    expect(third).not.toBeNull();
+    expect(third?.format).toBe('telegram_html');
+    expect(third?.message).toContain('计划执行中');
+    expect(third?.message).toContain('当前子任务');
+    expect(third?.message).toContain('我会继续推进，只在关键节点回来找你');
+    expect(runtime.createIssueCalls).toHaveLength(1);
+    expect(runtime.splitGovernanceCalls).toEqual(['issue-1']);
+    const finalSession = sessions.findById(session!.id);
+    expect(finalSession?.state).toBe('executing');
+    expect(finalSession?.current_child_issue_id).toBe('issue-2');
   });
 
   test('executes the recommended governance action from an awaiting-user-decision session', async () => {
@@ -653,6 +960,73 @@ describe('SupervisorSessionService', () => {
     expect(milestoneEvents).toHaveLength(1);
     expect(milestoneEvents[0]?.payload_json?.milestone_kind).toBe('delivery_failed');
     expect(sessions.findById(session.id)?.delivery_summary).toContain('PR 没建成');
+  });
+
+  test('switches an executing root session into awaiting-user-decision when the current child delivery fails', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+    const session = sessions.create({
+      id: 'session-1',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'executing',
+      repo_ref: 'test2',
+      intake_mode: 'plan_then_approve',
+      approval_mode: 'explicit_user_approval',
+      plan_version: 1,
+      root_issue_id: 'issue-root',
+      current_child_issue_id: 'issue-child-1',
+      plan_card: {
+        title: 'Root plan',
+        user_goal: 'Root plan',
+        in_scope: ['按 child queue 顺序推进'],
+        out_of_scope: ['不并发推进后续 child'],
+        acceptance: ['当前 child 完成后自动接力下一个 child'],
+        known_risks: [],
+        execution_strategy: '只放行 current child，后续自动接力。',
+        needs_user_approval: true,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_with_split_queue',
+        recommended_option: {
+          label: '按推荐继续',
+          summary: '继续推进当前 child。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    runtime.emit({
+      type: 'issue',
+      data: createIssueView({
+        issue_id: 'issue-child-1',
+        identifier: 'INT-2',
+        title: 'First child',
+        governance_root_issue_id: 'issue-root',
+        governance_root_issue_identifier: 'INT-1',
+        orchestrator_state: 'failed',
+        delivery_state: 'delivery_failed',
+        delivery_code: 'review_submit_failed',
+        delivery_summary: 'INT-2 已拿到证据，但卡在 review 提交。',
+      }),
+    });
+
+    const updated = sessions.findById(session.id);
+    expect(updated?.state).toBe('awaiting_user_decision');
+    expect(updated?.delivery_state).toBe('delivery_failed');
+    expect(updated?.delivery_summary).toContain('INT-2 已拿到证据');
+    const milestoneEvents = events
+      .listBySession(session.id)
+      .filter((event) => event.event_kind === 'orchestrator_milestone');
+    expect(milestoneEvents.at(-1)?.payload_json?.milestone_kind).toBe('child_failed');
   });
 
   test('rewrites the plan card and requires reapproval when execution receives a scope-changing user message', async () => {
@@ -925,5 +1299,134 @@ describe('SupervisorSessionService', () => {
     expect(response?.message).toContain('/settings 的主题保存');
     expect(response?.message).toContain('刷新页面后主题仍然生效');
     expect(response?.message).toContain('INT-2');
+  });
+
+  test('records an execution oversight instruction when a running issue publishes a new milestone', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+    const session = sessions.create({
+      id: 'session-oversight',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'executing',
+      repo_ref: 'test2',
+      intake_mode: 'direct_run',
+      approval_mode: 'auto',
+      plan_version: 1,
+      root_issue_id: 'issue-root',
+      plan_card: {
+        title: '新增设置页主题保存',
+        user_goal: '让用户能保存主题偏好',
+        in_scope: ['实现主题保存并补测试'],
+        out_of_scope: ['不重做登录页'],
+        acceptance: ['刷新页面后主题仍然生效', '相关测试通过'],
+        known_risks: [],
+        execution_strategy: '小步实现后跑测试。',
+        needs_user_approval: false,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '自动执行',
+          summary: '继续推进实现。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    runtime.emit({
+      type: 'issue',
+      data: createIssueView({
+        issue_id: 'issue-root',
+        identifier: 'INT-1',
+        title: '新增设置页主题保存',
+        orchestrator_state: 'retry_scheduled',
+        delivery_summary: '测试第一次失败，准备重试。',
+        governance_root_issue_id: 'issue-root',
+        updated_at: '2026-01-01T01:00:00.000Z',
+      }),
+    });
+
+    const oversightEvents = events
+      .listBySession(session.id)
+      .filter((event) => event.event_kind === 'supervisor_oversight');
+    expect(oversightEvents).toHaveLength(1);
+    expect(oversightEvents[0]?.payload_json?.decision).toBe('continue');
+    expect(String(oversightEvents[0]?.payload_json?.dev_instruction)).toContain('刷新页面后主题仍然生效');
+    expect(sessions.findById(session.id)?.last_material_outcome?.supervisor_decision).toBe('continue');
+  });
+
+  test('escalates execution oversight to user approval when delivery fails', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+    const session = sessions.create({
+      id: 'session-failure',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'executing',
+      repo_ref: 'test2',
+      intake_mode: 'direct_run',
+      approval_mode: 'auto',
+      plan_version: 1,
+      root_issue_id: 'issue-root',
+      plan_card: {
+        title: '清理仓库残余文件',
+        user_goal: '安全清理仓库残余文件',
+        in_scope: ['识别并清理无用文件'],
+        out_of_scope: ['不删除业务源码'],
+        acceptance: ['清理结果可解释', '测试通过'],
+        known_risks: ['误删风险较高'],
+        execution_strategy: '先识别再清理。',
+        needs_user_approval: false,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '自动执行',
+          summary: '继续推进实现。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    runtime.emit({
+      type: 'issue',
+      data: createIssueView({
+        issue_id: 'issue-root',
+        identifier: 'INT-1',
+        title: '清理仓库残余文件',
+        orchestrator_state: 'failed',
+        delivery_state: 'delivery_failed',
+        delivery_code: 'dirty_workspace_no_commit',
+        delivery_summary: '证据已满足，但交付卡在 dirty workspace，没有可提交代码。',
+        governance_root_issue_id: 'issue-root',
+        updated_at: '2026-01-01T01:00:00.000Z',
+      }),
+    });
+
+    const updated = sessions.findById(session.id);
+    expect(updated?.state).toBe('awaiting_user_decision');
+    expect(updated?.active_decision_kind).toBe('delivery_failure');
+    expect(updated?.last_material_outcome?.supervisor_decision).toBe('ask_user');
+    const oversightEvents = events
+      .listBySession(session.id)
+      .filter((event) => event.event_kind === 'supervisor_oversight');
+    expect(String(oversightEvents[0]?.payload_json?.user_summary)).toContain('dirty workspace');
   });
 });

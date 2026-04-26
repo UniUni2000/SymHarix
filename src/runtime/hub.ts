@@ -11,6 +11,7 @@ import {
 } from '../database';
 import type { SupervisorSessionRecord, WorkItem } from '../database/types';
 import type { OrchestratorStateSnapshot } from '../orchestrator';
+import { describeSupervisorThread } from '../supervisor/threadSummary';
 import type { AgentEvent, AgentTimelinePayload, Issue } from '../types';
 import type {
   CreateIssueRequest,
@@ -552,6 +553,7 @@ export class RuntimeHub implements RuntimeControlPlane {
       : null;
     const supervisorProjection = this.buildSupervisorProjection(
       governanceRootIssueId,
+      workItem,
       governanceThread,
     );
     const governanceThreadState = governanceThread?.state ?? (
@@ -630,6 +632,9 @@ export class RuntimeHub implements RuntimeControlPlane {
       governance_current_child: governanceThread?.currentChild ?? null,
       governance_child_queue: governanceThread?.childQueue ?? [],
       next_recommended_action: nextRecommendedAction,
+      governance_pause_reason: governanceThread?.pauseReason ?? null,
+      governance_expected_handoff: governanceThread?.expectedHandoff ?? null,
+      governance_queued_child_identifiers: governanceThread?.queuedChildIdentifiers ?? [],
       delivery_state: delivery.state,
       delivery_code: delivery.code,
       delivery_summary: delivery.summary,
@@ -716,6 +721,9 @@ export class RuntimeHub implements RuntimeControlPlane {
       governance_current_child: null,
       governance_child_queue: [],
       next_recommended_action: null,
+      governance_pause_reason: null,
+      governance_expected_handoff: null,
+      governance_queued_child_identifiers: [],
       delivery_state: null,
       delivery_code: null,
       delivery_summary: null,
@@ -1115,6 +1123,9 @@ export class RuntimeHub implements RuntimeControlPlane {
     childQueue: RuntimeGovernanceChildIssueView[];
     children: RuntimeGovernanceChildIssueView[];
     nextRecommendedAction: string | null;
+    pauseReason: string | null;
+    expectedHandoff: string | null;
+    queuedChildIdentifiers: string[];
   } | null {
     const children = this.workItemRepository
       .findByGovernanceParentIssueId(workItem.linear_issue_id)
@@ -1155,6 +1166,20 @@ export class RuntimeHub implements RuntimeControlPlane {
       } satisfies RuntimeGovernanceChildIssueView;
     });
     const currentChild = currentChildIndex >= 0 ? childViews[currentChildIndex] ?? null : null;
+    const queuedChildren = childViews.filter((child) => child.queue_state === 'queued');
+    const queuedChildIdentifiers = queuedChildren.map((child) => child.issue_identifier);
+    const pauseReason = currentChild
+      ? (
+        currentChild.delivery_state === 'delivery_failed' || currentChild.orchestrator_state === 'failed'
+          ? `源单当前暂停在 ${currentChild.issue_identifier}；需要先处理这张子任务的交付失败。`
+          : `源单当前暂停在 ${currentChild.issue_identifier}；完成这张子任务前不会放行后续 sibling。`
+      )
+      : '当前没有可推进的治理子任务，等待根线程重新评估。';
+    const expectedHandoff = queuedChildIdentifiers.length > 0
+      ? `处理完 ${currentChild?.issue_identifier ?? '当前子任务'} 后，会自动接力 ${queuedChildIdentifiers.join('、')}。`
+      : currentChild
+        ? `处理完 ${currentChild.issue_identifier} 后，根线程会重新评估是否恢复源单。`
+        : null;
 
     return {
       state: currentChild?.delivery_state === 'delivery_failed' || currentChild?.orchestrator_state === 'failed'
@@ -1163,14 +1188,24 @@ export class RuntimeHub implements RuntimeControlPlane {
       currentChild,
       childQueue: childViews,
       children: childViews,
+      pauseReason,
+      expectedHandoff,
+      queuedChildIdentifiers,
       nextRecommendedAction: currentChild
-        ? `先处理治理子任务 ${currentChild.issue_identifier}`
+        ? (
+          currentChild.delivery_state === 'delivery_failed' || currentChild.orchestrator_state === 'failed'
+            ? `先处理治理子任务 ${currentChild.issue_identifier}；源单仍暂停，${queuedChildren.length > 0 ? `处理完后会自动接力 ${queuedChildren.map((child) => child.issue_identifier).join('、')}。` : '处理完后再继续源计划。'}`
+            : queuedChildren.length > 0
+              ? `先处理治理子任务 ${currentChild.issue_identifier}；完成后会自动接力 ${queuedChildren.map((child) => child.issue_identifier).join('、')}。`
+              : `先处理治理子任务 ${currentChild.issue_identifier}`
+        )
         : '等待根治理线程重新评估。',
     };
   }
 
   private buildSupervisorProjection(
     rootIssueId: string,
+    workItem: WorkItem,
     governanceThread: ReturnType<RuntimeHub['buildGovernanceThreadProjection']>,
   ): {
     state: string | null;
@@ -1178,6 +1213,23 @@ export class RuntimeHub implements RuntimeControlPlane {
   } {
     const session = this.supervisorSessionRepository.findByRootIssueId(rootIssueId);
     if (!session) {
+      if (workItem.supervisor_root_session_id || workItem.supervisor_plan_summary || workItem.supervisor_acceptance_summary) {
+        return {
+          state: 'materialized',
+          summary: [
+            workItem.supervisor_plan_summary ?? '当前计划线程正在推进。',
+            workItem.supervisor_acceptance_summary
+              ? `完成标准：${workItem.supervisor_acceptance_summary}`
+              : null,
+            workItem.supervisor_execution_mode === 'root_with_split_queue'
+              ? '执行方式：root 保持主线程，child queue 顺序接力。'
+              : workItem.supervisor_execution_mode === 'root_only'
+                ? '执行方式：单 root 线程直接推进。'
+                : null,
+          ].filter(Boolean).join(' '),
+        };
+      }
+
       return {
         state: null,
         summary: null,
@@ -1194,30 +1246,10 @@ export class RuntimeHub implements RuntimeControlPlane {
     session: SupervisorSessionRecord,
     governanceThread: ReturnType<RuntimeHub['buildGovernanceThreadProjection']>,
   ): string {
-    const planTitle = session.plan_card?.title ?? '当前计划线程';
-    const currentChild = governanceThread?.currentChild ?? null;
-    if (currentChild) {
-      return `计划「${planTitle}」正在执行；当前子任务 ${currentChild.issue_identifier}，后续子任务会按顺序接力。`;
-    }
-
-    if (session.delivery_summary) {
-      return `计划「${planTitle}」当前状态：${session.delivery_summary}`;
-    }
-
-    switch (session.state) {
-      case 'clarifying':
-        return `计划「${planTitle}」还在补充信息。`;
-      case 'awaiting_user_approval':
-      case 'plan_ready':
-        return `计划「${planTitle}」正在等待 Telegram 批准。`;
-      case 'awaiting_user_decision':
-        return `计划「${planTitle}」正在等待你决定下一步。`;
-      case 'completed':
-        return `计划「${planTitle}」已经完成。`;
-      case 'cancelled':
-        return `计划「${planTitle}」已经取消。`;
-      default:
-        return `计划「${planTitle}」正在推进。`;
-    }
+    return describeSupervisorThread({
+      session,
+      currentChild: governanceThread?.currentChild ?? null,
+      childQueue: governanceThread?.childQueue ?? [],
+    });
   }
 }
