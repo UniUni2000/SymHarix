@@ -2,8 +2,8 @@
 
 **Date**: 2026-04-26
 **Status**: Active
-**Root Issue**: INT-108
-**Child Sequence**: INT-109 (1/2) → INT-110 (2/2)
+**Root Issue**: INT-114
+**Child Sequence**: INT-115 (1/2) → INT-116 (2/2)
 **Execution Mode**: ROOT_WITH_SPLIT_QUEUE
 
 ## Overview
@@ -13,13 +13,13 @@ This document describes the root plan for a sequential child task execution patt
 ## Architecture
 
 ```
-ROOT_PLAN (INT-108)
+ROOT_PLAN (INT-114)
     │
-    ├── CHILD_1 (INT-109) ←── Currently released (this task)
+    ├── CHILD_1 (INT-115) ←── Currently released (this task)
     │       └── Creates: docs/supervisor-live-root.md
     │       └── Status: In Progress
     │
-    └── CHILD_2 (INT-110) ←── Queued, waiting
+    └── CHILD_2 (INT-116) ←── Queued, waiting
             └── Creates: docs/supervisor-live-child.md
             └── Status: Queued
 ```
@@ -28,10 +28,10 @@ ROOT_PLAN (INT-108)
 
 ### Root + Child Queue Pattern
 
-1. **Root Plan (INT-108)**: Defines the overall goal and splits work into sequential child tasks
+1. **Root Plan (INT-114)**: Defines the overall goal and splits work into sequential child tasks
 2. **Child Queue**: Children are released one at a time in sequence
-3. **Current Child**: Only the current child issue is active/released (INT-109)
-4. **Queued Children**: Subsequent children wait in queue until their turn (INT-110)
+3. **Current Child**: Only the current child issue is active/released (INT-115)
+4. **Queued Children**: Subsequent children wait in queue until their turn (INT-116)
 
 ### Supervisor Live Execution
 
@@ -43,19 +43,19 @@ The Supervisor oversees execution with these characteristics:
 
 ## Child Task Specifications
 
-### INT-109 (Child 1/2) - Current
+### INT-115 (Child 1/2) - Current
 
 - **Deliverable**: `docs/supervisor-live-root.md` (this file)
 - **Purpose**: Document the root plan and architecture
 - **Completion Criteria**: File exists and content meets root plan requirements
 - **Status**: In Progress
 
-### INT-110 (Child 2/2) - Queued
+### INT-116 (Child 2/2) - Queued
 
 - **Deliverable**: `docs/supervisor-live-child.md`
 - **Purpose**: Document the child execution details
 - **Completion Criteria**: File exists and content meets child plan requirements
-- **Status**: Queued (will be released after INT-109 completes)
+- **Status**: Queued (will be released after INT-115 completes)
 
 ## Governance Properties
 
@@ -69,7 +69,7 @@ The Supervisor oversees execution with these characteristics:
 ## Validation Chain
 
 ```
-INT-108 (Root) ──creates──► INT-109 (Child 1/2) ──completes──► INT-110 (Child 2/2) ──completes──► Root Complete
+INT-114 (Root) ──creates──► INT-115 (Child 1/2) ──completes──► INT-116 (Child 2/2) ──completes──► Root Complete
      │                      │                                │
      │                      │                                │
   defines                delivers                      delivers
@@ -79,12 +79,13 @@ INT-108 (Root) ──creates──► INT-109 (Child 1/2) ──completes──�
 
 ## Supervisor Session Context
 
-- **Session ID**: 76f5a0cc-3057-4809-9bb8-15405b8d86e2
+- **Session ID**: 74ce82f8-97eb-4536-bced-f441566d40d5
 - **Plan Version**: v1
-- **Current Child Issue ID**: 89bf5127-ec64-4f96-b7d7-8326c241e01a (INT-109)
-- **Queued Child Issue ID**: (INT-110 - to be released after INT-109)
-- **Root Issue ID**: e0aea39a-b691-4f11-96a8-ad7359a51577 (INT-108)
+- **Current Child Issue ID**: cd60f1a8-d287-4f21-99ee-33994ec8d99c (INT-115)
+- **Queued Child Issue ID**: (INT-116 - to be released after INT-115)
+- **Root Issue ID**: e9104d82-13fb-4a5a-b14c-80411ee7b845 (INT-114)
 - **Repo Ref**: d886490c7fda
+- **Materialized Plan ID**: See materialized_plan_created in session memory
 
 ## Key Principles
 
@@ -92,3 +93,10 @@ INT-108 (Root) ──creates──► INT-109 (Child 1/2) ──completes──�
 2. **No抢跑 (No Racing)**: Subsequent children do not start until their turn
 3. **Queue Discipline**: Children respect their position in the queue
 4. **Governance Validation**: Pattern demonstrates proper task decomposition and sequential execution control
+
+## Execution Rules for This Child
+
+- This is CHILD 1/2 for INT-114
+- Only process this subtask, do not pre-execute subsequent siblings
+- Complete the independent deliverable: docs/supervisor-live-root.md
+- Completion means: docs/supervisor-live-root.md exists and content meets root plan requirements
