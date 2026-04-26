@@ -310,6 +310,21 @@ export const SUPERVISOR_SESSION_EVENTS_TABLE_SCHEMA = `
   );
 `;
 
+export const SUPERVISOR_MEMORIES_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS supervisor_memories (
+    id TEXT PRIMARY KEY,
+    repo_ref TEXT NOT NULL,
+    memory_kind TEXT NOT NULL,
+    subject_key TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    evidence_json TEXT,
+    confidence REAL NOT NULL DEFAULT 0.5,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(repo_ref, memory_kind, subject_key)
+  );
+`;
+
 /**
  * SQL schema for service_leases table
  * Stores short-lived singleton leadership leases for control-plane services
@@ -446,6 +461,8 @@ export const CONTROL_PLANE_INDEXES_SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_supervisor_sessions_root_issue ON supervisor_sessions(root_issue_id);
   CREATE INDEX IF NOT EXISTS idx_supervisor_sessions_state ON supervisor_sessions(state);
   CREATE INDEX IF NOT EXISTS idx_supervisor_session_events_session ON supervisor_session_events(session_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_memories_repo_updated ON supervisor_memories(repo_ref, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_memories_kind ON supervisor_memories(memory_kind);
   CREATE INDEX IF NOT EXISTS idx_service_leases_expires_at ON service_leases(expires_at);
   CREATE INDEX IF NOT EXISTS idx_shadow_harnesses_repo_key ON shadow_harnesses(repo_key);
   CREATE INDEX IF NOT EXISTS idx_governance_assessments_issue_id ON governance_assessments(issue_id);
@@ -569,6 +586,7 @@ export function initializeSchema(db: Database): void {
   db.exec(BOT_TRANSPORT_EVENTS_TABLE_SCHEMA);
   db.exec(SUPERVISOR_SESSIONS_TABLE_SCHEMA);
   db.exec(SUPERVISOR_SESSION_EVENTS_TABLE_SCHEMA);
+  db.exec(SUPERVISOR_MEMORIES_TABLE_SCHEMA);
   db.exec(SERVICE_LEASES_TABLE_SCHEMA);
   db.exec(SHADOW_HARNESSES_TABLE_SCHEMA);
   db.exec(GOVERNANCE_ASSESSMENTS_TABLE_SCHEMA);
@@ -624,6 +642,7 @@ export function dropAllTables(db: Database): void {
   db.exec('DROP TABLE IF EXISTS shadow_harnesses;');
   db.exec('DROP TABLE IF EXISTS service_leases;');
   db.exec('DROP TABLE IF EXISTS bot_transport_events;');
+  db.exec('DROP TABLE IF EXISTS supervisor_memories;');
   db.exec('DROP TABLE IF EXISTS supervisor_session_events;');
   db.exec('DROP TABLE IF EXISTS supervisor_sessions;');
   db.exec('DROP TABLE IF EXISTS bot_followup_delivery_states;');

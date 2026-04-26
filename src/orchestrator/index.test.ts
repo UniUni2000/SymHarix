@@ -15,6 +15,7 @@ import {
   DebtSignalRepository,
   GovernanceSuggestionRepository,
   ReviewEventRepository,
+  SupervisorMemoryRepository,
   SupervisorSessionEventRepository,
   SupervisorSessionRepository,
   SyncEventRepository,
@@ -2146,6 +2147,7 @@ describe('Orchestrator Stability', () => {
     });
     const supervisorSessions = new SupervisorSessionRepository(ctx.db);
     const supervisorEvents = new SupervisorSessionEventRepository(ctx.db);
+    const supervisorMemories = new SupervisorMemoryRepository(ctx.db);
     supervisorSessions.create({
       id: 'session-99',
       transport: 'telegram',
@@ -2196,6 +2198,13 @@ describe('Orchestrator Stability', () => {
         summary: '当前 child 正在处理。',
       },
     });
+    supervisorMemories.upsert({
+      repo_ref: 'owner/repo',
+      memory_kind: 'execution_pattern',
+      subject_key: 'telegram-root-card-stability',
+      summary: '历史经验：Telegram root card 更新必须保持同一 message_id，避免用户被 fallback 刷屏。',
+      confidence: 0.9,
+    });
 
     ctx.agentRunner.runTurn = mock(async (_child: unknown, _threadId: string, prompt: string) => ({
       success: true,
@@ -2227,6 +2236,8 @@ describe('Orchestrator Stability', () => {
     expect(prompt).toContain('runtime 不再抖动，Telegram 主卡稳定停留在同一条消息里。');
     expect(prompt).toContain('ROOT_WITH_SPLIT_QUEUE');
     expect(prompt).toContain('Supervisor Session Memory');
+    expect(prompt).toContain('Supervisor Long-Term Memory');
+    expect(prompt).toContain('Telegram root card 更新必须保持同一 message_id');
     expect(prompt).toContain('orchestrator_milestone');
     expect(prompt).toContain('Supervisor Oversight');
     expect(prompt).toContain('下一轮先确认 Telegram root card 不重复');

@@ -169,6 +169,7 @@ Phase 4 之后，runtime/bot 入口还补了这几层产品化能力：
 
 ```bash
 bun --env-file=.env run src/cli/index.ts verify-live-lifecycle --project-slug 1d3a3f95809d
+bun --env-file=.env run src/cli/index.ts verify-live-supervisor --project-slug 1d3a3f95809d
 ```
 
 它会自动：
@@ -212,6 +213,7 @@ bun --env-file=.env run src/cli/index.ts verify-live-lifecycle --project-slug 1d
 - `SYMPHONY_SUPERVISOR_OVERSEER_API_KEY`
 - `SYMPHONY_SUPERVISOR_OVERSEER_BASE_URL`
 - `SYMPHONY_SUPERVISOR_OVERSEER_TIMEOUT_MS`
+- `SYMPHONY_SUPERVISOR_JOB_INTERVAL_MS`
 - `SYMPHONY_DISCORD_BOT_TOKEN`
 - `SYMPHONY_DISCORD_PUBLIC_KEY`
 - `SYMPHONY_DISCORD_OPERATOR_IDS`
@@ -221,6 +223,8 @@ Bot LLM 配置全部走 `.env`。`SYMPHONY_BOT_LLM_TIMEOUT_MS` 默认 15000；`S
 Supervisor planning brain 默认复用 `SYMPHONY_BOT_LLM_*` 的 provider/model/key/base URL，但使用自己的超时预算，默认 `45000ms`；也可以用 `SYMPHONY_SUPERVISOR_LLM_*` 单独覆盖。它只增强 Telegram 计划卡和澄清策略；模型失败时会回落到本地确定性计划，不阻断 `/new` 或自然语言建单。
 
 Supervisor execution overseer 默认复用 `SYMPHONY_SUPERVISOR_LLM_*`，再回退到 `SYMPHONY_BOT_LLM_*`；也可以用 `SYMPHONY_SUPERVISOR_OVERSEER_*` 单独覆盖。它负责在 dev/review milestone 后生成下一轮监督判断和 dev agent 指令；模型超时、返回无效 JSON、或试图绕过 delivery failure 时，会自动回落到确定性 overseer。
+
+Supervisor job loop 会在启动时和定时 tick 时恢复活跃 session，重放当前 root issue 状态，并把监督判断沉淀进 `supervisor_memories`。这些长期记忆会注入后续 dev/review prompt，帮助 supervisor 像人类架构师一样记住历史失败、交付偏好和项目边界。`verify-live-supervisor` 会创建带 supervisor execution intent 的 live 验证单，用来验证计划上下文能穿过 dev/review/merge 主链。
 
 `/api/v1/runtime/manifest` 会返回当前 viewer 的 access mode、viewer role 和 Phase 4 feature flags。
 

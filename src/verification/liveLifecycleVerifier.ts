@@ -4,6 +4,7 @@ import * as path from 'path';
 import { WorkItemRepository, ReviewEventRepository } from '../database';
 import type { ReviewDecision } from '../database/types';
 import type { RuntimeControlPlane, RuntimeIssueView, RuntimeTimelineEvent } from '../runtime/types';
+import type { SupervisorExecutionIntent } from '../supervisor/types';
 import type {
   LiveLifecycleScenarioConfig,
   RuntimeDiagnosticsSnapshot,
@@ -52,6 +53,7 @@ export interface LiveLifecycleVerifyInput {
   projectSlug: string;
   timeoutMs?: number | null;
   titleSuffix?: string | null;
+  supervisorScenario?: boolean;
   reporter?: (message: string) => void;
 }
 
@@ -218,10 +220,14 @@ export class LiveLifecycleVerifier {
       input.reporter?.(`Started dedicated runtime host for ${input.projectSlug}`);
 
       const runtime = host.getRuntimeHub();
+      const issueTitle = this.buildIssueTitle(scenario, input.titleSuffix, input.supervisorScenario === true);
       const created = await runtime.createIssue({
-        title: this.buildIssueTitle(scenario, input.titleSuffix),
-        description: this.buildIssueDescription(scenario, input.titleSuffix),
+        title: issueTitle,
+        description: this.buildIssueDescription(scenario, input.titleSuffix, input.supervisorScenario === true),
         project_slug: input.projectSlug,
+        supervisor_execution_intent: input.supervisorScenario === true
+          ? this.buildSupervisorExecutionIntent(input.projectSlug, issueTitle, scenario)
+          : null,
       });
 
       if (!created.accepted || !created.issue_id || !created.issue_identifier) {
@@ -428,25 +434,72 @@ export class LiveLifecycleVerifier {
   private buildIssueTitle(
     scenario: LiveLifecycleScenarioConfig,
     titleSuffix?: string | null,
+    supervisorScenario = false,
   ): string {
-    const base = `${scenario.title} [live-lifecycle ${new Date(this.now()).toISOString().slice(0, 19).replace(/[:T]/g, '-')}]`;
+    const label = supervisorScenario ? 'live-supervisor' : 'live-lifecycle';
+    const base = `${scenario.title} [${label} ${new Date(this.now()).toISOString().slice(0, 19).replace(/[:T]/g, '-')}]`;
     return titleSuffix?.trim() ? `${base} ${titleSuffix.trim()}` : base;
   }
 
   private buildIssueDescription(
     scenario: LiveLifecycleScenarioConfig,
     titleSuffix?: string | null,
+    supervisorScenario = false,
   ): string {
     const nonceBase = titleSuffix?.trim() || formatVerificationNonce(this.now());
     const nonce = nonceBase.replace(/\s+/g, '-');
-    return [
+    const lines = [
       scenario.description.trim(),
       '',
       `Verification nonce: ${nonce}`,
       'Create or update one uniquely named smoke-test file or tiny repo-safe change that includes this nonce.',
       'Avoid editing previously touched smoke-test files or common demo files from earlier verification runs.',
       'Keep the change tiny, safe to merge, and easy to clean up after the PR lands.',
-    ].join('\n');
+    ];
+    if (supervisorScenario) {
+      lines.push(
+        '',
+        'Supervisor live verification:',
+        '- Treat this as a supervisor-approved execution package.',
+        '- Report proof separately from delivery if final PR/review/merge gets blocked.',
+        '- Ask for user approval instead of silently expanding scope.',
+      );
+    }
+    return lines.join('\n');
+  }
+
+  private buildSupervisorExecutionIntent(
+    projectSlug: string,
+    title: string,
+    scenario: LiveLifecycleScenarioConfig,
+  ): SupervisorExecutionIntent {
+    return {
+      root_session_id: `live-supervisor-${formatVerificationNonce(this.now())}`,
+      repo_ref: projectSlug,
+      plan_summary: `Live supervisor E2E: ${title}`,
+      acceptance_summary: 'Issue reaches PR/review/merge lifecycle without losing supervisor context.',
+      approved_execution_mode: 'root_only',
+      plan_card: {
+        title,
+        user_goal: scenario.description.trim(),
+        in_scope: ['Create a tiny repo-safe smoke-test change', 'Preserve supervisor context through dev/review'],
+        out_of_scope: ['No broad refactor', 'No unrelated cleanup'],
+        acceptance: ['PR/review/merge lifecycle completes', 'Supervisor context remains visible to runtime/dev prompt'],
+        known_risks: ['External GitHub/tracker delivery can fail independently from proof-of-work'],
+        execution_strategy: 'Proceed as a small approved supervisor plan and pause on delivery failures.',
+        needs_user_approval: false,
+        repo_ref: projectSlug,
+        project_slug: projectSlug,
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '自动执行',
+          summary: '按 live supervisor 验证计划推进。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    };
   }
 
   private resolveScenario(projectSlug: string): LiveLifecycleScenarioConfig | null {

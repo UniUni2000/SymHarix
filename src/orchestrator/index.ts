@@ -59,6 +59,7 @@ import {
   ReviewEventRepository,
   ServiceLeaseRepository,
   ShadowHarnessRepository,
+  SupervisorMemoryRepository,
   SupervisorSessionEventRepository,
   SupervisorSessionRepository,
   SyncEventRepository,
@@ -331,6 +332,7 @@ export class Orchestrator extends EventEmitter {
   private serviceLeaseRepository: ServiceLeaseRepository;
   private supervisorSessionRepository: SupervisorSessionRepository;
   private supervisorSessionEventRepository: SupervisorSessionEventRepository;
+  private supervisorMemoryRepository: SupervisorMemoryRepository;
   private shadowHarnessRepository: ShadowHarnessRepository;
   private governanceAssessmentRepository: GovernanceAssessmentRepository;
   private governanceSuggestionRepository: GovernanceSuggestionRepository;
@@ -412,6 +414,7 @@ export class Orchestrator extends EventEmitter {
     this.serviceLeaseRepository = dependencies.serviceLeaseRepository ?? new ServiceLeaseRepository(this.db);
     this.supervisorSessionRepository = new SupervisorSessionRepository(this.db);
     this.supervisorSessionEventRepository = new SupervisorSessionEventRepository(this.db);
+    this.supervisorMemoryRepository = new SupervisorMemoryRepository(this.db);
     this.shadowHarnessRepository = dependencies.shadowHarnessRepository ?? new ShadowHarnessRepository(this.db);
     this.governanceAssessmentRepository =
       dependencies.governanceAssessmentRepository ?? new GovernanceAssessmentRepository(this.db);
@@ -3929,6 +3932,10 @@ export class Orchestrator extends EventEmitter {
     const latestSupervisorReason = typeof session?.last_material_outcome?.supervisor_reason === 'string'
       ? session.last_material_outcome.supervisor_reason
       : null;
+    const repoRef = workItem?.github_repo ?? planCard?.repo_ref ?? session?.repo_ref ?? null;
+    const supervisorMemories = repoRef
+      ? this.supervisorMemoryRepository.listRelevant(repoRef, 6)
+      : [];
 
     return [
       '## Supervisor-Approved Plan',
@@ -3980,6 +3987,14 @@ export class Orchestrator extends EventEmitter {
               const payload = event.payload_json ? JSON.stringify(event.payload_json) : '{}';
               return `- ${event.event_kind}: ${payload.slice(0, 700)}`;
             }),
+          ].join('\n')
+        : null,
+      supervisorMemories.length > 0
+        ? [
+            '## Supervisor Long-Term Memory',
+            ...supervisorMemories.map((memory) => (
+              `- ${memory.memory_kind}/${memory.subject_key}: ${memory.summary}`
+            )),
           ].join('\n')
         : null,
       '- Treat this as the approved execution contract unless a later runtime milestone explicitly pauses for a new decision.',

@@ -28,6 +28,7 @@ import type {
   SupervisorRepoIntelligenceSnapshot,
 } from './repoIntelligence';
 import { describeSupervisorThread } from './threadSummary';
+import { applySupervisorApprovalPolicy } from './approvalPolicy';
 import {
   DefaultSupervisorExecutionOverseer,
   type SupervisorOversightAssessment,
@@ -1755,8 +1756,18 @@ export class SupervisorSessionService {
     session: SupervisorSessionRecord,
     issue: RuntimeIssueView,
     milestone: SupervisorMilestone | null,
-    oversight: SupervisorOversightAssessment | null,
+    rawOversight: SupervisorOversightAssessment | null,
   ): void {
+    const oversight = rawOversight
+      ? applySupervisorApprovalPolicy({
+          assessment: rawOversight,
+          milestone_kind: milestone?.kind ?? null,
+          delivery_code: issue.delivery_code ?? milestone?.delivery_code ?? null,
+          delivery_summary: issue.delivery_summary ?? milestone?.summary ?? null,
+          plan_title: session.plan_card?.title ?? issue.title,
+          user_text: null,
+        })
+      : null;
     const rootIssueId = issue.governance_root_issue_id ?? issue.issue_id;
     const isRootIssueEvent = rootIssueId === issue.issue_id;
     const previousOversightKey = typeof session.last_material_outcome?.oversight_key === 'string'

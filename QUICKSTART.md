@@ -91,6 +91,7 @@ codex:
 
 ```bash
 bun --env-file=.env run src/cli/index.ts verify-live-lifecycle --project-slug 1d3a3f95809d
+bun --env-file=.env run src/cli/index.ts verify-live-supervisor --project-slug 1d3a3f95809d
 ```
 
 这条命令会自动创建一张新的验证 issue，并真实校验：
@@ -123,6 +124,7 @@ bun --env-file=.env run src/cli/index.ts verify-live-lifecycle --project-slug 1d
 - `SYMPHONY_SUPERVISOR_OVERSEER_API_KEY`
 - `SYMPHONY_SUPERVISOR_OVERSEER_BASE_URL`
 - `SYMPHONY_SUPERVISOR_OVERSEER_TIMEOUT_MS`
+- `SYMPHONY_SUPERVISOR_JOB_INTERVAL_MS`
 - `SYMPHONY_DISCORD_BOT_TOKEN`
 - `SYMPHONY_DISCORD_PUBLIC_KEY`
 - `SYMPHONY_DISCORD_OPERATOR_IDS`
@@ -132,6 +134,8 @@ Bot LLM 的运行参数统一放在 `.env`。建议本地 Telegram 使用 `SYMPH
 Supervisor planning brain 默认复用 `SYMPHONY_BOT_LLM_*` 的 provider/model/key/base URL，但使用自己的超时预算，默认 `45000ms`；需要单独模型或超时时再设置 `SYMPHONY_SUPERVISOR_LLM_*`。它失败时会自动回落到本地计划规则。
 
 Supervisor execution overseer 默认复用 `SYMPHONY_SUPERVISOR_LLM_*`，再回退到 `SYMPHONY_BOT_LLM_*`；需要独立模型或更短超时时再设置 `SYMPHONY_SUPERVISOR_OVERSEER_*`。它只生成监督判断和下一轮 dev 指令，模型失败或输出不安全时会自动回落到本地 overseer。
+
+Supervisor job loop 会自动恢复活跃 session、重放 root issue 状态，并把监督判断写入长期记忆；这些记忆会进入后续 dev/review prompt。需要真机验证这条链路时，使用 `verify-live-supervisor`，它会创建带 supervisor execution intent 的 live 验证单。
 
 Phase 4 之后的几个实用点：
 
