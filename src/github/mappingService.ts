@@ -79,6 +79,10 @@ export class GitHubMappingService {
       governance_root_issue_id: existing?.governance_root_issue_id ?? issue.id,
       governance_parent_issue_id: existing?.governance_parent_issue_id ?? null,
       governance_generation: existing?.governance_generation ?? 0,
+      supervisor_root_session_id: existing?.supervisor_root_session_id ?? null,
+      supervisor_plan_summary: existing?.supervisor_plan_summary ?? null,
+      supervisor_acceptance_summary: existing?.supervisor_acceptance_summary ?? null,
+      supervisor_execution_mode: existing?.supervisor_execution_mode ?? null,
       cancelled_at: existing?.cancelled_at ?? null,
       merged_at: existing?.merged_at ?? null,
     });

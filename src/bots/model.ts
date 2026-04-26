@@ -604,9 +604,9 @@ export function createBotAssistantModel(
   }
 
   const fetchTransport = new FetchBotAssistantHttpTransport(fetchImpl);
-  const primaryTransport = options.primaryTransport ?? new CurlBotAssistantHttpTransport();
+  const primaryTransport = options.primaryTransport ?? fetchTransport;
   const fallbackTransport = options.fallbackTransport === undefined
-    ? fetchTransport
+    ? null
     : options.fallbackTransport;
   const transport = new FallbackBotAssistantHttpTransport(
     primaryTransport,

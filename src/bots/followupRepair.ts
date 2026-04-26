@@ -14,6 +14,8 @@ export interface BotFollowupRepairSummary {
   descendant_followups_folded: number;
   descendant_message_states_deleted: number;
   descendant_pending_actions_deleted: number;
+  orphan_message_states_deleted: number;
+  orphan_delivery_states_deleted: number;
   delivery_baselines_seeded: number;
 }
 
@@ -39,10 +41,25 @@ export class BotFollowupRepairService {
     return {
       expired_pending_actions_deleted: this.pendingActions?.deleteExpired(now) ?? 0,
       descendant_followups_folded: this.foldDescendantFollowupsToRoot(),
+      orphan_message_states_deleted: this.deleteOrphanMessageStates(),
       descendant_message_states_deleted: this.deleteDescendantMessageStates(),
       descendant_pending_actions_deleted: this.deleteDescendantPendingActions(),
+      orphan_delivery_states_deleted: this.deleteOrphanDeliveryStates(),
       delivery_baselines_seeded: this.seedDeliveryBaselines(),
     };
+  }
+
+  private hasKnownIssue(issueId: string, issueIdentifier?: string | null): boolean {
+    if (!issueId || issueId === 'unknown' || issueIdentifier === 'UNKNOWN') {
+      return false;
+    }
+    if (this.runtime.getIssue(issueId) || (issueIdentifier && this.runtime.getIssue(issueIdentifier))) {
+      return true;
+    }
+    return Boolean(
+      this.workItems?.findByLinearIssueId(issueId)
+        ?? (issueIdentifier ? this.workItems?.findByIdentifier(issueIdentifier) : null),
+    );
   }
 
   private resolveRoot(issueId: string, issueIdentifier?: string | null): {
@@ -97,8 +114,27 @@ export class BotFollowupRepairService {
   private deleteDescendantMessageStates(): number {
     let deleted = 0;
     for (const record of this.messageStates?.findAll() ?? []) {
+      if (!this.hasKnownIssue(record.issue_id, record.issue_identifier)) {
+        continue;
+      }
       const root = this.resolveRoot(record.issue_id, record.issue_identifier);
       if (root.rootIssueId === record.issue_id) {
+        continue;
+      }
+      this.messageStates?.delete({
+        transport: record.transport,
+        conversation_id: record.conversation_id,
+        issue_id: record.issue_id,
+      });
+      deleted += 1;
+    }
+    return deleted;
+  }
+
+  private deleteOrphanMessageStates(): number {
+    let deleted = 0;
+    for (const record of this.messageStates?.findAll() ?? []) {
+      if (this.hasKnownIssue(record.issue_id, record.issue_identifier)) {
         continue;
       }
       this.messageStates?.delete({
@@ -183,5 +219,22 @@ export class BotFollowupRepairService {
       seeded += 1;
     }
     return seeded;
+  }
+
+  private deleteOrphanDeliveryStates(): number {
+    let deleted = 0;
+    for (const record of this.deliveryStates?.findAll() ?? []) {
+      if (this.hasKnownIssue(record.root_issue_id, record.root_issue_identifier)) {
+        continue;
+      }
+      this.deliveryStates?.delete({
+        transport: record.transport,
+        conversation_id: record.conversation_id,
+        root_issue_id: record.root_issue_id,
+        delivery_kind: record.delivery_kind,
+      });
+      deleted += 1;
+    }
+    return deleted;
   }
 }

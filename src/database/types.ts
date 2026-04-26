@@ -155,6 +155,10 @@ export interface WorkItem {
   governance_source_updated_at: Date | null;
   governance_override_at: Date | null;
   governance_override_reason: string | null;
+  supervisor_root_session_id: string | null;
+  supervisor_plan_summary: string | null;
+  supervisor_acceptance_summary: string | null;
+  supervisor_execution_mode: SupervisorMaterializationMode | null;
   change_pack_summary: ChangePackSummary | null;
   task_status: ChangePackTaskStatus | null;
   evidence_summary: EvidenceSummary | null;
@@ -203,6 +207,10 @@ export interface CreateWorkItem {
   governance_source_updated_at?: Date | null;
   governance_override_at?: Date | null;
   governance_override_reason?: string | null;
+  supervisor_root_session_id?: string | null;
+  supervisor_plan_summary?: string | null;
+  supervisor_acceptance_summary?: string | null;
+  supervisor_execution_mode?: SupervisorMaterializationMode | null;
   change_pack_summary?: ChangePackSummary | null;
   task_status?: ChangePackTaskStatus | null;
   evidence_summary?: EvidenceSummary | null;

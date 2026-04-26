@@ -20,6 +20,13 @@ import {
   BotConversationPreferenceRepository,
   BotIssueFollowupRepository,
   BotPendingActionRepository,
+  ConflictMemoryRepository,
+  DebtSignalRepository,
+  DecisionMemoryRepository,
+  GovernanceAssessmentRepository,
+  GovernanceSuggestionRepository,
+  ReviewEventRepository,
+  ShadowHarnessRepository,
   SupervisorSessionEventRepository,
   SupervisorSessionRepository,
   BotTransportEventRepository,
@@ -49,7 +56,12 @@ import {
 } from './telegramDiagnostics';
 import { TelegramWebhookBootstrapService } from './telegramBootstrap';
 import { logger } from '../logging';
-import { SupervisorSessionService } from '../supervisor/sessionService';
+import { SupervisorSessionService, type SupervisorPlanBrain } from '../supervisor/sessionService';
+import type { SupervisorRepoIntelligenceResolver } from '../supervisor/repoIntelligence';
+import { DefaultSupervisorRepoIntelligenceResolver } from '../supervisor/repoIntelligence';
+import { SupervisorWorker } from '../supervisor/worker';
+import { createSupervisorPlanBrainFromEnv } from '../supervisor/planBrain';
+import { GovernanceMemoryService } from '../governance/repoIntelligence';
 
 interface TelegramUpdate {
   message?: {
@@ -455,6 +467,7 @@ export class DefaultBotGateway implements BotGateway {
   private readonly supervisorSessions: SupervisorSessionRepository | null;
   private readonly supervisorSessionEvents: SupervisorSessionEventRepository | null;
   private readonly supervisorSessionService: SupervisorSessionService | null;
+  private readonly supervisorWorker: SupervisorWorker | null;
 
   constructor(
     private readonly runtime: RuntimeControlPlane,
@@ -472,6 +485,8 @@ export class DefaultBotGateway implements BotGateway {
       supervisorSessionRepository?: SupervisorSessionRepository | null;
       supervisorSessionEventRepository?: SupervisorSessionEventRepository | null;
       supervisorSessionService?: SupervisorSessionService | null;
+      supervisorPlanBrain?: SupervisorPlanBrain | null;
+      supervisorRepoIntelligenceResolver?: SupervisorRepoIntelligenceResolver | null;
       workItemRepository?: WorkItemRepository | null;
       projectResolver?: TrackerProjectResolutionService | null;
       assistantModel?: BotAssistantModel;
@@ -520,6 +535,8 @@ export class DefaultBotGateway implements BotGateway {
             options.projectResolver ?? null,
             this.supervisorSessions,
             this.supervisorSessionEvents,
+            options.supervisorRepoIntelligenceResolver ?? null,
+            options.supervisorPlanBrain ?? null,
           )
         : null);
     this.assistantService = new BotAssistantService(
@@ -552,6 +569,23 @@ export class DefaultBotGateway implements BotGateway {
           supervisorSessionRepository: this.supervisorSessions,
         })
       : null;
+    this.supervisorWorker = this.supervisorSessions && this.supervisorSessionService
+      ? new SupervisorWorker({
+          runtime,
+          sessionRepository: this.supervisorSessions,
+          sessionService: this.supervisorSessionService,
+          transportEventRepository: this.transportEvents,
+          notifiers: {
+            telegram: this.telegramNotifier ?? undefined,
+            discord: this.discordNotifier ?? undefined,
+          },
+        })
+      : null;
+    if (this.supervisorWorker) {
+      void this.supervisorWorker.reconcile().catch((error) => {
+        logger.warn('Supervisor worker reconciliation failed during gateway startup', {}, error instanceof Error ? error : undefined);
+      });
+    }
   }
 
   getManifest(): BotManifest {
@@ -610,7 +644,7 @@ export class DefaultBotGateway implements BotGateway {
         localBaseUrl: params.localBaseUrl,
         inboundPath: params.inboundPath ?? '/api/v1/bots/telegram/webhook',
       });
-      this.telegramDiagnostics.maybeRefresh();
+      await this.telegramDiagnostics.refreshNow();
     } catch (error) {
       logger.warn('Telegram inbound bootstrap failed', {
         local_base_url: params.localBaseUrl,
@@ -621,6 +655,7 @@ export class DefaultBotGateway implements BotGateway {
   dispose(): void {
     this.subscriptions.dispose();
     this.followups?.dispose();
+    this.supervisorWorker?.dispose();
     this.supervisorSessionService?.dispose();
     void this.telegramBootstrap?.dispose();
   }
@@ -1003,19 +1038,21 @@ export class DefaultBotGateway implements BotGateway {
     }
 
     if (parsed.kind === 'confirm_pending') {
-      const pendingAction = this.resolvePendingActionForCallback(context, issue, existingCardState);
+      const pendingAction = this.resolvePendingActionForCallback(
+        context,
+        issue,
+        existingCardState,
+        originalMessageId,
+      );
       if (!pendingAction || !pendingAction.issue_id || !this.pendingActions) {
-        const response = await this.assistantService.respondToText(context, '确认');
-        const fallbackIssue = this.buildFallbackGovernanceIssue(issue, parsed.issueIdentifier, existingCardState);
         return {
-          outbound: buildGovernanceResolvedMessage(fallbackIssue, {
-            resultSummary: response.message,
-            notice: existingCardState ? null : '原卡片状态已丢失，已重新生成结果卡。',
-          }),
-          toastText: '已执行',
-          issue: fallbackIssue,
+          outbound: {
+            text: '这张治理卡已经失效，请直接发送“现在是什么单子？”或重新查看当前待处理线程。',
+          },
+          toastText: '这张卡已失效',
+          issue: null,
           cardState: 'resolved',
-          cardKey: `resolved|${buildGovernanceCardKey(fallbackIssue)}`,
+          cardKey: 'stale_pending_confirm',
           executeAfterAck: null,
         };
       }
@@ -1052,9 +1089,23 @@ export class DefaultBotGateway implements BotGateway {
     }
 
     if (parsed.kind === 'cancel_pending') {
-      const pendingAction = this.resolvePendingActionForCallback(context, issue, existingCardState);
+      const pendingAction = this.resolvePendingActionForCallback(
+        context,
+        issue,
+        existingCardState,
+        originalMessageId,
+      );
       if (!pendingAction || !this.pendingActions) {
-        await this.assistantService.respondToText(context, '取消');
+        return {
+          outbound: {
+            text: '这张治理卡已经失效，不需要再取消了。请直接发送“现在是什么单子？”查看当前线程。',
+          },
+          toastText: '这张卡已失效',
+          issue: null,
+          cardState: 'resolved',
+          cardKey: 'stale_pending_cancel',
+          executeAfterAck: null,
+        };
       } else {
         this.persistPendingAction(pendingAction, {
           status: 'cancelled',
@@ -1178,13 +1229,26 @@ export class DefaultBotGateway implements BotGateway {
     sessionId: string | null;
     materialKey: string | null;
   }> {
-    const text =
-      params.parsed.supervisorAction === 'approve'
-        ? '按推荐继续'
-        : params.parsed.supervisorAction === 'alternate'
-          ? '换用备选方案'
-          : '改一下计划';
-    const response = await this.assistantService.respondToText(params.context, text);
+    if (!this.supervisorSessionService || !params.parsed.sessionId || !params.parsed.supervisorAction) {
+      return {
+        outbound: {
+          text: '这条计划卡状态已经丢失。请直接回复你想继续做什么，我会重新接上当前线程。',
+        },
+        toastText: '计划状态已过期',
+        sessionId: params.parsed.sessionId ?? null,
+        materialKey: null,
+      };
+    }
+
+    const response = await this.supervisorSessionService.respondToAction({
+      context: params.context,
+      sessionId: params.parsed.sessionId,
+      action: params.parsed.supervisorAction,
+      canWrite: createBotWriteAuthorizer({
+        telegramOperatorIds: this.telegramConfig.operatorIds,
+        discordOperatorIds: this.discordConfig.operatorIds,
+      })(params.context),
+    });
     return {
       outbound: {
         text: response.message,
@@ -1398,6 +1462,7 @@ export class DefaultBotGateway implements BotGateway {
     context: BotCommandContext,
     issue: RuntimeIssueView | null,
     existingCardState: ReturnType<BotFollowupMessageStateRepository['findByConversationIssue']> | null,
+    originalMessageId: string | null,
   ): ReturnType<BotPendingActionRepository['findByConversationIssue']> | null {
     if (!this.pendingActions) {
       return null;
@@ -1420,6 +1485,14 @@ export class DefaultBotGateway implements BotGateway {
       });
       if (pending && ['pending_confirm', 'executing'].includes(pending.status)) {
         return pending;
+      }
+    }
+
+    if (originalMessageId) {
+      const sameMessagePending = this.pendingActions.findOpenByConversation(key)
+        .filter((pending) => pending.message_id === originalMessageId);
+      if (sameMessagePending.length === 1) {
+        return sameMessagePending[0] ?? null;
       }
     }
 
@@ -1953,10 +2026,39 @@ export function createBotGatewayFromEnv(
   const supervisorSessionRepository = db ? new SupervisorSessionRepository(db) : null;
   const supervisorSessionEventRepository = db ? new SupervisorSessionEventRepository(db) : null;
   const workItemRepository = db ? new WorkItemRepository(db) : null;
+  const reviewEventRepository = db ? new ReviewEventRepository(db) : null;
+  const governanceAssessmentRepository = db ? new GovernanceAssessmentRepository(db) : null;
+  const governanceSuggestionRepository = db ? new GovernanceSuggestionRepository(db) : null;
+  const decisionMemoryRepository = db ? new DecisionMemoryRepository(db) : null;
+  const conflictMemoryRepository = db ? new ConflictMemoryRepository(db) : null;
+  const debtSignalRepository = db ? new DebtSignalRepository(db) : null;
+  const shadowHarnessRepository = db ? new ShadowHarnessRepository(db) : null;
   const telegramDiagnostics = new DefaultTelegramWebhookDiagnosticsService(
     process.env.SYMPHONY_TELEGRAM_BOT_TOKEN || null,
   );
   telegramDiagnostics.maybeRefresh();
+  const supervisorRepoIntelligenceResolver =
+    workItemRepository &&
+    reviewEventRepository &&
+    governanceAssessmentRepository &&
+    governanceSuggestionRepository &&
+    decisionMemoryRepository &&
+    conflictMemoryRepository &&
+    debtSignalRepository &&
+    shadowHarnessRepository
+      ? new DefaultSupervisorRepoIntelligenceResolver(
+          shadowHarnessRepository,
+          new GovernanceMemoryService({
+            workItemRepository,
+            reviewEventRepository,
+            governanceAssessmentRepository,
+            governanceSuggestionRepository,
+            decisionMemoryRepository,
+            conflictMemoryRepository,
+            debtSignalRepository,
+          }),
+        )
+      : null;
 
   return new DefaultBotGateway(runtime, {
     botToken: process.env.SYMPHONY_TELEGRAM_BOT_TOKEN || null,
@@ -1976,6 +2078,8 @@ export function createBotGatewayFromEnv(
     transportEventRepository,
     supervisorSessionRepository,
     supervisorSessionEventRepository,
+    supervisorRepoIntelligenceResolver,
+    supervisorPlanBrain: createSupervisorPlanBrainFromEnv(),
     workItemRepository,
     projectResolver: options.projectResolver ?? null,
     assistantModel: options.assistantModel,

@@ -149,7 +149,7 @@ completion 也开始走 evidence-based 路线：
 
 - 配好 `SYMPHONY_TELEGRAM_BOT_TOKEN` 后，`bun run start -- --port 3000` 会在 server 启动时自动初始化 Telegram webhook
 - 若设置了 `SYMPHONY_PUBLIC_BASE_URL`，会直接用这个公网地址注册 webhook
-- 若没设置公网地址，系统会尝试调用 `cloudflared tunnel --url <localBaseUrl>` 自动申请临时 tunnel；也可以用 `SYMPHONY_TELEGRAM_TUNNEL_COMMAND` 改成别的 tunnel 命令
+- 若没设置公网地址，系统会尝试调用 `cloudflared tunnel --url <localBaseUrl> --protocol http2` 自动申请临时 tunnel；也可以用 `SYMPHONY_TELEGRAM_TUNNEL_COMMAND` / `SYMPHONY_TELEGRAM_TUNNEL_PROTOCOL` 覆盖
 - 若你想完全关闭这条自动 bootstrap 链路，可设置 `SYMPHONY_TELEGRAM_BOOTSTRAP=off`
 - 如果既没给 `SYMPHONY_PUBLIC_BASE_URL`，本机也没有可用的 `cloudflared`，启动不会 fail-closed，但 Telegram inbound 会保持未接通
 - 若希望有一条全局运维会话接收高频摘要，还需要额外配置 `SYMPHONY_TELEGRAM_OPERATIONS_CHAT_ID`
@@ -194,6 +194,7 @@ bun --env-file=.env run src/cli/index.ts verify-live-lifecycle --project-slug 1d
 - `SYMPHONY_PUBLIC_BASE_URL`
 - `SYMPHONY_TELEGRAM_BOOTSTRAP`
 - `SYMPHONY_TELEGRAM_TUNNEL_COMMAND`
+- `SYMPHONY_TELEGRAM_TUNNEL_PROTOCOL` 默认 `http2`
 - `SYMPHONY_TELEGRAM_OPERATIONS_CHAT_ID`
 - `SYMPHONY_BOT_LLM_PROVIDER`
 - `SYMPHONY_BOT_LLM_MODEL`
@@ -201,11 +202,18 @@ bun --env-file=.env run src/cli/index.ts verify-live-lifecycle --project-slug 1d
 - `SYMPHONY_BOT_LLM_BASE_URL`
 - `SYMPHONY_BOT_LLM_TIMEOUT_MS`
 - `SYMPHONY_BOT_LLM_HTTP_TRANSPORT`
+- `SYMPHONY_SUPERVISOR_LLM_PROVIDER`
+- `SYMPHONY_SUPERVISOR_LLM_MODEL`
+- `SYMPHONY_SUPERVISOR_LLM_API_KEY`
+- `SYMPHONY_SUPERVISOR_LLM_BASE_URL`
+- `SYMPHONY_SUPERVISOR_LLM_TIMEOUT_MS`
 - `SYMPHONY_DISCORD_BOT_TOKEN`
 - `SYMPHONY_DISCORD_PUBLIC_KEY`
 - `SYMPHONY_DISCORD_OPERATOR_IDS`
 
 Bot LLM 配置全部走 `.env`。`SYMPHONY_BOT_LLM_TIMEOUT_MS` 默认 15000；`SYMPHONY_BOT_LLM_HTTP_TRANSPORT=fetch` 默认只用 Bun fetch，避免 `curl -> fetch` 双 transport fallback 把一次 provider 长尾放大成接近双倍等待。需要诊断 HTTP 客户端兼容性时可设为 `curl`；确实需要客户端级 fallback 时再设为 `auto`。
+
+Supervisor planning brain 默认复用 `SYMPHONY_BOT_LLM_*` 的 provider/model/key/base URL，但使用自己的超时预算，默认 `45000ms`；也可以用 `SYMPHONY_SUPERVISOR_LLM_*` 单独覆盖。它只增强 Telegram 计划卡和澄清策略；模型失败时会回落到本地确定性计划，不阻断 `/new` 或自然语言建单。
 
 `/api/v1/runtime/manifest` 会返回当前 viewer 的 access mode、viewer role 和 Phase 4 feature flags。
 

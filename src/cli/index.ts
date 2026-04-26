@@ -44,6 +44,7 @@ import {
 import { parseMaintenanceArgs, type MaintenanceCommand } from '../maintenance/cli';
 import { parseVerifyLiveLifecycleArgs, type VerifyLiveLifecycleCommand } from '../verification/cli';
 import { LiveLifecycleVerifier } from '../verification/liveLifecycleVerifier';
+import { ensureEmbeddedClaudeRuntimeReady } from '../agent/embeddedClaudeRuntime';
 
 /**
  * Parse command line arguments
@@ -186,6 +187,12 @@ function createMaintenanceRuntimeHub(db: ReturnType<typeof createDatabase>): Run
 async function killKnownSymphonyProcesses(currentPid?: number): Promise<void> {
   const { execSync } = await import('child_process');
   const orchestratorPattern = 'bun .*src/cli/index\\.ts|node .*src/cli/index\\.ts|bun .*cli\\.tsx|node.*symharix.*cli';
+  const collectPids = (command: string): number[] => execSync(command)
+    .toString()
+    .trim()
+    .split('\n')
+    .map(s => parseInt(s.trim(), 10))
+    .filter(n => !isNaN(n) && n !== 1 && n !== currentPid);
 
   const orchestratorPids = execSync(
     `ps aux | grep -E '${orchestratorPattern}' | grep -v grep | awk '{print $2}'`
@@ -204,13 +211,25 @@ async function killKnownSymphonyProcesses(currentPid?: number): Promise<void> {
   }
 
   try {
-    const adapterPids = execSync(
+    const adapterPids = collectPids(
       `ps aux | grep 'claude-adapter\\.cjs' | grep -v grep | awk '{print $2}'`
-    ).toString().trim().split('\n').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n !== 1 && n !== currentPid);
+    );
     for (const pid of adapterPids) {
       try {
         process.kill(pid, 'SIGTERM');
         console.log(`[symphony] Sent SIGTERM to adapter ${pid}`);
+      } catch {}
+    }
+  } catch {}
+
+  try {
+    const tunnelPids = collectPids(
+      `ps aux | grep -E 'cloudflared tunnel --url http://(127\\.0\\.0\\.1|localhost):[0-9]+' | grep -v grep | awk '{print $2}'`
+    );
+    for (const pid of tunnelPids) {
+      try {
+        process.kill(pid, 'SIGTERM');
+        console.log(`[symphony] Sent SIGTERM to tunnel ${pid}`);
       } catch {}
     }
   } catch {}
@@ -391,6 +410,17 @@ async function main(): Promise<void> {
   console.log('[symphony] Poll interval:', config.pollIntervalMs, 'ms');
   console.log('[symphony] Max concurrent agents:', config.maxConcurrentAgents);
 
+  try {
+    ensureEmbeddedClaudeRuntimeReady({
+      projectRoot: config.projectRoot,
+      codexCommand: config.codexCommand,
+      log: (message) => console.log(message),
+    });
+  } catch (error) {
+    console.error('[symphony] ERROR:', (error as Error).message);
+    process.exit(1);
+  }
+
   const db = createDatabase({
     path: path.join(config.projectRoot, 'symphony.db'),
   });
@@ -411,6 +441,8 @@ async function main(): Promise<void> {
     console.log(`[repair] Folded descendant follow-ups: ${summary.descendant_followups_folded}`);
     console.log(`[repair] Deleted descendant card states: ${summary.descendant_message_states_deleted}`);
     console.log(`[repair] Deleted descendant pending actions: ${summary.descendant_pending_actions_deleted}`);
+    console.log(`[repair] Deleted orphan card states: ${summary.orphan_message_states_deleted}`);
+    console.log(`[repair] Deleted orphan delivery states: ${summary.orphan_delivery_states_deleted}`);
     console.log(`[repair] Deleted expired pending actions: ${summary.expired_pending_actions_deleted}`);
     console.log(`[repair] Seeded delivery baselines: ${summary.delivery_baselines_seeded}`);
     process.exit(0);

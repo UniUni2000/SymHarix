@@ -236,6 +236,77 @@ describe('DefaultBotGateway', () => {
     gateway.dispose();
   });
 
+  test('refreshes Telegram webhook diagnostics immediately after inbound bootstrap', async () => {
+    let refreshCount = 0;
+    const telegramDiagnostics = {
+      getSnapshot: () => ({
+        webhook_url: refreshCount > 0 ? 'https://example.test/api/v1/bots/telegram/webhook' : null,
+        webhook_pending_update_count: 0,
+        webhook_last_error_message: null,
+        webhook_last_error_at: null,
+        callback_ingress_recently_ok: false,
+        health: refreshCount > 0 ? 'healthy' : 'unconfigured',
+      }),
+      maybeRefresh: () => undefined,
+      refreshNow: async () => {
+        refreshCount += 1;
+      },
+      recordCallbackSuccess: () => undefined,
+      recordCallbackFailure: () => undefined,
+      recordAudit: () => undefined,
+    };
+    const telegramBootstrapService = {
+      bootstrap: async () => ({
+        enabled: true,
+        publicBaseUrl: 'https://example.test',
+        webhookUrl: 'https://example.test/api/v1/bots/telegram/webhook',
+        usedTunnel: true,
+      }),
+      dispose: async () => undefined,
+    };
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        telegramDiagnostics: telegramDiagnostics as any,
+        telegramBootstrapService: telegramBootstrapService as any,
+        assistantModel: {
+          decide: async () => null,
+          getDiagnostics: () => ({
+            provider: null,
+            model: null,
+            configured: false,
+            health: 'unconfigured',
+            fallback_available: true,
+            last_error_code: 'unconfigured',
+          }),
+        },
+      },
+    );
+
+    await gateway.initializeInboundIntegration({
+      localBaseUrl: 'http://127.0.0.1:3000',
+      inboundPath: '/api/v1/bots/telegram/webhook',
+    });
+
+    expect(refreshCount).toBe(1);
+    expect(gateway.getManifest().transports.telegram.webhook_url).toBe('https://example.test/api/v1/bots/telegram/webhook');
+
+    gateway.dispose();
+  });
+
   test('handles Telegram webhook commands with a fast ACK and sends the reply asynchronously', async () => {
     const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -666,7 +737,8 @@ describe('DefaultBotGateway', () => {
 
     expect(result.status).toBe(200);
     expect(requests.find((request) => request.url.includes('answerCallbackQuery'))?.body.text).toBe('已收到，正在处理');
-    expect(String(requests.find((request) => request.url.includes('editMessageText'))?.body.text)).toContain('已创建');
+    const editRequests = requests.filter((request) => request.url.includes('editMessageText'));
+    expect(String(editRequests.at(-1)?.body.text)).toContain('已创建');
     expect(sessions.findById(session.id)?.root_issue_id).toBe('issue-32');
 
     gateway.dispose();
@@ -1414,17 +1486,22 @@ describe('DefaultBotGateway', () => {
         publicKey: null,
         operatorIds: new Set(),
       },
+      undefined,
+      null,
+      {
+        supervisorSessionService: {
+          respondToAction: async () => {
+            throw new Error('callback exploded');
+          },
+        } as any,
+      },
     );
-
-    (gateway as any).assistantService.respondToText = async () => {
-      throw new Error('callback exploded');
-    };
 
     const result = await gateway.handleTelegramWebhook(
       {
         callback_query: {
           id: 'callback-1',
-          data: 'pending|confirm',
+          data: 'sup|session-1|approve',
           message: {
             chat: { id: 42 },
             message_id: 101,
@@ -1440,6 +1517,72 @@ describe('DefaultBotGateway', () => {
     expect(result.status).toBe(200);
     expect(requests.find((request) => request.url.includes('answerCallbackQuery'))?.body.text).toBe('执行失败，请稍后重试');
     expect(String(requests.find((request) => request.url.includes('sendMessage'))?.body.text)).toContain('处理 Telegram 按钮时失败');
+  });
+
+  test('treats stale pending confirm callbacks as expired cards instead of generating an UNKNOWN governance result', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const followupMessageStates = new BotFollowupMessageStateRepository(db);
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body || '{}')),
+      });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 101 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        followupMessageStateRepository: followupMessageStates,
+      },
+    );
+
+    const result = await gateway.handleTelegramWebhook(
+      {
+        callback_query: {
+          id: 'callback-stale',
+          data: 'pending|confirm',
+          message: {
+            chat: { id: 42 },
+            message_id: 101,
+          },
+          from: { id: 9, username: 'alice' },
+        },
+      } as any,
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(result.status).toBe(200);
+    expect(requests.find((request) => request.url.includes('answerCallbackQuery'))?.body.text).toBe('这张卡已失效');
+    const editRequest = requests.find((request) => request.url.includes('editMessageText'));
+    expect(String(editRequest?.body.text)).toContain('这张治理卡已经失效');
+    expect(followupMessageStates.findByConversationIssue({
+      transport: 'telegram',
+      conversation_id: '42',
+      issue_id: 'unknown',
+    })).toBeNull();
+
+    db.close();
   });
 
   test('rejects Telegram webhook calls with an invalid secret', async () => {

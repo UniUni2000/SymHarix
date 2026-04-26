@@ -87,6 +87,20 @@ export class SupervisorSessionRepository {
     );
   }
 
+  findByConversationRootIssue(key: FindSupervisorSessionConversationKey & {
+    root_issue_id: string;
+  }): SupervisorSessionRecord | null {
+    const stmt = this.db.prepare(`
+      SELECT * FROM supervisor_sessions
+      WHERE transport = ? AND conversation_id = ? AND root_issue_id = ?
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `);
+    return this.mapRow(
+      stmt.get(key.transport, key.conversation_id, key.root_issue_id) as Record<string, unknown> | undefined,
+    );
+  }
+
   findByRootIssueId(rootIssueId: string): SupervisorSessionRecord | null {
     const stmt = this.db.prepare(`
       SELECT * FROM supervisor_sessions

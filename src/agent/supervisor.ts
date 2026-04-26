@@ -11,7 +11,10 @@ import type {
 import { parseCanonicalReviewReport } from '../hooks/review-prompt';
 
 const DEFAULT_SUPERVISOR_MODEL =
-  process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5';
+  process.env.SYMPHONY_SUPERVISOR_LLM_MODEL ||
+  process.env.SYMPHONY_BOT_LLM_MODEL ||
+  process.env.ANTHROPIC_MODEL ||
+  'claude-sonnet-4-5';
 
 const EXTERNAL_WRITE_PATTERNS = [
   /\bgh\s+pr\s+(review|comment|merge|close)\b/i,
@@ -259,7 +262,16 @@ export class AnthropicSupervisorService implements SupervisorService {
   private model: string;
 
   constructor(model = DEFAULT_SUPERVISOR_MODEL) {
-    this.client = new Anthropic();
+    this.client = new Anthropic({
+      apiKey:
+        process.env.SYMPHONY_SUPERVISOR_LLM_API_KEY ||
+        process.env.SYMPHONY_BOT_LLM_API_KEY ||
+        process.env.ANTHROPIC_API_KEY,
+      baseURL:
+        process.env.SYMPHONY_SUPERVISOR_LLM_BASE_URL ||
+        process.env.SYMPHONY_BOT_LLM_BASE_URL ||
+        process.env.ANTHROPIC_BASE_URL,
+    });
     this.model = model;
   }
 

@@ -168,6 +168,9 @@ export interface RuntimeIssueView {
   governance_current_child?: RuntimeGovernanceChildIssueView | null;
   governance_child_queue?: RuntimeGovernanceChildIssueView[];
   next_recommended_action?: string | null;
+  governance_pause_reason?: string | null;
+  governance_expected_handoff?: string | null;
+  governance_queued_child_identifiers?: string[];
   delivery_state?: RuntimeDeliveryState | null;
   delivery_code?: RuntimeDeliveryCode | null;
   delivery_summary?: string | null;
