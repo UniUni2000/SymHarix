@@ -356,11 +356,21 @@ describe('SupervisorSessionService', () => {
     expect(approved?.message).toContain('INT-1');
     expect(approved?.message).toContain('当前子任务');
     expect(runtime.createIssueCalls).toHaveLength(1);
+    expect(runtime.createIssueCalls[0]?.supervisor_execution_intent).toEqual(expect.objectContaining({
+      root_session_id: session!.id,
+      repo_ref: 'test2',
+      approved_execution_mode: 'root_with_split_queue',
+      plan_summary: expect.stringContaining('Refactor runtime API'),
+      acceptance_summary: expect.stringContaining('Do all three together'),
+    }));
     expect(runtime.splitGovernanceCalls).toEqual(['issue-1']);
     const updated = sessions.findById(session!.id);
     expect(updated?.state).toBe('executing');
     expect(updated?.root_issue_id).toBe('issue-1');
     expect(updated?.current_child_issue_id).toBe('issue-2');
+    const eventKinds = events.listBySession(session!.id).map((event) => event.event_kind);
+    expect(eventKinds).toContain('execution_intent_approved');
+    expect(eventKinds).toContain('materialized_plan_created');
   });
 
   test('auto-starts a small focused issue after generating a compact plan card', async () => {
@@ -768,5 +778,71 @@ describe('SupervisorSessionService', () => {
     expect(updated?.state).toBe('executing');
     expect(updated?.root_issue_id).toBe('issue-1');
     expect(events.listBySession(session.id).some((event) => event.event_kind === 'plan_revision_approved')).toBe(true);
+  });
+
+  test('keeps the root session executing when a child issue completes and records a child-completed milestone', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+    const session = sessions.create({
+      id: 'session-1',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'executing',
+      repo_ref: 'test2',
+      intake_mode: 'plan_then_approve',
+      approval_mode: 'explicit_user_approval',
+      plan_version: 1,
+      root_issue_id: 'issue-root',
+      current_child_issue_id: 'issue-child-1',
+      plan_card: {
+        title: 'Root plan',
+        user_goal: 'Root plan',
+        in_scope: ['按 child queue 顺序推进'],
+        out_of_scope: ['不并发推进后续 child'],
+        acceptance: ['所有 child 完成后 root 才算完成'],
+        known_risks: [],
+        execution_strategy: '只放行 current child，后续自动接力。',
+        needs_user_approval: true,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_with_split_queue',
+        recommended_option: {
+          label: '按推荐继续',
+          summary: '继续推进当前 child。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    runtime.emit({
+      type: 'issue',
+      data: createIssueView({
+        issue_id: 'issue-child-1',
+        identifier: 'INT-2',
+        title: 'First child',
+        governance_root_issue_id: 'issue-root',
+        governance_root_issue_identifier: 'INT-1',
+        orchestrator_state: 'completed',
+        delivery_state: 'completed',
+        delivery_summary: '第一个 child 已完成。',
+      }),
+    });
+
+    const updated = sessions.findById(session.id);
+    expect(updated?.state).toBe('executing');
+    expect(updated?.current_child_issue_id).toBe('issue-child-1');
+    const milestoneEvents = events
+      .listBySession(session.id)
+      .filter((event) => event.event_kind === 'orchestrator_milestone');
+    expect(milestoneEvents).toHaveLength(1);
+    expect(milestoneEvents[0]?.payload_json?.milestone_kind).toBe('child_completed');
   });
 });
