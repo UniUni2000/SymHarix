@@ -417,4 +417,55 @@ describe('claude-adapter timeline helpers', () => {
       process.exit = originalExit;
     }
   });
+
+  test('surfaces Claude startup stderr when the child exits before the first turn begins', async () => {
+    const originalSpawn = childProcess.spawn;
+    const originalExit = process.exit;
+    const fakeClaude = createFakeClaudeProcess();
+    const adapterIn = new PassThrough();
+    const adapterOut = new PassThrough();
+    const adapterErr = new PassThrough();
+    const adapterCollector = createJsonCollector(adapterOut);
+    let runtime;
+
+    childProcess.spawn = () => fakeClaude;
+    process.exit = () => {};
+
+    try {
+      runtime = startAdapter({
+        env: { ...process.env, SYMPHONY_ADAPTER_DEBUG: '0' },
+        stdin: adapterIn,
+        stdout: adapterOut,
+        stderr: adapterErr,
+      });
+
+      adapterIn.write(`${JSON.stringify({ id: 1, method: 'initialize', params: {} })}\n`);
+      await adapterCollector.waitFor((message) => message.id === 1);
+
+      adapterIn.write(`${JSON.stringify({ id: 2, method: 'thread/start', params: { cwd: process.cwd() } })}\n`);
+      await adapterCollector.waitFor((message) => message.id === 2);
+
+      fakeClaude.stderr.write(`Cannot find module 'lodash-es/sumBy.js'\n`);
+      fakeClaude.stdin.end();
+      fakeClaude.stdin.destroy();
+      fakeClaude.emit('exit', 1, null);
+
+      adapterIn.write(`${JSON.stringify({
+        id: 3,
+        method: 'turn/start',
+        params: {
+          input: [{ type: 'text', text: 'say hi' }],
+        },
+      })}\n`);
+
+      const failed = await adapterCollector.waitFor(
+        (message) => message.method === 'turn/failed',
+      );
+      expect(failed.result.error).toContain(`Cannot find module 'lodash-es/sumBy.js'`);
+    } finally {
+      runtime?.rl.close();
+      childProcess.spawn = originalSpawn;
+      process.exit = originalExit;
+    }
+  });
 });

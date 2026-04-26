@@ -11,6 +11,7 @@ import type {
   SupervisorDecisionKind,
   SupervisorIntakeMode,
   SupervisorPlanCard,
+  SupervisorSessionEventRecord,
   SupervisorSessionRecord,
   SupervisorSessionState,
 } from '../database/types';
@@ -22,6 +23,15 @@ import type {
   SupervisorMaterializedPlan,
   SupervisorMilestone,
 } from './types';
+import type {
+  SupervisorRepoIntelligenceResolver,
+  SupervisorRepoIntelligenceSnapshot,
+} from './repoIntelligence';
+import { describeSupervisorThread } from './threadSummary';
+import {
+  DefaultSupervisorExecutionOverseer,
+  type SupervisorExecutionOverseer,
+} from './executionOverseer';
 
 export interface SupervisorServiceResponseParams {
   context: BotCommandContext;
@@ -31,10 +41,35 @@ export interface SupervisorServiceResponseParams {
   canWrite: boolean;
 }
 
-const APPROVE_WORDS = ['确认', '按推荐继续', '批准', '开始执行', '继续'];
+export type SupervisorSessionAction = 'approve' | 'edit' | 'alternate';
+
+const APPROVE_WORDS = ['确认', '按推荐继续', '批准', '开始执行', '继续', '批准并开始'];
 const EDIT_WORDS = ['改一下计划', '修改计划', '先别执行', '不要开始'];
 const ALTERNATE_WORDS = ['换用备选方案', '换方案', '备选方案'];
 const SCOPE_CHANGE_PATTERNS = [/顺便/, /另外/, /再加/, /改成/, /顺手/];
+
+function emptyRuntimeContext(): BotRuntimeCopilotContext {
+  return {
+    default_project_slug: null,
+    available_projects: [],
+    watch_subscriptions: [],
+    overview: {
+      running: 0,
+      retrying: 0,
+      total: 0,
+      active_issues: [],
+    },
+    focus_issue: null,
+    assistant: {
+      provider: null,
+      model: null,
+      configured: false,
+      health: 'unconfigured',
+      fallback_available: true,
+      last_error_code: null,
+    },
+  };
+}
 
 function compact(value: string | null | undefined, maxLength = 160): string {
   const normalized = String(value || '').replace(/\s+/g, ' ').trim();
@@ -63,6 +98,14 @@ function joinHtmlLines(lines: Array<string | null | undefined>): string {
 function textList(values: string[] | null | undefined, fallback: string): string {
   const normalized = (values ?? []).map((value) => compact(value, 120)).filter(Boolean);
   return normalized.length > 0 ? normalized.join('；') : fallback;
+}
+
+function lastOutcomeString(
+  session: SupervisorSessionRecord,
+  key: string,
+): string | null {
+  const value = session.last_material_outcome?.[key];
+  return typeof value === 'string' && value.trim() ? value : null;
 }
 
 function escapeRegExp(value: string): string {
@@ -115,6 +158,48 @@ function inferOutOfScope(title: string): string[] {
   return ['不顺手扩展到无关模块。'];
 }
 
+function buildRepoIntelligenceRisks(
+  intelligence: SupervisorRepoIntelligenceSnapshot | null,
+): string[] {
+  if (!intelligence) {
+    return [];
+  }
+
+  return [
+    intelligence.harness_status === 'shadow'
+      ? '当前仓库仍在使用 shadow harness，验证约束可能还不稳定。'
+      : intelligence.harness_status === 'missing'
+        ? '当前仓库还没有 formal harness，执行约束需要继续从运行结果里学习。'
+        : null,
+    intelligence.constitution_status === 'missing'
+      ? '当前仓库还没有 .symphony-constitution.md，治理判断会偏保守。'
+      : null,
+    intelligence.related_conflict_count > 0
+      ? `同仓最近已有 ${intelligence.related_conflict_count} 条相关冲突记忆。${compact(intelligence.top_conflict_summary, 90)}`
+      : null,
+    intelligence.related_debt_signal_count > 0
+      ? `同仓最近已有 ${intelligence.related_debt_signal_count} 条相关 debt signal。${compact(intelligence.top_debt_summary, 90)}`
+      : null,
+  ].filter((value): value is string => Boolean(value));
+}
+
+function buildRepoExecutionHints(
+  intelligence: SupervisorRepoIntelligenceSnapshot | null,
+): string[] {
+  if (!intelligence) {
+    return [];
+  }
+
+  return [
+    intelligence.decision_memory_count > 0
+      ? `优先复用这个仓库最近 ${intelligence.decision_memory_count} 条已验证路径，避免重复试错。`
+      : null,
+    intelligence.harness_status !== 'formal'
+      ? '先用可验证的小步提交收紧执行范围，再决定是否扩展。'
+      : null,
+  ].filter((value): value is string => Boolean(value));
+}
+
 function buildScopeChangedPlanCard(
   previous: SupervisorPlanCard,
   scopeChangeText: string,
@@ -160,6 +245,11 @@ function isAlternateText(text: string): boolean {
 
 function isScopeChangeText(text: string): boolean {
   return SCOPE_CHANGE_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function explicitlyRequestsApprovalBeforeExecution(text: string, description: string | null): boolean {
+  const combined = `${text}\n${description || ''}`;
+  return /先.*(?:计划卡|计划|方案).*(?:批准|确认|同意)|(?:批准|确认|同意)后再(?:做|执行|开始|开跑)|等我(?:批准|确认|同意)|不要直接(?:做|执行|开跑)|别直接(?:做|执行|开跑)/i.test(combined);
 }
 
 function isPlanMemoryQuestion(text: string): boolean {
@@ -360,18 +450,128 @@ function buildMaterializedPlan(
   };
 }
 
-interface DraftInput {
+export interface DraftInput {
   title: string;
   description: string | null;
   project_slug: string | null;
 }
 
-interface PlanComputation {
+export interface PlanComputation {
   repoRef: string | null;
   intakeMode: SupervisorIntakeMode;
   approvalMode: SupervisorApprovalMode;
   state: SupervisorSessionState;
   planCard: SupervisorPlanCard;
+}
+
+export interface SupervisorPlanBrainInput {
+  session: SupervisorSessionRecord;
+  draft: DraftInput;
+  runtimeContext: BotRuntimeCopilotContext;
+  repoIntelligence: SupervisorRepoIntelligenceSnapshot | null;
+  governancePreview: SupervisorPlanCard['governance_preview'];
+  deterministicPlan: PlanComputation;
+  recentEvents: SupervisorSessionEventRecord[];
+}
+
+export interface SupervisorPlanBrainResult {
+  intakeMode?: SupervisorIntakeMode | null;
+  approvalMode?: SupervisorApprovalMode | null;
+  state?: SupervisorSessionState | null;
+  planCard?: Partial<SupervisorPlanCard> | null;
+  rationale?: string | null;
+}
+
+export interface SupervisorPlanBrain {
+  refinePlan(input: SupervisorPlanBrainInput): Promise<SupervisorPlanBrainResult | null>;
+}
+
+function mergeStringList(
+  override: string[] | null | undefined,
+  fallback: string[],
+): string[] {
+  const values = Array.isArray(override) ? override : fallback;
+  const normalized = values
+    .map((value) => compact(value, 220))
+    .filter(Boolean);
+  return normalized.length > 0 ? normalized : fallback;
+}
+
+function mergePlanOption(
+  override: Partial<SupervisorPlanCard['recommended_option']> | null | undefined,
+  fallback: SupervisorPlanCard['recommended_option'],
+): SupervisorPlanCard['recommended_option'] {
+  if (!override) {
+    return fallback;
+  }
+  return {
+    label: compact(override.label, 48) || fallback.label,
+    summary: compact(override.summary, 220) || fallback.summary,
+  };
+}
+
+function mergePlanCard(
+  fallback: SupervisorPlanCard,
+  override: Partial<SupervisorPlanCard> | null | undefined,
+): SupervisorPlanCard {
+  if (!override) {
+    return fallback;
+  }
+
+  return {
+    ...fallback,
+    title: compact(override.title, 120) || fallback.title,
+    user_goal: compact(override.user_goal, 220) || fallback.user_goal,
+    in_scope: mergeStringList(override.in_scope, fallback.in_scope),
+    out_of_scope: mergeStringList(override.out_of_scope, fallback.out_of_scope),
+    acceptance: mergeStringList(override.acceptance, fallback.acceptance),
+    known_risks: mergeStringList(override.known_risks, fallback.known_risks),
+    execution_strategy: compact(override.execution_strategy, 420) || fallback.execution_strategy,
+    needs_user_approval: override.needs_user_approval ?? fallback.needs_user_approval,
+    repo_ref: override.repo_ref ?? fallback.repo_ref,
+    project_slug: override.project_slug ?? fallback.project_slug,
+    clarification_question: override.clarification_question ?? fallback.clarification_question,
+    materialization_mode: override.materialization_mode ?? fallback.materialization_mode,
+    recommended_option: mergePlanOption(override.recommended_option, fallback.recommended_option),
+    alternate_option: override.alternate_option === null
+      ? null
+      : override.alternate_option
+        ? mergePlanOption(override.alternate_option, fallback.alternate_option ?? {
+            label: '改一下计划',
+            summary: '先把计划重写得更稳，再继续。',
+          })
+        : fallback.alternate_option,
+    governance_preview: override.governance_preview ?? fallback.governance_preview,
+  };
+}
+
+function normalizePlanComputation(
+  base: PlanComputation,
+  refinement: SupervisorPlanBrainResult | null | undefined,
+): PlanComputation {
+  if (!refinement) {
+    return base;
+  }
+
+  const planCard = mergePlanCard(base.planCard, refinement.planCard);
+  const approvalMode = refinement.approvalMode ?? base.approvalMode;
+  let state = refinement.state ?? base.state;
+  if (planCard.clarification_question && state !== 'clarifying') {
+    state = 'clarifying';
+  } else if (approvalMode === 'explicit_user_approval' && state === 'plan_ready') {
+    state = 'awaiting_user_approval';
+  }
+
+  return {
+    repoRef: planCard.project_slug ?? base.repoRef,
+    intakeMode: refinement.intakeMode ?? base.intakeMode,
+    approvalMode,
+    state,
+    planCard: {
+      ...planCard,
+      needs_user_approval: approvalMode !== 'auto',
+    },
+  };
 }
 
 export function buildSupervisorSessionFollowupMessage(
@@ -391,6 +591,16 @@ export function buildSupervisorSessionFollowupMessage(
   const queue = issue?.governance_child_queue ?? [];
   const waitingForApproval = session.state === 'awaiting_user_approval' || session.state === 'plan_ready';
   const waitingForDecision = session.state === 'awaiting_user_decision';
+  const completed = session.state === 'completed';
+  const cancelled = session.state === 'cancelled';
+  const oversightSummary = lastOutcomeString(session, 'user_summary');
+  const oversightInstruction = lastOutcomeString(session, 'dev_instruction');
+  const threadSummary = describeSupervisorThread({
+    session,
+    currentChild,
+    childQueue: queue,
+  });
+  const approvalPrimaryLabel = waitingForApproval ? '批准并开始' : '按推荐继续';
   const materialKey = [
     'session',
     session.id,
@@ -408,14 +618,24 @@ export function buildSupervisorSessionFollowupMessage(
       waitingForApproval
         ? `<b>计划待你批准 · v${session.plan_version}</b>`
         : waitingForDecision
-          ? `<b>需要你决定 · ${escapeHtml(issue?.identifier || title)}</b>`
-          : `<b>计划线程 · ${escapeHtml(issue?.identifier || title)}</b>`,
+          ? `<b>执行中需要你决定 · ${escapeHtml(issue?.identifier || title)}</b>`
+          : completed
+            ? `<b>计划已完成 · ${escapeHtml(issue?.identifier || title)}</b>`
+            : cancelled
+              ? `<b>计划已取消 · ${escapeHtml(issue?.identifier || title)}</b>`
+              : `<b>计划执行中 · ${escapeHtml(issue?.identifier || title)}</b>`,
       waitingForApproval
-        ? '这条需求需要你确认计划后再建单执行。'
+        ? '我已经把这条需求收成一条可执行计划线程。你一批准，我就会开始建单并推进。'
         : waitingForDecision
-          ? '执行线程遇到需要确认的治理节点。'
-          : `当前状态：${escapeHtml(session.state)}`,
+          ? escapeHtml(threadSummary)
+          : completed
+            ? escapeHtml(session.delivery_summary || issue?.delivery_summary || '这条计划线程已经完成，最终交付已闭环。')
+            : cancelled
+              ? escapeHtml(session.delivery_summary || '这条计划线程已经取消，不会继续自动推进。')
+              : '我会继续推进，只在关键节点回来找你。',
       null,
+      '<b>我已理解的计划</b>',
+      escapeHtml(planCard?.title || title),
       '<b>用户目标</b>',
       escapeHtml(planCard?.user_goal || title),
       planCard?.repo_ref || issue?.github_repo ? '<b>仓库</b>' : null,
@@ -426,6 +646,12 @@ export function buildSupervisorSessionFollowupMessage(
       planCard ? escapeHtml(textList(planCard.in_scope, '按当前目标推进。')) : null,
       planCard ? '<b>完成算什么</b>' : null,
       planCard ? escapeHtml(textList(planCard.acceptance, '结果可验证。')) : null,
+      waitingForApproval && planCard ? '<b>批准后会发生什么</b>' : null,
+      waitingForApproval && planCard ? escapeHtml(planCard.execution_strategy || '批准后我会开始物化并推进这条计划线程。') : null,
+      waitingForDecision && oversightSummary ? '<b>监督判断</b>' : null,
+      waitingForDecision && oversightSummary ? escapeHtml(oversightSummary) : null,
+      !waitingForDecision && !completed && !cancelled && oversightInstruction ? '<b>Supervisor 下一步指令</b>' : null,
+      !waitingForDecision && !completed && !cancelled && oversightInstruction ? escapeHtml(compact(oversightInstruction, 260)) : null,
       currentChild ? '<b>当前子任务</b>' : null,
       currentChild ? `${escapeHtml(currentChild.issue_identifier)} · ${escapeHtml(currentChild.title)}` : null,
       queue.length > 0 ? '<b>队列</b>' : null,
@@ -434,15 +660,23 @@ export function buildSupervisorSessionFollowupMessage(
         : null,
       null,
       '<b>推荐下一步</b>',
-      escapeHtml(issue?.next_recommended_action || planCard?.recommended_option.summary || '继续推进当前计划线程。'),
+      escapeHtml(
+        completed
+          ? '如果还要继续扩展，请直接发一条新需求。'
+          : cancelled
+            ? '如需恢复，请明确回复要重新启动哪张单。'
+            : issue?.next_recommended_action || planCard?.recommended_option.summary || '继续推进当前计划线程。',
+      ),
       null,
       waitingForApproval || waitingForDecision
         ? '点按钮继续，或者直接回复你的想法。'
-        : '我会继续盯关键节点，有需要你决定时再回来。',
+        : completed || cancelled
+          ? '这张卡会停留在这里作为结果记录。'
+          : '我会继续盯关键节点，有需要你决定时再回来。',
     ]),
     action_rows: waitingForApproval || waitingForDecision
       ? [
-          [{ label: '按推荐继续', callback_data: `sup|${session.id}|approve` }],
+          [{ label: approvalPrimaryLabel, callback_data: `sup|${session.id}|approve` }],
           [
             { label: '改一下计划', callback_data: `sup|${session.id}|edit` },
             { label: '换用备选方案', callback_data: `sup|${session.id}|alternate` },
@@ -460,6 +694,9 @@ export class SupervisorSessionService {
     private readonly projectResolver: TrackerProjectResolutionService | null,
     private readonly sessions: SupervisorSessionRepository,
     private readonly sessionEvents: SupervisorSessionEventRepository,
+    private readonly repoIntelligenceResolver: SupervisorRepoIntelligenceResolver | null = null,
+    private readonly planBrain: SupervisorPlanBrain | null = null,
+    private readonly executionOverseer: SupervisorExecutionOverseer = new DefaultSupervisorExecutionOverseer(),
   ) {
     this.unsubscribe = this.runtime.subscribe((event) => {
       if (event.type === 'issue') {
@@ -503,6 +740,10 @@ export class SupervisorSessionService {
     return this.renderSessionMessage(session, issue);
   }
 
+  syncIssue(issue: RuntimeIssueView): void {
+    this.syncFromIssue(issue);
+  }
+
   async respond(params: SupervisorServiceResponseParams): Promise<BotCommandResponse | null> {
     const activeSession = this.findActiveSession(params.context);
     if (!activeSession) {
@@ -534,6 +775,35 @@ export class SupervisorSessionService {
     }
 
     return this.continueSession(activeSession, params);
+  }
+
+  async respondToAction(params: {
+    context: BotCommandContext;
+    sessionId: string;
+    action: SupervisorSessionAction;
+    canWrite: boolean;
+    runtimeContext?: BotRuntimeCopilotContext | null;
+  }): Promise<BotCommandResponse> {
+    const session = this.sessions.findById(params.sessionId);
+    if (!session) {
+      return {
+        message: '这条计划卡状态已经丢失。请直接回复你想继续做什么，我会重新接上当前线程。',
+      };
+    }
+
+    const text = params.action === 'approve'
+      ? '批准并开始'
+      : params.action === 'alternate'
+        ? '换用备选方案'
+        : '改一下计划';
+
+    return this.continueSession(session, {
+      context: params.context,
+      text,
+      intent: null,
+      runtimeContext: params.runtimeContext ?? emptyRuntimeContext(),
+      canWrite: params.canWrite,
+    });
   }
 
   private async startSession(params: SupervisorServiceResponseParams): Promise<BotCommandResponse> {
@@ -703,7 +973,7 @@ export class SupervisorSessionService {
     runtimeContext: BotRuntimeCopilotContext,
     canWrite: boolean,
   ): Promise<BotCommandResponse> {
-    const computed = await this.computePlan(draft, runtimeContext);
+    const computed = await this.computePlan(session, draft, runtimeContext);
     const updated = this.sessions.update({
       id: session.id,
       state: computed.state,
@@ -728,6 +998,7 @@ export class SupervisorSessionService {
   }
 
   private async computePlan(
+    session: SupervisorSessionRecord,
     draft: DraftInput,
     runtimeContext: BotRuntimeCopilotContext,
   ): Promise<PlanComputation> {
@@ -737,7 +1008,7 @@ export class SupervisorSessionService {
       || null;
 
     if (!repoRef) {
-      return {
+      const base: PlanComputation = {
         repoRef: null,
         intakeMode: 'clarify_then_plan',
         approvalMode: 'explicit_user_approval',
@@ -766,10 +1037,15 @@ export class SupervisorSessionService {
           governance_preview: null,
         },
       };
+      return this.refinePlanWithBrain(session, draft, runtimeContext, null, null, base);
     }
 
     const resolved = await this.projectResolver?.resolveProjectSlug(repoRef);
     const route = resolved?.route ?? null;
+    const repoIntelligence = await this.repoIntelligenceResolver?.resolve({
+      projectSlug: repoRef,
+      route,
+    }) ?? null;
     const governance = route
       ? await assessIntakeCritic({
           issue: {
@@ -796,6 +1072,7 @@ export class SupervisorSessionService {
     const multiObjective = governance?.decision === 'split_before_implement'
       || isLikelyMultiObjective(draft.title, draft.description);
     const riskyCleanup = isRiskyCleanupRequest(`${draft.title}\n${draft.description || ''}`);
+    const explicitApprovalRequested = explicitlyRequestsApprovalBeforeExecution(draft.title, draft.description);
     const needsClarify = shouldClarifyAcceptance(draft.title, draft.description)
       && !multiObjective
       && governance?.decision !== 'accept_with_rewrite';
@@ -804,7 +1081,7 @@ export class SupervisorSessionService {
     let approvalMode: SupervisorApprovalMode = 'auto';
     let state: SupervisorSessionState = 'plan_ready';
 
-    if (multiObjective || governance?.decision === 'accept_with_rewrite' || riskyCleanup) {
+    if (explicitApprovalRequested || multiObjective || governance?.decision === 'accept_with_rewrite' || riskyCleanup) {
       intakeMode = 'plan_then_approve';
       approvalMode = 'explicit_user_approval';
       state = 'awaiting_user_approval';
@@ -834,7 +1111,7 @@ export class SupervisorSessionService {
             summary: '按这张精简计划直接开跑。',
           };
 
-    return {
+    const base: PlanComputation = {
       repoRef,
       intakeMode,
       approvalMode,
@@ -849,14 +1126,18 @@ export class SupervisorSessionService {
           governance?.summary ? compact(governance.summary, 180) : null,
           riskyCleanup ? '这类清理可能删除文件，需要先确认范围和验收方式。' : null,
           needsClarify ? '当前验收条件还不够稳，需要先补清楚。' : null,
+          ...buildRepoIntelligenceRisks(repoIntelligence),
         ].filter((value): value is string => Boolean(value)),
-        execution_strategy: multiObjective
-          ? '先把源目标收成 root thread，再只放行当前 child，其余 child 顺序排队。'
-          : riskyCleanup
-            ? '先限定清理范围，执行后用 git diff / 文件列表证明只清掉残余内容。'
-          : '保持单目标推进，避免顺手扩大范围。',
+        execution_strategy: [
+          multiObjective
+            ? '先把源目标收成 root thread，再只放行当前 child，其余 child 顺序排队。'
+            : riskyCleanup
+              ? '先限定清理范围，执行后用 git diff / 文件列表证明只清掉残余内容。'
+              : '保持单目标推进，避免顺手扩大范围。',
+          ...buildRepoExecutionHints(repoIntelligence),
+        ].join(' '),
         needs_user_approval: approvalMode !== 'auto',
-        repo_ref: route?.github_repo_full ?? repoRef,
+        repo_ref: repoIntelligence?.repo_ref ?? route?.github_repo_full ?? repoRef,
         project_slug: repoRef,
         clarification_question: needsClarify ? '这条需求完成以后，你最想看到的可验证结果是什么？' : null,
         materialization_mode: multiObjective ? 'root_with_split_queue' : 'root_only',
@@ -876,6 +1157,55 @@ export class SupervisorSessionService {
           : null,
       },
     };
+    return this.refinePlanWithBrain(
+      session,
+      draft,
+      runtimeContext,
+      repoIntelligence,
+      base.planCard.governance_preview,
+      base,
+    );
+  }
+
+  private async refinePlanWithBrain(
+    session: SupervisorSessionRecord,
+    draft: DraftInput,
+    runtimeContext: BotRuntimeCopilotContext,
+    repoIntelligence: SupervisorRepoIntelligenceSnapshot | null,
+    governancePreview: SupervisorPlanCard['governance_preview'],
+    deterministicPlan: PlanComputation,
+  ): Promise<PlanComputation> {
+    if (!this.planBrain) {
+      return deterministicPlan;
+    }
+
+    const recentEvents = this.sessionEvents.listBySession(session.id).slice(-16);
+    try {
+      const refinement = await this.planBrain.refinePlan({
+        session,
+        draft,
+        runtimeContext,
+        repoIntelligence,
+        governancePreview,
+        deterministicPlan,
+        recentEvents,
+      });
+      const computed = normalizePlanComputation(deterministicPlan, refinement);
+      if (refinement) {
+        this.recordEvent(session.id, 'plan_brain_applied', {
+          rationale: refinement.rationale ?? null,
+          state: computed.state,
+          intake_mode: computed.intakeMode,
+          approval_mode: computed.approvalMode,
+        });
+      }
+      return computed;
+    } catch (error) {
+      this.recordEvent(session.id, 'plan_brain_failed', {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return deterministicPlan;
+    }
   }
 
   private async materialize(session: SupervisorSessionRecord, canWrite: boolean): Promise<BotCommandResponse> {
@@ -1132,17 +1462,19 @@ export class SupervisorSessionService {
         {
           format: 'telegram_html',
           message: joinHtmlLines([
-            `<b>继续补计划</b>`,
-            '我正在帮你把这件事收成一个可执行计划。',
+            `<b>一起补计划</b>`,
+            '我正在帮你把这件事收成一个可执行计划，还差一点关键信息。',
             null,
-            '<b>当前理解</b>',
+            '<b>我已理解</b>',
             escapeHtml(planCard.title),
             null,
-            '<b>仓库</b>',
+            '<b>目标仓库</b>',
             escapeHtml(planCard.repo_ref || '待确认'),
             null,
             '<b>还缺什么</b>',
             escapeHtml(planCard.clarification_question || '请补一句你最关心的验收结果。'),
+            null,
+            '直接回复即可，我会继续把它收成计划。',
           ]),
         },
         'clarifying',
@@ -1156,7 +1488,10 @@ export class SupervisorSessionService {
           format: 'telegram_html',
           message: joinHtmlLines([
             `<b>计划待你批准 · v${session.plan_version}</b>`,
-            escapeHtml(planCard.needs_user_approval ? '这条需求需要你确认计划后再建单执行。' : '这是我准备自动执行的精简计划。'),
+            escapeHtml(planCard.needs_user_approval ? '我已经把这条需求收成一条可执行计划线程。你一批准，我就会开始建单并推进。' : '这是我准备自动执行的精简计划。'),
+            null,
+            '<b>我已理解的计划</b>',
+            escapeHtml(planCard.title),
             null,
             '<b>用户目标</b>',
             escapeHtml(planCard.user_goal),
@@ -1178,13 +1513,16 @@ export class SupervisorSessionService {
             null,
             '<b>推荐方案</b>',
             escapeHtml(`${planCard.recommended_option.label}：${planCard.recommended_option.summary}`),
+            null,
+            '<b>批准后会发生什么</b>',
+            escapeHtml(planCard.execution_strategy || '批准后我会开始物化并推进这条计划线程。'),
             planCard.alternate_option ? '<b>备选方案</b>' : null,
             planCard.alternate_option ? escapeHtml(`${planCard.alternate_option.label}：${planCard.alternate_option.summary}`) : null,
             null,
             '点按钮继续，或者直接回复你的想法。',
           ]),
           action_rows: [
-            [{ label: '按推荐继续', callback_data: `sup|${session.id}|approve` }],
+            [{ label: '批准并开始', callback_data: `sup|${session.id}|approve` }],
             [
               { label: '改一下计划', callback_data: `sup|${session.id}|edit` },
               { label: '换用备选方案', callback_data: `sup|${session.id}|alternate` },
@@ -1201,13 +1539,24 @@ export class SupervisorSessionService {
         {
           format: 'telegram_html',
           message: joinHtmlLines([
-            `<b>需要你决定 · ${escapeHtml(issue?.identifier || planCard.title)}</b>`,
-            '执行线程遇到需要确认的治理节点。',
+            `<b>执行中需要你决定 · ${escapeHtml(issue?.identifier || planCard.title)}</b>`,
+            '这条计划线程在执行中遇到了一个需要你拍板的节点。',
+            session.last_material_outcome?.user_summary ? '<b>监督判断</b>' : null,
+            session.last_material_outcome?.user_summary ? escapeHtml(String(session.last_material_outcome.user_summary)) : null,
             null,
             '<b>当前计划</b>',
             escapeHtml(planCard.title),
             issue?.github_repo ? '<b>仓库</b>' : null,
             issue?.github_repo ? `<code>${escapeHtml(issue.github_repo)}</code>` : null,
+            null,
+            '<b>当前为什么停在这里</b>',
+            escapeHtml(describeSupervisorThread({
+              session,
+              currentChild: issue?.governance_current_child
+                ?? issue?.governance_child_queue?.find((child) => child.queue_state === 'current')
+                ?? null,
+              childQueue: issue?.governance_child_queue ?? [],
+            })),
             null,
             '<b>推荐下一步</b>',
             escapeHtml(issue?.next_recommended_action || planCard.recommended_option.summary),
@@ -1230,7 +1579,7 @@ export class SupervisorSessionService {
       {
         format: 'telegram_html',
         message: joinHtmlLines([
-          `<b>计划线程 · ${escapeHtml(planCard.title)}</b>`,
+          `<b>计划执行中 · ${escapeHtml(planCard.title)}</b>`,
           `状态：${escapeHtml(session.state)}`,
         ]),
       },
@@ -1254,7 +1603,7 @@ export class SupervisorSessionService {
       {
         format: 'telegram_html',
         message: joinHtmlLines([
-          `<b>计划已进入执行 · ${escapeHtml(issue?.identifier || planCard?.title || 'root')}</b>`,
+          `<b>计划执行中 · ${escapeHtml(issue?.identifier || planCard?.title || 'root')}</b>`,
           escapeHtml(compact(resultMessage, 260)),
           null,
           planCard ? '<b>计划</b>' : null,
@@ -1267,6 +1616,8 @@ export class SupervisorSessionService {
           queue.length > 0
             ? escapeHtml(queue.map((child) => `${child.issue_identifier}:${child.queue_state || 'queued'}`).join(' / '))
             : null,
+          null,
+          '我会继续推进，只在关键节点回来找你。',
           null,
           escapeHtml(issue?.next_recommended_action || '我会继续盯关键节点，有需要你决定时再回来。'),
         ]),
@@ -1358,6 +1709,14 @@ export class SupervisorSessionService {
     const previousMilestoneKey = typeof session.last_material_outcome?.milestone_key === 'string'
       ? session.last_material_outcome.milestone_key
       : null;
+    const oversight = this.executionOverseer.assess({
+      session,
+      issue,
+      milestone,
+    });
+    const previousOversightKey = typeof session.last_material_outcome?.oversight_key === 'string'
+      ? session.last_material_outcome.oversight_key
+      : null;
     if (milestone && milestone.key !== previousMilestoneKey) {
       this.recordEvent(session.id, 'orchestrator_milestone', {
         milestone_kind: milestone.kind,
@@ -1371,13 +1730,31 @@ export class SupervisorSessionService {
         current_child_issue_id: milestone.current_child_issue_id ?? null,
       });
     }
+    if (oversight && oversight.key !== previousOversightKey) {
+      this.recordEvent(session.id, 'supervisor_oversight', {
+        decision: oversight.decision,
+        reason: oversight.reason,
+        dev_instruction: oversight.dev_instruction,
+        user_summary: oversight.user_summary,
+        active_decision_kind: oversight.active_decision_kind,
+        issue_id: issue.issue_id,
+        issue_identifier: issue.identifier,
+        milestone_kind: milestone?.kind ?? null,
+        milestone_key: milestone?.key ?? null,
+      });
+    }
 
     let nextState = session.state;
     if (isRootIssueEvent && (issue.orchestrator_state === 'completed' || issue.delivery_state === 'completed')) {
       nextState = 'completed';
+    } else if (oversight?.decision === 'ask_user') {
+      nextState = 'awaiting_user_decision';
+    } else if (milestone?.kind === 'child_failed') {
+      nextState = 'awaiting_user_decision';
     } else if (isRootIssueEvent && (
       issue.governance_thread_state === 'blocked' ||
-      issue.governance_thread_state === 'confirming'
+      issue.governance_thread_state === 'confirming' ||
+      issue.governance_thread_state === 'child_failed'
     )) {
       nextState = 'awaiting_user_decision';
     } else if (session.root_issue_id) {
@@ -1389,6 +1766,11 @@ export class SupervisorSessionService {
       state: nextState,
       root_issue_id: session.root_issue_id ?? rootIssueId,
       current_child_issue_id: issue.governance_current_child?.issue_id ?? session.current_child_issue_id,
+      active_decision_kind: oversight?.decision === 'ask_user'
+        ? oversight.active_decision_kind ?? 'delivery_failure'
+        : nextState === 'awaiting_user_decision'
+          ? session.active_decision_kind
+          : null,
       delivery_state: isRootIssueEvent || issue.delivery_state === 'delivery_failed'
         ? issue.delivery_state ?? session.delivery_state
         : session.delivery_state,
@@ -1401,6 +1783,11 @@ export class SupervisorSessionService {
         milestone_key: milestone?.key ?? session.last_material_outcome?.milestone_key ?? null,
         governance_thread_state: issue.governance_thread_state ?? null,
         next_recommended_action: issue.next_recommended_action ?? null,
+        oversight_key: oversight?.key ?? session.last_material_outcome?.oversight_key ?? null,
+        supervisor_decision: oversight?.decision ?? session.last_material_outcome?.supervisor_decision ?? null,
+        supervisor_reason: oversight?.reason ?? session.last_material_outcome?.supervisor_reason ?? null,
+        dev_instruction: oversight?.dev_instruction ?? session.last_material_outcome?.dev_instruction ?? null,
+        user_summary: oversight?.user_summary ?? session.last_material_outcome?.user_summary ?? null,
       },
     });
   }

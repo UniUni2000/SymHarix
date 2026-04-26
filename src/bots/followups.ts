@@ -33,6 +33,12 @@ interface BotFollowupServiceOptions {
 export type LifecycleNotificationClass = 'retrying' | 'failed' | 'done' | 'cancelled';
 
 function shouldNotifyTimeline(event: RuntimeTimelineEvent): boolean {
+  if (
+    event.code === 'governance_assessed'
+    && /(?:No \.symphony-constitution\.md found|shadow harness|governance is running in degraded mode|governance is degraded)/i.test(event.message)
+  ) {
+    return false;
+  }
   return [
     'governance_blocked',
     'governance_assessed',
@@ -127,6 +133,7 @@ export class BotFollowupService {
   private readonly seenTimelineIds = new Set<string>();
   private readonly issueLifecycleClasses = new Map<string, LifecycleNotificationClass>();
   private readonly governanceEventKeys = new Map<string, string>();
+  private readonly lifecycleDigestsInFlight = new Set<string>();
 
   constructor(
     private readonly runtime: RuntimeControlPlane,
@@ -407,6 +414,14 @@ export class BotFollowupService {
     issue: RuntimeIssueView,
     notificationClass: LifecycleNotificationClass,
   ): boolean {
+    const memoryKey = `${recipient.transport}:${recipient.conversation_id}:${issue.issue_id}`;
+    if (this.issueLifecycleClasses.get(memoryKey) === notificationClass) {
+      return true;
+    }
+    if (this.lifecycleDigestsInFlight.has(`${memoryKey}:${notificationClass}`)) {
+      return true;
+    }
+
     if (this.options.deliveryStateRepository) {
       const existing = this.options.deliveryStateRepository.findByKey({
         transport: recipient.transport,
@@ -485,10 +500,10 @@ export class BotFollowupService {
         return;
       }
 
-      this.issueLifecycleClasses.set(
-        `${recipient.transport}:${recipient.conversation_id}:${issue.issue_id}`,
-        notificationClass,
-      );
+      const memoryKey = `${recipient.transport}:${recipient.conversation_id}:${issue.issue_id}`;
+      const inFlightKey = `${memoryKey}:${notificationClass}`;
+      this.issueLifecycleClasses.set(memoryKey, notificationClass);
+      this.lifecycleDigestsInFlight.add(inFlightKey);
 
       try {
         const messageRef = await notifier.sendMessage(recipient, message);
@@ -512,6 +527,8 @@ export class BotFollowupService {
           materialKey: `class:${notificationClass}`,
           errorMessage: error instanceof Error ? error.message : String(error),
         });
+      } finally {
+        this.lifecycleDigestsInFlight.delete(inFlightKey);
       }
     }));
   }
@@ -527,7 +544,11 @@ export class BotFollowupService {
 
     const remaining: BotRecipient[] = [];
     await Promise.allSettled(recipients.map(async (recipient) => {
-      const session = sessionRepository.findActiveByConversation({
+      const session = sessionRepository.findByConversationRootIssue({
+        transport: recipient.transport,
+        conversation_id: recipient.conversation_id,
+        root_issue_id: issue.issue_id,
+      }) ?? sessionRepository.findActiveByConversation({
         transport: recipient.transport,
         conversation_id: recipient.conversation_id,
       });

@@ -448,6 +448,30 @@ describe('SymphonyServer', () => {
     expect(html).toContain('/api/v1/runtime/overview');
   });
 
+  test('GET /runtime includes root-thread pause and handoff inspector semantics', async () => {
+    const response = await request('/runtime');
+    expect(response.status).toBe(200);
+
+    const html = await response.text();
+    expect(html).toContain('Root-thread pause');
+    expect(html).toContain('Expected handoff');
+    expect(html).toContain('Queued children');
+    expect(html).toContain('governance_pause_reason');
+    expect(html).toContain('governance_expected_handoff');
+    expect(html).toContain('governance_queued_child_identifiers');
+  });
+
+  test('GET /runtime includes supervisor session planning semantics', async () => {
+    const response = await request('/runtime');
+    expect(response.status).toBe(200);
+
+    const html = await response.text();
+    expect(html).toContain('Supervisor plan');
+    expect(html).toContain('Session state');
+    expect(html).toContain('supervisor_plan_summary');
+    expect(html).toContain('supervisor_session_state');
+  });
+
   test('GET /api/v1/runtime/overview returns runtime snapshot data', async () => {
     const response = await request('/api/v1/runtime/overview');
     expect(response.status).toBe(200);

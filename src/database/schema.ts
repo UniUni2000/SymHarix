@@ -40,6 +40,10 @@ export const WORK_ITEMS_TABLE_SCHEMA = `
     governance_source_updated_at TEXT,
     governance_override_at TEXT,
     governance_override_reason TEXT,
+    supervisor_root_session_id TEXT,
+    supervisor_plan_summary TEXT,
+    supervisor_acceptance_summary TEXT,
+    supervisor_execution_mode TEXT,
     change_pack_summary_json TEXT,
     task_status_json TEXT,
     evidence_summary_json TEXT,
@@ -585,6 +589,10 @@ export function initializeSchema(db: Database): void {
   ensureColumn(db, 'work_items', 'governance_source_updated_at', 'TEXT');
   ensureColumn(db, 'work_items', 'governance_override_at', 'TEXT');
   ensureColumn(db, 'work_items', 'governance_override_reason', 'TEXT');
+  ensureColumn(db, 'work_items', 'supervisor_root_session_id', 'TEXT');
+  ensureColumn(db, 'work_items', 'supervisor_plan_summary', 'TEXT');
+  ensureColumn(db, 'work_items', 'supervisor_acceptance_summary', 'TEXT');
+  ensureColumn(db, 'work_items', 'supervisor_execution_mode', 'TEXT');
   ensureColumn(db, 'bot_pending_actions', 'issue_id', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'bot_pending_actions', 'status', "TEXT NOT NULL DEFAULT 'pending_confirm'");
   ensureColumn(db, 'bot_pending_actions', 'message_id', 'TEXT');

@@ -15,6 +15,8 @@ import {
   DebtSignalRepository,
   GovernanceSuggestionRepository,
   ReviewEventRepository,
+  SupervisorSessionEventRepository,
+  SupervisorSessionRepository,
   SyncEventRepository,
   WorkItemRepository
 } from '../database';
@@ -178,16 +180,24 @@ function createOrchestrator(
   };
 
   const fakeMappingService = {
-    ensureWorkItem: mock((issue: Issue, githubRepo: string) => workItemRepository.upsert({
-      id: issue.id,
-      linear_issue_id: issue.id,
-      linear_identifier: issue.identifier,
-      linear_title: issue.title,
-      linear_state: issue.state,
-      github_repo: githubRepo,
-      github_issue_number: 501,
-    })),
+    ensureWorkItem: mock((issue: Issue, githubRepo: string) => {
+      const existing = workItemRepository.findByLinearIssueId(issue.id);
+      return workItemRepository.upsert({
+        id: issue.id,
+        linear_issue_id: issue.id,
+        linear_identifier: issue.identifier,
+        linear_title: issue.title,
+        linear_state: issue.state,
+        github_repo: githubRepo,
+        github_issue_number: 501,
+        supervisor_root_session_id: existing?.supervisor_root_session_id ?? null,
+        supervisor_plan_summary: existing?.supervisor_plan_summary ?? null,
+        supervisor_acceptance_summary: existing?.supervisor_acceptance_summary ?? null,
+        supervisor_execution_mode: existing?.supervisor_execution_mode ?? null,
+      });
+    }),
     ensureGitHubIssue: mock(async (issue: Issue, githubRepo: string) => {
+      const existing = workItemRepository.findByLinearIssueId(issue.id);
       const workItem = workItemRepository.upsert({
         id: issue.id,
         linear_issue_id: issue.id,
@@ -196,6 +206,10 @@ function createOrchestrator(
         linear_state: issue.state,
         github_repo: githubRepo,
         github_issue_number: 501,
+        supervisor_root_session_id: existing?.supervisor_root_session_id ?? null,
+        supervisor_plan_summary: existing?.supervisor_plan_summary ?? null,
+        supervisor_acceptance_summary: existing?.supervisor_acceptance_summary ?? null,
+        supervisor_execution_mode: existing?.supervisor_execution_mode ?? null,
       });
       return {
         workItem,
@@ -2021,6 +2035,52 @@ describe('Orchestrator Stability', () => {
     expect(workItem?.orchestrator_state).toBe('discovering');
   });
 
+  it('createIssue persists supervisor execution intent onto the created work item', async () => {
+    const issue = makeIssue({ id: 'issue-created', identifier: 'INT-57', title: 'Created from supervisor plan' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    const result = await orchestrator.createIssue({
+      title: 'Created from supervisor plan',
+      description: 'hello',
+      team_id: 'team-1',
+      supervisor_execution_intent: {
+        root_session_id: 'session-42',
+        repo_ref: 'proj',
+        plan_summary: '清理 runtime 主链并保留 Telegram 治理体验',
+        acceptance_summary: 'runtime 主链更稳定，Telegram 卡片语义不回退。',
+        approved_execution_mode: 'root_with_split_queue',
+        plan_card: {
+          title: '清理 runtime 主链',
+          user_goal: '清理 runtime 主链并保留 Telegram 治理体验',
+          in_scope: ['runtime 主链', 'Telegram 治理卡'],
+          out_of_scope: ['不重做 Discord'],
+          acceptance: ['runtime 主链更稳定', 'Telegram 卡片语义不回退'],
+          known_risks: ['需要顺序推进 child queue'],
+          execution_strategy: 'root 保持主线程，child 顺序接力。',
+          needs_user_approval: true,
+          repo_ref: 'owner/repo',
+          project_slug: 'proj',
+          clarification_question: null,
+          materialization_mode: 'root_with_split_queue',
+          recommended_option: {
+            label: '按推荐继续',
+            summary: '批准后开始顺序执行子任务。',
+          },
+          alternate_option: null,
+          governance_preview: null,
+        },
+      },
+    });
+
+    const workItem = ctx.workItemRepository.findByLinearIssueId(issue.id);
+    expect(result.accepted).toBe(true);
+    expect(workItem?.supervisor_root_session_id).toBe('session-42');
+    expect(workItem?.supervisor_plan_summary).toContain('清理 runtime 主链');
+    expect(workItem?.supervisor_acceptance_summary).toContain('Telegram 卡片语义不回退');
+    expect(workItem?.supervisor_execution_mode).toBe('root_with_split_queue');
+  });
+
   it('createIssue resolves project_slug through the shared tracker project resolver before calling Linear', async () => {
     const issue = makeIssue({
       id: 'issue-created',
@@ -2064,6 +2124,114 @@ describe('Orchestrator Stability', () => {
       projectId: 'project-1',
       stateId: null,
     });
+  });
+
+  it('injects persisted supervisor plan and acceptance guidance into the dev prompt', async () => {
+    const issue = makeIssue({ state: 'Todo', title: 'Runtime cleanup with supervisor context' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: issue.state,
+      github_repo: 'owner/repo',
+      orchestrator_state: 'discovering',
+      supervisor_root_session_id: 'session-99',
+      supervisor_plan_summary: '先清理 runtime 主链，再稳定 Telegram 治理线程。',
+      supervisor_acceptance_summary: 'runtime 不再抖动，Telegram 主卡稳定停留在同一条消息里。',
+      supervisor_execution_mode: 'root_with_split_queue',
+    });
+    const supervisorSessions = new SupervisorSessionRepository(ctx.db);
+    const supervisorEvents = new SupervisorSessionEventRepository(ctx.db);
+    supervisorSessions.create({
+      id: 'session-99',
+      transport: 'telegram',
+      conversation_id: 'chat-99',
+      user_id: 'user-99',
+      state: 'executing',
+      repo_ref: 'proj',
+      intake_mode: 'plan_then_approve',
+      approval_mode: 'explicit_user_approval',
+      plan_version: 2,
+      root_issue_id: issue.id,
+      current_child_issue_id: 'child-1',
+      plan_card: {
+        title: '稳定 runtime 和 Telegram 治理线程',
+        user_goal: '用户希望控制面不再刷屏，执行链路可以稳定闭环。',
+        in_scope: ['runtime 主链降噪', 'Telegram root session 语义稳定'],
+        out_of_scope: ['不重做 Discord'],
+        acceptance: ['Telegram 主卡不重复', 'dev agent 按 root 计划推进'],
+        known_risks: ['历史 followup 可能残留'],
+        execution_strategy: '当前 child 完成后再接力后续队列。',
+        needs_user_approval: true,
+        repo_ref: 'owner/repo',
+        project_slug: 'proj',
+        clarification_question: null,
+        materialization_mode: 'root_with_split_queue',
+        recommended_option: {
+          label: '批准并开始',
+          summary: '按 root thread 推进。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+      delivery_state: 'proof_satisfied',
+      delivery_summary: '证据基本满足，等待最终交付动作。',
+      last_material_outcome: {
+        milestone_kind: 'waiting_on_child',
+        next_recommended_action: '先完成当前 child。',
+        dev_instruction: '下一轮先确认 Telegram root card 不重复，再做最小可验证推进。',
+        supervisor_decision: 'continue',
+      },
+    });
+    supervisorEvents.create({
+      id: 'event-99',
+      session_id: 'session-99',
+      event_kind: 'orchestrator_milestone',
+      payload_json: {
+        milestone_kind: 'waiting_on_child',
+        summary: '当前 child 正在处理。',
+      },
+    });
+
+    ctx.agentRunner.runTurn = mock(async (_child: unknown, _threadId: string, prompt: string) => ({
+      success: true,
+      completed: true,
+      cancelled: false,
+      tokens: { input: 10, output: 5, total: 15 },
+      claude_api_calls: 1,
+      timeline: [],
+      transcript: [{
+        role: 'assistant',
+        kind: 'message',
+        text: prompt,
+        turn: 1,
+        tool_name: null,
+      }],
+    }));
+    (orchestrator as any).agentRunner = ctx.agentRunner;
+    (orchestrator as any).runCliCommand = mock(async () => ({
+      success: true,
+      result: makeCliResult({ final_state: 'In Review' }),
+    }));
+
+    await (orchestrator as any).dispatchIssue(issue, null);
+    await awaitWorker(orchestrator, issue.id);
+
+    const prompt = ctx.agentRunner.runTurn.mock.calls[0]?.[2];
+    expect(prompt).toContain('Supervisor-Approved Plan');
+    expect(prompt).toContain('先清理 runtime 主链，再稳定 Telegram 治理线程。');
+    expect(prompt).toContain('runtime 不再抖动，Telegram 主卡稳定停留在同一条消息里。');
+    expect(prompt).toContain('ROOT_WITH_SPLIT_QUEUE');
+    expect(prompt).toContain('Supervisor Session Memory');
+    expect(prompt).toContain('orchestrator_milestone');
+    expect(prompt).toContain('Supervisor Oversight');
+    expect(prompt).toContain('下一轮先确认 Telegram root card 不重复');
+    expect(prompt).toContain('用户希望控制面不再刷屏');
+    expect(prompt).toContain('child-1');
   });
 
   it('createIssue records advisory governance state and skips dispatch when intake critic asks for a split first', async () => {
@@ -2660,6 +2828,10 @@ describe('Orchestrator Stability', () => {
       linear_state: issue.state,
       github_repo: 'owner/repo',
       orchestrator_state: 'completed',
+      supervisor_root_session_id: 'session-root-92',
+      supervisor_plan_summary: '先处理 root 计划，再按顺序推进治理 follow-up。',
+      supervisor_acceptance_summary: '用户始终围绕 root thread 理解这次治理动作。',
+      supervisor_execution_mode: 'root_with_split_queue',
     });
     ctx.governanceSuggestionRepository.create({
       id: 'suggestion-cleanup',
@@ -2703,6 +2875,12 @@ describe('Orchestrator Stability', () => {
     expect(executed.accepted).toBe(true);
     expect(executed.message).toContain('INT-93');
     expect(ctx.tracker.createIssue).toHaveBeenCalledTimes(1);
+    expect(ctx.workItemRepository.findByLinearIssueId(createdGovernanceIssue.id)).toMatchObject({
+      supervisor_root_session_id: 'session-root-92',
+      supervisor_plan_summary: '先处理 root 计划，再按顺序推进治理 follow-up。',
+      supervisor_acceptance_summary: '用户始终围绕 root thread 理解这次治理动作。',
+      supervisor_execution_mode: 'root_with_split_queue',
+    });
     expect(ctx.governanceSuggestionRepository.findById('suggestion-cleanup')?.status).toBe('accepted');
     expect(ctx.governanceSuggestionRepository.findById('suggestion-dismiss')?.status).toBe('dismissed');
     expect(dismissed.accepted).toBe(true);

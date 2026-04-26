@@ -202,7 +202,72 @@ describe('BotFollowupRepairService', () => {
       descendant_followups_folded: 1,
       descendant_message_states_deleted: 1,
       descendant_pending_actions_deleted: 1,
+      orphan_message_states_deleted: 0,
+      orphan_delivery_states_deleted: 0,
       delivery_baselines_seeded: 1,
+    });
+
+    db.close();
+  });
+
+  test('deletes stale UNKNOWN governance card state and orphan delivery baselines', () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const workItems = new WorkItemRepository(db);
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+    const deliveryStates = new BotFollowupDeliveryStateRepository(db);
+    const pendingActions = new BotPendingActionRepository(db);
+
+    messageStates.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      issue_id: 'unknown',
+      issue_identifier: 'UNKNOWN',
+      message_id: '101',
+      card_kind: 'governance_blocked',
+      card_key: 'blocked|UNKNOWN|split_before_implement',
+      card_state: 'open',
+    });
+    deliveryStates.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      root_issue_id: 'missing-issue',
+      root_issue_identifier: 'INT-404',
+      delivery_kind: 'governance_card',
+      last_material_key: 'missing-card',
+      last_notification_class: null,
+      last_message_id: '101',
+    });
+
+    const runtime = {
+      getIssue: () => null,
+      getOverview: () => ({
+        generated_at: '2026-01-01T00:00:00.000Z',
+        counts: { running: 0, retrying: 0, total: 0 },
+        issues: [],
+      }),
+    } as unknown as RuntimeControlPlane;
+
+    const summary = new BotFollowupRepairService(
+      runtime,
+      workItems,
+      followups,
+      messageStates,
+      deliveryStates,
+      pendingActions,
+    ).repair(new Date('2026-01-01T00:00:00.000Z'));
+
+    expect(messageStates.findAll()).toEqual([]);
+    expect(deliveryStates.findAll()).toEqual([]);
+    expect(summary).toEqual({
+      expired_pending_actions_deleted: 0,
+      descendant_followups_folded: 0,
+      descendant_message_states_deleted: 0,
+      descendant_pending_actions_deleted: 0,
+      orphan_message_states_deleted: 1,
+      orphan_delivery_states_deleted: 1,
+      delivery_baselines_seeded: 0,
     });
 
     db.close();

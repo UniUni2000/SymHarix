@@ -160,6 +160,8 @@ export function buildGovernanceCardKey(issue: RuntimeIssueView): string {
       currentChild?.issue_identifier ?? '',
       currentChild?.delivery_state ?? '',
       currentChild?.delivery_summary ? compact(currentChild.delivery_summary, 140) : '',
+      issue.governance_pause_reason ? compact(issue.governance_pause_reason, 160) : '',
+      issue.governance_expected_handoff ? compact(issue.governance_expected_handoff, 160) : '',
       issue.next_recommended_action ?? '',
       (issue.governance_child_queue ?? issue.governance_child_issues ?? [])
         .map((child) => `${child.issue_identifier}:${child.queue_state ?? '-'}`)
@@ -317,6 +319,8 @@ export function buildGovernanceWaitingOnChildMessage(
       null,
       '<b>源单状态</b>',
       '源单仍暂停，不会并发把所有子任务一起推进。',
+      issue.governance_pause_reason ? escapeHtml(issue.governance_pause_reason) : null,
+      issue.governance_expected_handoff ? `接力方式：${escapeHtml(issue.governance_expected_handoff)}` : null,
       null,
       '<b>下一步建议</b>',
       escapeHtml(options.nextRecommendedAction || issue.next_recommended_action || '先处理子任务，再决定是否回到源单。'),

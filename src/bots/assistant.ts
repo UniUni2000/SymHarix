@@ -382,6 +382,7 @@ function explainGovernanceNextStep(focusIssue: BotFocusedIssueContext): string {
     governance.thread_state === 'waiting_on_child' && governance.child_issues[0]
       ? `当前源单还在等治理子任务 ${governance.child_issues[0].issue_identifier}，所以不会继续自动开发。`
       : null,
+    governance.pause_reason ? `暂停原因：${governance.pause_reason}` : null,
     governance.summary ? `原因：${governance.summary}` : null,
     governance.suggestions[0] ? `建议：${governance.suggestions[0].summary}` : null,
     governance.suggestions[1] ? `备选：${governance.suggestions[1].summary}` : null,
@@ -389,6 +390,7 @@ function explainGovernanceNextStep(focusIssue: BotFocusedIssueContext): string {
       ? `治理子任务：${governance.child_issues.map((child) => `${child.issue_identifier} · ${child.title}`).join('；')}`
       : null,
     governance.next_recommended_action ? `下一步：${governance.next_recommended_action}` : null,
+    governance.expected_handoff ? `接力方式：${governance.expected_handoff}` : null,
     governance.suggestions.length > 0
       ? `可引用建议：${governance.suggestions.map((suggestion, index) => `[${index + 1}] ${suggestion.suggestion_type} (${suggestion.id})`).join(' · ')}`
       : null,
@@ -405,8 +407,11 @@ function explainGovernanceChildIssuePurpose(focusIssue: BotFocusedIssueContext):
     `${firstChild.issue_identifier} 是为 ${focusIssue.issue.identifier} 拆出来的治理子任务。`,
     `用途：${firstChild.title}`,
     firstChild.governance_summary ? `当前状态：${firstChild.governance_summary}` : `当前状态：${firstChild.tracker_state}`,
-    `为什么源单还没继续：${focusIssue.issue.identifier} 还在等待这个子任务先收口。`,
+    focusIssue.governance?.pause_reason
+      ? `为什么源单还没继续：${focusIssue.governance.pause_reason}`
+      : `为什么源单还没继续：${focusIssue.issue.identifier} 还在等待这个子任务先收口。`,
     focusIssue.governance?.next_recommended_action ? `最推荐下一步：${focusIssue.governance.next_recommended_action}` : null,
+    focusIssue.governance?.expected_handoff ? `处理完之后：${focusIssue.governance.expected_handoff}` : null,
   ].filter(Boolean).join('\n');
 }
 
@@ -738,11 +743,11 @@ function isLikelyRepositoryWorkRequest(text: string): boolean {
     return false;
   }
 
-  if (/默认项目|当前.*状态|现在怎么样|为什么|怎么设置|怎么用|help|帮助/i.test(text)) {
+  if (/默认项目|当前.*状态|现在怎么样|现在是什么|现在.*单子|为什么|怎么设置|怎么用|help|帮助|是什么|什么意思|解释一下/i.test(text)) {
     return false;
   }
 
-  return /(?:清空|清理|删除|移除|删掉|处理|整理|收掉|干掉).*(?:残余|垃圾|遗留|多余|无用|文件|目录|仓库|项目|issue|pr)|(?:残余|垃圾|遗留|多余|无用).*(?:清空|清理|删除|移除|删掉|处理|整理)|把.+(?:清空|清理|删除|移除|删掉|处理|整理)|(?:实现|修掉|解决|重构|优化|支持|完成).+(?:功能|页面|接口|流程|测试|验证|闭环|问题|bug)/i.test(text);
+  return /(?:帮我|请你|麻烦|我要|我想|需要).*(?:实现|做|加|新增|支持|修|修复|解决|重构|优化|清理|清空|删除|移除|整理|完成)|(?:做一个|加一个|新增一个|实现一个|修复一个).*(?:功能|页面|接口|流程|按钮|配置|脚本|工具|测试)|(?:清空|清理|删除|移除|删掉|处理|整理|收掉|干掉).*(?:残余|垃圾|遗留|多余|无用|文件|目录|仓库|项目|issue|pr)|(?:残余|垃圾|遗留|多余|无用).*(?:清空|清理|删除|移除|删掉|处理|整理)|把.+(?:清空|清理|删除|移除|删掉|处理|整理|修掉|做好|完成)|(?:实现|修掉|解决|重构|优化|支持|完成).+(?:功能|页面|接口|流程|测试|验证|闭环|问题|bug)/i.test(text);
 }
 
 function parseModelDecision(output: BotAssistantModelOutput): BotAssistantDecision | null {
