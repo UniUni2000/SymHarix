@@ -1,51 +1,92 @@
-# Supervisor Live Root
+# Supervisor Live Root Plan
 
-**Issue**: INT-93
-**Type**: Root Task Entry (Supervisor Root + Child Queue)
-**State**: In Progress
-**Created**: 2026-04-26
+**Date**: 2026-04-26
+**Status**: Active
+**Root Issue**: INT-97
+**Child Sequence**: INT-98 (1/2) → INT-99 (2/2)
+**Execution Mode**: ROOT_WITH_SPLIT_QUEUE
 
 ## Overview
 
-This document serves as the **root task entry** for the Supervisor root + child queue governance verification. It is the first in a sequence of two tasks:
+This document describes the root plan for a sequential child task execution pattern using Supervisor root + child queue. The plan demonstrates governance verification by splitting work into ordered child issues that execute sequentially, with only the current child released for execution while subsequent children queue up.
 
-1. **Root (this document)**: `docs/supervisor-live-root.md` - Creates the root task entry and establishes the queue mechanism
-2. **Child**: `docs/supervisor-live-child.md` - Sequential child task that follows root completion
+## Architecture
 
-## Execution Mode
+```
+ROOT_PLAN (INT-97)
+    │
+    ├── CHILD_1 (INT-98) ←── Currently released
+    │       └── Creates: docs/supervisor-live-root.md
+    │       └── Status: In Progress
+    │
+    └── CHILD_2 (INT-99) ←── Queued, waiting
+            └── Creates: docs/supervisor-live-child.md
+            └── Status: Queued
+```
 
-- **Mode**: `ROOT_WITH_SPLIT_QUEUE`
-- **Root Session ID**: `98960e18-c043-45b0-a5e2-bdd706cf9b98`
-- **Current Child Issue ID**: `aad7fdf8-a7ac-4a85-a73b-a9f8134fc2e2`
+## Execution Model
 
-## Plan Summary
+### Root + Child Queue Pattern
 
-治理验证：顺序创建 Root 与 Child 文档并配置队列接力
+1. **Root Plan (INT-97)**: Defines the overall goal and splits work into sequential child tasks
+2. **Child Queue**: Children are released one at a time in sequence
+3. **Current Child**: Only the current child issue is active/released
+4. **Queued Children**: Subsequent children wait in queue until their turn
 
-**User Goal**: 验证 Supervisor 的 root + child queue 机制，确保先创建 docs/supervisor-live-root.md，再按顺序创建 docs/supervisor-live-child.md，期间仅放行当前 child 任务，后续任务严格排队接力。
+### Supervisor Live Execution
 
-## Acceptance Criteria
+The Supervisor oversees execution with these characteristics:
+- Monitors each child task's progress
+- Releases the next child only after the current child completes
+- Maintains governance validation throughout the chain
+- Ensures sequential execution without parallel sibling work
 
-- [x] `docs/supervisor-live-root.md` exists and is marked as root
-- [ ] `docs/supervisor-live-child.md` is created sequentially after root completion
-- [ ] Queue mechanism correctly intercepts subsequent children and implements sequential handoff
-- [ ] Execution logs are traceable with no concurrency conflicts
+## Child Task Specifications
 
-## Queue Mechanism
+### INT-98 (Child 1/2) - Current
 
-The root + child queue mechanism operates as follows:
+- **Deliverable**: `docs/supervisor-live-root.md` (this file)
+- **Purpose**: Document the root plan and architecture
+- **Completion Criteria**: File exists and content meets root plan requirements
+- **Status**: In Progress
 
-1. **Root Task**: The root task (`docs/supervisor-live-root.md`) is created first and establishes the queue
-2. **Single Child Release**: Only the current child task is released/allowed to proceed
-3. **Strict Queuing**: Subsequent child tasks are queued and not released until their turn
-4. **Sequential Handoff**: Each child task hands off to the next in sequence after completion
+### INT-99 (Child 2/2) - Queued
 
-## Related Documents
+- **Deliverable**: `docs/supervisor-live-child.md`
+- **Purpose**: Document the child execution details
+- **Completion Criteria**: File exists and content符合 child 计划要求
+- **Status**: Queued (will be released after INT-98 completes)
 
-- [docs/supervisor-live-child.md](docs/supervisor-live-child.md) - Sequential child document
+## Governance Properties
 
-## Session Context
+| Property | Value |
+|----------|-------|
+| Execution Mode | ROOT_WITH_SPLIT_QUEUE |
+| Child Release Policy | Sequential (one at a time) |
+| Sibling Control | No parallel execution of queued children |
+| Supervisor Role | Overseer of child queue execution |
 
-- **Supervisor Session**: `98960e18-c043-45b0-a5e2-bdd706cf9b98`
-- **Plan Version**: 1
-- **Execution Mode**: ROOT_WITH_SPLIT_QUEUE
+## Validation Chain
+
+```
+INT-97 (Root) ──creates──► INT-98 (Child 1/2) ──completes──► INT-99 (Child 2/2) ──completes──► Root Complete
+     │                      │                                │
+     │                      │                                │
+  defines                delivers                      delivers
+  child queue          supervisor-live-             supervisor-live-
+                       root.md                      child.md
+```
+
+## Supervisor Session Context
+
+- **Session ID**: b91ab5ee-d080-4e52-a43a-cec8b066f49d
+- **Plan Version**: v1
+- **Current Child Issue ID**: b5242756-d0cb-4136-a33b-e133bd77d037 (INT-98)
+- **Repo Ref**: d886490c7fda
+
+## Key Principles
+
+1. **Sequential Release**: Only one child is active at any time
+2. **No抢跑 (No Racing)**: Subsequent children do not start until their turn
+3. **Queue Discipline**: Children respect their position in the queue
+4. **Governance Validation**: Pattern demonstrates proper task decomposition and sequential execution control
