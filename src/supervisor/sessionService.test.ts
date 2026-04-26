@@ -845,4 +845,85 @@ describe('SupervisorSessionService', () => {
     expect(milestoneEvents).toHaveLength(1);
     expect(milestoneEvents[0]?.payload_json?.milestone_kind).toBe('child_completed');
   });
+
+  test('answers plan-scope questions from active session memory while executing', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    runtime.issues.set('issue-root', createIssueView({
+      issue_id: 'issue-root',
+      identifier: 'INT-1',
+      title: '设置体验计划',
+      governance_root_issue_id: 'issue-root',
+      governance_thread_state: 'waiting_on_child',
+      governance_current_child: {
+        issue_id: 'issue-child',
+        issue_identifier: 'INT-2',
+        title: '实现主题保存',
+        tracker_state: 'In Progress',
+        orchestrator_state: 'dev_running',
+        governance_decision: null,
+        governance_summary: null,
+        queue_state: 'current',
+        delivery_state: null,
+        delivery_code: null,
+        delivery_summary: null,
+      },
+      governance_child_queue: [],
+    }));
+
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+    sessions.create({
+      id: 'session-1',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'executing',
+      repo_ref: 'test2',
+      intake_mode: 'direct_run',
+      approval_mode: 'auto',
+      plan_version: 1,
+      root_issue_id: 'issue-root',
+      current_child_issue_id: 'issue-child',
+      plan_card: {
+        title: '设置体验计划',
+        user_goal: '让用户能保存主题偏好',
+        in_scope: ['实现 /settings 的主题保存'],
+        out_of_scope: ['不重做登录页'],
+        acceptance: ['刷新页面后主题仍然生效'],
+        known_risks: [],
+        execution_strategy: '先完成当前 child，再顺序接力。',
+        needs_user_approval: false,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_with_split_queue',
+        recommended_option: {
+          label: '按推荐继续',
+          summary: '继续推进 INT-2。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    const response = await service.respond({
+      context: createContext(),
+      text: '这个计划范围是什么，完成算什么？',
+      intent: null,
+      runtimeContext: createRuntimeContext(),
+      canWrite: true,
+    });
+
+    expect(response).not.toBeNull();
+    expect(response?.format).toBe('telegram_html');
+    expect(response?.message).toContain('计划记忆');
+    expect(response?.message).toContain('让用户能保存主题偏好');
+    expect(response?.message).toContain('/settings 的主题保存');
+    expect(response?.message).toContain('刷新页面后主题仍然生效');
+    expect(response?.message).toContain('INT-2');
+  });
 });
