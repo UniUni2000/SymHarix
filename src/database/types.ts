@@ -105,6 +105,11 @@ export type SupervisorIntakeMode = 'direct_run' | 'clarify_then_plan' | 'plan_th
 export type SupervisorApprovalMode = 'auto' | 'explicit_user_approval' | 'explicit_reapproval';
 export type SupervisorDecisionKind = 'plan_approval' | 'plan_revision' | 'execution_decision';
 export type SupervisorMaterializationMode = 'root_only' | 'root_with_split_queue';
+export type SupervisorMemoryKind =
+  | 'architecture_preference'
+  | 'delivery_failure'
+  | 'user_approval_preference'
+  | 'execution_pattern';
 
 export interface ServiceLease {
   lease_key: string;
@@ -631,6 +636,29 @@ export interface CreateSupervisorSessionRecord {
 
 export interface UpdateSupervisorSessionRecord extends Partial<Omit<SupervisorSessionRecord, 'id' | 'transport' | 'conversation_id' | 'created_at' | 'updated_at'>> {
   id: string;
+}
+
+export interface SupervisorMemoryRecord {
+  id: string;
+  repo_ref: string;
+  memory_kind: SupervisorMemoryKind;
+  subject_key: string;
+  summary: string;
+  evidence: Record<string, unknown> | null;
+  confidence: number;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface UpsertSupervisorMemoryRecord {
+  repo_ref: string;
+  memory_kind: SupervisorMemoryKind;
+  subject_key: string;
+  summary: string;
+  evidence?: Record<string, unknown> | null;
+  confidence?: number;
+  created_at?: Date;
+  updated_at?: Date;
 }
 
 export interface FindSupervisorSessionConversationKey {

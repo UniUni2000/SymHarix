@@ -29,6 +29,7 @@ import {
   ShadowHarnessRepository,
   SupervisorSessionEventRepository,
   SupervisorSessionRepository,
+  SupervisorMemoryRepository,
   BotTransportEventRepository,
   BotWatchSubscriptionRepository,
   WorkItemRepository,
@@ -60,6 +61,7 @@ import { SupervisorSessionService, type SupervisorPlanBrain } from '../superviso
 import type { SupervisorRepoIntelligenceResolver } from '../supervisor/repoIntelligence';
 import { DefaultSupervisorRepoIntelligenceResolver } from '../supervisor/repoIntelligence';
 import { SupervisorWorker } from '../supervisor/worker';
+import { SupervisorJobLoop } from '../supervisor/jobLoop';
 import { createSupervisorPlanBrainFromEnv } from '../supervisor/planBrain';
 import {
   createSupervisorExecutionOverseerFromEnv,
@@ -472,6 +474,7 @@ export class DefaultBotGateway implements BotGateway {
   private readonly supervisorSessionEvents: SupervisorSessionEventRepository | null;
   private readonly supervisorSessionService: SupervisorSessionService | null;
   private readonly supervisorWorker: SupervisorWorker | null;
+  private readonly supervisorJobLoop: SupervisorJobLoop | null;
 
   constructor(
     private readonly runtime: RuntimeControlPlane,
@@ -488,6 +491,7 @@ export class DefaultBotGateway implements BotGateway {
       transportEventRepository?: BotTransportEventRepository | null;
       supervisorSessionRepository?: SupervisorSessionRepository | null;
       supervisorSessionEventRepository?: SupervisorSessionEventRepository | null;
+      supervisorMemoryRepository?: SupervisorMemoryRepository | null;
       supervisorSessionService?: SupervisorSessionService | null;
       supervisorPlanBrain?: SupervisorPlanBrain | null;
       supervisorExecutionOverseer?: SupervisorExecutionOverseer | null;
@@ -505,6 +509,7 @@ export class DefaultBotGateway implements BotGateway {
     this.transportEvents = options.transportEventRepository ?? null;
     this.supervisorSessions = options.supervisorSessionRepository ?? null;
     this.supervisorSessionEvents = options.supervisorSessionEventRepository ?? null;
+    const supervisorMemories = options.supervisorMemoryRepository ?? null;
     this.telegramNotifier = telegramConfig.botToken ? new TelegramNotifier(telegramConfig) : null;
     this.discordNotifier = discordConfig.botToken ? new DiscordNotifier(discordConfig) : null;
     this.telegramDiagnostics = options.telegramDiagnostics
@@ -587,10 +592,26 @@ export class DefaultBotGateway implements BotGateway {
           },
         })
       : null;
+    this.supervisorJobLoop = this.supervisorSessions && this.supervisorSessionEvents && supervisorMemories && this.supervisorSessionService
+      ? new SupervisorJobLoop({
+          runtime,
+          sessionRepository: this.supervisorSessions,
+          eventRepository: this.supervisorSessionEvents,
+          memoryRepository: supervisorMemories,
+          syncIssue: (issue) => this.supervisorSessionService?.syncIssue(issue),
+          intervalMs: Number.parseInt(process.env.SYMPHONY_SUPERVISOR_JOB_INTERVAL_MS || '', 10) || undefined,
+        })
+      : null;
     if (this.supervisorWorker) {
       void this.supervisorWorker.reconcile().catch((error) => {
         logger.warn('Supervisor worker reconciliation failed during gateway startup', {}, error instanceof Error ? error : undefined);
       });
+    }
+    if (this.supervisorJobLoop) {
+      void this.supervisorJobLoop.tick().catch((error) => {
+        logger.warn('Supervisor job loop startup tick failed', {}, error instanceof Error ? error : undefined);
+      });
+      this.supervisorJobLoop.start();
     }
   }
 
@@ -662,6 +683,7 @@ export class DefaultBotGateway implements BotGateway {
     this.subscriptions.dispose();
     this.followups?.dispose();
     this.supervisorWorker?.dispose();
+    this.supervisorJobLoop?.dispose();
     this.supervisorSessionService?.dispose();
     void this.telegramBootstrap?.dispose();
   }
@@ -2031,6 +2053,7 @@ export function createBotGatewayFromEnv(
   const transportEventRepository = db ? new BotTransportEventRepository(db) : null;
   const supervisorSessionRepository = db ? new SupervisorSessionRepository(db) : null;
   const supervisorSessionEventRepository = db ? new SupervisorSessionEventRepository(db) : null;
+  const supervisorMemoryRepository = db ? new SupervisorMemoryRepository(db) : null;
   const workItemRepository = db ? new WorkItemRepository(db) : null;
   const reviewEventRepository = db ? new ReviewEventRepository(db) : null;
   const governanceAssessmentRepository = db ? new GovernanceAssessmentRepository(db) : null;
@@ -2084,6 +2107,7 @@ export function createBotGatewayFromEnv(
     transportEventRepository,
     supervisorSessionRepository,
     supervisorSessionEventRepository,
+    supervisorMemoryRepository,
     supervisorRepoIntelligenceResolver,
     supervisorPlanBrain: createSupervisorPlanBrainFromEnv(),
     supervisorExecutionOverseer: createSupervisorExecutionOverseerFromEnv(),
