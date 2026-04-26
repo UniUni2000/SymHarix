@@ -17,6 +17,7 @@ import type {
 import { SupervisorSessionEventRepository } from '../database/repositories/supervisorSessionEventRepository';
 import { SupervisorSessionRepository } from '../database/repositories/supervisorSessionRepository';
 import { TrackerProjectResolutionService } from '../tracker/projectResolution';
+import type { SupervisorMilestone } from './types';
 
 export interface SupervisorServiceResponseParams {
   context: BotCommandContext;
@@ -110,6 +111,34 @@ function inferOutOfScope(title: string): string[] {
   return ['不顺手扩展到无关模块。'];
 }
 
+function buildScopeChangedPlanCard(
+  previous: SupervisorPlanCard,
+  scopeChangeText: string,
+): SupervisorPlanCard {
+  const addedScope = `新增范围候选：${compact(scopeChangeText, 140)}`;
+  const existingScope = previous.in_scope ?? [];
+  const existingRisks = previous.known_risks ?? [];
+  return {
+    ...previous,
+    in_scope: existingScope.includes(addedScope)
+      ? existingScope
+      : [...existingScope, addedScope],
+    known_risks: [
+      ...existingRisks,
+      '执行中出现范围变化，需要重新批准后再继续，避免静默漂移。',
+    ],
+    needs_user_approval: true,
+    recommended_option: {
+      label: '批准第新版计划',
+      summary: '确认新增范围后，再继续推进执行线程。',
+    },
+    alternate_option: previous.alternate_option ?? {
+      label: '改一下计划',
+      summary: '如果新增范围不该进本轮，可以先重写计划。',
+    },
+  };
+}
+
 function isApprovalText(text: string): boolean {
   const normalized = text.trim().toLowerCase();
   return APPROVE_WORDS.some((word) => normalized.includes(word.toLowerCase()));
@@ -137,6 +166,10 @@ function shouldClarifyAcceptance(text: string, description: string | null): bool
   return !/验收|测试|verify|验证|输出|页面|命令|结果|完成后|应该/.test(combined);
 }
 
+function asksForRepoClarification(question: string | null | undefined): boolean {
+  return /仓库|project slug|repo/i.test(question || '');
+}
+
 function isLikelyMultiObjective(text: string, description: string | null): boolean {
   const combined = `${text}\n${description || ''}`;
   return /同时|并且|以及|一起|顺便|另外|also|and/i.test(combined);
@@ -144,6 +177,109 @@ function isLikelyMultiObjective(text: string, description: string | null): boole
 
 function isRiskyCleanupRequest(text: string): boolean {
   return /(?:清空|清理|删除|移除|删掉).*(?:残余|垃圾|遗留|多余|无用|文件|目录|仓库|项目)|(?:残余|垃圾|遗留|多余|无用).*(?:清空|清理|删除|移除|删掉)|把.+(?:清空|清理|删除|移除|删掉)/i.test(text);
+}
+
+function deriveSupervisorMilestone(issue: RuntimeIssueView): SupervisorMilestone | null {
+  if (issue.delivery_state === 'delivery_failed' || issue.delivery_code) {
+    return {
+      kind: 'delivery_failed',
+      key: [
+        'delivery_failed',
+        issue.issue_id,
+        issue.delivery_code ?? '',
+        issue.delivery_summary ?? '',
+      ].join('|'),
+      issue_id: issue.issue_id,
+      issue_identifier: issue.identifier,
+      summary: issue.delivery_summary ?? issue.delivery_code ?? null,
+      delivery_state: issue.delivery_state ?? null,
+      delivery_code: issue.delivery_code ?? null,
+      governance_thread_state: issue.governance_thread_state ?? null,
+      current_child_issue_id: issue.governance_current_child?.issue_id ?? null,
+    };
+  }
+
+  if (issue.orchestrator_state === 'completed' || issue.delivery_state === 'completed') {
+    return {
+      kind: 'completed',
+      key: ['completed', issue.issue_id, issue.updated_at ?? ''].join('|'),
+      issue_id: issue.issue_id,
+      issue_identifier: issue.identifier,
+      summary: issue.delivery_summary ?? '计划线程已完成。',
+      delivery_state: issue.delivery_state ?? null,
+      delivery_code: issue.delivery_code ?? null,
+      governance_thread_state: issue.governance_thread_state ?? null,
+      current_child_issue_id: issue.governance_current_child?.issue_id ?? null,
+    };
+  }
+
+  if (issue.orchestrator_state === 'cancelled') {
+    return {
+      kind: 'cancelled',
+      key: ['cancelled', issue.issue_id, issue.updated_at ?? ''].join('|'),
+      issue_id: issue.issue_id,
+      issue_identifier: issue.identifier,
+      summary: '计划线程已取消。',
+      delivery_state: issue.delivery_state ?? null,
+      delivery_code: issue.delivery_code ?? null,
+      governance_thread_state: issue.governance_thread_state ?? null,
+      current_child_issue_id: issue.governance_current_child?.issue_id ?? null,
+    };
+  }
+
+  if (issue.orchestrator_state === 'retry_scheduled') {
+    return {
+      kind: 'retrying',
+      key: ['retrying', issue.issue_id].join('|'),
+      issue_id: issue.issue_id,
+      issue_identifier: issue.identifier,
+      summary: issue.delivery_summary ?? '当前进入重试队列。',
+      delivery_state: issue.delivery_state ?? null,
+      delivery_code: issue.delivery_code ?? null,
+      governance_thread_state: issue.governance_thread_state ?? null,
+      current_child_issue_id: issue.governance_current_child?.issue_id ?? null,
+    };
+  }
+
+  if (issue.governance_thread_state === 'waiting_on_child' || issue.governance_thread_state === 'child_failed') {
+    return {
+      kind: issue.governance_thread_state,
+      key: [
+        issue.governance_thread_state,
+        issue.issue_id,
+        issue.governance_current_child?.issue_id ?? '',
+        issue.governance_child_queue?.map((child) => `${child.issue_id}:${child.queue_state ?? ''}`).join(',') ?? '',
+      ].join('|'),
+      issue_id: issue.issue_id,
+      issue_identifier: issue.identifier,
+      summary: issue.next_recommended_action ?? null,
+      delivery_state: issue.delivery_state ?? null,
+      delivery_code: issue.delivery_code ?? null,
+      governance_thread_state: issue.governance_thread_state ?? null,
+      current_child_issue_id: issue.governance_current_child?.issue_id ?? null,
+    };
+  }
+
+  if (issue.governance_thread_state === 'blocked' || issue.governance_thread_state === 'confirming') {
+    return {
+      kind: 'requires_user_decision',
+      key: [
+        'requires_user_decision',
+        issue.issue_id,
+        issue.governance_decision ?? '',
+        issue.next_recommended_action ?? '',
+      ].join('|'),
+      issue_id: issue.issue_id,
+      issue_identifier: issue.identifier,
+      summary: issue.next_recommended_action ?? issue.governance_summary ?? null,
+      delivery_state: issue.delivery_state ?? null,
+      delivery_code: issue.delivery_code ?? null,
+      governance_thread_state: issue.governance_thread_state ?? null,
+      current_child_issue_id: issue.governance_current_child?.issue_id ?? null,
+    };
+  }
+
+  return null;
 }
 
 interface DraftInput {
@@ -363,6 +499,9 @@ export class SupervisorSessionService {
 
     if (session.state === 'awaiting_user_approval' || session.state === 'plan_ready') {
       if (isApprovalText(params.text)) {
+        if (session.approval_mode === 'explicit_reapproval' && session.root_issue_id) {
+          return this.approvePlanRevision(session, params.canWrite);
+        }
         return this.materialize(session, params.canWrite);
       }
       if (isAlternateText(params.text) || isEditText(params.text)) {
@@ -393,9 +532,12 @@ export class SupervisorSessionService {
 
     if (session.state === 'clarifying' || session.state === 'drafting') {
       const planCard = session.plan_card;
+      const repoClarification = asksForRepoClarification(planCard?.clarification_question);
       const draft: DraftInput = {
         title: planCard?.title || compact(params.text, 80) || '未命名计划',
-        description: planCard?.acceptance?.join('\n') || params.text,
+        description: repoClarification
+          ? planCard?.acceptance?.join('\n') || params.text
+          : params.text,
         project_slug: session.repo_ref,
       };
 
@@ -416,17 +558,28 @@ export class SupervisorSessionService {
         };
       }
 
+      if (planCard?.clarification_question && !repoClarification) {
+        this.recordEvent(session.id, 'clarification_answer_recorded', {
+          question: planCard.clarification_question,
+          answer: params.text,
+        });
+      }
+
       return this.recomputeAndRespond(session, draft, params.runtimeContext, params.canWrite);
     }
 
     if (session.state === 'executing') {
       if (isScopeChangeText(params.text)) {
         const nextPlanVersion = (session.plan_version ?? 1) + 1;
+        const revisedPlanCard = session.plan_card
+          ? buildScopeChangedPlanCard(session.plan_card, params.text)
+          : null;
         const updated = this.sessions.update({
           id: session.id,
           state: 'awaiting_user_approval',
           approval_mode: 'explicit_reapproval',
           plan_version: nextPlanVersion,
+          plan_card: revisedPlanCard ?? session.plan_card,
           active_decision_kind: 'plan_revision',
           last_material_outcome: {
             scope_change_text: params.text,
@@ -436,19 +589,7 @@ export class SupervisorSessionService {
           text: params.text,
           next_plan_version: nextPlanVersion,
         });
-        return {
-          ...this.withSessionMetadata(
-            updated,
-            {
-              message: `我收到一个明显会改变范围的新要求，所以先暂停吸收它。\n已把当前线程切回计划更新态，请你重新确认第 ${nextPlanVersion} 版计划后我再继续。`,
-              action_rows: [
-                [{ label: '按推荐继续', callback_data: `sup|${updated.id}|approve` }],
-                [{ label: '改一下计划', callback_data: `sup|${updated.id}|edit` }],
-              ],
-            },
-            'scope-change',
-          ),
-        };
+        return this.renderSessionMessage(updated);
       }
 
       const rootIssue = session.root_issue_id ? this.runtime.getIssue(session.root_issue_id) : null;
@@ -771,6 +912,46 @@ export class SupervisorSessionService {
     return this.renderMaterializedMessage(updated, latestIssue, resultMessage);
   }
 
+  private approvePlanRevision(
+    session: SupervisorSessionRecord,
+    canWrite: boolean,
+  ): BotCommandResponse {
+    if (!canWrite) {
+      return this.withSessionMetadata(
+        session,
+        {
+          message: '当前 transport 没有写权限，所以我不能批准这次计划修订。',
+        },
+        'revision-write-blocked',
+      );
+    }
+
+    const issue = session.root_issue_id ? this.runtime.getIssue(session.root_issue_id) : null;
+    const updated = this.sessions.update({
+      id: session.id,
+      state: 'executing',
+      active_decision_kind: null,
+      delivery_state: issue?.delivery_state ?? session.delivery_state,
+      delivery_summary: issue?.delivery_summary ?? session.delivery_summary,
+      last_material_outcome: {
+        ...(session.last_material_outcome ?? {}),
+        plan_revision_approved_at: new Date().toISOString(),
+        plan_version: session.plan_version,
+      },
+    }) ?? session;
+    this.recordEvent(session.id, 'plan_revision_approved', {
+      plan_version: session.plan_version,
+      root_issue_id: session.root_issue_id,
+      root_issue_identifier: issue?.identifier ?? null,
+    });
+
+    return this.renderMaterializedMessage(
+      updated,
+      issue,
+      `第 ${session.plan_version} 版计划已批准。我会继续围绕原 root thread 推进，不会新建重复任务。`,
+    );
+  }
+
   private async executeRecommendedDecision(
     session: SupervisorSessionRecord,
     canWrite: boolean,
@@ -1034,6 +1215,24 @@ export class SupervisorSessionService {
       return;
     }
 
+    const milestone = deriveSupervisorMilestone(issue);
+    const previousMilestoneKey = typeof session.last_material_outcome?.milestone_key === 'string'
+      ? session.last_material_outcome.milestone_key
+      : null;
+    if (milestone && milestone.key !== previousMilestoneKey) {
+      this.recordEvent(session.id, 'orchestrator_milestone', {
+        milestone_kind: milestone.kind,
+        milestone_key: milestone.key,
+        issue_id: milestone.issue_id,
+        issue_identifier: milestone.issue_identifier,
+        summary: milestone.summary,
+        delivery_state: milestone.delivery_state ?? null,
+        delivery_code: milestone.delivery_code ?? null,
+        governance_thread_state: milestone.governance_thread_state ?? null,
+        current_child_issue_id: milestone.current_child_issue_id ?? null,
+      });
+    }
+
     let nextState = session.state;
     if (issue.orchestrator_state === 'completed' || issue.delivery_state === 'completed') {
       nextState = 'completed';
@@ -1054,6 +1253,9 @@ export class SupervisorSessionService {
       delivery_state: issue.delivery_state ?? session.delivery_state,
       delivery_summary: issue.delivery_summary ?? session.delivery_summary,
       last_material_outcome: {
+        ...(session.last_material_outcome ?? {}),
+        milestone_kind: milestone?.kind ?? session.last_material_outcome?.milestone_kind ?? null,
+        milestone_key: milestone?.key ?? session.last_material_outcome?.milestone_key ?? null,
         governance_thread_state: issue.governance_thread_state ?? null,
         next_recommended_action: issue.next_recommended_action ?? null,
       },
