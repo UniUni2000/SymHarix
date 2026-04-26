@@ -17,7 +17,11 @@ import type {
 import { SupervisorSessionEventRepository } from '../database/repositories/supervisorSessionEventRepository';
 import { SupervisorSessionRepository } from '../database/repositories/supervisorSessionRepository';
 import { TrackerProjectResolutionService } from '../tracker/projectResolution';
-import type { SupervisorMilestone } from './types';
+import type {
+  SupervisorExecutionIntent,
+  SupervisorMaterializedPlan,
+  SupervisorMilestone,
+} from './types';
 
 export interface SupervisorServiceResponseParams {
   context: BotCommandContext;
@@ -180,6 +184,42 @@ function isRiskyCleanupRequest(text: string): boolean {
 }
 
 function deriveSupervisorMilestone(issue: RuntimeIssueView): SupervisorMilestone | null {
+  const rootIssueId = issue.governance_root_issue_id ?? issue.issue_id;
+  const isChildIssue = rootIssueId !== issue.issue_id;
+  if (isChildIssue && (issue.orchestrator_state === 'completed' || issue.delivery_state === 'completed')) {
+    return {
+      kind: 'child_completed',
+      key: ['child_completed', rootIssueId, issue.issue_id, issue.updated_at ?? ''].join('|'),
+      issue_id: issue.issue_id,
+      issue_identifier: issue.identifier,
+      summary: issue.delivery_summary ?? `${issue.identifier} 已完成，等待 root thread 接力下一步。`,
+      delivery_state: issue.delivery_state ?? null,
+      delivery_code: issue.delivery_code ?? null,
+      governance_thread_state: issue.governance_thread_state ?? null,
+      current_child_issue_id: issue.issue_id,
+    };
+  }
+
+  if (isChildIssue && (issue.delivery_state === 'delivery_failed' || issue.orchestrator_state === 'failed')) {
+    return {
+      kind: 'child_failed',
+      key: [
+        'child_failed',
+        rootIssueId,
+        issue.issue_id,
+        issue.delivery_code ?? '',
+        issue.delivery_summary ?? '',
+      ].join('|'),
+      issue_id: issue.issue_id,
+      issue_identifier: issue.identifier,
+      summary: issue.delivery_summary ?? issue.delivery_code ?? null,
+      delivery_state: issue.delivery_state ?? null,
+      delivery_code: issue.delivery_code ?? null,
+      governance_thread_state: issue.governance_thread_state ?? null,
+      current_child_issue_id: issue.issue_id,
+    };
+  }
+
   if (issue.delivery_state === 'delivery_failed' || issue.delivery_code) {
     return {
       kind: 'delivery_failed',
@@ -280,6 +320,40 @@ function deriveSupervisorMilestone(issue: RuntimeIssueView): SupervisorMilestone
   }
 
   return null;
+}
+
+function buildExecutionIntent(
+  session: SupervisorSessionRecord,
+  planCard: SupervisorPlanCard,
+): SupervisorExecutionIntent {
+  return {
+    root_session_id: session.id,
+    repo_ref: planCard.project_slug || session.repo_ref || planCard.repo_ref || 'unknown',
+    plan_summary: planCard.title,
+    acceptance_summary: textList(planCard.acceptance, '结果可验证。'),
+    approved_execution_mode: planCard.materialization_mode,
+    plan_card: planCard,
+  };
+}
+
+function buildMaterializedPlan(
+  intent: SupervisorExecutionIntent,
+  issue: RuntimeIssueView | null,
+  createResult: { issue_id: string | null; issue_identifier: string | null },
+): SupervisorMaterializedPlan {
+  const queue = issue?.governance_child_queue ?? [];
+  return {
+    ...intent,
+    root_issue_id: createResult.issue_id ?? issue?.issue_id ?? '',
+    root_issue_identifier: createResult.issue_identifier ?? issue?.identifier ?? null,
+    current_child_issue_id: issue?.governance_current_child?.issue_id ?? null,
+    child_queue: queue.map((child) => ({
+      issue_id: child.issue_id,
+      issue_identifier: child.issue_identifier,
+      title: child.title,
+      queue_state: child.queue_state ?? null,
+    })),
+  };
 }
 
 interface DraftInput {
@@ -828,9 +902,13 @@ export class SupervisorSessionService {
       state: 'approved_for_materialization',
       active_decision_kind: null,
     });
+    const executionIntent = buildExecutionIntent(session, planCard);
     this.recordEvent(session.id, 'plan_approved', {
       plan_version: session.plan_version,
       project_slug: planCard.project_slug,
+    });
+    this.recordEvent(session.id, 'execution_intent_approved', {
+      intent: executionIntent,
     });
 
     const createResult = await this.runtime.createIssue({
@@ -843,6 +921,7 @@ export class SupervisorSessionService {
         `执行方式：${planCard.execution_strategy}`,
       ].join('\n'),
       project_slug: planCard.project_slug,
+      supervisor_execution_intent: executionIntent,
     });
 
     if (!createResult.accepted || !createResult.issue_id) {
@@ -907,6 +986,9 @@ export class SupervisorSessionService {
       issue_id: createResult.issue_id,
       issue_identifier: createResult.issue_identifier,
       current_child_issue_id: latestIssue?.governance_current_child?.issue_id ?? null,
+    });
+    this.recordEvent(session.id, 'materialized_plan_created', {
+      plan: buildMaterializedPlan(executionIntent, latestIssue, createResult),
     });
 
     return this.renderMaterializedMessage(updated, latestIssue, resultMessage);
@@ -1210,6 +1292,7 @@ export class SupervisorSessionService {
 
   private syncFromIssue(issue: RuntimeIssueView): void {
     const rootIssueId = issue.governance_root_issue_id ?? issue.issue_id;
+    const isRootIssueEvent = rootIssueId === issue.issue_id;
     const session = this.sessions.findByRootIssueId(rootIssueId);
     if (!session) {
       return;
@@ -1234,12 +1317,12 @@ export class SupervisorSessionService {
     }
 
     let nextState = session.state;
-    if (issue.orchestrator_state === 'completed' || issue.delivery_state === 'completed') {
+    if (isRootIssueEvent && (issue.orchestrator_state === 'completed' || issue.delivery_state === 'completed')) {
       nextState = 'completed';
-    } else if (
+    } else if (isRootIssueEvent && (
       issue.governance_thread_state === 'blocked' ||
       issue.governance_thread_state === 'confirming'
-    ) {
+    )) {
       nextState = 'awaiting_user_decision';
     } else if (session.root_issue_id) {
       nextState = 'executing';
@@ -1250,8 +1333,12 @@ export class SupervisorSessionService {
       state: nextState,
       root_issue_id: session.root_issue_id ?? rootIssueId,
       current_child_issue_id: issue.governance_current_child?.issue_id ?? session.current_child_issue_id,
-      delivery_state: issue.delivery_state ?? session.delivery_state,
-      delivery_summary: issue.delivery_summary ?? session.delivery_summary,
+      delivery_state: isRootIssueEvent || issue.delivery_state === 'delivery_failed'
+        ? issue.delivery_state ?? session.delivery_state
+        : session.delivery_state,
+      delivery_summary: isRootIssueEvent || issue.delivery_state === 'delivery_failed'
+        ? issue.delivery_summary ?? session.delivery_summary
+        : session.delivery_summary,
       last_material_outcome: {
         ...(session.last_material_outcome ?? {}),
         milestone_kind: milestone?.kind ?? session.last_material_outcome?.milestone_kind ?? null,
