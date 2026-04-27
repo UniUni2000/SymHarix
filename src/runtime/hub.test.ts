@@ -8,6 +8,7 @@ import {
   GovernanceSuggestionRepository,
   ReviewEventRepository,
   ShadowHarnessRepository,
+  SupervisorJobRepository,
   SupervisorSessionRepository,
   SyncEventRepository,
   WorkItemRepository,
@@ -694,6 +695,83 @@ describe('RuntimeHub', () => {
     hub.dispose();
   });
 
+  test('projects a root thread as resolved after every queued child completes', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workItemRepository = new WorkItemRepository(db);
+
+    workItemRepository.create({
+      id: 'issue-root-complete',
+      linear_issue_id: 'issue-root-complete',
+      linear_identifier: 'INT-80',
+      linear_title: 'Completed root queue',
+      linear_state: 'Todo',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'halted',
+      governance_root_issue_id: 'issue-root-complete',
+      governance_generation: 0,
+    });
+    workItemRepository.create({
+      id: 'issue-child-complete-1',
+      linear_issue_id: 'issue-child-complete-1',
+      linear_identifier: 'INT-81',
+      linear_title: 'First completed child',
+      linear_state: 'Done',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'completed',
+      governance_root_issue_id: 'issue-root-complete',
+      governance_parent_issue_id: 'issue-root-complete',
+      governance_generation: 1,
+      delivery_state: 'completed',
+    });
+    workItemRepository.create({
+      id: 'issue-child-complete-2',
+      linear_issue_id: 'issue-child-complete-2',
+      linear_identifier: 'INT-82',
+      linear_title: 'Second completed child',
+      linear_state: 'Done',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'completed',
+      governance_root_issue_id: 'issue-root-complete',
+      governance_parent_issue_id: 'issue-root-complete',
+      governance_generation: 1,
+      delivery_state: 'completed',
+    });
+
+    const controller = new FakeController();
+    controller.getStateSnapshot = () => ({
+      generated_at: '2026-01-01T00:00:00.000Z',
+      counts: {
+        running: 0,
+        retrying: 0,
+      },
+      running: [],
+      retrying: [],
+      codex_totals: {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        seconds_running: 0,
+      },
+      rate_limits: null,
+    });
+
+    const hub = new RuntimeHub(db, controller);
+    const issue = hub.getIssue('INT-80');
+
+    expect(issue?.governance_thread_state).toBe('resolved');
+    expect(issue?.governance_current_child).toBeNull();
+    expect(issue?.next_recommended_action).toBe('所有顺序子任务已完成，计划线程已完成。');
+    expect(issue?.governance_pause_reason).toBeNull();
+    expect(issue?.governance_child_queue).toEqual([
+      expect.objectContaining({ issue_identifier: 'INT-81', queue_state: 'completed' }),
+      expect.objectContaining({ issue_identifier: 'INT-82', queue_state: 'completed' }),
+    ]);
+
+    hub.dispose();
+  });
+
   test('describes child delivery failures as a paused root thread that needs user attention', () => {
     db = new Database(':memory:');
     initializeSchema(db);
@@ -740,6 +818,11 @@ describe('RuntimeHub', () => {
       current_child_issue_id: 'issue-child',
       delivery_state: 'delivery_failed',
       delivery_summary: 'INT-53 代码和证据基本齐了，但卡在 review 提交。',
+      active_decision_kind: 'execution_decision',
+      last_material_outcome: {
+        latest_dev_directive_kind: 'pause_for_user',
+        latest_dev_instruction: '不要继续重试，先让用户确认 review 提交恢复策略。',
+      },
       plan_card: {
         title: 'Root issue with supervisor thread',
         user_goal: 'Root issue with supervisor thread',
@@ -787,6 +870,9 @@ describe('RuntimeHub', () => {
     expect(issue?.supervisor_plan_summary).toContain('源单仍暂停');
     expect(issue?.supervisor_plan_summary).toContain('INT-53');
     expect(issue?.supervisor_plan_summary).toContain('review 提交');
+    expect(issue?.active_decision_kind).toBe('execution_decision');
+    expect(issue?.latest_supervisor_directive).toContain('不要继续重试');
+    expect(issue?.supervisor_job_state).toBe('awaiting_user_decision');
 
     hub.dispose();
   });
@@ -1305,6 +1391,76 @@ describe('RuntimeHub', () => {
     expect(overview.issues.some((issue) => issue.identifier === 'INT-2')).toBe(true);
     expect(hub.getTimeline('issue-1')).toHaveLength(0);
     expect(hub.getTimeline('issue-2')[0]?.message).toBe('Write completed');
+
+    hub.dispose();
+  });
+
+  test('projects the latest durable supervisor job status onto runtime issue views', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workItemRepository = new WorkItemRepository(db);
+    workItemRepository.create({
+      id: 'issue-root',
+      linear_issue_id: 'issue-root',
+      linear_identifier: 'INT-JOB',
+      linear_title: 'Issue with supervisor job',
+      linear_state: 'In Progress',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'dev_running',
+      governance_root_issue_id: 'issue-root',
+      supervisor_root_session_id: 'session-job',
+    });
+
+    const sessionRepository = new SupervisorSessionRepository(db);
+    sessionRepository.create({
+      id: 'session-job',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'executing',
+      repo_ref: 'acme/repo',
+      root_issue_id: 'issue-root',
+      plan_card: {
+        title: 'Issue with supervisor job',
+        user_goal: 'Observe durable jobs',
+        in_scope: ['推进当前 issue'],
+        out_of_scope: ['不扩大范围'],
+        acceptance: ['job state visible'],
+        known_risks: [],
+        execution_strategy: 'supervisor watches dev loop',
+        needs_user_approval: false,
+        repo_ref: 'acme/repo',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: { label: '继续', summary: '继续推进。' },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    const jobRepository = new SupervisorJobRepository(db);
+    const job = jobRepository.enqueue({
+      session_id: 'session-job',
+      root_issue_id: 'issue-root',
+      job_kind: 'issue_dev_instruction',
+      idempotency_key: 'session-job|issue-root|dev|issue_dev_instruction',
+      payload: { issue_id: 'issue-root' },
+      run_after: new Date('2026-01-01T00:00:00.000Z'),
+    });
+    jobRepository.leaseNextReady({
+      now: new Date('2026-01-01T00:00:01.000Z'),
+      leaseOwner: 'test',
+      leaseMs: 60_000,
+    });
+
+    const controller = new FakeController();
+    const hub = new RuntimeHub(db, controller);
+    const issue = hub.getIssue('INT-JOB');
+
+    expect(jobRepository.findById(job.id)?.status).toBe('running');
+    expect(issue?.supervisor_job_state).toBe('running:issue_dev_instruction');
 
     hub.dispose();
   });

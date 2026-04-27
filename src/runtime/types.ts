@@ -176,6 +176,9 @@ export interface RuntimeIssueView {
   delivery_summary?: string | null;
   supervisor_session_state?: string | null;
   supervisor_plan_summary?: string | null;
+  supervisor_job_state?: string | null;
+  latest_supervisor_directive?: string | null;
+  active_decision_kind?: string | null;
   constitution_hits?: ConstitutionHit[];
   fitness_signals?: Array<{ code: string; summary: string; severity: 'low' | 'medium' | 'high' }>;
   active_governance_suggestions?: GovernanceSuggestion[];
@@ -252,6 +255,12 @@ export interface CreateIssueRequest {
   project_id?: string | null;
   state_id?: string | null;
   supervisor_execution_intent?: SupervisorExecutionIntent | null;
+  defer_dispatch?: boolean | null;
+  governance_lineage?: {
+    root_issue_id: string;
+    parent_issue_id: string | null;
+    generation: number;
+  } | null;
 }
 
 export interface RuntimeActionResult {

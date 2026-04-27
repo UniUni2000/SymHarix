@@ -31,10 +31,13 @@ export interface SupervisorWorkerOptions {
   sessionService: SupervisorSessionService;
   notifiers: Partial<Record<BotTransport, BotTransportNotifier>>;
   transportEventRepository?: BotTransportEventRepository | null;
+  editThrottleMs?: number;
 }
 
 export class SupervisorWorker {
   private readonly unsubscribe: () => void;
+  private readonly inFlightMaterialKeys = new Set<string>();
+  private readonly recentMaterialEdits = new Map<string, number>();
 
   constructor(private readonly options: SupervisorWorkerOptions) {
     this.unsubscribe = this.options.runtime.subscribe((event) => {
@@ -88,12 +91,28 @@ export class SupervisorWorker {
       format: card.format,
       action_rows: card.action_rows,
     };
+    const coalesceKey = `${session.id}|${card.material_key}`;
 
     if (session.last_message_id && session.last_card_key === card.material_key) {
       return;
     }
 
+    if (this.inFlightMaterialKeys.has(coalesceKey)) {
+      return;
+    }
+
+    const throttleMs = this.options.editThrottleMs ?? 2_000;
+    const lastEditAt = this.recentMaterialEdits.get(coalesceKey) ?? 0;
+    if (session.last_message_id && Date.now() - lastEditAt < throttleMs) {
+      this.options.sessionRepository.update({
+        id: session.id,
+        last_card_key: card.material_key,
+      });
+      return;
+    }
+
     if (session.last_message_id) {
+      this.inFlightMaterialKeys.add(coalesceKey);
       try {
         await notifier.editMessage(
           recipient,
@@ -116,6 +135,7 @@ export class SupervisorWorker {
           material_key: card.material_key,
           error_message: null,
         });
+        this.recentMaterialEdits.set(coalesceKey, Date.now());
         return;
       } catch (error) {
         const failureKind = getBotMessageEditFailureKind(error);
@@ -136,6 +156,7 @@ export class SupervisorWorker {
             material_key: card.material_key,
             error_message: null,
           });
+          this.recentMaterialEdits.set(coalesceKey, Date.now());
           return;
         }
 
@@ -151,10 +172,13 @@ export class SupervisorWorker {
           material_key: card.material_key,
           error_message: error instanceof Error ? error.message : String(error),
         });
+      } finally {
+        this.inFlightMaterialKeys.delete(coalesceKey);
       }
     }
 
     try {
+      this.inFlightMaterialKeys.add(coalesceKey);
       const messageRef = await notifier.sendMessage(recipient, message);
       this.options.sessionRepository.update({
         id: session.id,
@@ -173,6 +197,7 @@ export class SupervisorWorker {
         material_key: card.material_key,
         error_message: null,
       });
+      this.recentMaterialEdits.set(coalesceKey, Date.now());
     } catch (error) {
       logger.warn('Supervisor worker failed to send session card', {
         session_id: session.id,
@@ -191,6 +216,8 @@ export class SupervisorWorker {
         material_key: card.material_key,
         error_message: error instanceof Error ? error.message : String(error),
       });
+    } finally {
+      this.inFlightMaterialKeys.delete(coalesceKey);
     }
   }
 

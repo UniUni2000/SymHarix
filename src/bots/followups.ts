@@ -6,7 +6,6 @@ import type {
   SupervisorSessionRepository,
 } from '../database';
 import type { RuntimeControlPlane, RuntimeIssueView, RuntimeStreamEvent, RuntimeTimelineEvent } from '../runtime/types';
-import { buildSupervisorSessionFollowupMessage } from '../supervisor/sessionService';
 import {
   buildGovernanceBlockedMessage,
   buildGovernanceCardKey,
@@ -134,6 +133,7 @@ export class BotFollowupService {
   private readonly issueLifecycleClasses = new Map<string, LifecycleNotificationClass>();
   private readonly governanceEventKeys = new Map<string, string>();
   private readonly lifecycleDigestsInFlight = new Set<string>();
+  private readonly governanceCardsInFlight = new Set<string>();
 
   constructor(
     private readonly runtime: RuntimeControlPlane,
@@ -155,6 +155,7 @@ export class BotFollowupService {
     this.seenTimelineIds.clear();
     this.issueLifecycleClasses.clear();
     this.governanceEventKeys.clear();
+    this.governanceCardsInFlight.clear();
   }
 
   registerOrigin(params: {
@@ -557,87 +558,9 @@ export class BotFollowupService {
         return;
       }
 
-      const notifier = this.notifiers[recipient.transport];
-      if (!notifier) {
-        return;
-      }
-
-      const card = buildSupervisorSessionFollowupMessage(session, issue);
-      const message: BotTransportMessage = {
-        text: card.message,
-        format: card.format,
-        action_rows: card.action_rows,
-      };
-      if (session.last_card_key === card.material_key) {
-        return;
-      }
-
-      if (session.last_message_id) {
-        try {
-          await notifier.editMessage(
-            recipient,
-            { provider_message_id: session.last_message_id },
-            message,
-          );
-          sessionRepository.update({
-            id: session.id,
-            last_card_key: card.material_key,
-          });
-          this.recordTransportEvent({
-            recipient,
-            issue,
-            source: 'followup_card',
-            action: 'edit',
-            result: 'success',
-            messageId: session.last_message_id,
-            materialKey: card.material_key,
-          });
-          return;
-        } catch (error) {
-          if (getBotMessageEditFailureKind(error) === 'not_modified') {
-            sessionRepository.update({
-              id: session.id,
-              last_card_key: card.material_key,
-            });
-            this.recordTransportEvent({
-              recipient,
-              issue,
-              source: 'followup_card',
-              action: 'edit',
-              result: 'success',
-              messageId: session.last_message_id,
-              materialKey: card.material_key,
-            });
-            return;
-          }
-          this.recordTransportEvent({
-            recipient,
-            issue,
-            source: 'followup_card',
-            action: 'edit',
-            result: 'failed',
-            messageId: session.last_message_id,
-            materialKey: card.material_key,
-            errorMessage: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
-
-      const messageRef = await notifier.sendMessage(recipient, message);
-      sessionRepository.update({
-        id: session.id,
-        last_message_id: messageRef.provider_message_id,
-        last_card_key: card.material_key,
-      });
-      this.recordTransportEvent({
-        recipient,
-        issue,
-        source: 'followup_card',
-        action: session.last_message_id ? 'fallback' : 'send',
-        result: 'success',
-        messageId: messageRef.provider_message_id,
-        materialKey: card.material_key,
-      });
+      // SupervisorWorker owns session card send/edit. Followups only suppress
+      // lifecycle/governance digests for the same root thread to avoid duplicate
+      // Telegram edits when runtime issue events fan out through both paths.
     }));
 
     return remaining;
@@ -654,6 +577,16 @@ export class BotFollowupService {
     await Promise.allSettled(recipients.map(async (recipient) => {
       const notifier = this.notifiers[recipient.transport];
       if (!notifier) {
+        return;
+      }
+      const inFlightKey = [
+        recipient.transport,
+        recipient.conversation_id,
+        issue.issue_id,
+        cardState,
+        cardKey,
+      ].join(':');
+      if (this.governanceCardsInFlight.has(inFlightKey)) {
         return;
       }
 
@@ -679,6 +612,7 @@ export class BotFollowupService {
           return;
         }
 
+        this.governanceCardsInFlight.add(inFlightKey);
         try {
           await notifier.editMessage(
             recipient,
@@ -757,39 +691,46 @@ export class BotFollowupService {
             errorMessage: error instanceof Error ? error.message : String(error),
           });
           // Fall back to posting a new message and refreshing the stored message id.
+        } finally {
+          this.governanceCardsInFlight.delete(inFlightKey);
         }
       }
 
-      const messageRef = await notifier.sendMessage(recipient, message);
-      this.messageStates?.upsert({
-        transport: recipient.transport,
-        conversation_id: recipient.conversation_id,
-        issue_id: issue.issue_id,
-        issue_identifier: issue.identifier,
-        message_id: messageRef.provider_message_id,
-        card_kind: 'governance_blocked',
-        card_key: cardKey,
-        card_state: cardState,
-      });
-      this.options.deliveryStateRepository?.upsert({
-        transport: recipient.transport,
-        conversation_id: recipient.conversation_id,
-        root_issue_id: issue.issue_id,
-        root_issue_identifier: issue.identifier,
-        delivery_kind: 'governance_card',
-        last_material_key: cardKey,
-        last_notification_class: null,
-        last_message_id: messageRef.provider_message_id,
-      });
-      this.recordTransportEvent({
-        recipient,
-        issue,
-        source: 'followup_card',
-        action: existing ? 'fallback' : 'send',
-        result: 'success',
-        messageId: messageRef.provider_message_id,
-        materialKey: cardKey,
-      });
+      this.governanceCardsInFlight.add(inFlightKey);
+      try {
+        const messageRef = await notifier.sendMessage(recipient, message);
+        this.messageStates?.upsert({
+          transport: recipient.transport,
+          conversation_id: recipient.conversation_id,
+          issue_id: issue.issue_id,
+          issue_identifier: issue.identifier,
+          message_id: messageRef.provider_message_id,
+          card_kind: 'governance_blocked',
+          card_key: cardKey,
+          card_state: cardState,
+        });
+        this.options.deliveryStateRepository?.upsert({
+          transport: recipient.transport,
+          conversation_id: recipient.conversation_id,
+          root_issue_id: issue.issue_id,
+          root_issue_identifier: issue.identifier,
+          delivery_kind: 'governance_card',
+          last_material_key: cardKey,
+          last_notification_class: null,
+          last_message_id: messageRef.provider_message_id,
+        });
+        this.recordTransportEvent({
+          recipient,
+          issue,
+          source: 'followup_card',
+          action: existing ? 'fallback' : 'send',
+          result: 'success',
+          messageId: messageRef.provider_message_id,
+          materialKey: cardKey,
+        });
+      } finally {
+        this.governanceCardsInFlight.delete(inFlightKey);
+      }
     }));
   }
 

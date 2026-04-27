@@ -137,6 +137,41 @@ describe('changePackService', () => {
     expect(state.missing_requirements.some((item) => item.key === 'artifact:reports/weekly-summary.md')).toBe(false);
   });
 
+  test('keeps supervisor live marker verification lightweight even when the repo harness asks for broad commands', async () => {
+    workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-change-pack-live-marker-'));
+    fs.mkdirSync(path.join(workspacePath, '.symphony'), { recursive: true });
+
+    await initializeChangePack({
+      workspacePath,
+      issue: makeIssue({
+        title: '创建 docs/supervisor-live-cleanup-approval-smoke.md 验证文件',
+        description: 'supervisor live E2E root-only marker，不要扫描全仓。',
+      }),
+      profile: 'coding',
+      harness: {
+        verification: {
+          required_commands: ['build', 'test'],
+          required_artifacts: ['dist/index.js'],
+        },
+      },
+      governanceSummary: 'No governance blockers detected.',
+    });
+
+    const state = await evaluateChangePackState({
+      workspacePath,
+      issue: makeIssue({
+        title: '创建 docs/supervisor-live-cleanup-approval-smoke.md 验证文件',
+        description: 'supervisor live E2E root-only marker，不要扫描全仓。',
+      }),
+      mode: 'dev',
+    });
+
+    expect(state.missing_requirements.some((item) => item.key === 'command:build')).toBe(false);
+    expect(state.missing_requirements.some((item) => item.key === 'command:test')).toBe(false);
+    expect(state.missing_requirements.some((item) => item.key === 'artifact:dist/index.js')).toBe(false);
+    expect(state.missing_requirements.some((item) => item.key === 'verification')).toBe(true);
+  });
+
   test('records command evidence from observed runs and uses it to satisfy command requirements', async () => {
     workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-change-pack-commands-'));
     fs.mkdirSync(path.join(workspacePath, '.symphony'), { recursive: true });
@@ -219,6 +254,47 @@ describe('changePackService', () => {
         summary: 'eslint found one error',
       }),
     ]));
+  });
+
+  test('treats custom verification requirements with structured evidence as satisfied', async () => {
+    workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-change-pack-custom-verification-'));
+    fs.mkdirSync(path.join(workspacePath, '.symphony'), { recursive: true });
+
+    await initializeChangePack({
+      workspacePath,
+      issue: makeIssue({
+        title: 'Verify destructive cleanup approval',
+        description: 'Create a marker proving cleanup approval was checked.',
+      }),
+      profile: 'coding',
+      governanceSummary: 'No governance blockers detected.',
+    });
+    fs.writeFileSync(
+      path.join(workspacePath, '.symphony', 'HANDOVER.md'),
+      '# Handover: INT-1\n\n## 开发摘要\nVerified cleanup approval.\n\n## 测试情况\n- 单元测试: PASS\n',
+      'utf8',
+    );
+    const evidencePath = path.join(workspacePath, '.symphony', 'change-pack', 'evidence.json');
+    const evidence = JSON.parse(fs.readFileSync(evidencePath, 'utf8'));
+    evidence.requirements.push({
+      key: 'cleanup_approval_verification',
+      label: 'Verify destructive cleanup approval mechanism',
+      reason: 'Issue requires verification that cleanup requests trigger explicit approval flow.',
+      kind: 'verification',
+      evidence: {
+        mechanism_verified: 'cleanup requests require explicit approval',
+        no_actual_deletion: true,
+      },
+    });
+    fs.writeFileSync(evidencePath, JSON.stringify(evidence, null, 2), 'utf8');
+
+    const state = await evaluateChangePackState({
+      workspacePath,
+      issue: makeIssue(),
+      mode: 'dev',
+    });
+
+    expect(state.missing_requirements.some((item) => item.key === 'cleanup_approval_verification')).toBe(false);
   });
 
   test('requires non-empty research artifacts before completion evidence is satisfied', async () => {

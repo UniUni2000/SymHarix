@@ -110,6 +110,19 @@ export type SupervisorMemoryKind =
   | 'delivery_failure'
   | 'user_approval_preference'
   | 'execution_pattern';
+export type SupervisorJobKind =
+  | 'sync_runtime_state'
+  | 'assess_milestone'
+  | 'issue_dev_instruction'
+  | 'summarize_memory'
+  | 'notify_user'
+  | 'verify_handoff';
+export type SupervisorJobStatus =
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'deferred';
 
 export interface ServiceLease {
   lease_key: string;
@@ -672,6 +685,33 @@ export interface SupervisorSessionEventRecord {
   event_kind: string;
   payload_json: Record<string, unknown> | null;
   created_at: Date;
+}
+
+export interface SupervisorJobRecord {
+  id: string;
+  session_id: string;
+  root_issue_id: string | null;
+  job_kind: SupervisorJobKind;
+  status: SupervisorJobStatus;
+  idempotency_key: string;
+  payload: Record<string, unknown> | null;
+  result: Record<string, unknown> | null;
+  attempt_count: number;
+  run_after: Date;
+  lease_owner: string | null;
+  lease_expires_at: Date | null;
+  last_error: string | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface EnqueueSupervisorJobRecord {
+  session_id: string;
+  root_issue_id?: string | null;
+  job_kind: SupervisorJobKind;
+  idempotency_key: string;
+  payload?: Record<string, unknown> | null;
+  run_after?: Date | null;
 }
 
 export interface CreateSupervisorSessionEventRecord {

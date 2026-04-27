@@ -5,6 +5,7 @@ import {
   GovernanceSuggestionRepository,
   ReviewEventRepository,
   ShadowHarnessRepository,
+  SupervisorJobRepository,
   SupervisorSessionRepository,
   SyncEventRepository,
   WorkItemRepository,
@@ -121,6 +122,7 @@ export class RuntimeHub implements RuntimeControlPlane {
   private readonly governanceSuggestionRepository: GovernanceSuggestionRepository;
   private readonly shadowHarnessRepository: ShadowHarnessRepository;
   private readonly supervisorSessionRepository: SupervisorSessionRepository;
+  private readonly supervisorJobRepository: SupervisorJobRepository;
   private readonly timelineHistoryLimit: number;
   private readonly issueCacheById = new Map<string, Issue>();
   private readonly timelineByIssueId = new Map<string, RuntimeTimelineEvent[]>();
@@ -142,6 +144,7 @@ export class RuntimeHub implements RuntimeControlPlane {
     this.governanceSuggestionRepository = new GovernanceSuggestionRepository(db);
     this.shadowHarnessRepository = new ShadowHarnessRepository(db);
     this.supervisorSessionRepository = new SupervisorSessionRepository(db);
+    this.supervisorJobRepository = new SupervisorJobRepository(db);
     this.timelineHistoryLimit = Math.max(10, options.timelineHistoryLimit ?? 200);
     this.controller = controller;
     this.bindControllerListeners();
@@ -640,6 +643,9 @@ export class RuntimeHub implements RuntimeControlPlane {
       delivery_summary: delivery.summary,
       supervisor_session_state: supervisorProjection.state,
       supervisor_plan_summary: supervisorProjection.summary,
+      supervisor_job_state: supervisorProjection.jobState,
+      latest_supervisor_directive: supervisorProjection.latestDirective,
+      active_decision_kind: supervisorProjection.activeDecisionKind,
       constitution_hits: workItem.constitution_hits,
       fitness_signals: workItem.fitness_signals,
       active_governance_suggestions: this.governanceSuggestionRepository
@@ -1168,6 +1174,18 @@ export class RuntimeHub implements RuntimeControlPlane {
     const currentChild = currentChildIndex >= 0 ? childViews[currentChildIndex] ?? null : null;
     const queuedChildren = childViews.filter((child) => child.queue_state === 'queued');
     const queuedChildIdentifiers = queuedChildren.map((child) => child.issue_identifier);
+    if (!currentChild && childViews.length > 0 && childViews.every((child) => child.queue_state === 'completed')) {
+      return {
+        state: 'resolved',
+        currentChild: null,
+        childQueue: childViews,
+        children: childViews,
+        pauseReason: null,
+        expectedHandoff: null,
+        queuedChildIdentifiers: [],
+        nextRecommendedAction: '所有顺序子任务已完成，计划线程已完成。',
+      };
+    }
     const pauseReason = currentChild
       ? (
         currentChild.delivery_state === 'delivery_failed' || currentChild.orchestrator_state === 'failed'
@@ -1210,6 +1228,9 @@ export class RuntimeHub implements RuntimeControlPlane {
   ): {
     state: string | null;
     summary: string | null;
+    jobState: string | null;
+    latestDirective: string | null;
+    activeDecisionKind: string | null;
   } {
     const session = this.supervisorSessionRepository.findByRootIssueId(rootIssueId);
     if (!session) {
@@ -1227,19 +1248,41 @@ export class RuntimeHub implements RuntimeControlPlane {
                 ? '执行方式：单 root 线程直接推进。'
                 : null,
           ].filter(Boolean).join(' '),
+          jobState: null,
+          latestDirective: null,
+          activeDecisionKind: null,
         };
       }
 
       return {
         state: null,
         summary: null,
+        jobState: null,
+        latestDirective: null,
+        activeDecisionKind: null,
       };
     }
 
     return {
       state: session.state,
       summary: this.describeSupervisorSession(session, governanceThread),
+      jobState: this.describeSupervisorJobState(session),
+      latestDirective: typeof session.last_material_outcome?.latest_dev_instruction === 'string'
+        ? session.last_material_outcome.latest_dev_instruction
+        : null,
+      activeDecisionKind: session.active_decision_kind,
     };
+  }
+
+  private describeSupervisorJobState(session: SupervisorSessionRecord): string {
+    if (session.active_decision_kind || session.state === 'awaiting_user_decision') {
+      return session.state;
+    }
+    const latestJob = this.supervisorJobRepository.listBySession(session.id)[0] ?? null;
+    if (!latestJob) {
+      return session.state;
+    }
+    return `${latestJob.status}:${latestJob.job_kind}`;
   }
 
   private describeSupervisorSession(
