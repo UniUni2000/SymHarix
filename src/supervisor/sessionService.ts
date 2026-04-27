@@ -351,7 +351,7 @@ function asksForRepoClarification(question: string | null | undefined): boolean 
 
 function isLikelyMultiObjective(text: string, description: string | null): boolean {
   const combined = `${text}\n${description || ''}`;
-  return /同时|并且|以及|一起|顺便|另外|两个|多个|子任务|子单|拆分|顺序|排队|child queue|root \+ child|also|and/i.test(combined);
+  return /同时|并且|以及|一起|顺便|另外|两个|多个|子任务|子单|拆分|顺序|排队|child queue|root \+ child|also|multiple|sequential|split/i.test(combined);
 }
 
 function explicitlyForbidsSplitQueue(text: string, description: string | null): boolean {
@@ -367,6 +367,31 @@ function deriveSupervisorMilestone(issue: RuntimeIssueView): SupervisorMilestone
   const rootIssueId = issue.governance_root_issue_id ?? issue.issue_id;
   const isChildIssue = rootIssueId !== issue.issue_id;
   const childQueue = issue.governance_child_queue ?? [];
+  const rootDeliveryFailed = !isChildIssue && (
+    issue.delivery_state === 'delivery_failed' ||
+    issue.orchestrator_state === 'failed' ||
+    Boolean(issue.delivery_code)
+  );
+  if (rootDeliveryFailed) {
+    return {
+      kind: 'delivery_failed',
+      key: [
+        'delivery_failed',
+        issue.issue_id,
+        issue.delivery_code ?? '',
+        issue.delivery_summary ?? '',
+        issue.orchestrator_state ?? '',
+      ].join('|'),
+      issue_id: issue.issue_id,
+      issue_identifier: issue.identifier,
+      summary: issue.delivery_summary ?? issue.delivery_code ?? 'root 线程交付失败。',
+      delivery_state: issue.delivery_state ?? null,
+      delivery_code: issue.delivery_code ?? null,
+      governance_thread_state: issue.governance_thread_state ?? null,
+      current_child_issue_id: issue.governance_current_child?.issue_id ?? null,
+    };
+  }
+
   const allChildrenCompleted = !isChildIssue
     && childQueue.length > 0
     && childQueue.every((child) => (
@@ -374,8 +399,13 @@ function deriveSupervisorMilestone(issue: RuntimeIssueView): SupervisorMilestone
       child.orchestrator_state === 'completed' ||
       child.delivery_state === 'completed'
     ));
+  const rootDeliveryFinalized = !isChildIssue && (
+    issue.orchestrator_state === 'completed' ||
+    issue.delivery_state === 'completed' ||
+    /^(done|cancelled|canceled|duplicate)$/i.test(issue.tracker_state || '')
+  );
 
-  if (allChildrenCompleted) {
+  if (allChildrenCompleted && rootDeliveryFinalized) {
     return {
       kind: 'completed',
       key: [
@@ -387,6 +417,24 @@ function deriveSupervisorMilestone(issue: RuntimeIssueView): SupervisorMilestone
       issue_identifier: issue.identifier,
       summary: '所有顺序子任务已完成，计划线程已完成。',
       delivery_state: issue.delivery_state ?? 'completed',
+      delivery_code: issue.delivery_code ?? null,
+      governance_thread_state: issue.governance_thread_state ?? null,
+      current_child_issue_id: null,
+    };
+  }
+
+  if (allChildrenCompleted) {
+    return {
+      kind: 'waiting_on_child',
+      key: [
+        'children_completed_waiting_root',
+        issue.issue_id,
+        childQueue.map((child) => `${child.issue_id}:${child.queue_state ?? child.orchestrator_state ?? ''}`).join(','),
+      ].join('|'),
+      issue_id: issue.issue_id,
+      issue_identifier: issue.identifier,
+      summary: '所有顺序子任务已完成，正在等待 root 线程做最终收尾；不会把 root 当作新的开发任务派发。',
+      delivery_state: issue.delivery_state ?? null,
       delivery_code: issue.delivery_code ?? null,
       governance_thread_state: issue.governance_thread_state ?? null,
       current_child_issue_id: null,

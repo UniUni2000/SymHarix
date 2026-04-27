@@ -2622,6 +2622,93 @@ describe('Orchestrator Stability', () => {
     expect(prompt).toContain('child-1');
   });
 
+  it('keeps supervisor prompt guidance compact when session memory is noisy', async () => {
+    const issue = makeIssue({ id: 'issue-supervisor-compact', identifier: 'INT-920', state: 'Todo' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    const workItem = ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: issue.state,
+      github_repo: 'owner/repo',
+      orchestrator_state: 'discovering',
+      supervisor_root_session_id: 'session-compact',
+      supervisor_plan_summary: 'Compact supervisor prompt test.',
+      supervisor_acceptance_summary: 'Prompt remains small enough for first-turn budget.',
+      supervisor_execution_mode: 'root_with_split_queue',
+    });
+    const supervisorSessions = new SupervisorSessionRepository(ctx.db);
+    const supervisorEvents = new SupervisorSessionEventRepository(ctx.db);
+    const supervisorMemories = new SupervisorMemoryRepository(ctx.db);
+    supervisorSessions.create({
+      id: 'session-compact',
+      transport: 'telegram',
+      conversation_id: 'chat-compact',
+      user_id: 'user-compact',
+      state: 'executing',
+      repo_ref: 'proj',
+      intake_mode: 'plan_then_approve',
+      approval_mode: 'explicit_user_approval',
+      plan_version: 3,
+      root_issue_id: issue.id,
+      current_child_issue_id: 'child-compact',
+      plan_card: {
+        title: 'Compact supervisor prompt test',
+        user_goal: 'Keep prompts compact.',
+        in_scope: ['第一项很长 '.repeat(80), '第二项很长 '.repeat(80)],
+        out_of_scope: ['不要把所有历史都塞进 dev prompt '.repeat(80)],
+        acceptance: ['上下文裁剪后仍包含关键执行约束 '.repeat(80)],
+        known_risks: [],
+        execution_strategy: '只推进当前 child，后续排队。',
+        needs_user_approval: true,
+        repo_ref: 'owner/repo',
+        project_slug: 'proj',
+        clarification_question: null,
+        materialization_mode: 'root_with_split_queue',
+        recommended_option: { label: '批准并开始', summary: '继续。' },
+        alternate_option: null,
+        governance_preview: null,
+      },
+      delivery_state: 'proof_satisfied',
+      delivery_summary: 'delivery summary '.repeat(120),
+      last_material_outcome: {
+        milestone_kind: 'waiting_on_child',
+        latest_dev_instruction: '请检查当前 child，不要重复读取全部历史。'.repeat(80),
+        supervisor_decision: 'continue',
+        raw_overseer_payload: 'oversight payload '.repeat(200),
+      },
+    });
+    for (let index = 0; index < 12; index += 1) {
+      supervisorEvents.create({
+        id: `event-compact-${index}`,
+        session_id: 'session-compact',
+        event_kind: 'orchestrator_milestone',
+        payload_json: {
+          index,
+          summary: 'very noisy repeated milestone '.repeat(120),
+        },
+      });
+    }
+    supervisorMemories.upsert({
+      repo_ref: 'owner/repo',
+      memory_kind: 'execution_pattern',
+      subject_key: 'noisy-history',
+      summary: 'long memory '.repeat(200),
+      confidence: 0.8,
+    });
+
+    const section = (orchestrator as any).buildSupervisorPromptSection(workItem);
+
+    expect(section.length).toBeLessThanOrEqual(4200);
+    expect(section).toContain('Supervisor-Approved Plan');
+    expect(section).toContain('Compact supervisor prompt test');
+    expect(section).not.toContain('very noisy repeated milestone very noisy repeated milestone very noisy repeated milestone very noisy repeated milestone');
+    expect(section).not.toContain('oversight payload oversight payload oversight payload oversight payload');
+  });
+
   it('createIssue records advisory governance state and skips dispatch when intake critic asks for a split first', async () => {
     const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-create-intake-'));
     try {
@@ -3001,6 +3088,127 @@ describe('Orchestrator Stability', () => {
     } finally {
       fs.rmSync(repoRoot, { recursive: true, force: true });
     }
+  });
+
+  it('does not dispatch a supervisor root after all child queue items completed', async () => {
+    const rootIssue = makeIssue({
+      id: 'issue-root-all-children-done',
+      identifier: 'INT-915',
+      title: 'Supervisor root coordinator',
+      state: 'In Progress',
+      project_slug: 'proj',
+    });
+    const ctx = createOrchestrator(rootIssue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.workItemRepository.create({
+      id: rootIssue.id,
+      linear_issue_id: rootIssue.id,
+      linear_identifier: rootIssue.identifier,
+      linear_title: rootIssue.title,
+      linear_state: rootIssue.state,
+      github_repo: 'owner/repo',
+      orchestrator_state: 'halted',
+      governance_root_issue_id: rootIssue.id,
+      governance_generation: 0,
+      supervisor_root_session_id: 'session-root',
+      supervisor_plan_summary: 'Root coordinates a child queue.',
+      supervisor_acceptance_summary: 'All children complete.',
+      supervisor_execution_mode: 'root_with_split_queue',
+    });
+    ctx.workItemRepository.create({
+      id: 'issue-child-done-1',
+      linear_issue_id: 'issue-child-done-1',
+      linear_identifier: 'INT-916',
+      linear_title: 'First child',
+      linear_state: 'Done',
+      github_repo: 'owner/repo',
+      orchestrator_state: 'completed',
+      governance_root_issue_id: rootIssue.id,
+      governance_parent_issue_id: rootIssue.id,
+      governance_generation: 1,
+      delivery_state: 'completed',
+    });
+    ctx.workItemRepository.create({
+      id: 'issue-child-done-2',
+      linear_issue_id: 'issue-child-done-2',
+      linear_identifier: 'INT-917',
+      linear_title: 'Second child',
+      linear_state: 'Done',
+      github_repo: 'owner/repo',
+      orchestrator_state: 'completed',
+      governance_root_issue_id: rootIssue.id,
+      governance_parent_issue_id: rootIssue.id,
+      governance_generation: 1,
+      delivery_state: 'completed',
+    });
+
+    expect((orchestrator as any).shouldDispatch(rootIssue)).toBe(false);
+  });
+
+  it('finalizes a supervisor root coordinator after all child queue items completed', async () => {
+    const rootIssue = makeIssue({
+      id: 'issue-root-ready-to-finalize',
+      identifier: 'INT-918A',
+      title: 'Supervisor root ready to finalize',
+      state: 'In Progress',
+      project_slug: 'proj',
+    });
+    const ctx = createOrchestrator(rootIssue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.workItemRepository.create({
+      id: rootIssue.id,
+      linear_issue_id: rootIssue.id,
+      linear_identifier: rootIssue.identifier,
+      linear_title: rootIssue.title,
+      linear_state: rootIssue.state,
+      github_repo: 'owner/repo',
+      github_issue_number: 777,
+      orchestrator_state: 'halted',
+      governance_root_issue_id: rootIssue.id,
+      governance_generation: 0,
+      supervisor_root_session_id: 'session-root',
+      supervisor_plan_summary: 'Root coordinates a child queue.',
+      supervisor_acceptance_summary: 'All children complete.',
+      supervisor_execution_mode: 'root_with_split_queue',
+    });
+    ctx.workItemRepository.create({
+      id: 'issue-child-finalize-1',
+      linear_issue_id: 'issue-child-finalize-1',
+      linear_identifier: 'INT-918B',
+      linear_title: 'First child',
+      linear_state: 'Done',
+      github_repo: 'owner/repo',
+      orchestrator_state: 'completed',
+      governance_root_issue_id: rootIssue.id,
+      governance_parent_issue_id: rootIssue.id,
+      governance_generation: 1,
+      delivery_state: 'completed',
+    });
+    ctx.workItemRepository.create({
+      id: 'issue-child-finalize-2',
+      linear_issue_id: 'issue-child-finalize-2',
+      linear_identifier: 'INT-918C',
+      linear_title: 'Second child',
+      linear_state: 'Done',
+      github_repo: 'owner/repo',
+      orchestrator_state: 'completed',
+      governance_root_issue_id: rootIssue.id,
+      governance_parent_issue_id: rootIssue.id,
+      governance_generation: 1,
+      delivery_state: 'completed',
+    });
+
+    const finalized = await (orchestrator as any).finalizeCompletedSupervisorRootIfNeeded(rootIssue);
+
+    expect(finalized).toBe(true);
+    expect(ctx.tracker.updateIssueState).toHaveBeenCalledWith(rootIssue.id, 'Done');
+    const workItem = ctx.workItemRepository.findByLinearIssueId(rootIssue.id);
+    expect(workItem?.linear_state).toBe('Done');
+    expect(workItem?.orchestrator_state).toBe('completed');
+    expect(workItem?.delivery_code).toBeNull();
+    expect(workItem?.delivery_summary).toContain('所有顺序子任务已完成');
   });
 
   it('serializes split governance children so only the earliest non-terminal child can dispatch', async () => {

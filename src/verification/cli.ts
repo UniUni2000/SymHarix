@@ -144,3 +144,7 @@ export function parseVerifyLiveSupervisorArgs(args: string[]): VerifyLiveLifecyc
     },
   };
 }
+
+export function shouldRunAttachedVerifierBeforeServiceBootstrap(command: VerifyLiveLifecycleCommand): boolean {
+  return Boolean(command.json && command.serverUrl);
+}

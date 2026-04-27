@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { parseVerifyLiveLifecycleArgs, parseVerifyLiveSupervisorArgs } from './cli';
+import {
+  parseVerifyLiveLifecycleArgs,
+  parseVerifyLiveSupervisorArgs,
+  shouldRunAttachedVerifierBeforeServiceBootstrap,
+} from './cli';
 
 describe('parseVerifyLiveLifecycleArgs', () => {
   test('parses the required project slug plus optional flags', () => {
@@ -96,5 +100,46 @@ describe('parseVerifyLiveSupervisorArgs', () => {
     expect(parsed.command.supervisorScenario).toBe(true);
     expect(parsed.command.supervisorLiveScenario).toBe('governed_split');
     expect(parsed.command.supervisorLiveMatrix).toBe(true);
+  });
+
+  test('marks json attach-mode supervisor verification as safe to run before service bootstrap logs', () => {
+    const parsed = parseVerifyLiveSupervisorArgs([
+      '--project-slug',
+      'test2',
+      '--server-url',
+      'http://localhost:3000',
+      '--telegram-chat-id',
+      '7570067877',
+      '--matrix',
+      '--json',
+    ]);
+
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) {
+      throw new Error(parsed.error);
+    }
+    expect(shouldRunAttachedVerifierBeforeServiceBootstrap(parsed.command)).toBe(true);
+  });
+
+  test('does not skip service bootstrap for non-attach or text live verification', () => {
+    const attachText = parseVerifyLiveSupervisorArgs([
+      '--project-slug',
+      'test2',
+      '--server-url',
+      'http://localhost:3000',
+    ]);
+    const standaloneJson = parseVerifyLiveSupervisorArgs([
+      '--project-slug',
+      'test2',
+      '--json',
+    ]);
+
+    expect(attachText.ok).toBe(true);
+    expect(standaloneJson.ok).toBe(true);
+    if (!attachText.ok || !standaloneJson.ok) {
+      throw new Error('parser failed');
+    }
+    expect(shouldRunAttachedVerifierBeforeServiceBootstrap(attachText.command)).toBe(false);
+    expect(shouldRunAttachedVerifierBeforeServiceBootstrap(standaloneJson.command)).toBe(false);
   });
 });

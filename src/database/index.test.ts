@@ -249,6 +249,42 @@ describe('WorkItemRepository', () => {
     expect(updated?.architectural_target).toBe('runtime<->server');
     expect(repository.findByIdentifier('INT-1')?.id).toBe('wi-1');
   });
+
+  test('preserves an explicit governance override across tracker upserts that omit override fields', () => {
+    const repository = new WorkItemRepository(db);
+    const overrideAt = new Date('2026-01-01T00:00:00.000Z');
+
+    repository.create({
+      id: 'wi-override',
+      linear_issue_id: 'linear-override',
+      linear_identifier: 'INT-OVERRIDE',
+      linear_title: 'Blocked task',
+      linear_state: 'Todo',
+      github_repo: 'acme/repo',
+      governance_status: 'advisory',
+      governance_decision: 'accept_with_rewrite',
+      governance_summary: 'Rewrite before dispatch.',
+      governance_override_at: overrideAt,
+      governance_override_reason: 'Manual operator override',
+    });
+
+    repository.upsert({
+      id: 'wi-override',
+      linear_issue_id: 'linear-override',
+      linear_identifier: 'INT-OVERRIDE',
+      linear_title: 'Blocked task synced from tracker',
+      linear_state: 'In Progress',
+      github_repo: 'acme/repo',
+      governance_status: 'advisory',
+      governance_decision: 'accept_with_rewrite',
+      governance_summary: 'Rewrite before dispatch.',
+    });
+
+    const stored = repository.findById('wi-override');
+    expect(stored?.linear_title).toBe('Blocked task synced from tracker');
+    expect(stored?.governance_override_at?.toISOString()).toBe(overrideAt.toISOString());
+    expect(stored?.governance_override_reason).toBe('Manual operator override');
+  });
 });
 
 describe('RepoCacheRepository', () => {
