@@ -12,7 +12,7 @@ import * as dotenv from 'dotenv';
 // Load .env file explicitly
 const envPath = path.resolve(__dirname, '../../.env');
 if (fs.existsSync(envPath)) {
-  dotenv.config({ path: envPath });
+  dotenv.config({ path: envPath, quiet: true });
 }
 
 import { Orchestrator } from '../orchestrator';
@@ -45,6 +45,7 @@ import { parseMaintenanceArgs, type MaintenanceCommand } from '../maintenance/cl
 import {
   parseVerifyLiveLifecycleArgs,
   parseVerifyLiveSupervisorArgs,
+  shouldRunAttachedVerifierBeforeServiceBootstrap,
   type VerifyLiveLifecycleCommand,
 } from '../verification/cli';
 import { LiveLifecycleVerifier } from '../verification/liveLifecycleVerifier';
@@ -352,6 +353,67 @@ function attachCliObservers(
   };
 }
 
+async function runAttachedLiveVerificationCommand(liveVerificationCommand: VerifyLiveLifecycleCommand): Promise<number> {
+  if (!liveVerificationCommand.supervisorScenario || !liveVerificationCommand.serverUrl) {
+    throw new Error('Attached live verification requires a supervisor scenario and --server-url.');
+  }
+
+  const result = liveVerificationCommand.supervisorLiveMatrix
+    ? await verifyAttachedLiveSupervisorMatrix({
+        serverUrl: liveVerificationCommand.serverUrl,
+        projectSlug: liveVerificationCommand.projectSlug,
+        timeoutMs: liveVerificationCommand.timeoutMs,
+        titleSuffix: liveVerificationCommand.titleSuffix,
+        telegramChatId: liveVerificationCommand.telegramChatId ?? null,
+        reporter: (message) => {
+          if (!liveVerificationCommand.json) {
+            console.log(`[verify] ${message}`);
+          }
+        },
+      })
+    : await verifyAttachedLiveSupervisor({
+        serverUrl: liveVerificationCommand.serverUrl,
+        projectSlug: liveVerificationCommand.projectSlug,
+        timeoutMs: liveVerificationCommand.timeoutMs,
+        titleSuffix: liveVerificationCommand.titleSuffix,
+        telegramChatId: liveVerificationCommand.telegramChatId ?? null,
+        supervisorLiveScenario: liveVerificationCommand.supervisorLiveScenario ?? null,
+        reporter: (message) => {
+          if (!liveVerificationCommand.json) {
+            console.log(`[verify] ${message}`);
+          }
+        },
+      });
+
+  if (liveVerificationCommand.json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    console.log(`[verify] ${result.success ? 'PASS' : 'FAIL'} ${result.message}`);
+    if ('results' in result) {
+      for (const item of result.results) {
+        console.log(`[verify] Scenario: ${item.scenario} · ${item.success ? 'PASS' : 'FAIL'} · ${item.issue_identifier ?? 'no issue'}`);
+      }
+    } else {
+      console.log(`[verify] Project: ${result.project_slug}`);
+      if (result.issue_identifier) {
+        console.log(`[verify] Issue: ${result.issue_identifier}`);
+      }
+      if (result.pull_request_number) {
+        console.log(`[verify] PR: #${result.pull_request_number}`);
+      }
+      for (const checkpoint of result.checkpoints) {
+        const marker = checkpoint.status === 'passed' ? 'OK' : checkpoint.status === 'failed' ? 'FAIL' : 'WAIT';
+        console.log(`[verify] ${marker} ${checkpoint.label}${checkpoint.detail ? ` · ${checkpoint.detail}` : ''}`);
+      }
+      if (!result.success && result.last_timeline_message) {
+        console.log(`[verify] Last signal: ${result.last_timeline_message}`);
+      }
+    }
+  }
+
+  return result.success ? 0 : 1;
+}
+
 /**
  * Main entry point
  */
@@ -384,6 +446,14 @@ async function main(): Promise<void> {
     }
     console.log('[symphonyness] All processes stopped.');
     process.exit(0);
+  }
+
+  const earlyLiveVerificationCommand = args.verifyLiveSupervisor ?? args.verifyLiveLifecycle ?? null;
+  if (
+    earlyLiveVerificationCommand?.supervisorScenario &&
+    shouldRunAttachedVerifierBeforeServiceBootstrap(earlyLiveVerificationCommand)
+  ) {
+    process.exit(await runAttachedLiveVerificationCommand(earlyLiveVerificationCommand));
   }
 
   // Resolve workflow path
@@ -513,60 +583,7 @@ async function main(): Promise<void> {
   const liveVerificationCommand = args.verifyLiveSupervisor ?? args.verifyLiveLifecycle ?? null;
   if (liveVerificationCommand) {
     if (liveVerificationCommand.supervisorScenario && liveVerificationCommand.serverUrl) {
-      const result = liveVerificationCommand.supervisorLiveMatrix
-        ? await verifyAttachedLiveSupervisorMatrix({
-            serverUrl: liveVerificationCommand.serverUrl,
-            projectSlug: liveVerificationCommand.projectSlug,
-            timeoutMs: liveVerificationCommand.timeoutMs,
-            titleSuffix: liveVerificationCommand.titleSuffix,
-            telegramChatId: liveVerificationCommand.telegramChatId ?? null,
-            reporter: (message) => {
-              if (!liveVerificationCommand.json) {
-                console.log(`[verify] ${message}`);
-              }
-            },
-          })
-        : await verifyAttachedLiveSupervisor({
-        serverUrl: liveVerificationCommand.serverUrl,
-        projectSlug: liveVerificationCommand.projectSlug,
-        timeoutMs: liveVerificationCommand.timeoutMs,
-        titleSuffix: liveVerificationCommand.titleSuffix,
-        telegramChatId: liveVerificationCommand.telegramChatId ?? null,
-        supervisorLiveScenario: liveVerificationCommand.supervisorLiveScenario ?? null,
-        reporter: (message) => {
-          if (!liveVerificationCommand.json) {
-            console.log(`[verify] ${message}`);
-          }
-        },
-      });
-
-      if (liveVerificationCommand.json) {
-        console.log(JSON.stringify(result, null, 2));
-      } else {
-        console.log(`[verify] ${result.success ? 'PASS' : 'FAIL'} ${result.message}`);
-        if ('results' in result) {
-          for (const item of result.results) {
-            console.log(`[verify] Scenario: ${item.scenario} · ${item.success ? 'PASS' : 'FAIL'} · ${item.issue_identifier ?? 'no issue'}`);
-          }
-        } else {
-          console.log(`[verify] Project: ${result.project_slug}`);
-          if (result.issue_identifier) {
-            console.log(`[verify] Issue: ${result.issue_identifier}`);
-          }
-          if (result.pull_request_number) {
-            console.log(`[verify] PR: #${result.pull_request_number}`);
-          }
-          for (const checkpoint of result.checkpoints) {
-            const marker = checkpoint.status === 'passed' ? 'OK' : checkpoint.status === 'failed' ? 'FAIL' : 'WAIT';
-            console.log(`[verify] ${marker} ${checkpoint.label}${checkpoint.detail ? ` · ${checkpoint.detail}` : ''}`);
-          }
-          if (!result.success && result.last_timeline_message) {
-            console.log(`[verify] Last signal: ${result.last_timeline_message}`);
-          }
-        }
-      }
-
-      process.exit(result.success ? 0 : 1);
+      process.exit(await runAttachedLiveVerificationCommand(liveVerificationCommand));
     }
 
     const verifyConfig: ServiceConfig = {

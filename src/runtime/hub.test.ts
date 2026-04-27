@@ -695,7 +695,7 @@ describe('RuntimeHub', () => {
     hub.dispose();
   });
 
-  test('projects a root thread as resolved after every queued child completes', () => {
+  test('keeps a root thread waiting when every child completes before the root is finalized', () => {
     db = new Database(':memory:');
     initializeSchema(db);
 
@@ -760,14 +760,76 @@ describe('RuntimeHub', () => {
     const hub = new RuntimeHub(db, controller);
     const issue = hub.getIssue('INT-80');
 
-    expect(issue?.governance_thread_state).toBe('resolved');
+    expect(issue?.governance_thread_state).toBe('waiting_on_child');
     expect(issue?.governance_current_child).toBeNull();
-    expect(issue?.next_recommended_action).toBe('所有顺序子任务已完成，计划线程已完成。');
-    expect(issue?.governance_pause_reason).toBeNull();
+    expect(issue?.next_recommended_action).toContain('所有顺序子任务已完成');
+    expect(issue?.next_recommended_action).toContain('root 线程收尾');
+    expect(issue?.governance_pause_reason).toContain('等待 root 线程收尾');
     expect(issue?.governance_child_queue).toEqual([
       expect.objectContaining({ issue_identifier: 'INT-81', queue_state: 'completed' }),
       expect.objectContaining({ issue_identifier: 'INT-82', queue_state: 'completed' }),
     ]);
+
+    hub.dispose();
+  });
+
+  test('projects a root thread as resolved only after the root delivery is finalized', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workItemRepository = new WorkItemRepository(db);
+
+    workItemRepository.create({
+      id: 'issue-root-complete',
+      linear_issue_id: 'issue-root-complete',
+      linear_identifier: 'INT-80',
+      linear_title: 'Completed root queue',
+      linear_state: 'Done',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'completed',
+      delivery_state: 'completed',
+      governance_root_issue_id: 'issue-root-complete',
+      governance_generation: 0,
+    });
+    workItemRepository.create({
+      id: 'issue-child-complete-1',
+      linear_issue_id: 'issue-child-complete-1',
+      linear_identifier: 'INT-81',
+      linear_title: 'First completed child',
+      linear_state: 'Done',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'completed',
+      governance_root_issue_id: 'issue-root-complete',
+      governance_parent_issue_id: 'issue-root-complete',
+      governance_generation: 1,
+      delivery_state: 'completed',
+    });
+
+    const controller = new FakeController();
+    controller.getStateSnapshot = () => ({
+      generated_at: '2026-01-01T00:00:00.000Z',
+      counts: {
+        running: 0,
+        retrying: 0,
+      },
+      running: [],
+      retrying: [],
+      codex_totals: {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        seconds_running: 0,
+      },
+      rate_limits: null,
+    });
+
+    const hub = new RuntimeHub(db, controller);
+    const issue = hub.getIssue('INT-80');
+
+    expect(issue?.governance_thread_state).toBe('resolved');
+    expect(issue?.governance_current_child).toBeNull();
+    expect(issue?.next_recommended_action).toBe('所有顺序子任务已完成，计划线程已完成。');
+    expect(issue?.governance_pause_reason).toBeNull();
 
     hub.dispose();
   });
