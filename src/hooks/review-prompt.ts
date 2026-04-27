@@ -4,6 +4,7 @@
  */
 
 import type { Issue } from '../types';
+import { isSupervisorLiveVerifierText } from './dev-prompt';
 
 /**
  * Review decision types
@@ -56,11 +57,23 @@ export function buildReviewPrompt(
   harnessGuidance?: string,
   supervisorGuidance?: string,
 ): string {
+  const liveVerifierFastPath = isSupervisorLiveVerifierText(`${issue.title}\n${issue.description || ''}`);
   const historySection = previousReviews && previousReviews.length > 0
     ? previousReviews.map(r =>
         `- Round ${r.round}: ${r.decision} - ${r.summary.slice(0, 100)}`
       ).join('\n')
     : '(no previous reviews)';
+  const reviewVerification = liveVerifierFastPath
+    ? 'For supervisor live verifier marker tasks, review only the requested marker file, git diff/stat, and PR metadata. Do not run full repository test suites or broad build commands.'
+    : 'Run the narrowest relevant tests for the changed code; for Python code prefer the affected `pytest` target.';
+  const liveVerifierGuidance = liveVerifierFastPath
+    ? `## Supervisor Live Verifier Review Fast Path
+- This is a bounded verification marker review, not a full product review.
+- review only the requested marker file, the commit diff, and the PR metadata.
+- Do not run full repository test suites or broad build commands unless the issue explicitly asks for them.
+- If the marker path and content satisfy the approved plan, write the canonical review report in the same turn.
+`
+    : '';
 
   return `You are a CODE REVIEWER for issue ${issue.identifier}.
 
@@ -72,12 +85,13 @@ export function buildReviewPrompt(
 ${githubContext || ''}
 ${harnessGuidance ? `\n${harnessGuidance}` : ''}
 ${supervisorGuidance ? `\n${supervisorGuidance}` : ''}
+${liveVerifierGuidance}
 
 ## Your Responsibilities
 1. **First: Read \`.symphony/HANDOVER.md\`** — This is DEV's summary of what was done
 2. Read repo-local contracts if present: \`.symphony-repo.yaml\`, \`.symphony-constitution.md\`, and \`.symphony/change-pack/*\`
 3. Inspect the local worktree diff directly with git and file reads; do not rely only on prior reports
-4. Run the narrowest relevant tests for the changed code; for Python code prefer the affected \`pytest\` target
+4. ${reviewVerification}
 5. Assess code quality: logic, naming, performance, security
 6. **Give feedback in "现状+期望" format** — Do NOT give solutions
 7. Put the final decision in \`.symphony/REVIEW_REPORT.md\` so the orchestrator and review executor can act on it

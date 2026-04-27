@@ -424,6 +424,17 @@ async function awaitWorker(orchestrator: Orchestrator, issueId: string): Promise
   await entry.worker_handle;
 }
 
+async function drainWorkers(orchestrator: Orchestrator, issueId: string, maxPasses = 5): Promise<void> {
+  const state = (orchestrator as any).state;
+  for (let index = 0; index < maxPasses; index += 1) {
+    const entry = state.running.get(issueId) as { worker_handle: Promise<unknown> } | undefined;
+    if (!entry) {
+      return;
+    }
+    await entry.worker_handle;
+  }
+}
+
 function clearRetryTimers(orchestrator: Orchestrator): void {
   const retryEntries = Array.from(
     ((orchestrator as any).state.retry_attempts.values()) as Iterable<{
@@ -585,6 +596,53 @@ describe('Orchestrator Stability', () => {
     expect(state.completed.has(issue.id)).toBe(false);
   });
 
+  it('treats tracker terminal state after a dev turn as completion instead of rerunning dev post-processing', async () => {
+    const issue = makeIssue({ state: 'In Progress' });
+    const terminalIssue = { ...issue, state: 'Done' };
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+    const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-terminal-after-turn-'));
+    fs.mkdirSync(path.join(workspacePath, '.git'), { recursive: true });
+    writeWorkflowArtifacts(workspacePath, {
+      handover: '# Handover: INT-1\n\n## 开发摘要\nCompleted externally.\n\n## 测试情况\n- 单元测试: N/A\n',
+      developmentLog: '# Development Log\n状态: Completed\n',
+    });
+
+    ctx.workspaceManager.createForIssue.mockImplementation(async () => ({
+      success: true,
+      workspace: {
+        path: workspacePath,
+        workspace_key: 'INT-1',
+        created_now: false,
+      },
+    }));
+    ctx.tracker.fetchIssueStatesByIds.mockImplementation(async () => ({ issues: [issue], error: null }));
+    ctx.tracker.fetchIssueById.mockImplementation(async () => ({ issue: terminalIssue, error: null }));
+    const commands: string[] = [];
+    (orchestrator as any).runCliCommand = mock(async (command: string) => {
+      commands.push(command);
+      if (command === 'dispatch') {
+        return { success: true, result: makeCliResult({ final_state: 'In Progress' }) };
+      }
+      return { success: false, error: 'dev post-process should not run' };
+    });
+
+    try {
+      await (orchestrator as any).dispatchIssue(issue, null);
+      await awaitWorker(orchestrator, issue.id);
+
+      expect(commands).toEqual(['dispatch']);
+      const workItem = ctx.workItemRepository.findByLinearIssueId(issue.id);
+      expect(workItem?.orchestrator_state).toBe('completed');
+      expect(workItem?.linear_state).toBe('Done');
+      const state = (orchestrator as any).state;
+      expect(state.retry_attempts.size).toBe(0);
+      expect(state.claimed.has(issue.id)).toBe(false);
+    } finally {
+      fs.rmSync(workspacePath, { recursive: true, force: true });
+    }
+  });
+
   it('enforces a singleton orchestrator lease and releases it on stop', async () => {
     const sharedDb = createTestDatabase();
     const issue = makeIssue({ state: 'Todo' });
@@ -605,6 +663,77 @@ describe('Orchestrator Stability', () => {
     await first.orchestrator.stop();
     await expect(second.orchestrator.start()).resolves.toBeUndefined();
     await second.orchestrator.stop();
+  });
+
+  it('starts serving work without waiting for heavy startup terminal cleanup', async () => {
+    const issue = makeIssue({ state: 'Todo' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+    const previousDelay = process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS;
+    process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS = '0';
+    let cleanupFinished = false;
+    (orchestrator as any).startupTerminalCleanup = mock(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      cleanupFinished = true;
+    });
+    ctx.tracker.fetchCandidateIssues = mock(async () => ({ issues: [], error: null }));
+
+    try {
+      await expect(orchestrator.start()).resolves.toBeUndefined();
+
+      expect(cleanupFinished).toBe(false);
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(cleanupFinished).toBe(true);
+    } finally {
+      if (previousDelay === undefined) {
+        delete process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS;
+      } else {
+        process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS = previousDelay;
+      }
+    }
+    await orchestrator.stop();
+  });
+
+  it('keeps default startup terminal cleanup outside the first-turn budget', async () => {
+    const issue = makeIssue({ state: 'Todo' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+    const previousDelay = process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS;
+    const previousFirstTickDelay = process.env.SYMPHONY_FIRST_TICK_DELAY_MS;
+    const originalSetTimeout = globalThis.setTimeout;
+    delete process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS;
+    delete process.env.SYMPHONY_FIRST_TICK_DELAY_MS;
+    const scheduledDelays: number[] = [];
+    globalThis.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      scheduledDelays.push(typeof timeout === 'number' ? timeout : 0);
+      return originalSetTimeout(handler, timeout, ...args);
+    }) as typeof setTimeout;
+    let cleanupStarted = false;
+    (orchestrator as any).startupTerminalCleanup = mock(async () => {
+      cleanupStarted = true;
+    });
+    ctx.tracker.fetchCandidateIssues = mock(async () => ({ issues: [], error: null }));
+
+    try {
+      await expect(orchestrator.start()).resolves.toBeUndefined();
+      expect(scheduledDelays).toContain(900_000);
+      expect(scheduledDelays).toContain(10_000);
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(cleanupStarted).toBe(false);
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+      if (previousDelay === undefined) {
+        delete process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS;
+      } else {
+        process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS = previousDelay;
+      }
+      if (previousFirstTickDelay === undefined) {
+        delete process.env.SYMPHONY_FIRST_TICK_DELAY_MS;
+      } else {
+        process.env.SYMPHONY_FIRST_TICK_DELAY_MS = previousFirstTickDelay;
+      }
+    }
+    await orchestrator.stop();
   });
 
   it('schedules exactly one retry when review requests changes', async () => {
@@ -1266,6 +1395,71 @@ describe('Orchestrator Stability', () => {
     expect(state.claimed.has(issue.id)).toBe(false);
   });
 
+  it('auto-finishes supervisor live docs verification at the turn budget even when harness checks remain noisy', () => {
+    const issue = makeIssue({
+      title: '创建 docs/supervisor-live-smoke.md 验证文件',
+      description: 'supervisor live e2e',
+    });
+    const ctx = createOrchestrator(issue, { maxTurns: 2 });
+    orchestrator = ctx.orchestrator;
+
+    const shouldFinish = (orchestrator as any).shouldAutoFinishAfterTurn(
+      'dev',
+      issue,
+      2,
+      2,
+      {
+        handover: '# Handover\n开发摘要：创建 docs/supervisor-live-smoke.md 验证文件。\n测试情况：N/A（纯文档任务）',
+        developmentLog: '# Development Log\n状态: Completed',
+        reviewReport: null,
+      },
+      [
+        { key: 'command:test', label: 'Record successful test verification', reason: 'Formal harness still asks for tests.', kind: 'verification' },
+        { key: 'command:build', label: 'Record successful build verification', reason: 'Formal harness still asks for build.', kind: 'verification' },
+        { key: 'artifact:dist/index.js', label: 'Produce required artifact dist/index.js', reason: 'Formal harness artifact is noisy for docs-only verifier.', kind: 'artifact' },
+      ],
+    );
+
+    expect(shouldFinish).toBe(true);
+  });
+
+  it('auto-finishes review at the turn budget when a canonical review report exists despite noisy harness checks', () => {
+    const issue = makeIssue({
+      state: 'In Review',
+      title: 'Review supervisor live E2E child',
+      description: 'Supervisor live E2E request entered through Telegram.',
+    });
+    const ctx = createOrchestrator(issue, { maxTurns: 1 });
+    orchestrator = ctx.orchestrator;
+
+    const shouldFinish = (orchestrator as any).shouldAutoFinishAfterTurn(
+      'review',
+      issue,
+      1,
+      1,
+      {
+        handover: '# Handover\n开发摘要：实现完成。',
+        developmentLog: '# Development Log\n状态: Completed',
+        reviewReport: [
+          '## Review Decision: APPROVE',
+          '',
+          '## Review Summary',
+          'The implementation is safe to merge.',
+        ].join('\n'),
+      },
+      [
+        {
+          key: 'command:test',
+          label: 'Record successful test verification',
+          reason: 'Formal harness still asks for tests after the canonical review report.',
+          kind: 'verification',
+        },
+      ],
+    );
+
+    expect(shouldFinish).toBe(true);
+  });
+
   it('auto-finishes a simple completed dev task after the first turn without asking the supervisor to continue', async () => {
     const issue = makeIssue({
       state: 'Todo',
@@ -1380,6 +1574,51 @@ describe('Orchestrator Stability', () => {
     orchestrator = ctx.orchestrator;
 
     expect((orchestrator as any).getTurnBudget('dev', issue)).toBe(2);
+  });
+
+  it('gives Telegram supervisor live E2E issues at least two dev turns for delivery recovery', () => {
+    const issue = makeIssue({
+      state: 'Todo',
+      title: '创建 docs/supervisor-live-codex-matrix.md，写一句 supervisor live e2e passed',
+      description: [
+        'Supervisor live E2E request entered through Telegram.',
+        'nonce codex-matrix',
+      ].join('\n'),
+    });
+    const ctx = createOrchestrator(issue, { maxTurns: 1 });
+    orchestrator = ctx.orchestrator;
+
+    expect((orchestrator as any).getTurnBudget('dev', issue)).toBe(2);
+  });
+
+  it('recreates missing private runtime state before dev post-processing', async () => {
+    const issue = makeIssue({
+      identifier: 'INT-918',
+      state: 'In Progress',
+    });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+    const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-missing-state-'));
+
+    await (orchestrator as any).ensureWorkspaceStateForPostProcess({
+      command: 'dev',
+      issue,
+      workspacePath,
+      workItem: {
+        branch_name: 'feature/int-918',
+        github_repo: 'owner/repo',
+        github_issue_number: 918,
+      },
+      route: {
+        github_repo_full: 'owner/repo',
+      },
+    });
+
+    const state = JSON.parse(fs.readFileSync(path.join(workspacePath, '.symphony', 'state.json'), 'utf8'));
+    expect(state.issue_id).toBe('INT-918');
+    expect(state.current_state).toBe('IN_PROGRESS');
+    expect(state.metadata.branch).toBe('feature/int-918');
+    expect(state.metadata.github_repo).toBe('owner/repo');
   });
 
   it('fails closed and schedules a review retry when the turn budget is exhausted without a canonical review report', async () => {
@@ -1588,6 +1827,124 @@ describe('Orchestrator Stability', () => {
     expect(ctx.tracker.updateIssueState).toHaveBeenCalledWith(issue.id, 'In Progress');
     expect(ctx.tracker.updateIssueState).toHaveBeenCalledWith(issue.id, 'In Review');
     expect(ctx.githubSyncService.publishPullRequestSummary).toHaveBeenCalled();
+  });
+
+  it('does not redispatch a stale In Progress tracker snapshot after local dev completion advanced to review', async () => {
+    const issue = makeIssue({
+      id: 'issue-stale-dev-state',
+      identifier: 'INT-915',
+      state: 'In Progress',
+    });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: 'In Review',
+      github_repo: 'owner/repo',
+      orchestrator_state: 'workspace_ready',
+      active_pr_number: 77,
+      branch_name: 'feature/int-915',
+    });
+
+    expect((orchestrator as any).shouldDispatch(issue)).toBe(false);
+    expect((orchestrator as any).shouldDispatch({ ...issue, state: 'In Review' })).toBe(true);
+  });
+
+  it('immediately hands off a locally completed dev issue to review when the tracker poll has not caught up yet', async () => {
+    const issue = makeIssue({
+      id: 'issue-local-review-handoff',
+      identifier: 'INT-916',
+      state: 'In Progress',
+    });
+    const ctx = createOrchestrator(issue, { maxConcurrentAgents: 2 });
+    orchestrator = ctx.orchestrator;
+    (orchestrator as any).running = true;
+    (orchestrator as any).readWorkspaceStateFile = mock(async () => ({
+      metadata: {
+        branch: 'feature/int-916',
+        pr_number: 916,
+      },
+    }));
+    (orchestrator as any).readWorkspaceFile = mock(async (_workspacePath: string, filename: string) => {
+      if (filename === 'HANDOVER.md') {
+        return '# Handover\nReady for review.';
+      }
+      if (filename === 'REVIEW_REPORT.md') {
+        return '# Review Report\n\n## Review Decision: APPROVE\n\nLooks good.';
+      }
+      return null;
+    });
+    const commands: string[] = [];
+    (orchestrator as any).runCliCommand = mock(async (command: string) => {
+      commands.push(command);
+      if (command === 'review') {
+        return {
+          success: true,
+          result: makeCliResult({
+            final_state: 'Done',
+            review_decision: 'APPROVE',
+          }),
+        };
+      }
+      return {
+        success: true,
+        result: makeCliResult({
+          final_state: command === 'dev' ? 'In Review' : 'In Progress',
+        }),
+      };
+    });
+
+    await (orchestrator as any).dispatchIssue(issue, null);
+    await drainWorkers(orchestrator, issue.id);
+
+    expect(commands).toContain('dev');
+    expect(commands).toContain('review');
+  });
+
+  it('recovers a persisted workspace_ready In Review work item even when the tracker candidate poll omits it', async () => {
+    const issue = makeIssue({
+      id: 'issue-persisted-review',
+      identifier: 'INT-917',
+      state: 'In Progress',
+    });
+    const ctx = createOrchestrator(issue, { maxConcurrentAgents: 2 });
+    orchestrator = ctx.orchestrator;
+    (orchestrator as any).running = true;
+    ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: 'In Review',
+      github_repo: 'owner/repo',
+      orchestrator_state: 'workspace_ready',
+      branch_name: 'feature/int-917',
+    });
+    const commands: string[] = [];
+    (orchestrator as any).runCliCommand = mock(async (command: string) => {
+      commands.push(command);
+      return {
+        success: true,
+        result: makeCliResult({
+          final_state: command === 'review' ? 'Done' : 'In Review',
+          review_decision: command === 'review' ? 'APPROVE' : null,
+        }),
+      };
+    });
+    (orchestrator as any).readWorkspaceFile = mock(async (_workspacePath: string, filename: string) => (
+      filename === 'REVIEW_REPORT.md'
+        ? '# Review Report\n\n## Review Decision: APPROVE\n\nLooks good.'
+        : null
+    ));
+
+    await (orchestrator as any).dispatchLocalReviewReadyWorkItems(new Set<string>());
+    await drainWorkers(orchestrator, issue.id);
+
+    expect(commands).toContain('review');
   });
 
   it('captures touched paths and touched areas from the native agent timeline into the work item', async () => {
@@ -2080,6 +2437,26 @@ describe('Orchestrator Stability', () => {
     expect(workItem?.supervisor_plan_summary).toContain('清理 runtime 主链');
     expect(workItem?.supervisor_acceptance_summary).toContain('Telegram 卡片语义不回退');
     expect(workItem?.supervisor_execution_mode).toBe('root_with_split_queue');
+  });
+
+  it('createIssue with defer_dispatch does not immediately dispatch or schedule a tick before children are created', async () => {
+    const issue = makeIssue({ id: 'issue-deferred-root', identifier: 'INT-58', title: 'Deferred root' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+    (orchestrator as any).running = true;
+    (orchestrator as any).dispatchIssue = mock(async () => undefined);
+    (orchestrator as any).scheduleTick = mock(() => undefined);
+
+    const result = await orchestrator.createIssue({
+      title: 'Deferred root',
+      description: 'root should wait for child queue',
+      project_slug: 'proj',
+      defer_dispatch: true,
+    });
+
+    expect(result.accepted).toBe(true);
+    expect((orchestrator as any).dispatchIssue).not.toHaveBeenCalled();
+    expect((orchestrator as any).scheduleTick).not.toHaveBeenCalled();
   });
 
   it('createIssue resolves project_slug through the shared tracker project resolver before calling Linear', async () => {
@@ -3562,6 +3939,62 @@ describe('Orchestrator Stability', () => {
     expect((orchestrator as any).state.claimed.has(issue.id)).toBe(false);
   });
 
+  it('stopIssue persistently halts an idle active work item so restart polling does not redispatch it', async () => {
+    const issue = makeIssue({ state: 'In Progress', updated_at: new Date('2025-01-01T00:00:00Z') });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: issue.state,
+      github_repo: 'owner/repo',
+      orchestrator_state: 'failed',
+    });
+
+    const result = await orchestrator.stopIssue(issue.id);
+    const updatedWorkItem = ctx.workItemRepository.findByLinearIssueId(issue.id);
+
+    expect(result.accepted).toBe(true);
+    expect(result.status).toBe('completed');
+    expect(updatedWorkItem?.orchestrator_state).toBe('halted');
+    expect(updatedWorkItem?.delivery_code).toBe('manual_stop');
+    expect((orchestrator as any).shouldDispatch(issue)).toBe(false);
+  });
+
+  it('does not dispatch work items whose supervisor session has already been cancelled', () => {
+    const issue = makeIssue({ state: 'In Progress', updated_at: new Date('2025-01-01T00:00:00Z') });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    new SupervisorSessionRepository(ctx.db).create({
+      id: 'session-cancelled',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'cancelled',
+      repo_ref: 'proj',
+      intake_mode: 'direct_run',
+      approval_mode: 'auto',
+      plan_version: 1,
+      root_issue_id: issue.id,
+    });
+    ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: issue.state,
+      github_repo: 'owner/repo',
+      orchestrator_state: 'discovering',
+      supervisor_root_session_id: 'session-cancelled',
+    });
+
+    expect((orchestrator as any).shouldDispatch(issue)).toBe(false);
+  });
+
   it('startup terminal cleanup closes mapped GitHub issues for terminal tracker items', async () => {
     const terminalIssue = makeIssue({ state: 'Canceled' });
     const ctx = createOrchestrator(terminalIssue);
@@ -3584,6 +4017,55 @@ describe('Orchestrator Stability', () => {
 
     expect(ctx.workspaceManager.removeWorkspace).toHaveBeenCalledWith('/tmp/symphony-tests/repo/INT-1');
     expect(ctx.githubIssueClient.closeIssue).toHaveBeenCalledWith(501);
+  });
+
+  it('startup terminal cleanup skips while active execution is in flight', async () => {
+    const terminalIssue = makeIssue({ state: 'Done' });
+    const activeIssue = makeIssue({ id: 'active-issue', identifier: 'INT-ACTIVE', state: 'In Progress' });
+    const ctx = createOrchestrator(terminalIssue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.tracker.fetchIssuesByStates = mock(async () => ({ issues: [terminalIssue], error: null }));
+    (orchestrator as any).state.running.set(activeIssue.id, {
+      issue: activeIssue,
+      identifier: activeIssue.identifier,
+      workspace_path: '/tmp/symphony-tests/repo/INT-ACTIVE',
+      branch_name: 'feature/int-active',
+      started_at: new Date(),
+      last_codex_timestamp: new Date(),
+      retry_attempt: 0,
+      stage: 'dev',
+    });
+
+    await (orchestrator as any).startupTerminalCleanup();
+
+    expect(ctx.tracker.fetchIssuesByStates).not.toHaveBeenCalled();
+    expect(ctx.workspaceManager.removeWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('global terminal branch cleanup skips while another issue is actively executing', async () => {
+    const terminalIssue = makeIssue({ state: 'Done' });
+    const activeIssue = makeIssue({ id: 'active-issue', identifier: 'INT-ACTIVE', state: 'In Progress' });
+    const ctx = createOrchestrator(terminalIssue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.tracker.fetchIssuesByStates = mock(async () => ({ issues: [terminalIssue], error: null }));
+    (orchestrator as any).cleanupIssueBranch = mock(async () => undefined);
+    (orchestrator as any).state.running.set(activeIssue.id, {
+      issue: activeIssue,
+      identifier: activeIssue.identifier,
+      workspace_path: '/tmp/symphony-tests/repo/INT-ACTIVE',
+      branch_name: 'feature/int-active',
+      started_at: new Date(),
+      last_codex_timestamp: new Date(),
+      retry_attempt: 0,
+      stage: 'dev',
+    });
+
+    await (orchestrator as any).cleanupAllTerminalIssueBranches();
+
+    expect(ctx.tracker.fetchIssuesByStates).not.toHaveBeenCalled();
+    expect((orchestrator as any).cleanupIssueBranch).not.toHaveBeenCalled();
   });
 
   it('startup terminal cleanup globally repairs orphan GitHub issues and PRs for terminal tracker identifiers', async () => {

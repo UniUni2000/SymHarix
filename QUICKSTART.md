@@ -135,7 +135,9 @@ Supervisor planning brain 默认复用 `SYMPHONY_BOT_LLM_*` 的 provider/model/k
 
 Supervisor execution overseer 默认复用 `SYMPHONY_SUPERVISOR_LLM_*`，再回退到 `SYMPHONY_BOT_LLM_*`；需要独立模型或更短超时时再设置 `SYMPHONY_SUPERVISOR_OVERSEER_*`。它只生成监督判断和下一轮 dev 指令，模型失败或输出不安全时会自动回落到本地 overseer。
 
-Supervisor job loop 会自动恢复活跃 session、重放 root issue 状态，并把监督判断写入长期记忆；这些记忆会进入后续 dev/review prompt。需要真机验证这条链路时，使用 `verify-live-supervisor`，它会创建带 supervisor execution intent 的 live 验证单。
+Supervisor job loop 会自动恢复活跃 session、重放 root issue 状态，并把监督判断写入长期记忆；这些记忆会进入后续 dev/review prompt。需要真机验证这条链路时，使用 `verify-live-supervisor --server-url <url> --telegram-chat-id <id>`，它会从 Telegram webhook/session 入口验证 Plan Card、批准、建单和执行链。需要补全矩阵时加 `--matrix`，会顺序跑 `simple`、`governed-split`、`destructive-cleanup`。
+
+启动后 bot follow-up repair 会默认延迟 `5000ms` 在后台运行，避免历史 Telegram/card/session 清理阻塞冷启动；terminal workspace / GitHub orphan cleanup 默认延迟 `900000ms`，避免和 live E2E / dev / review 主链抢资源。需要调整时统一在 `.env` 设置 `SYMPHONY_BOT_FOLLOWUP_REPAIR_DELAY_MS` / `SYMPHONY_SUPERVISOR_SESSION_REPAIR_MAX_AGE_MS` / `SYMPHONY_STARTUP_CLEANUP_DELAY_MS`。
 
 Phase 4 之后的几个实用点：
 

@@ -410,6 +410,106 @@ describe('LiveLifecycleVerifier', () => {
     expect(result.review_decision).toBe('REQUEST_CHANGES');
   });
 
+  test('fails fast when the runtime issue reaches failed orchestrator state', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const config = makeConfig({
+      verification: {
+        lifecycle: {
+          timeoutMs: 60_000,
+          pollIntervalMs: 1,
+          projects: {
+            test2: {
+              title: 'Lifecycle smoke test',
+              description: 'Create a tiny change and verify the full lifecycle.',
+            },
+          },
+        },
+      },
+    });
+    const workItemRepository = new WorkItemRepository(db);
+
+    let pollCount = 0;
+    const runtime: RuntimeControlPlane = {
+      getOverview: () => ({ generated_at: '', counts: { running: 0, retrying: 0, total: 1 }, issues: [] }),
+      getIssue: () => {
+        pollCount += 1;
+        workItemRepository.upsert({
+          id: 'issue-1',
+          linear_issue_id: 'issue-1',
+          linear_identifier: 'INT-1',
+          linear_title: 'Lifecycle smoke test',
+          linear_state: 'In Progress',
+          github_repo: 'owner/repo',
+          github_issue_number: 101,
+          branch_name: 'feature/int-1',
+          workspace_path: '/tmp/workspaces/INT-1',
+          orchestrator_state: 'failed',
+          delivery_summary: 'ERROR creating PR: 422 Client Error: Unprocessable Entity',
+        });
+        return makeIssueView({
+          tracker_state: 'In Progress',
+          orchestrator_state: 'failed',
+          delivery_state: 'delivery_failed',
+          delivery_summary: 'ERROR creating PR: 422 Client Error: Unprocessable Entity',
+        });
+      },
+      getTimeline: () => [
+        {
+          id: 'timeline-1',
+          issue_id: 'issue-1',
+          timestamp: '2026-01-01T00:00:00.000Z',
+          phase: 'DEV',
+          code: 'delivery_failed',
+          message: 'ERROR creating PR: 422 Client Error: Unprocessable Entity',
+          tool_name: null,
+          payload: null,
+        },
+      ],
+      getHistoryView: () => null,
+      createIssue: async () => ({
+        accepted: true,
+        status: 'accepted',
+        message: 'created',
+        issue_id: 'issue-1',
+        issue_identifier: 'INT-1',
+        issue: null,
+      }),
+      stopIssue: async () => ({ accepted: true, status: 'accepted', message: 'stopped', issue_id: 'issue-1', issue_identifier: 'INT-1' }),
+      retryIssue: async () => ({ accepted: true, status: 'queued', message: 'retried', issue_id: 'issue-1', issue_identifier: 'INT-1' }),
+      rewriteGovernance: async () => ({ accepted: true, status: 'accepted', message: 'rewritten', issue_id: 'issue-1', issue_identifier: 'INT-1' }),
+      splitGovernance: async () => ({ accepted: true, status: 'accepted', message: 'split', issue_id: 'issue-1', issue_identifier: 'INT-1' }),
+      createStream: () => new ReadableStream(),
+      subscribe: () => () => undefined,
+    };
+
+    const verifier = new LiveLifecycleVerifier({
+      db,
+      config,
+      workflow: makeWorkflow(),
+      runtimeHostFactory: async () => new FakeRuntimeHost(runtime, config, () => ({
+        running_issue_count: 0,
+        retry_count: 0,
+        worker_process_count: 0,
+        active_session_count: 0,
+        claimed_issue_count: 0,
+        leadership_lease_held: true,
+      })) as any,
+      sleep: async () => undefined,
+      runGitCommand: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    });
+
+    const result = await verifier.verify({
+      projectSlug: 'test2',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.failure_code).toBe('orchestrator_failed');
+    expect(result.message).toContain('ERROR creating PR: 422');
+    expect(pollCount).toBe(1);
+  });
+
   test('adds unique non-conflicting guidance to live verification issues', async () => {
     db = new Database(':memory:');
     initializeSchema(db);

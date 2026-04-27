@@ -43,12 +43,24 @@ export interface SupervisorServiceResponseParams {
   canWrite: boolean;
 }
 
-export type SupervisorSessionAction = 'approve' | 'edit' | 'alternate';
+export type SupervisorSessionAction = 'approve' | 'edit' | 'alternate' | 'focus' | 'cancel';
 
 const APPROVE_WORDS = ['确认', '按推荐继续', '批准', '开始执行', '继续', '批准并开始'];
 const EDIT_WORDS = ['改一下计划', '修改计划', '先别执行', '不要开始'];
 const ALTERNATE_WORDS = ['换用备选方案', '换方案', '备选方案'];
+const CANCEL_WORDS = ['取消当前计划', '取消这条计划', '结束当前计划', '放弃当前计划'];
+const NEW_THREAD_PREFIX = /^(新开线程|开启新线程|新建线程|另开线程)[:：\s]+/;
 const SCOPE_CHANGE_PATTERNS = [/顺便/, /另外/, /再加/, /改成/, /顺手/];
+const ACTIVE_SESSION_STATES = new Set<SupervisorSessionState>([
+  'drafting',
+  'clarifying',
+  'plan_ready',
+  'awaiting_user_approval',
+  'approved_for_materialization',
+  'materialized',
+  'executing',
+  'awaiting_user_decision',
+]);
 
 function emptyRuntimeContext(): BotRuntimeCopilotContext {
   return {
@@ -102,12 +114,49 @@ function textList(values: string[] | null | undefined, fallback: string): string
   return normalized.length > 0 ? normalized.join('；') : fallback;
 }
 
+function isInternalPlanDiagnostic(value: string): boolean {
+  return /shadow harness|formal harness|\.symphony-constitution\.md|debt signal|冲突记忆/i.test(value);
+}
+
+function visiblePlanRisks(planCard: SupervisorPlanCard): string[] {
+  return (planCard.known_risks ?? []).filter((risk) => !isInternalPlanDiagnostic(risk));
+}
+
 function lastOutcomeString(
   session: SupervisorSessionRecord,
   key: string,
 ): string | null {
   const value = session.last_material_outcome?.[key];
   return typeof value === 'string' && value.trim() ? value : null;
+}
+
+function supervisorOutcomeMaterialParts(session: SupervisorSessionRecord): string[] {
+  return [
+    lastOutcomeString(session, 'pending_user_notification_summary')
+      ? `notify:${compact(lastOutcomeString(session, 'pending_user_notification_summary'), 96)}`
+      : null,
+    lastOutcomeString(session, 'latest_dev_directive_kind')
+      ? `directive:${lastOutcomeString(session, 'latest_dev_directive_kind')}`
+      : null,
+    lastOutcomeString(session, 'latest_dev_instruction')
+      ? `instruction:${compact(lastOutcomeString(session, 'latest_dev_instruction'), 96)}`
+      : null,
+  ].filter((part): part is string => Boolean(part));
+}
+
+function buildMaterializedRootIssueTitle(planCard: SupervisorPlanCard): string {
+  const combined = [
+    planCard.title,
+    planCard.user_goal,
+    planCard.in_scope.join('\n'),
+    planCard.acceptance.join('\n'),
+  ].join('\n');
+  if (/supervisor\s+live\s+e2e|supervisor-live-cleanup-approval/i.test(combined)) {
+    if (/supervisor-live-cleanup-approval|破坏性清理审批/i.test(combined)) {
+      return '验证破坏性清理审批 marker';
+    }
+  }
+  return planCard.title;
 }
 
 function escapeRegExp(value: string): string {
@@ -140,6 +189,23 @@ function resolveProjectAlias(
 
 function normalizeTitle(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
+}
+
+function normalizeRequirementText(value: string): string {
+  const normalized = normalizeTitle(value)
+    .replace(NEW_THREAD_PREFIX, '')
+    .replace(/\bsupervisor\s+live\s+e2e\s+[a-z0-9_/-]*\d[a-z0-9_/-]*\b/gi, '')
+    .replace(/\bnonce\s+\S+\b/gi, '')
+    .replace(/请新建一条很小的验证任务[:：]\s*/g, '')
+    .replace(/请先给\s*plan\s*card[，,、\s]*(?:不要直接建单)?[。.]?/gi, '')
+    .replace(/先给(?:我)?(?:计划卡|计划|方案)[，,、\s]*(?:我)?(?:批准|确认|同意)后再(?:做|执行|开始|开跑)[。.]?/g, '')
+    .replace(/(?:我)?(?:批准|确认|同意)后再(?:做|执行|开始|开跑)[。.]?/g, '')
+    .replace(/不要直接(?:建单|做|执行|开跑)[。.]?/g, '')
+    .replace(/别直接(?:建单|做|执行|开跑)[。.]?/g, '')
+    .replace(/(?:^|[\s，,。.:：；;])plan\s*card\s*$/i, '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s，,。.:：；;]+|[\s，,。.:：；;]+$/g, '');
+  return normalized || normalizeTitle(value);
 }
 
 function inferAcceptance(title: string, description: string | null): string[] {
@@ -245,13 +311,26 @@ function isAlternateText(text: string): boolean {
   return ALTERNATE_WORDS.some((word) => normalized.includes(word.toLowerCase()));
 }
 
+function isCancelText(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  return CANCEL_WORDS.some((word) => normalized.includes(word.toLowerCase()));
+}
+
+function isNewThreadText(text: string): boolean {
+  return NEW_THREAD_PREFIX.test(text.trim());
+}
+
+function stripNewThreadPrefix(text: string): string {
+  return text.trim().replace(NEW_THREAD_PREFIX, '').trim();
+}
+
 function isScopeChangeText(text: string): boolean {
   return SCOPE_CHANGE_PATTERNS.some((pattern) => pattern.test(text));
 }
 
 function explicitlyRequestsApprovalBeforeExecution(text: string, description: string | null): boolean {
   const combined = `${text}\n${description || ''}`;
-  return /先.*(?:计划卡|计划|方案).*(?:批准|确认|同意)|(?:批准|确认|同意)后再(?:做|执行|开始|开跑)|等我(?:批准|确认|同意)|不要直接(?:做|执行|开跑)|别直接(?:做|执行|开跑)/i.test(combined);
+  return /先.*(?:计划卡|计划|方案|plan\s*card).*(?:批准|确认|同意|approve|approval)|(?:批准|确认|同意|approve|approval)后再(?:做|执行|开始|开跑)|等我(?:批准|确认|同意|approve|approval)|plan\s*card|不要直接(?:做|执行|开跑)|别直接(?:做|执行|开跑)/i.test(combined);
 }
 
 function isPlanMemoryQuestion(text: string): boolean {
@@ -272,7 +351,12 @@ function asksForRepoClarification(question: string | null | undefined): boolean 
 
 function isLikelyMultiObjective(text: string, description: string | null): boolean {
   const combined = `${text}\n${description || ''}`;
-  return /同时|并且|以及|一起|顺便|另外|also|and/i.test(combined);
+  return /同时|并且|以及|一起|顺便|另外|两个|多个|子任务|子单|拆分|顺序|排队|child queue|root \+ child|also|and/i.test(combined);
+}
+
+function explicitlyForbidsSplitQueue(text: string, description: string | null): boolean {
+  const combined = `${text}\n${description || ''}`;
+  return /(?:不要|不需要|禁止|别).{0,12}(?:拆分|子任务|子单|child queue|split queue)|(?:root-only|单一\s*issue|一张\s*root-only|只创建一张).{0,24}(?:单|issue|任务)|(?:不要|不需要|禁止|别).{0,12}(?:创建|生成).{0,12}(?:child queue|子任务|子单)/i.test(combined);
 }
 
 function isRiskyCleanupRequest(text: string): boolean {
@@ -282,6 +366,33 @@ function isRiskyCleanupRequest(text: string): boolean {
 function deriveSupervisorMilestone(issue: RuntimeIssueView): SupervisorMilestone | null {
   const rootIssueId = issue.governance_root_issue_id ?? issue.issue_id;
   const isChildIssue = rootIssueId !== issue.issue_id;
+  const childQueue = issue.governance_child_queue ?? [];
+  const allChildrenCompleted = !isChildIssue
+    && childQueue.length > 0
+    && childQueue.every((child) => (
+      child.queue_state === 'completed' ||
+      child.orchestrator_state === 'completed' ||
+      child.delivery_state === 'completed'
+    ));
+
+  if (allChildrenCompleted) {
+    return {
+      kind: 'completed',
+      key: [
+        'completed_children',
+        issue.issue_id,
+        childQueue.map((child) => `${child.issue_id}:${child.queue_state ?? child.orchestrator_state ?? ''}`).join(','),
+      ].join('|'),
+      issue_id: issue.issue_id,
+      issue_identifier: issue.identifier,
+      summary: '所有顺序子任务已完成，计划线程已完成。',
+      delivery_state: issue.delivery_state ?? 'completed',
+      delivery_code: issue.delivery_code ?? null,
+      governance_thread_state: issue.governance_thread_state ?? null,
+      current_child_issue_id: null,
+    };
+  }
+
   if (isChildIssue && (issue.orchestrator_state === 'completed' || issue.delivery_state === 'completed')) {
     return {
       kind: 'child_completed',
@@ -512,6 +623,63 @@ function mergePlanOption(
   };
 }
 
+function buildSupervisorSplitChildPlans(planCard: SupervisorPlanCard): Array<{
+  title: string;
+  description: string;
+}> {
+  const visibleScopeText = [
+    planCard.user_goal,
+    ...planCard.in_scope,
+  ].join('\n');
+  const text = [
+    visibleScopeText,
+    planCard.execution_strategy,
+  ].join('\n');
+  const extractMarkdownPaths = (value: string) => Array.from(new Set(
+    [...value.matchAll(/(?:^|\s)([\w./-]+\.md)(?=[\s，。；,;]|$)/g)]
+      .map((match) => match[1])
+      .filter((value): value is string => Boolean(value)),
+  ));
+  const visiblePaths = extractMarkdownPaths(visibleScopeText);
+  const paths = visiblePaths.length >= 2 ? visiblePaths : extractMarkdownPaths(text);
+  const pathLimit = /两个|两张|2\s*个|2\s*张/i.test(text) ? 2 : 4;
+  const targets = paths.length >= 2
+    ? paths.slice(0, pathLimit).map((pathValue) => ({
+        title: `完成 ${pathValue}`,
+        purpose: `完成计划中的独立交付物 ${pathValue}`,
+        acceptance: `${pathValue} 存在且内容符合 root 计划要求。`,
+      }))
+    : planCard.in_scope.length >= 2
+      ? planCard.in_scope.slice(0, 4).map((scope, index) => ({
+          title: `完成子任务 ${index + 1}: ${compact(scope, 64)}`,
+          purpose: scope,
+          acceptance: planCard.acceptance[index] ?? planCard.acceptance[0] ?? scope,
+        }))
+      : [
+          {
+            title: `完成第一阶段: ${compact(planCard.user_goal, 64)}`,
+            purpose: planCard.in_scope[0] ?? planCard.user_goal,
+            acceptance: planCard.acceptance[0] ?? '第一阶段可验证完成。',
+          },
+          {
+            title: `完成第二阶段: ${compact(planCard.user_goal, 64)}`,
+            purpose: planCard.in_scope[1] ?? planCard.user_goal,
+            acceptance: planCard.acceptance[1] ?? planCard.acceptance[0] ?? '第二阶段可验证完成。',
+          },
+        ];
+
+  return targets.map((target, index) => ({
+    title: target.title,
+    description: [
+      `来源 root 计划：${planCard.title}`,
+      `子任务序号：${index + 1}/${targets.length}`,
+      `用途：${target.purpose}`,
+      `完成算什么：${target.acceptance}`,
+      '执行规则：这是 Supervisor root + child queue 的一个顺序 child；只处理本子任务，不抢跑后续 sibling。',
+    ].join('\n'),
+  }));
+}
+
 function mergePlanCard(
   fallback: SupervisorPlanCard,
   override: Partial<SupervisorPlanCard> | null | undefined,
@@ -519,6 +687,14 @@ function mergePlanCard(
   if (!override) {
     return fallback;
   }
+
+  const forbidsSplitQueue = [
+    fallback.user_goal,
+    fallback.execution_strategy,
+    ...fallback.in_scope,
+    ...fallback.out_of_scope,
+    ...fallback.acceptance,
+  ].some((value) => explicitlyForbidsSplitQueue(value, null));
 
   return {
     ...fallback,
@@ -533,7 +709,11 @@ function mergePlanCard(
     repo_ref: override.repo_ref ?? fallback.repo_ref,
     project_slug: override.project_slug ?? fallback.project_slug,
     clarification_question: override.clarification_question ?? fallback.clarification_question,
-    materialization_mode: override.materialization_mode ?? fallback.materialization_mode,
+    materialization_mode: fallback.materialization_mode === 'root_with_split_queue'
+      ? fallback.materialization_mode
+      : forbidsSplitQueue
+        ? 'root_only'
+      : override.materialization_mode ?? fallback.materialization_mode,
     recommended_option: mergePlanOption(override.recommended_option, fallback.recommended_option),
     alternate_option: override.alternate_option === null
       ? null
@@ -556,8 +736,14 @@ function normalizePlanComputation(
   }
 
   const planCard = mergePlanCard(base.planCard, refinement.planCard);
-  const approvalMode = refinement.approvalMode ?? base.approvalMode;
+  let approvalMode = refinement.approvalMode ?? base.approvalMode;
   let state = refinement.state ?? base.state;
+  if (base.approvalMode !== 'auto' && approvalMode === 'auto') {
+    approvalMode = base.approvalMode;
+    if (state === 'plan_ready') {
+      state = 'awaiting_user_approval';
+    }
+  }
   if (planCard.clarification_question && state !== 'clarifying') {
     state = 'clarifying';
   } else if (approvalMode === 'explicit_user_approval' && state === 'plan_ready') {
@@ -597,6 +783,8 @@ export function buildSupervisorSessionFollowupMessage(
   const cancelled = session.state === 'cancelled';
   const oversightSummary = lastOutcomeString(session, 'user_summary');
   const oversightInstruction = lastOutcomeString(session, 'dev_instruction');
+  const notificationSummary = lastOutcomeString(session, 'pending_user_notification_summary');
+  const latestDevInstruction = lastOutcomeString(session, 'latest_dev_instruction');
   const threadSummary = describeSupervisorThread({
     session,
     currentChild,
@@ -611,6 +799,7 @@ export function buildSupervisorSessionFollowupMessage(
     issue?.identifier ?? '',
     currentChild?.issue_identifier ?? '',
     queue.map((child) => `${child.issue_identifier}:${child.queue_state ?? ''}`).join(','),
+    ...supervisorOutcomeMaterialParts(session),
   ].join('|');
 
   return {
@@ -652,8 +841,12 @@ export function buildSupervisorSessionFollowupMessage(
       waitingForApproval && planCard ? escapeHtml(planCard.execution_strategy || '批准后我会开始物化并推进这条计划线程。') : null,
       waitingForDecision && oversightSummary ? '<b>监督判断</b>' : null,
       waitingForDecision && oversightSummary ? escapeHtml(oversightSummary) : null,
-      !waitingForDecision && !completed && !cancelled && oversightInstruction ? '<b>Supervisor 下一步指令</b>' : null,
-      !waitingForDecision && !completed && !cancelled && oversightInstruction ? escapeHtml(compact(oversightInstruction, 260)) : null,
+      !waitingForDecision && !completed && !cancelled && notificationSummary ? '<b>监督更新</b>' : null,
+      !waitingForDecision && !completed && !cancelled && notificationSummary ? escapeHtml(compact(notificationSummary, 260)) : null,
+      !waitingForDecision && !completed && !cancelled && latestDevInstruction ? '<b>下一轮指令</b>' : null,
+      !waitingForDecision && !completed && !cancelled && latestDevInstruction ? escapeHtml(compact(latestDevInstruction, 260)) : null,
+      !waitingForDecision && !completed && !cancelled && !latestDevInstruction && oversightInstruction ? '<b>Supervisor 下一步指令</b>' : null,
+      !waitingForDecision && !completed && !cancelled && !latestDevInstruction && oversightInstruction ? escapeHtml(compact(oversightInstruction, 260)) : null,
       currentChild ? '<b>当前子任务</b>' : null,
       currentChild ? `${escapeHtml(currentChild.issue_identifier)} · ${escapeHtml(currentChild.title)}` : null,
       queue.length > 0 ? '<b>队列</b>' : null,
@@ -726,8 +919,38 @@ export class SupervisorSessionService {
     });
   }
 
+  private findActiveSessionsForConversation(context: BotCommandContext): SupervisorSessionRecord[] {
+    return this.sessions.findAll().filter((session) => (
+      session.transport === context.transport
+      && session.conversation_id === context.recipient.conversation_id
+      && ACTIVE_SESSION_STATES.has(session.state)
+    ));
+  }
+
   findById(id: string): SupervisorSessionRecord | null {
     return this.sessions.findById(id);
+  }
+
+  preemptActiveSessionsForNewThread(context: BotCommandContext, text: string): number {
+    if (!isNewThreadText(text)) {
+      return 0;
+    }
+
+    let cancelled = 0;
+    for (const session of this.findActiveSessionsForConversation(context)) {
+      this.sessions.update({
+        id: session.id,
+        state: 'cancelled',
+        active_decision_kind: null,
+        delivery_summary: '用户选择新开计划线程，旧线程已取消。',
+      });
+      this.stopSessionExecution(session);
+      this.recordEvent(session.id, 'session_cancelled_for_new_thread_preemptive', {
+        text,
+      });
+      cancelled += 1;
+    }
+    return cancelled;
   }
 
   recordOutboundMessage(sessionId: string, messageId: string, cardKey: string | null = null): void {
@@ -755,6 +978,34 @@ export class SupervisorSessionService {
       return this.startSession(params);
     }
 
+    if (isCancelText(params.text)) {
+      return this.cancelSession(activeSession, params.text);
+    }
+
+    if (params.intent?.kind === 'create_issue' && isNewThreadText(params.text)) {
+      for (const session of this.findActiveSessionsForConversation(params.context)) {
+        this.sessions.update({
+          id: session.id,
+          state: 'cancelled',
+          active_decision_kind: null,
+          delivery_summary: '用户选择新开计划线程，旧线程已取消。',
+        });
+        this.stopSessionExecution(session);
+        this.recordEvent(session.id, 'session_cancelled_for_new_thread', {
+          text: params.text,
+        });
+      }
+      const stripped = stripNewThreadPrefix(params.text);
+      return this.startSession({
+        ...params,
+        text: stripped || params.intent.title,
+        intent: {
+          ...params.intent,
+          title: stripped || params.intent.title,
+        },
+      });
+    }
+
     const shouldContinueActiveSession =
       params.intent?.kind !== 'create_issue'
       || isApprovalText(params.text)
@@ -772,7 +1023,21 @@ export class SupervisorSessionService {
         );
       }
       return {
-        message: `当前会话里已经有一条活跃计划线程：${activeSession.plan_card?.title || '未命名计划'}。\n先把这条线程收口，或者直接回复你想怎么调整它。`,
+        format: 'telegram_html',
+        message: joinHtmlLines([
+          '<b>当前会话已经有一条活跃计划线程</b>',
+          escapeHtml(activeSession.plan_card?.title || '未命名计划'),
+          null,
+          '为了避免把两个需求混到一起，我不会静默新建第二条线程。',
+          null,
+          '<b>你可以这样继续</b>',
+          '点「查看当前计划」继续旧线程；点「取消当前计划」结束旧线程；如果确实要换新需求，请回复：',
+          `<code>新开线程 ${escapeHtml(params.intent.title)}</code>`,
+        ]),
+        action_rows: [
+          [{ label: '查看当前计划', callback_data: `sup|${activeSession.id}|focus` }],
+          [{ label: '取消当前计划', callback_data: `sup|${activeSession.id}|cancel` }],
+        ],
       };
     }
 
@@ -797,7 +1062,22 @@ export class SupervisorSessionService {
       ? '批准并开始'
       : params.action === 'alternate'
         ? '换用备选方案'
-        : '改一下计划';
+        : params.action === 'focus'
+          ? '查看当前计划'
+          : params.action === 'cancel'
+            ? '取消当前计划'
+            : '改一下计划';
+
+    if (params.action === 'focus') {
+      return this.renderSessionMessage(
+        session,
+        session.root_issue_id ? this.runtime.getIssue(session.root_issue_id) : null,
+      );
+    }
+
+    if (params.action === 'cancel') {
+      return this.cancelSession(session, text);
+    }
 
     return this.continueSession(session, {
       context: params.context,
@@ -805,6 +1085,34 @@ export class SupervisorSessionService {
       intent: null,
       runtimeContext: params.runtimeContext ?? emptyRuntimeContext(),
       canWrite: params.canWrite,
+    });
+  }
+
+  private cancelSession(session: SupervisorSessionRecord, text: string): BotCommandResponse {
+    const updated = this.sessions.update({
+      id: session.id,
+      state: 'cancelled',
+      active_decision_kind: null,
+      delivery_summary: '用户已取消这条计划线程。',
+    })!;
+    this.recordEvent(session.id, 'session_cancelled_by_user', {
+      text,
+    });
+    this.stopSessionExecution(session);
+    return this.renderSessionMessage(updated);
+  }
+
+  private stopSessionExecution(session: SupervisorSessionRecord): void {
+    const issue = session.root_issue_id ? this.runtime.getIssue(session.root_issue_id) : null;
+    const stopIssueId = issue?.governance_current_child?.issue_id
+      ?? session.current_child_issue_id
+      ?? session.root_issue_id;
+    if (!stopIssueId) {
+      return;
+    }
+    void this.runtime.stopIssue(stopIssueId).catch(() => {
+      // Cancellation should always update the session card even when the runtime
+      // stop path is already idle or the issue has disappeared.
     });
   }
 
@@ -975,7 +1283,23 @@ export class SupervisorSessionService {
     runtimeContext: BotRuntimeCopilotContext,
     canWrite: boolean,
   ): Promise<BotCommandResponse> {
-    const computed = await this.computePlan(session, draft, runtimeContext);
+    const computedPlan = await this.computePlan(session, draft, runtimeContext);
+    const shouldPreserveApprovalGate = Boolean(
+      session.approval_mode
+      && session.approval_mode !== 'auto'
+      && computedPlan.approvalMode === 'auto',
+    );
+    const computed: PlanComputation = shouldPreserveApprovalGate
+      ? {
+          ...computedPlan,
+          approvalMode: session.approval_mode as SupervisorApprovalMode,
+          state: 'awaiting_user_approval',
+          planCard: {
+            ...computedPlan.planCard,
+            needs_user_approval: true,
+          },
+        }
+      : computedPlan;
     const updated = this.sessions.update({
       id: session.id,
       state: computed.state,
@@ -1004,6 +1328,9 @@ export class SupervisorSessionService {
     draft: DraftInput,
     runtimeContext: BotRuntimeCopilotContext,
   ): Promise<PlanComputation> {
+    const requestTitle = normalizeRequirementText(draft.title);
+    const requestDescription = draft.description ? normalizeRequirementText(draft.description) : null;
+    const explicitApprovalRequested = explicitlyRequestsApprovalBeforeExecution(draft.title, draft.description);
     const repoRef = draft.project_slug
       || runtimeContext.default_project_slug
       || resolveProjectAlias(draft.title, runtimeContext.available_projects)
@@ -1013,17 +1340,17 @@ export class SupervisorSessionService {
       const base: PlanComputation = {
         repoRef: null,
         intakeMode: 'clarify_then_plan',
-        approvalMode: 'explicit_user_approval',
+        approvalMode: explicitApprovalRequested ? 'explicit_user_approval' : 'auto',
         state: 'clarifying',
         planCard: {
-          title: normalizeTitle(draft.title),
-          user_goal: normalizeTitle(draft.title),
-          in_scope: [normalizeTitle(draft.title)],
+          title: requestTitle,
+          user_goal: requestTitle,
+          in_scope: [requestTitle],
           out_of_scope: ['在确认仓库前，不启动真正执行。'],
-          acceptance: inferAcceptance(draft.title, draft.description),
+          acceptance: inferAcceptance(requestTitle, requestDescription),
           known_risks: ['当前还没有绑定到明确仓库，因此无法读取治理上下文。'],
           execution_strategy: '先绑定仓库，再根据仓库约束完善计划。',
-          needs_user_approval: true,
+          needs_user_approval: explicitApprovalRequested,
           repo_ref: null,
           project_slug: null,
           clarification_question: '告诉我这条需求应该落到哪个 project slug / 仓库。',
@@ -1053,8 +1380,8 @@ export class SupervisorSessionService {
           issue: {
             id: 'preview',
             identifier: 'PREVIEW',
-            title: draft.title,
-            description: draft.description,
+            title: requestTitle,
+            description: requestDescription,
             priority: null,
             state: 'Todo',
             project_slug: repoRef,
@@ -1071,12 +1398,15 @@ export class SupervisorSessionService {
         })
       : null;
 
-    const multiObjective = governance?.decision === 'split_before_implement'
-      || isLikelyMultiObjective(draft.title, draft.description);
+    const splitQueueForbidden = explicitlyForbidsSplitQueue(draft.title, draft.description);
+    const multiObjective = !splitQueueForbidden && (
+      governance?.decision === 'split_before_implement'
+      || isLikelyMultiObjective(draft.title, draft.description)
+    );
     const riskyCleanup = isRiskyCleanupRequest(`${draft.title}\n${draft.description || ''}`);
-    const explicitApprovalRequested = explicitlyRequestsApprovalBeforeExecution(draft.title, draft.description);
     const needsClarify = shouldClarifyAcceptance(draft.title, draft.description)
       && !multiObjective
+      && !explicitApprovalRequested
       && governance?.decision !== 'accept_with_rewrite';
 
     let intakeMode: SupervisorIntakeMode = 'direct_run';
@@ -1089,7 +1419,7 @@ export class SupervisorSessionService {
       state = 'awaiting_user_approval';
     } else if (needsClarify) {
       intakeMode = 'clarify_then_plan';
-      approvalMode = 'explicit_user_approval';
+      approvalMode = explicitApprovalRequested ? 'explicit_user_approval' : 'auto';
       state = 'clarifying';
     }
 
@@ -1119,11 +1449,14 @@ export class SupervisorSessionService {
       approvalMode,
       state,
       planCard: {
-        title: governance?.rewrite_title?.trim() || normalizeTitle(draft.title),
-        user_goal: normalizeTitle(draft.title),
-        in_scope: [normalizeTitle(draft.title)],
-        out_of_scope: inferOutOfScope(draft.title),
-        acceptance: inferAcceptance(draft.title, draft.description),
+        title: governance?.rewrite_title?.trim() || requestTitle,
+        user_goal: requestTitle,
+        in_scope: [requestTitle],
+        out_of_scope: [
+          ...inferOutOfScope(requestTitle),
+          splitQueueForbidden ? '不拆分、不创建 child queue；本轮只创建一张 root-only 验证单。' : null,
+        ].filter((value): value is string => Boolean(value)),
+        acceptance: inferAcceptance(requestTitle, requestDescription),
         known_risks: [
           governance?.summary ? compact(governance.summary, 180) : null,
           riskyCleanup ? '这类清理可能删除文件，需要先确认范围和验收方式。' : null,
@@ -1133,6 +1466,8 @@ export class SupervisorSessionService {
         execution_strategy: [
           multiObjective
             ? '先把源目标收成 root thread，再只放行当前 child，其余 child 顺序排队。'
+            : riskyCleanup && splitQueueForbidden
+              ? '只创建一张 root-only 受控验证单，不扫描全仓，不创建 child queue；执行后用指定标记文件证明审批语义。'
             : riskyCleanup
               ? '先限定清理范围，执行后用 git diff / 文件列表证明只清掉残余内容。'
               : '保持单目标推进，避免顺手扩大范围。',
@@ -1251,7 +1586,7 @@ export class SupervisorSessionService {
     });
 
     const createResult = await this.runtime.createIssue({
-      title: planCard.title,
+      title: buildMaterializedRootIssueTitle(planCard),
       description: [
         `用户目标：${planCard.user_goal}`,
         `本次范围：${planCard.in_scope.join('；')}`,
@@ -1261,6 +1596,7 @@ export class SupervisorSessionService {
       ].join('\n'),
       project_slug: planCard.project_slug,
       supervisor_execution_intent: executionIntent,
+      defer_dispatch: planCard.materialization_mode === 'root_with_split_queue',
     });
 
     if (!createResult.accepted || !createResult.issue_id) {
@@ -1294,20 +1630,39 @@ export class SupervisorSessionService {
     };
 
     if (planCard.materialization_mode === 'root_with_split_queue') {
-      const splitResult = await this.runtime.splitGovernance(createResult.issue_id);
+      const childPlans = buildSupervisorSplitChildPlans(planCard);
+      const childResults = [];
+      for (let index = 0; index < childPlans.length; index += 1) {
+        const childPlan = childPlans[index]!;
+        const childResult = await this.runtime.createIssue({
+          title: `[SUPERVISOR CHILD ${index + 1}/${childPlans.length} for ${createResult.issue_identifier || 'root'}] ${childPlan.title}`,
+          description: childPlan.description,
+          project_slug: planCard.project_slug,
+          supervisor_execution_intent: executionIntent,
+          governance_lineage: {
+            root_issue_id: createResult.issue_id,
+            parent_issue_id: createResult.issue_id,
+            generation: 1,
+          },
+          defer_dispatch: index > 0,
+        });
+        childResults.push(childResult);
+      }
       latestIssue = this.runtime.getIssue(createResult.issue_id) ?? latestIssue;
       materialOutcome = {
         ...materialOutcome,
-        split_status: splitResult.status,
-        governance_action: splitResult.governance_action ?? null,
+        split_status: childResults.every((result) => result.accepted) ? 'accepted' : 'partial',
+        created_child_issue_identifiers: childResults
+          .map((result) => result.issue_identifier)
+          .filter(Boolean),
       };
-      if (splitResult.accepted) {
+      if (childResults.every((result) => result.accepted)) {
         resultMessage = [
           `已创建 ${createResult.issue_identifier || '新任务'}，并按推荐拆成顺序子任务队列。`,
-          splitResult.governance_action?.user_summary || splitResult.message,
+          `当前先处理 ${childResults[0]?.issue_identifier || '第一张 child'}；后续 ${childResults.slice(1).map((result) => result.issue_identifier).filter(Boolean).join('、') || 'child'} 会排队接力。`,
         ].join('\n');
       } else {
-        resultMessage = `已创建 ${createResult.issue_identifier || '新任务'}，但自动拆分没有成功：${splitResult.message}`;
+        resultMessage = `已创建 ${createResult.issue_identifier || '新任务'}，但自动创建 child queue 时有部分子任务失败。`;
       }
     }
 
@@ -1484,6 +1839,7 @@ export class SupervisorSessionService {
     }
 
     if (session.state === 'awaiting_user_approval' || session.state === 'plan_ready') {
+      const visibleRisks = visiblePlanRisks(planCard);
       return this.withSessionMetadata(
         session,
         {
@@ -1509,9 +1865,9 @@ export class SupervisorSessionService {
             null,
             '<b>完成算什么</b>',
             escapeHtml(textList(planCard.acceptance, '结果可验证。')),
-            planCard.known_risks.length > 0 ? null : null,
-            planCard.known_risks.length > 0 ? '<b>已知风险</b>' : null,
-            planCard.known_risks.length > 0 ? escapeHtml(textList(planCard.known_risks, '暂无明显风险。')) : null,
+            visibleRisks.length > 0 ? null : null,
+            visibleRisks.length > 0 ? '<b>已知风险</b>' : null,
+            visibleRisks.length > 0 ? escapeHtml(textList(visibleRisks, '暂无明显风险。')) : null,
             null,
             '<b>推荐方案</b>',
             escapeHtml(`${planCard.recommended_option.label}：${planCard.recommended_option.summary}`),
@@ -1576,6 +1932,23 @@ export class SupervisorSessionService {
       );
     }
 
+    if (session.state === 'cancelled') {
+      return this.withSessionMetadata(
+        session,
+        {
+          format: 'telegram_html',
+          message: joinHtmlLines([
+            `<b>计划已取消 · ${escapeHtml(planCard.title)}</b>`,
+            escapeHtml(session.delivery_summary || '这条计划线程已经取消，不会继续自动推进。'),
+            null,
+            '如果你要换一个需求，请直接发送：',
+            `<code>新开线程 ${escapeHtml(planCard.title)}</code>`,
+          ]),
+        },
+        'cancelled',
+      );
+    }
+
     return this.withSessionMetadata(
       session,
       {
@@ -1583,9 +1956,21 @@ export class SupervisorSessionService {
         message: joinHtmlLines([
           `<b>计划执行中 · ${escapeHtml(planCard.title)}</b>`,
           `状态：${escapeHtml(session.state)}`,
+          lastOutcomeString(session, 'pending_user_notification_summary') ? null : null,
+          lastOutcomeString(session, 'pending_user_notification_summary') ? '<b>监督更新</b>' : null,
+          lastOutcomeString(session, 'pending_user_notification_summary')
+            ? escapeHtml(lastOutcomeString(session, 'pending_user_notification_summary')!)
+            : null,
+          lastOutcomeString(session, 'latest_dev_instruction') ? '<b>下一轮指令</b>' : null,
+          lastOutcomeString(session, 'latest_dev_instruction')
+            ? escapeHtml(lastOutcomeString(session, 'latest_dev_instruction')!)
+            : null,
         ]),
       },
-      session.state,
+      [
+        session.state,
+        ...supervisorOutcomeMaterialParts(session),
+      ].filter(Boolean).join(':'),
     );
   }
 
@@ -1705,6 +2090,9 @@ export class SupervisorSessionService {
     if (!session) {
       return;
     }
+    if (session.state === 'cancelled' || session.state === 'completed') {
+      return;
+    }
 
     const milestone = deriveSupervisorMilestone(issue);
     const previousMilestoneKey = typeof session.last_material_outcome?.milestone_key === 'string'
@@ -1734,6 +2122,9 @@ export class SupervisorSessionService {
         .then((oversight) => {
           const freshSession = this.sessions.findById(session.id);
           if (!freshSession) {
+            return;
+          }
+          if (freshSession.state === 'cancelled' || freshSession.state === 'completed') {
             return;
           }
           this.applyIssueOversightUpdate(freshSession, issue, milestone, oversight);
@@ -1790,7 +2181,11 @@ export class SupervisorSessionService {
     }
 
     let nextState = session.state;
-    if (isRootIssueEvent && (issue.orchestrator_state === 'completed' || issue.delivery_state === 'completed')) {
+    if (isRootIssueEvent && (
+      issue.orchestrator_state === 'completed' ||
+      issue.delivery_state === 'completed' ||
+      milestone?.kind === 'completed'
+    )) {
       nextState = 'completed';
     } else if (oversight?.decision === 'ask_user') {
       nextState = 'awaiting_user_decision';

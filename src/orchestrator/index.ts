@@ -357,6 +357,7 @@ export class Orchestrator extends EventEmitter {
 
   private pollTimer: NodeJS.Timeout | null = null;
   private leaseRenewTimer: NodeJS.Timeout | null = null;
+  private startupCleanupTimer: NodeJS.Timeout | null = null;
   private running = false;
   private stopRequested = false;
   private currentTickPromise: Promise<void> | null = null;
@@ -590,10 +591,23 @@ export class Orchestrator extends EventEmitter {
       this.startLeaseRenewalLoop();
 
       // Startup terminal workspace cleanup (Section 8.6)
-      await this.startupTerminalCleanup();
+      // Delay and run in the background so first-turn HTTP/webhook traffic is
+      // not competing with historical workspace and orphan repair.
+      const startupCleanupDelayMs = Number.parseInt(process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS || '', 10);
+      this.startupCleanupTimer = setTimeout(() => {
+        this.startupCleanupTimer = null;
+        if (!this.running || this.stopRequested) {
+          return;
+        }
+        void this.startupTerminalCleanup().catch((error) => {
+          console.warn('[orchestrator] Startup terminal cleanup failed, continuing:', error);
+        });
+      }, Number.isFinite(startupCleanupDelayMs) && startupCleanupDelayMs >= 0 ? startupCleanupDelayMs : 900_000);
 
-      // Schedule immediate first tick
-      this.scheduleTick(0);
+      // Give Telegram/session repair a short startup window to preempt stale
+      // active threads before the orchestrator resumes polling old tracker work.
+      const firstTickDelayMs = Number.parseInt(process.env.SYMPHONY_FIRST_TICK_DELAY_MS || '', 10);
+      this.scheduleTick(Number.isFinite(firstTickDelayMs) && firstTickDelayMs >= 0 ? firstTickDelayMs : 10_000);
 
       console.log('[orchestrator] Started');
     } catch (err) {
@@ -614,6 +628,10 @@ export class Orchestrator extends EventEmitter {
     if (this.pollTimer) {
       clearTimeout(this.pollTimer);
       this.pollTimer = null;
+    }
+    if (this.startupCleanupTimer) {
+      clearTimeout(this.startupCleanupTimer);
+      this.startupCleanupTimer = null;
     }
     this.stopLeaseRenewalLoop();
 
@@ -647,7 +665,10 @@ export class Orchestrator extends EventEmitter {
   }
 
   async createIssue(input: CreateIssueRequest): Promise<CreateIssueResult> {
-    return this.createIssueInternal(input);
+    return this.createIssueInternal(input, {
+      defer_dispatch: input.defer_dispatch ?? undefined,
+      governance_lineage: input.governance_lineage ?? undefined,
+    });
   }
 
   private async createIssueInternal(
@@ -804,7 +825,7 @@ export class Orchestrator extends EventEmitter {
         if (deferDispatch && this.shouldDispatch(issue)) {
           message = `Created ${issue.identifier} and queued it for dispatch`;
         }
-        if (scheduleTickWhenRunning) {
+        if (scheduleTickWhenRunning && !deferDispatch) {
           this.scheduleTick(0);
         }
       }
@@ -875,6 +896,25 @@ export class Orchestrator extends EventEmitter {
         message: `Issue ${issueId} was not found`,
         issue_id: null,
         issue_identifier: null,
+      };
+    }
+
+    if (this.isActiveTrackerState(workItem.linear_state)) {
+      this.state.claimed.delete(workItem.linear_issue_id);
+      this.state.completed.delete(workItem.linear_issue_id);
+      this.workItemRepository.update({
+        id: workItem.id,
+        orchestrator_state: 'halted',
+        delivery_code: 'manual_stop',
+        delivery_summary: '这张单已被手动停止；除非用户显式 retry 或更新 tracker 内容，否则不会自动重启。',
+      });
+      this.emit('state:changed', this.getStateSnapshot());
+      return {
+        accepted: true,
+        status: 'completed',
+        message: `Stopped ${workItem.linear_identifier}`,
+        issue_id: workItem.linear_issue_id,
+        issue_identifier: workItem.linear_identifier,
       };
     }
 
@@ -2076,7 +2116,13 @@ export class Orchestrator extends EventEmitter {
           return;
         }
 
-        // Step 3: Fetch candidate issues
+        // Step 3: Dispatch locally known review handoffs before relying on the
+        // tracker poll. Linear can lag immediately after DEV moves a task to
+        // In Review, but the work item already contains the source of truth.
+        const dispatchedThisTick = new Set<string>();
+        await this.dispatchLocalReviewReadyWorkItems(dispatchedThisTick);
+
+        // Step 4: Fetch candidate issues
         const { issues, error: fetchError } = await this.tracker.fetchCandidateIssues(
           this.config.activeStates
         );
@@ -2087,13 +2133,12 @@ export class Orchestrator extends EventEmitter {
           return;
         }
 
-        // Step 4: Sort issues by dispatch priority (Section 8.2)
+        // Step 5: Sort issues by dispatch priority (Section 8.2)
         const sortedIssues = this.sortForDispatch(issues);
 
-        // Step 5: Dispatch eligible issues while slots remain
+        // Step 6: Dispatch eligible issues while slots remain
         // Use a local set to track issues dispatched in THIS tick, preventing
         // the same issue from being dispatched multiple times in one loop.
-        const dispatchedThisTick = new Set<string>();
         for (const issue of sortedIssues) {
           if (!this.hasAvailableSlots()) {
             break;
@@ -2236,6 +2281,21 @@ export class Orchestrator extends EventEmitter {
     }
 
     return issue.updated_at.getTime() <= workItem.updated_at.getTime();
+  }
+
+  private usesSupervisorSessionDispatchBlock(workItem: WorkItem | null): boolean {
+    const session = this.findSupervisorSessionForWorkItem(workItem);
+    return session?.state === 'cancelled' || session?.state === 'completed';
+  }
+
+  private usesPostDevReviewTransitionBlock(workItem: WorkItem | null, issue: Issue): boolean {
+    if (!workItem || workItem.orchestrator_state !== 'workspace_ready') {
+      return false;
+    }
+    if ((workItem.linear_state || '').trim().toLowerCase() !== 'in review') {
+      return false;
+    }
+    return issue.state.trim().toLowerCase() !== 'in review';
   }
 
   private governanceSourceTimestamp(workItem: WorkItem): Date | null {
@@ -2426,11 +2486,19 @@ export class Orchestrator extends EventEmitter {
     }
 
     const trackedWorkItem = this.findTrackedWorkItem(issue);
+    if (this.usesSupervisorSessionDispatchBlock(trackedWorkItem)) {
+      return false;
+    }
+
     if (this.usesFailureDispatchBlock(trackedWorkItem, issue)) {
       return false;
     }
 
     if (this.usesManualStopDispatchBlock(trackedWorkItem, issue)) {
+      return false;
+    }
+
+    if (this.usesPostDevReviewTransitionBlock(trackedWorkItem, issue)) {
       return false;
     }
 
@@ -2508,7 +2576,9 @@ export class Orchestrator extends EventEmitter {
 
     // Spawn worker
     try {
-      const workerPromise = this.runAgentAttempt(issue, attempt, route).then(result => this.handleWorkerExit(issue.id, result));
+      const workerPromise = Promise.resolve()
+        .then(() => this.runAgentAttempt(issue, attempt, route))
+        .then(result => this.handleWorkerExit(issue.id, result));
 
       const runningEntry: RunningEntry = {
         worker_handle: workerPromise,
@@ -2727,6 +2797,11 @@ export class Orchestrator extends EventEmitter {
   }
 
   private async cleanupAllTerminalIssueBranches(): Promise<void> {
+    if (this.hasActiveExecutionWork()) {
+      console.log('[orchestrator] Skipping global terminal branch cleanup because active execution is in flight.');
+      return;
+    }
+
     const { issues, error } = await this.tracker.fetchIssuesByStates(this.config.terminalStates);
     if (error) {
       return;
@@ -2835,7 +2910,7 @@ export class Orchestrator extends EventEmitter {
       description: null,
       priority: null,
       state: workItem.linear_state,
-      project_slug: null,
+      project_slug: this.findProjectSlugForGithubRepo(workItem.github_repo),
       project_name: null,
       branch_name: workItem.branch_name,
       url: null,
@@ -2844,6 +2919,46 @@ export class Orchestrator extends EventEmitter {
       created_at: workItem.created_at,
       updated_at: workItem.updated_at,
     };
+  }
+
+  private findProjectSlugForGithubRepo(githubRepo: string): string | null {
+    for (const [projectSlug, route] of Object.entries(this.config.repositories.routing)) {
+      if (`${route.github_owner}/${route.github_repo}` === githubRepo) {
+        return projectSlug;
+      }
+    }
+    return null;
+  }
+
+  private async dispatchLocalReviewReadyWorkItems(dispatchedThisTick: Set<string>): Promise<void> {
+    for (const workItem of this.workItemRepository.findAll()) {
+      if (!this.hasAvailableSlots()) {
+        return;
+      }
+      if (
+        workItem.orchestrator_state !== 'workspace_ready' ||
+        workItem.linear_state.trim().toLowerCase() !== 'in review'
+      ) {
+        continue;
+      }
+      if (this.state.running.has(workItem.linear_issue_id) || this.state.claimed.has(workItem.linear_issue_id)) {
+        continue;
+      }
+      if (this.state.retry_attempts.has(workItem.linear_issue_id)) {
+        continue;
+      }
+      if (dispatchedThisTick.has(workItem.linear_issue_id)) {
+        continue;
+      }
+      const issue = this.buildSyntheticIssueFromWorkItem(workItem);
+      if (!issue.project_slug) {
+        continue;
+      }
+      if (this.shouldDispatch(issue)) {
+        dispatchedThisTick.add(issue.id);
+        await this.dispatchIssue(issue, null);
+      }
+    }
   }
 
   private hasGovernanceOverride(issue: Issue): boolean {
@@ -3923,8 +4038,13 @@ export class Orchestrator extends EventEmitter {
     const lastOutcome = session?.last_material_outcome
       ? JSON.stringify(session.last_material_outcome)
       : null;
-    const latestSupervisorInstruction = typeof session?.last_material_outcome?.dev_instruction === 'string'
+    const latestSupervisorInstruction = typeof session?.last_material_outcome?.latest_dev_instruction === 'string'
+      ? session.last_material_outcome.latest_dev_instruction
+      : typeof session?.last_material_outcome?.dev_instruction === 'string'
       ? session.last_material_outcome.dev_instruction
+      : null;
+    const latestDirectiveKind = typeof session?.last_material_outcome?.latest_dev_directive_kind === 'string'
+      ? session.last_material_outcome.latest_dev_directive_kind
       : null;
     const latestSupervisorDecision = typeof session?.last_material_outcome?.supervisor_decision === 'string'
       ? session.last_material_outcome.supervisor_decision
@@ -3934,7 +4054,17 @@ export class Orchestrator extends EventEmitter {
       : null;
     const repoRef = workItem?.github_repo ?? planCard?.repo_ref ?? session?.repo_ref ?? null;
     const supervisorMemories = repoRef
-      ? this.supervisorMemoryRepository.listRelevant(repoRef, 6)
+      ? this.supervisorMemoryRepository.searchRelevant({
+          repo_ref: repoRef,
+          query: [
+            workItem?.linear_title,
+            workItem?.supervisor_plan_summary,
+            planCard?.title,
+            planCard?.user_goal,
+            latestSupervisorInstruction,
+          ].filter(Boolean).join(' '),
+          limit: 6,
+        })
       : [];
 
     return [
@@ -3975,6 +4105,7 @@ export class Orchestrator extends EventEmitter {
       latestSupervisorInstruction || latestSupervisorDecision || latestSupervisorReason
         ? [
             '## Supervisor Oversight',
+            latestDirectiveKind ? `- Directive: ${latestDirectiveKind}` : null,
             latestSupervisorDecision ? `- Decision: ${latestSupervisorDecision}` : null,
             latestSupervisorReason ? `- Reason: ${latestSupervisorReason}` : null,
             latestSupervisorInstruction ? `- Next Instruction: ${latestSupervisorInstruction}` : null,
@@ -4448,7 +4579,7 @@ export class Orchestrator extends EventEmitter {
     issue: Issue,
   ): number {
     if (mode === 'dev' && this.isLiveLifecycleVerificationIssue(issue)) {
-      return Math.min(this.config.maxTurns, 2);
+      return Math.max(2, Math.min(this.config.maxTurns, 2));
     }
 
     const complexity = judgeComplexity(issue).complexity;
@@ -4532,6 +4663,8 @@ export class Orchestrator extends EventEmitter {
     return (
       combinedText.includes('live-lifecycle')
       || combinedText.includes('verification nonce:')
+      || combinedText.includes('supervisor live e2e')
+      || combinedText.includes('supervisor-live-')
       || (combinedText.includes('smoke-test') && combinedText.includes('full lifecycle'))
       || (combinedText.includes('smoke test') && combinedText.includes('full lifecycle'))
     );
@@ -4557,6 +4690,23 @@ export class Orchestrator extends EventEmitter {
     const hasCompletionEvidence =
       artifactCompletion &&
       (missingRequirements.length === 0 || (mode === 'dev' && onlyLightweightFallbackRequirements));
+
+    if (
+      mode === 'dev' &&
+      artifactCompletion &&
+      this.isLiveLifecycleVerificationIssue(issue) &&
+      turnNumber >= turnBudget
+    ) {
+      return true;
+    }
+
+    if (
+      mode === 'review' &&
+      artifactCompletion &&
+      turnNumber >= turnBudget
+    ) {
+      return true;
+    }
 
     if (!hasCompletionEvidence) {
       return false;
@@ -5417,12 +5567,49 @@ export class Orchestrator extends EventEmitter {
         return result;
       }
 
+      const latestBeforePostProcess = await this.tracker.fetchIssueById(issue.id);
+      const latestIssueState = latestBeforePostProcess.issue?.state ?? null;
+      if (!isReview && latestIssueState && this.isTerminalTrackerState(latestIssueState)) {
+        console.log(
+          `[orchestrator] ${issue.identifier} reached terminal tracker state ${latestIssueState} during dev turn; skipping dev post-processing.`,
+        );
+        const outputSummary = await this.readWorkspaceFile(workspace.path, 'HANDOVER.md');
+        this.workItemRepository.update({
+          id: workItem.id,
+          linear_state: latestIssueState,
+          orchestrator_state: 'completed',
+          workspace_path: workspace.path,
+          workspace_key: issue.identifier,
+          branch_name: workspace.git_branch || issue.branch_name || workItem.branch_name,
+        });
+        finalizeAgentRun('completed', outputSummary, null, null);
+        return {
+          ...result,
+          success: true,
+          completed: true,
+          outcome: 'completed',
+          next_action: 'none',
+          final_state: latestIssueState,
+          workspace_path: workspace.path,
+          cleanup_workspace: true,
+          work_item_id: workItem.id,
+          agent_run_id: agentRun.id,
+        };
+      }
+
       // Run appropriate CLI command based on state
       this.setRunningStage(issue.id, isReview ? 'post_process_review' : 'post_process_dev');
       workItem = this.workItemRepository.update({
         id: workItem.id,
         orchestrator_state: isReview ? 'review_post_processing' : 'dev_post_processing',
       }) ?? workItem;
+      await this.ensureWorkspaceStateForPostProcess({
+        command: cliCommand,
+        issue: activeIssue,
+        workspacePath: workspace.path,
+        workItem,
+        route,
+      });
       const cliResult = await this.runCliCommand(
         cliCommand,
         issue.identifier,
@@ -5503,9 +5690,54 @@ export class Orchestrator extends EventEmitter {
     return result;
   }
 
-  private async handleDevCompletion(runningEntry: RunningEntry, result: WorkerResult): Promise<void> {
-    if (!result.work_item_id) {
+  private async ensureWorkspaceStateForPostProcess(params: {
+    command: 'dev' | 'review';
+    issue: Issue;
+    workspacePath: string;
+    workItem: Pick<WorkItem, 'branch_name' | 'github_repo' | 'github_issue_number'>;
+    route: Pick<ResolvedRepositoryRoute, 'github_repo_full'>;
+  }): Promise<void> {
+    const fs = await import('fs/promises');
+    const statePath = path.join(params.workspacePath, '.symphony', 'state.json');
+    try {
+      await fs.access(statePath);
       return;
+    } catch {
+      // Continue below.
+    }
+
+    const symphonyPath = path.dirname(statePath);
+    await fs.mkdir(symphonyPath, { recursive: true });
+    const branch = params.workItem.branch_name
+      || params.issue.branch_name
+      || `feature/${params.issue.identifier.toLowerCase()}`;
+    const currentState = params.command === 'review' ? 'IN_REVIEW' : 'IN_PROGRESS';
+    const linearState = params.command === 'review' ? 'In Review' : 'In Progress';
+    const stateData = {
+      version: 1,
+      issue_id: params.issue.identifier,
+      current_state: currentState,
+      previous_state: null,
+      transition_history: [],
+      metadata: {
+        linear_issue_id: params.issue.id,
+        linear_state: linearState,
+        github_repo: params.workItem.github_repo || params.route.github_repo_full,
+        github_issue_number: params.workItem.github_issue_number ?? null,
+        branch,
+      },
+      error: null,
+      retry_count: 0,
+    };
+    await fs.writeFile(statePath, JSON.stringify(stateData, null, 2), 'utf-8');
+    console.warn(
+      `[orchestrator] Recreated missing .symphony/state.json for ${params.issue.identifier} before ${params.command} post-processing.`,
+    );
+  }
+
+  private async handleDevCompletion(runningEntry: RunningEntry, result: WorkerResult): Promise<boolean> {
+    if (!result.work_item_id) {
+      return false;
     }
 
     const synced = await this.syncWorkItemFromWorkspaceState(
@@ -5519,7 +5751,7 @@ export class Orchestrator extends EventEmitter {
       ? await this.readWorkspaceFile(result.workspace_path, 'HANDOVER.md')
       : null;
 
-    await this.syncLinearState(runningEntry.issue, 'In Review');
+    const trackerSync = await this.syncLinearState(runningEntry.issue, 'In Review');
     await this.postLinearComment(
       runningEntry.issue.id,
       this.buildDevCompletionComment(runningEntry.issue, handoverContent)
@@ -5545,6 +5777,7 @@ export class Orchestrator extends EventEmitter {
         delivery_summary: null,
       });
     }
+    return trackerSync.success;
   }
 
   private async handleReviewNeedsRework(runningEntry: RunningEntry, result: WorkerResult): Promise<void> {
@@ -5889,10 +6122,24 @@ export class Orchestrator extends EventEmitter {
         }
       }
 
-      if (runningEntry.issue.state.toLowerCase() === 'in review') {
+      let shouldDispatchReviewAfterDev = false;
+      const completedReviewRun = runningEntry.issue.state.toLowerCase() === 'in review'
+        || Boolean(result.cli_result?.review_decision);
+      const completedExternallyTerminalDevRun =
+        !completedReviewRun &&
+        Boolean(result.final_state && this.isTerminalTrackerState(result.final_state));
+      if (completedReviewRun) {
         await this.handleReviewCompletion(runningEntry, result);
+      } else if (completedExternallyTerminalDevRun) {
+        if (result.work_item_id) {
+          this.workItemRepository.update({
+            id: result.work_item_id,
+            linear_state: result.final_state ?? runningEntry.issue.state,
+            orchestrator_state: 'completed',
+          });
+        }
       } else {
-        await this.handleDevCompletion(runningEntry, result);
+        shouldDispatchReviewAfterDev = await this.handleDevCompletion(runningEntry, result);
       }
 
       this.setRunningStage(issueId, 'completed');
@@ -5939,6 +6186,18 @@ export class Orchestrator extends EventEmitter {
 
       // Emit completion event
       this.emit('issue:completed', runningEntry.issue, true);
+
+      if (
+        shouldDispatchReviewAfterDev &&
+        this.running &&
+        this.hasAvailableSlots()
+      ) {
+        await this.dispatchIssue({
+          ...runningEntry.issue,
+          state: 'In Review',
+          updated_at: new Date(),
+        }, null);
+      }
     } else if (result.outcome === 'needs_rework') {
       await this.handleReviewNeedsRework(runningEntry, result);
       this.setRunningStage(issueId, 'retry_scheduled');
@@ -6413,6 +6672,11 @@ export class Orchestrator extends EventEmitter {
    * Section 8.6: Startup Terminal Workspace Cleanup
    */
   private async startupTerminalCleanup(): Promise<void> {
+    if (this.hasActiveExecutionWork()) {
+      console.log('[orchestrator] Skipping startup terminal cleanup because active execution is in flight.');
+      return;
+    }
+
     console.log('[orchestrator] Running startup terminal cleanup...');
 
     const { issues, error } = await this.tracker.fetchIssuesByStates(this.config.terminalStates);
@@ -6422,6 +6686,9 @@ export class Orchestrator extends EventEmitter {
     }
 
     for (const issue of issues) {
+      if (this.stopRequested) {
+        break;
+      }
       const workItem = this.workItemRepository.findByLinearIssueId(issue.id);
       const workspacePath = workItem?.workspace_path ?? this.getRouteWorkspacePath(issue);
       if (!workspacePath) {
@@ -6441,6 +6708,7 @@ export class Orchestrator extends EventEmitter {
       } catch (err) {
         console.warn('[orchestrator] Failed to clean workspace:', issue.identifier, err);
       }
+      await new Promise((resolve) => setTimeout(resolve, 50));
     }
 
     await this.cleanupAllTerminalIssueBranches();
@@ -6454,6 +6722,15 @@ export class Orchestrator extends EventEmitter {
     } catch (error) {
       console.warn('[orchestrator] Global orphan repair failed during startup cleanup, continuing anyway:', error);
     }
+  }
+
+  private hasActiveExecutionWork(): boolean {
+    return (
+      this.state.running.size > 0 ||
+      this.state.claimed.size > 0 ||
+      this.state.retry_attempts.size > 0 ||
+      this.currentTickPromise !== null
+    );
   }
 
   // ============================================================================

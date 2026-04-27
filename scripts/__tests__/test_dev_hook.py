@@ -162,7 +162,7 @@ def test_dev_hook_pushes_branch_before_creating_pr(tmp_path, monkeypatch):
         elif command == ("rev-parse", "--verify", "refs/remotes/origin/feature/int-25"):
             result.returncode = 128
             result.stderr = "fatal: Needed a single revision\n"
-        elif command == ("push", "-u", "origin", "feature/int-25"):
+        elif command == ("push", "-u", "origin", "HEAD:feature/int-25"):
             result.stdout = "branch set up to track origin/feature/int-25\n"
         else:
             raise AssertionError(f"Unexpected git command: {cmd}")
@@ -181,8 +181,56 @@ def test_dev_hook_pushes_branch_before_creating_pr(tmp_path, monkeypatch):
         ("rev-list", "--count", "refs/remotes/origin/main..HEAD"),
         ("rev-parse", "HEAD"),
         ("rev-parse", "--verify", "refs/remotes/origin/feature/int-25"),
-        ("push", "-u", "origin", "feature/int-25"),
+        ("push", "-u", "origin", "HEAD:feature/int-25"),
     ]
+
+
+def test_dev_hook_pushes_current_head_to_expected_runtime_branch(tmp_path, monkeypatch):
+    hook = make_hook(tmp_path)
+    hook.branch = "liupenghui/int-25-runtime-branch"
+    hook.github.pr_exists.return_value = None
+    hook.github.create_pull_request.return_value = {
+        "html_url": "https://github.com/owner/repo/pull/25",
+        "number": 25,
+    }
+
+    git_calls: list[tuple[str, ...]] = []
+
+    def fake_run(cmd, cwd, capture_output, text, check):
+        assert cwd == hook.store.symphony_dir.path.parent
+        assert cmd[0] == "git"
+        git_calls.append(tuple(cmd[1:]))
+
+        result = MagicMock()
+        result.returncode = 0
+        result.stderr = ""
+        result.stdout = ""
+
+        command = tuple(cmd[1:])
+        if command == ("rev-parse", "--verify", "refs/remotes/origin/main"):
+            result.stdout = "origin-main-sha\n"
+        elif command == WORKFLOW_DIFF_COMMAND:
+            result.stdout = ""
+        elif command == ("rev-list", "--count", "refs/remotes/origin/main..HEAD"):
+            result.stdout = "2\n"
+        elif command == ("rev-parse", "HEAD"):
+            result.stdout = "local-head-sha\n"
+        elif command == ("rev-parse", "--verify", "refs/remotes/origin/liupenghui/int-25-runtime-branch"):
+            result.returncode = 128
+            result.stderr = "fatal: Needed a single revision\n"
+        elif command == ("push", "-u", "origin", "HEAD:liupenghui/int-25-runtime-branch"):
+            result.stdout = "branch set up to track origin/liupenghui/int-25-runtime-branch\n"
+        else:
+            raise AssertionError(f"Unexpected git command: {cmd}")
+
+        return result
+
+    monkeypatch.setattr("scripts.hooks.dev.subprocess.run", fake_run)
+
+    assert hook.run() is True
+    hook.github.create_pull_request.assert_called_once()
+    assert hook.github.create_pull_request.call_args.kwargs["head"] == "liupenghui/int-25-runtime-branch"
+    assert ("push", "-u", "origin", "HEAD:liupenghui/int-25-runtime-branch") in git_calls
 
 
 def test_dev_hook_publishes_handover_to_pull_request_comment(tmp_path, monkeypatch):
@@ -217,7 +265,7 @@ def test_dev_hook_publishes_handover_to_pull_request_comment(tmp_path, monkeypat
         elif command == ("rev-parse", "--verify", "refs/remotes/origin/feature/int-25"):
             result.returncode = 128
             result.stderr = "fatal: Needed a single revision\n"
-        elif command == ("push", "-u", "origin", "feature/int-25"):
+        elif command == ("push", "-u", "origin", "HEAD:feature/int-25"):
             result.stdout = "branch set up to track origin/feature/int-25\n"
         else:
             raise AssertionError(f"Unexpected git command: {cmd}")
@@ -262,7 +310,7 @@ def test_dev_hook_ignores_legacy_root_handover_when_canonical_handover_is_missin
         elif command == ("rev-parse", "--verify", "refs/remotes/origin/feature/int-25"):
             result.returncode = 128
             result.stderr = "fatal: Needed a single revision\n"
-        elif command == ("push", "-u", "origin", "feature/int-25"):
+        elif command == ("push", "-u", "origin", "HEAD:feature/int-25"):
             result.stdout = "branch set up to track origin/feature/int-25\n"
         else:
             raise AssertionError(f"Unexpected git command: {cmd}")
@@ -327,7 +375,7 @@ def test_dev_hook_removes_workflow_artifacts_from_branch_diff_before_pr(tmp_path
         elif command == ("rev-parse", "--verify", "refs/remotes/origin/feature/int-25"):
             result.returncode = 128
             result.stderr = "fatal: Needed a single revision\n"
-        elif command == ("push", "-u", "origin", "feature/int-25"):
+        elif command == ("push", "-u", "origin", "HEAD:feature/int-25"):
             result.stdout = "branch set up to track origin/feature/int-25\n"
         else:
             raise AssertionError(f"Unexpected git command: {cmd}")
@@ -387,3 +435,61 @@ def test_dev_hook_recovers_when_pr_create_returns_422_but_pr_already_exists(tmp_
     hook.github.get_pull_request_by_branch.assert_called_once_with("feature/int-25", state="open")
     assert hook.store.get_current_state_enum().value == State.IN_REVIEW.value
     assert hook.store.get_state()["metadata"]["pr_number"] == 25
+
+
+def test_dev_hook_pushes_to_github_remote_and_retries_when_pr_create_422_has_no_existing_pr(tmp_path, monkeypatch):
+    hook = make_hook(tmp_path)
+    hook.github.pr_exists.return_value = None
+    hook.github.get_pull_request_by_branch.return_value = None
+    response = MagicMock()
+    response.status_code = 422
+    error = requests.HTTPError("422 Client Error: Unprocessable Entity for url", response=response)
+    hook.github.create_pull_request.side_effect = [
+        error,
+        {
+            "html_url": "https://github.com/owner/repo/pull/25",
+            "number": 25,
+        },
+    ]
+
+    git_calls: list[tuple[str, ...]] = []
+
+    def fake_run(cmd, cwd, capture_output, text, check):
+        assert cwd == hook.store.symphony_dir.path.parent
+        assert cmd[0] == "git"
+        git_calls.append(tuple(cmd[1:]))
+
+        result = MagicMock()
+        result.returncode = 0
+        result.stderr = ""
+        result.stdout = ""
+
+        command = tuple(cmd[1:])
+        if command == ("rev-parse", "--verify", "refs/remotes/origin/main"):
+            result.stdout = "origin-main-sha\n"
+        elif command == WORKFLOW_DIFF_COMMAND:
+            result.stdout = ""
+        elif command == ("rev-list", "--count", "refs/remotes/origin/main..HEAD"):
+            result.stdout = "2\n"
+        elif command == ("rev-parse", "HEAD"):
+            result.stdout = "local-head-sha\n"
+        elif command == ("rev-parse", "--verify", "refs/remotes/origin/feature/int-25"):
+            result.stdout = "local-head-sha\n"
+        elif command == ("remote", "get-url", "symphony-github"):
+            result.returncode = 2
+            result.stderr = "error: No such remote 'symphony-github'\n"
+        elif command == ("remote", "add", "symphony-github", "https://github.com/owner/repo.git"):
+            result.stdout = ""
+        elif command == ("push", "-u", "symphony-github", "HEAD:feature/int-25"):
+            result.stdout = "branch set up to track symphony-github/feature/int-25\n"
+        else:
+            raise AssertionError(f"Unexpected git command: {cmd}")
+
+        return result
+
+    monkeypatch.setattr("scripts.hooks.dev.subprocess.run", fake_run)
+
+    assert hook.run() is True
+    assert hook.github.create_pull_request.call_count == 2
+    assert ("push", "-u", "symphony-github", "HEAD:feature/int-25") in git_calls
+    assert hook.store.get_current_state_enum().value == State.IN_REVIEW.value

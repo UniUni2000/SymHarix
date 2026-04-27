@@ -133,6 +133,19 @@ export interface BotManifest {
   watch_presets: readonly BotWatchPreset[];
   assistant: BotAssistantDiagnostics;
   natural_language_enabled?: boolean;
+  supervisor?: {
+    active_sessions: Array<{
+      session_id: string;
+      transport: BotTransport;
+      conversation_id: string;
+      state: string;
+      active_decision_kind: string | null;
+      title: string | null;
+      repo_ref: string | null;
+      root_issue_id: string | null;
+      updated_at: string;
+    }>;
+  };
 }
 
 export interface BotGateway {

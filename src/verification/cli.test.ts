@@ -40,15 +40,61 @@ describe('parseVerifyLiveSupervisorArgs', () => {
       '--json',
     ]);
 
-    expect(parsed).toEqual({
-      ok: true,
-      command: {
-        projectSlug: 'test2',
-        timeoutMs: null,
-        json: true,
-        titleSuffix: 'supervisor-e2e',
-        supervisorScenario: true,
-      },
-    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) {
+      throw new Error(parsed.error);
+    }
+    expect(parsed.command.projectSlug).toBe('test2');
+    expect(parsed.command.timeoutMs).toBeNull();
+    expect(parsed.command.json).toBe(true);
+    expect(parsed.command.supervisorScenario).toBe(true);
+    expect(parsed.command.titleSuffix).toStartWith('supervisor-e2e-');
+  });
+
+  test('parses attach-mode server URL and Telegram chat id for supervisor live verification', () => {
+    const parsed = parseVerifyLiveSupervisorArgs([
+      '--project-slug',
+      'test2',
+      '--server-url',
+      'http://localhost:3000',
+      '--telegram-chat-id',
+      '7570067877',
+      '--json',
+    ]);
+
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) {
+      throw new Error(parsed.error);
+    }
+    expect(parsed.command.projectSlug).toBe('test2');
+    expect(parsed.command.timeoutMs).toBeNull();
+    expect(parsed.command.json).toBe(true);
+    expect(parsed.command.supervisorScenario).toBe(true);
+    expect(parsed.command.titleSuffix).toStartWith('supervisor-e2e-');
+    expect(parsed.command.serverUrl).toBe('http://localhost:3000');
+    expect(parsed.command.telegramChatId).toBe('7570067877');
+  });
+
+  test('parses supervisor live scenario and matrix flags', () => {
+    const parsed = parseVerifyLiveSupervisorArgs([
+      '--project-slug',
+      'test2',
+      '--server-url',
+      'http://localhost:3000',
+      '--telegram-chat-id',
+      '7570067877',
+      '--scenario',
+      'governed-split',
+      '--matrix',
+      '--json',
+    ]);
+
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) {
+      throw new Error(parsed.error);
+    }
+    expect(parsed.command.supervisorScenario).toBe(true);
+    expect(parsed.command.supervisorLiveScenario).toBe('governed_split');
+    expect(parsed.command.supervisorLiveMatrix).toBe(true);
   });
 });

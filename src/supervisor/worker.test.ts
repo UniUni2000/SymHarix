@@ -186,6 +186,17 @@ class MemoryNotifier implements BotTransportNotifier {
   }
 }
 
+class SlowEditNotifier extends MemoryNotifier {
+  async editMessage(
+    recipient: BotRecipient,
+    messageRef: BotTransportMessageRef,
+    message: BotTransportMessage,
+  ): Promise<BotTransportMessageRef> {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    return super.editMessage(recipient, messageRef, message);
+  }
+}
+
 describe('SupervisorWorker', () => {
   test('restores awaiting-approval session cards on reconcile without duplicating the same card twice', async () => {
     const db = new Database(':memory:');
@@ -317,6 +328,63 @@ describe('SupervisorWorker', () => {
     expect(notifier.edits[0]?.messageRef.provider_message_id).toBe('msg-existing');
     expect(sessions.findById('session-1')?.last_message_id).toBe('msg-existing');
     expect(sessions.findById('session-1')?.last_card_key).toContain('session|session-1|v2|executing');
+  });
+
+  test('coalesces concurrent reconciles for the same session material key into one edit', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const issue = createIssueView({
+      governance_thread_state: 'executing',
+      next_recommended_action: '继续推进。',
+    });
+    const { runtime } = createRuntimeHarness(issue);
+    const sessions = new SupervisorSessionRepository(db);
+    const sessionEvents = new SupervisorSessionEventRepository(db);
+    const transportEvents = new BotTransportEventRepository(db);
+    const sessionService = new SupervisorSessionService(runtime, null, sessions, sessionEvents);
+    sessions.create({
+      id: 'session-1',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      state: 'executing',
+      root_issue_id: issue.issue_id,
+      last_message_id: 'msg-1',
+      last_card_key: 'old-key',
+      plan_card: {
+        title: 'Root issue',
+        user_goal: 'Root issue',
+        in_scope: ['Do root issue'],
+        out_of_scope: [],
+        acceptance: ['Done'],
+        known_risks: [],
+        execution_strategy: 'Continue.',
+        needs_user_approval: false,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: { label: '继续', summary: '继续推进。' },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+    const notifier = new SlowEditNotifier();
+    const worker = new SupervisorWorker({
+      runtime,
+      sessionRepository: sessions,
+      sessionService,
+      transportEventRepository: transportEvents,
+      notifiers: { telegram: notifier },
+    });
+
+    await Promise.all([
+      worker.reconcileSession('session-1'),
+      worker.reconcileSession('session-1'),
+      worker.reconcileSession('session-1'),
+    ]);
+
+    expect(notifier.edits).toHaveLength(1);
+    worker.dispose();
   });
 
   test('proactively refreshes the same supervisor card when runtime publishes a new root-thread milestone', async () => {

@@ -310,6 +310,27 @@ export const SUPERVISOR_SESSION_EVENTS_TABLE_SCHEMA = `
   );
 `;
 
+export const SUPERVISOR_JOBS_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS supervisor_jobs (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    root_issue_id TEXT,
+    job_kind TEXT NOT NULL,
+    status TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    payload_json TEXT,
+    result_json TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    run_after TEXT NOT NULL,
+    lease_owner TEXT,
+    lease_expires_at TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES supervisor_sessions(id) ON DELETE CASCADE
+  );
+`;
+
 export const SUPERVISOR_MEMORIES_TABLE_SCHEMA = `
   CREATE TABLE IF NOT EXISTS supervisor_memories (
     id TEXT PRIMARY KEY,
@@ -461,6 +482,9 @@ export const CONTROL_PLANE_INDEXES_SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_supervisor_sessions_root_issue ON supervisor_sessions(root_issue_id);
   CREATE INDEX IF NOT EXISTS idx_supervisor_sessions_state ON supervisor_sessions(state);
   CREATE INDEX IF NOT EXISTS idx_supervisor_session_events_session ON supervisor_session_events(session_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_jobs_ready ON supervisor_jobs(status, run_after);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_jobs_session ON supervisor_jobs(session_id, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_jobs_root_issue ON supervisor_jobs(root_issue_id);
   CREATE INDEX IF NOT EXISTS idx_supervisor_memories_repo_updated ON supervisor_memories(repo_ref, updated_at DESC);
   CREATE INDEX IF NOT EXISTS idx_supervisor_memories_kind ON supervisor_memories(memory_kind);
   CREATE INDEX IF NOT EXISTS idx_service_leases_expires_at ON service_leases(expires_at);
@@ -586,6 +610,7 @@ export function initializeSchema(db: Database): void {
   db.exec(BOT_TRANSPORT_EVENTS_TABLE_SCHEMA);
   db.exec(SUPERVISOR_SESSIONS_TABLE_SCHEMA);
   db.exec(SUPERVISOR_SESSION_EVENTS_TABLE_SCHEMA);
+  db.exec(SUPERVISOR_JOBS_TABLE_SCHEMA);
   db.exec(SUPERVISOR_MEMORIES_TABLE_SCHEMA);
   db.exec(SERVICE_LEASES_TABLE_SCHEMA);
   db.exec(SHADOW_HARNESSES_TABLE_SCHEMA);
@@ -643,6 +668,7 @@ export function dropAllTables(db: Database): void {
   db.exec('DROP TABLE IF EXISTS service_leases;');
   db.exec('DROP TABLE IF EXISTS bot_transport_events;');
   db.exec('DROP TABLE IF EXISTS supervisor_memories;');
+  db.exec('DROP TABLE IF EXISTS supervisor_jobs;');
   db.exec('DROP TABLE IF EXISTS supervisor_session_events;');
   db.exec('DROP TABLE IF EXISTS supervisor_sessions;');
   db.exec('DROP TABLE IF EXISTS bot_followup_delivery_states;');

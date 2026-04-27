@@ -23,6 +23,7 @@ import {
   ServiceLeaseRepository,
   ShadowHarnessRepository,
   SupervisorSessionEventRepository,
+  SupervisorJobRepository,
   SupervisorMemoryRepository,
   SupervisorSessionRepository,
   SyncEventRepository,
@@ -65,6 +66,7 @@ describe('database schema', () => {
     expect(tableNames).toContain('governance_suggestions');
     expect(tableNames).toContain('supervisor_sessions');
     expect(tableNames).toContain('supervisor_session_events');
+    expect(tableNames).toContain('supervisor_jobs');
     expect(tableNames).toContain('supervisor_memories');
     expect(tableNames).not.toContain('tasks');
     expect(tableNames).not.toContain('execution_events');
@@ -78,6 +80,53 @@ describe('database schema', () => {
       .all() as Array<{ name: string }>;
 
     expect(rows).toEqual([]);
+  });
+});
+
+describe('SupervisorJobRepository', () => {
+  test('enqueues jobs idempotently and leases ready work once', () => {
+    const repository = new SupervisorJobRepository(db);
+
+    const first = repository.enqueue({
+      session_id: 'session-1',
+      root_issue_id: 'issue-1',
+      job_kind: 'assess_milestone',
+      idempotency_key: 'session-1|milestone-1|assess_milestone',
+      payload: { milestone_key: 'milestone-1' },
+      run_after: new Date('2026-01-01T00:00:00.000Z'),
+    });
+    const second = repository.enqueue({
+      session_id: 'session-1',
+      root_issue_id: 'issue-1',
+      job_kind: 'assess_milestone',
+      idempotency_key: 'session-1|milestone-1|assess_milestone',
+      payload: { milestone_key: 'milestone-1', ignored: true },
+      run_after: new Date('2026-01-01T00:00:00.000Z'),
+    });
+
+    expect(second.id).toBe(first.id);
+    expect(repository.listBySession('session-1')).toHaveLength(1);
+
+    const leased = repository.leaseNextReady({
+      now: new Date('2026-01-01T00:00:01.000Z'),
+      leaseOwner: 'worker-a',
+      leaseMs: 30_000,
+    });
+
+    expect(leased?.status).toBe('running');
+    expect(leased?.lease_owner).toBe('worker-a');
+    expect(repository.leaseNextReady({
+      now: new Date('2026-01-01T00:00:02.000Z'),
+      leaseOwner: 'worker-b',
+      leaseMs: 30_000,
+    })).toBeNull();
+
+    repository.complete(leased!.id, {
+      result: { directive: 'continue' },
+      now: new Date('2026-01-01T00:00:03.000Z'),
+    });
+
+    expect(repository.findById(leased!.id)?.status).toBe('succeeded');
   });
 });
 
@@ -126,6 +175,35 @@ describe('SupervisorMemoryRepository', () => {
     const updated = repository.listRelevant('UniUni2000/test2', 1)[0];
     expect(updated?.summary).toBe('Updated failure memory.');
     expect(updated?.confidence).toBe(0.7);
+  });
+
+  test('retrieves supervisor memories by lexical relevance before recency', () => {
+    const repository = new SupervisorMemoryRepository(db);
+
+    repository.upsert({
+      repo_ref: 'UniUni2000/test2',
+      memory_kind: 'architecture_preference',
+      subject_key: 'telegram-root-thread',
+      summary: 'Telegram governance must stay anchored on the root thread and avoid descendant card spam.',
+      confidence: 0.8,
+      updated_at: new Date('2026-01-01T00:00:00.000Z'),
+    });
+    repository.upsert({
+      repo_ref: 'UniUni2000/test2',
+      memory_kind: 'delivery_failure',
+      subject_key: 'github-review-422',
+      summary: 'GitHub review 422 recovery should inspect existing reviews before retrying.',
+      confidence: 0.9,
+      updated_at: new Date('2026-01-02T00:00:00.000Z'),
+    });
+
+    const relevant = repository.searchRelevant({
+      repo_ref: 'UniUni2000/test2',
+      query: 'telegram root thread card spam',
+      limit: 2,
+    });
+
+    expect(relevant[0]?.subject_key).toBe('telegram-root-thread');
   });
 });
 

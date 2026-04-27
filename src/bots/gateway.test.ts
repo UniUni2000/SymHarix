@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { DefaultBotGateway } from './gateway';
+import { BotFollowupRepairService } from './followupRepair';
 import type { RuntimeControlPlane } from '../runtime/types';
 import {
   BotTransportEventRepository,
@@ -141,9 +142,91 @@ function createRuntimeControlPlane(): RuntimeControlPlane {
 
 describe('DefaultBotGateway', () => {
   const originalFetch = globalThis.fetch;
+  const originalRepair = BotFollowupRepairService.prototype.repair;
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    BotFollowupRepairService.prototype.repair = originalRepair;
+  });
+
+  test('defers bot follow-up repair after construction so startup can become responsive first', () => {
+    let repairCalls = 0;
+    BotFollowupRepairService.prototype.repair = function patchedRepair() {
+      repairCalls += 1;
+      return {
+        expired_pending_actions_deleted: 0,
+        descendant_followups_folded: 0,
+        descendant_message_states_deleted: 0,
+        descendant_pending_actions_deleted: 0,
+        orphan_message_states_deleted: 0,
+        orphan_delivery_states_deleted: 0,
+        delivery_baselines_seeded: 0,
+      };
+    };
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: null,
+        webhookSecret: null,
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        startupRepairDelayMs: 10_000,
+      },
+    );
+
+    expect(repairCalls).toBe(0);
+    gateway.dispose();
+  });
+
+  test('runs deferred bot follow-up repair after the configured startup delay', async () => {
+    let repairCalls = 0;
+    BotFollowupRepairService.prototype.repair = function patchedRepair() {
+      repairCalls += 1;
+      return {
+        expired_pending_actions_deleted: 0,
+        descendant_followups_folded: 0,
+        descendant_message_states_deleted: 0,
+        descendant_pending_actions_deleted: 0,
+        orphan_message_states_deleted: 0,
+        orphan_delivery_states_deleted: 0,
+        delivery_baselines_seeded: 0,
+      };
+    };
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: null,
+        webhookSecret: null,
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        startupRepairDelayMs: 5,
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(repairCalls).toBe(1);
+    gateway.dispose();
   });
 
   test('reports operator-gated write access and watch presets in the manifest', () => {
@@ -231,6 +314,9 @@ describe('DefaultBotGateway', () => {
         last_error_code: 'unconfigured',
       },
       natural_language_enabled: true,
+      supervisor: {
+        active_sessions: [],
+      },
     });
 
     gateway.dispose();
@@ -515,6 +601,293 @@ describe('DefaultBotGateway', () => {
 
     expect(requests).toHaveLength(1);
     expect(String(requests[0]?.body.text)).toContain('INT-1 目前还在执行中');
+  });
+
+  test('sends a lightweight processing acknowledgement when Telegram text handling is slow', async () => {
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    let resolveAssistant: (() => void) | null = null;
+    const assistantDone = new Promise<void>((resolve) => {
+      resolveAssistant = resolve;
+    });
+
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body || '{}')),
+      });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        telegramTextProcessingAckDelayMs: 5,
+        assistantModel: {
+          decide: async () => {
+            await assistantDone;
+            return {
+              intent: {
+                kind: 'answer_question',
+                answer: 'INT-1 目前还在执行中。',
+              },
+            };
+          },
+          getDiagnostics: () => ({
+            provider: 'test',
+            model: 'test-model',
+            configured: true,
+            health: 'healthy',
+            fallback_available: true,
+            last_error_code: null,
+          }),
+        },
+      },
+    );
+
+    const result = await gateway.handleTelegramWebhook(
+      {
+        message: {
+          text: 'INT-1 现在怎么样了',
+          chat: { id: 42 },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(result.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(requests).toHaveLength(1);
+    expect(String(requests[0]?.body.text)).toContain('已收到');
+
+    resolveAssistant?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(requests).toHaveLength(2);
+    expect(String(requests[1]?.body.text)).toContain('INT-1 目前还在执行中');
+  });
+
+  test('edits the slow-processing acknowledgement into the supervisor Plan Card instead of sending a second card', async () => {
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    let nextMessageId = 700;
+    let resolveAssistant: (() => void) | null = null;
+    const assistantDone = new Promise<void>((resolve) => {
+      resolveAssistant = resolve;
+    });
+
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      requests.push({ url: String(input), body });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: nextMessageId += 1 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        telegramTextProcessingAckDelayMs: 5,
+        assistantModel: {
+          decide: async () => ({ intent: { kind: 'help' } }),
+          getDiagnostics: () => ({
+            provider: null,
+            model: null,
+            configured: false,
+            health: 'unconfigured',
+            fallback_available: true,
+            last_error_code: 'unconfigured',
+          }),
+        },
+      },
+    );
+    (gateway as any).assistantService = {
+      respondToText: async () => {
+        await assistantDone;
+        return {
+          message: '<b>计划待你批准 · v1</b>\n我已理解的计划：清理残余文件。',
+          format: 'telegram_html',
+          action_rows: [[{ label: '批准并开始', callback_data: 'sup|session-1|approve' }]],
+          session_id: 'session-1',
+          material_key: 'session|session-1|v1|approval',
+        };
+      },
+      getDiagnostics: () => ({
+        provider: null,
+        model: null,
+        configured: false,
+        health: 'unconfigured',
+        fallback_available: true,
+        last_error_code: 'unconfigured',
+      }),
+    };
+
+    const result = await gateway.handleTelegramWebhook(
+      {
+        message: {
+          text: '这个仓库还有文件残余，把它都清空',
+          chat: { id: 42 },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(result.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toContain('sendMessage');
+    expect(String(requests[0]?.body.text)).toContain('已收到');
+
+    resolveAssistant?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(requests).toHaveLength(2);
+    expect(requests[1]?.url).toContain('editMessageText');
+    expect(requests[1]?.body.message_id).toBe('701');
+    expect(String(requests[1]?.body.text)).toContain('计划待你批准');
+  });
+
+  test('waits for an in-flight slow-processing acknowledgement before delivering the Plan Card', async () => {
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    let nextMessageId = 800;
+    let resolveAssistant: (() => void) | null = null;
+    let resolveAckSend: (() => void) | null = null;
+    const assistantDone = new Promise<void>((resolve) => {
+      resolveAssistant = resolve;
+    });
+    const ackSendDone = new Promise<void>((resolve) => {
+      resolveAckSend = resolve;
+    });
+
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      requests.push({ url: String(input), body });
+      if (String(input).includes('sendMessage') && String(body.text).includes('已收到')) {
+        await ackSendDone;
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: nextMessageId += 1 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        telegramTextProcessingAckDelayMs: 5,
+        assistantModel: {
+          decide: async () => ({ intent: { kind: 'help' } }),
+          getDiagnostics: () => ({
+            provider: null,
+            model: null,
+            configured: false,
+            health: 'unconfigured',
+            fallback_available: true,
+            last_error_code: 'unconfigured',
+          }),
+        },
+      },
+    );
+    (gateway as any).assistantService = {
+      respondToText: async () => {
+        await assistantDone;
+        return {
+          message: '<b>计划待你批准 · v1</b>\n我已理解的计划：清理残余文件。',
+          format: 'telegram_html',
+          action_rows: [[{ label: '批准并开始', callback_data: 'sup|session-1|approve' }]],
+          session_id: 'session-1',
+          material_key: 'session|session-1|v1|approval',
+        };
+      },
+      getDiagnostics: () => ({
+        provider: null,
+        model: null,
+        configured: false,
+        health: 'unconfigured',
+        fallback_available: true,
+        last_error_code: 'unconfigured',
+      }),
+    };
+
+    const result = await gateway.handleTelegramWebhook(
+      {
+        message: {
+          text: '这个仓库还有文件残余，把它都清空',
+          chat: { id: 42 },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(result.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toContain('sendMessage');
+
+    resolveAssistant?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(requests).toHaveLength(1);
+
+    resolveAckSend?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(requests).toHaveLength(2);
+    expect(requests[1]?.url).toContain('editMessageText');
+    expect(requests[1]?.body.message_id).toBe('801');
+    expect(String(requests[1]?.body.text)).toContain('计划待你批准');
   });
 
   test('sends Telegram inline keyboard markup when the notifier receives structured actions', async () => {

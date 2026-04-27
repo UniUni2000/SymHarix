@@ -4,6 +4,10 @@ export interface VerifyLiveLifecycleCommand {
   json: boolean;
   titleSuffix: string | null;
   supervisorScenario?: boolean;
+  serverUrl?: string | null;
+  telegramChatId?: string | null;
+  supervisorLiveScenario?: 'simple' | 'governed_split' | 'destructive_cleanup' | null;
+  supervisorLiveMatrix?: boolean;
 }
 
 export type VerifyLiveLifecycleArgsParseResult =
@@ -21,6 +25,10 @@ export function parseVerifyLiveLifecycleArgs(args: string[]): VerifyLiveLifecycl
   let timeoutMs: number | null = null;
   let json = false;
   let titleSuffix: string | null = null;
+  let serverUrl: string | null = null;
+  let telegramChatId: string | null = null;
+  let supervisorLiveScenario: VerifyLiveLifecycleCommand['supervisorLiveScenario'] = null;
+  let supervisorLiveMatrix = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -54,6 +62,36 @@ export function parseVerifyLiveLifecycleArgs(args: string[]): VerifyLiveLifecycl
       continue;
     }
 
+    if (arg === '--server-url' && args[index + 1]) {
+      serverUrl = args[index + 1]!.trim().replace(/\/+$/, '') || null;
+      index += 1;
+      continue;
+    }
+
+    if (arg === '--telegram-chat-id' && args[index + 1]) {
+      telegramChatId = args[index + 1]!.trim() || null;
+      index += 1;
+      continue;
+    }
+
+    if (arg === '--scenario' && args[index + 1]) {
+      const normalized = args[index + 1]!.trim().replace(/-/g, '_');
+      if (!['simple', 'governed_split', 'destructive_cleanup'].includes(normalized)) {
+        return {
+          ok: false,
+          error: 'verify-live-supervisor --scenario must be one of simple, governed-split, destructive-cleanup.',
+        };
+      }
+      supervisorLiveScenario = normalized as NonNullable<VerifyLiveLifecycleCommand['supervisorLiveScenario']>;
+      index += 1;
+      continue;
+    }
+
+    if (arg === '--matrix') {
+      supervisorLiveMatrix = true;
+      continue;
+    }
+
     return {
       ok: false,
       error: `Unknown verify-live-lifecycle argument: ${arg}`,
@@ -67,15 +105,26 @@ export function parseVerifyLiveLifecycleArgs(args: string[]): VerifyLiveLifecycl
     };
   }
 
-  return {
-    ok: true,
-    command: {
-      projectSlug,
-      timeoutMs,
-      json,
-      titleSuffix,
-    },
+  const command: VerifyLiveLifecycleCommand = {
+    projectSlug,
+    timeoutMs,
+    json,
+    titleSuffix,
   };
+  if (serverUrl) {
+    command.serverUrl = serverUrl;
+  }
+  if (telegramChatId) {
+    command.telegramChatId = telegramChatId;
+  }
+  if (supervisorLiveScenario) {
+    command.supervisorLiveScenario = supervisorLiveScenario;
+  }
+  if (supervisorLiveMatrix) {
+    command.supervisorLiveMatrix = true;
+  }
+
+  return { ok: true, command };
 }
 
 export function parseVerifyLiveSupervisorArgs(args: string[]): VerifyLiveLifecycleArgsParseResult {
@@ -91,7 +140,7 @@ export function parseVerifyLiveSupervisorArgs(args: string[]): VerifyLiveLifecyc
     command: {
       ...parsed.command,
       supervisorScenario: true,
-      titleSuffix: parsed.command.titleSuffix ?? 'supervisor-e2e',
+      titleSuffix: parsed.command.titleSuffix ?? `supervisor-e2e-${new Date().toISOString().replace(/[:.]/g, '-')}`,
     },
   };
 }

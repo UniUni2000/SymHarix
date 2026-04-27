@@ -1,6 +1,6 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { judgeComplexity } from '../hooks/dev-prompt';
+import { isSupervisorLiveVerifierText, judgeComplexity } from '../hooks/dev-prompt';
 import { parseCanonicalReviewReport } from '../hooks/review-prompt';
 import type {
   AgentTimelinePayload,
@@ -76,7 +76,10 @@ interface ChangePackEvidenceFile {
   issue_identifier?: string;
   profile?: 'coding' | 'research' | 'ui' | 'review';
   complexity?: 'small' | 'medium' | 'large';
-  requirements?: Array<CompletionRequirement & { status?: 'missing' | 'satisfied' }>;
+  requirements?: Array<CompletionRequirement & {
+    status?: 'missing' | 'satisfied';
+    evidence?: unknown;
+  }>;
   notes?: string[];
   command_runs?: ChangePackCommandRun[];
   artifact_observations?: ChangePackArtifactObservation[];
@@ -136,6 +139,27 @@ async function readJson<T>(filePath: string, fallback: T): Promise<T> {
 
 function normalizeCommand(value: string): string {
   return value.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function hasStructuredRequirementEvidence(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  return Object.values(value as Record<string, unknown>).some((entry) => {
+    if (entry === null || entry === undefined || entry === false) {
+      return false;
+    }
+    if (typeof entry === 'string') {
+      return entry.trim().length > 0;
+    }
+    if (Array.isArray(entry)) {
+      return entry.length > 0;
+    }
+    if (typeof entry === 'object') {
+      return Object.keys(entry).length > 0;
+    }
+    return true;
+  });
 }
 
 function mergeUniqueStrings(values: Array<string | null | undefined>): string[] {
@@ -711,6 +735,7 @@ function inferProfile(issue: Issue, mode?: 'dev' | 'review'): 'coding' | 'resear
 
 function buildDefaultRequirements(params: {
   profile: 'coding' | 'research' | 'ui' | 'review';
+  issue: Issue;
   harness?: RepositoryHarnessConfig | null;
 }): CompletionRequirement[] {
   const requirements: CompletionRequirement[] = [];
@@ -731,6 +756,16 @@ function buildDefaultRequirements(params: {
     reason: 'Completion requires a handover artifact.',
     kind: 'artifact',
   });
+
+  if (isSupervisorLiveVerifierText(`${params.issue.title}\n${params.issue.description || ''}`)) {
+    requirements.push({
+      key: 'verification',
+      label: 'Record narrow supervisor live marker verification',
+      reason: 'Live verifier marker tasks only require proof that the requested marker file and handoff exist.',
+      kind: 'verification',
+    });
+    return requirements;
+  }
 
   const requiredCommands = params.harness?.verification?.required_commands || [];
   if (requiredCommands.length > 0) {
@@ -824,7 +859,7 @@ export async function initializeChangePack(params: {
     evidencePath,
     {},
   );
-  const defaultRequirements = buildDefaultRequirements({ profile, harness: params.harness });
+  const defaultRequirements = buildDefaultRequirements({ profile, issue: params.issue, harness: params.harness });
   const existingRequirements = new Map(
     (existingEvidence.requirements ?? []).map((requirement) => [requirement.key, requirement]),
   );
@@ -943,6 +978,9 @@ export async function evaluateChangePackState(params: {
   for (const item of evidence.requirements ?? []) {
     let satisfied = item.status === 'satisfied';
 
+    if (item.kind === 'verification' && hasStructuredRequirementEvidence(item.evidence)) {
+      satisfied = true;
+    }
     if (item.key === 'handover' && handover) {
       satisfied = true;
     }

@@ -246,6 +246,49 @@ describe('claude-adapter timeline helpers', () => {
     }
   });
 
+  test('starts Claude Code in bare mode to avoid loading broad startup context', async () => {
+    const originalSpawn = childProcess.spawn;
+    const originalExit = process.exit;
+    const fakeClaude = createFakeClaudeProcess();
+    const adapterIn = new PassThrough();
+    const adapterOut = new PassThrough();
+    const adapterErr = new PassThrough();
+    const adapterCollector = createJsonCollector(adapterOut);
+    let capturedArgs = [];
+    let capturedEnv = {};
+    let runtime;
+
+    childProcess.spawn = (_cmd, args, options) => {
+      capturedArgs = args;
+      capturedEnv = options.env;
+      return fakeClaude;
+    };
+    process.exit = () => {};
+
+    try {
+      runtime = startAdapter({
+        env: { ...process.env, SYMPHONY_ADAPTER_DEBUG: '0' },
+        stdin: adapterIn,
+        stdout: adapterOut,
+        stderr: adapterErr,
+      });
+
+      adapterIn.write(`${JSON.stringify({ id: 1, method: 'initialize', params: {} })}\n`);
+      await adapterCollector.waitFor((message) => message.id === 1);
+
+      adapterIn.write(`${JSON.stringify({ id: 2, method: 'thread/start', params: { cwd: process.cwd() } })}\n`);
+      await adapterCollector.waitFor((message) => message.id === 2);
+
+      expect(capturedArgs).toContain('--bare');
+      expect(capturedEnv.CLAUDE_CODE_SIMPLE).toBe('1');
+      expect(capturedEnv.CLAUDE_CODE_GLOB_HIDDEN).toBe('false');
+    } finally {
+      runtime?.rl.close();
+      childProcess.spawn = originalSpawn;
+      process.exit = originalExit;
+    }
+  });
+
   test('forwards can_use_tool control requests to the runner and returns control responses to Claude', async () => {
     const originalSpawn = childProcess.spawn;
     const originalExit = process.exit;
