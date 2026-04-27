@@ -126,13 +126,13 @@ function parseArgs(): {
  */
 function printUsage(): void {
   console.log(`
-Symphony - Coding Agent Orchestrator
+symphonyness - Harnessed Coding Agent Orchestrator
 
-Usage: symphony [options] [workflow-path]
+Usage: symphonyness [options] [workflow-path]
 
 Options:
   --port <number>    Enable HTTP server on specified port
-  --kill             Stop all running symphony agent processes
+  --kill             Stop all running symphonyness agent processes
   repair bot-followups
   repair all
   verify-live-lifecycle --project-slug <slug> [--timeout-ms <n>] [--json] [--title-suffix <text>]
@@ -143,14 +143,14 @@ Arguments:
   workflow-path      Path to WORKFLOW.md file (default: ./WORKFLOW.md)
 
 Examples:
-  symphony                        # Use local ./WORKFLOW.md (copy from WORKFLOW.md.example first)
-  symphony path/to/WORKFLOW.md    # Use specified workflow file
-  symphony --port 3000            # Enable HTTP server on port 3000
-  symphony --kill                 # Stop all running agents
-  symphony repair bot-followups   # Repair persisted Telegram follow-up/card state
-  symphony repair all             # Repair Telegram follow-up state plus GitHub orphan issue/PR artifacts
-  symphony verify-live-lifecycle --project-slug 1d3a3f95809d
-  symphony verify-live-supervisor --project-slug 1d3a3f95809d
+  symphonyness                        # Use local ./WORKFLOW.md (copy from WORKFLOW.md.example first)
+  symphonyness path/to/WORKFLOW.md    # Use specified workflow file
+  symphonyness --port 3000            # Enable HTTP server on port 3000
+  symphonyness --kill                 # Stop all running agents
+  symphonyness repair bot-followups   # Repair persisted Telegram follow-up/card state
+  symphonyness repair all             # Repair Telegram follow-up state plus GitHub orphan issue/PR artifacts
+  symphonyness verify-live-lifecycle --project-slug sample-project
+  symphonyness verify-live-supervisor --project-slug sample-project
 `);
 }
 
@@ -220,14 +220,14 @@ async function killKnownSymphonyProcesses(currentPid?: number): Promise<void> {
   ).toString().trim().split('\n').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n !== 1 && n !== currentPid);
 
   if (orchestratorPids.length > 0) {
-    console.log('[symphony] Stopping processes:', orchestratorPids.join(', '));
+    console.log('[symphonyness] Stopping processes:', orchestratorPids.join(', '));
   }
   for (const pid of orchestratorPids) {
     try {
       process.kill(pid, 'SIGTERM');
-      console.log(`[symphony] Sent SIGTERM to ${pid}`);
+      console.log(`[symphonyness] Sent SIGTERM to ${pid}`);
     } catch (err) {
-      console.error(`[symphony] Failed to kill ${pid}:`, err);
+      console.error(`[symphonyness] Failed to kill ${pid}:`, err);
     }
   }
 
@@ -238,7 +238,7 @@ async function killKnownSymphonyProcesses(currentPid?: number): Promise<void> {
     for (const pid of adapterPids) {
       try {
         process.kill(pid, 'SIGTERM');
-        console.log(`[symphony] Sent SIGTERM to adapter ${pid}`);
+        console.log(`[symphonyness] Sent SIGTERM to adapter ${pid}`);
       } catch {}
     }
   } catch {}
@@ -250,7 +250,7 @@ async function killKnownSymphonyProcesses(currentPid?: number): Promise<void> {
     for (const pid of tunnelPids) {
       try {
         process.kill(pid, 'SIGTERM');
-        console.log(`[symphony] Sent SIGTERM to tunnel ${pid}`);
+        console.log(`[symphonyness] Sent SIGTERM to tunnel ${pid}`);
       } catch {}
     }
   } catch {}
@@ -360,7 +360,7 @@ async function main(): Promise<void> {
   try {
     args = parseArgs();
   } catch (error) {
-    console.error('[symphony] ERROR:', (error as Error).message);
+    console.error('[symphonyness] ERROR:', (error as Error).message);
     process.exit(1);
   }
 
@@ -380,9 +380,9 @@ async function main(): Promise<void> {
     ).toString().trim().split('\n').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n !== myPid && n !== 1);
 
     if (remainingPids.length === 0) {
-      console.log('[symphony] No running processes found.');
+      console.log('[symphonyness] No running processes found.');
     }
-    console.log('[symphony] All processes stopped.');
+    console.log('[symphonyness] All processes stopped.');
     process.exit(0);
   }
 
@@ -392,13 +392,13 @@ async function main(): Promise<void> {
     ? path.resolve(args.workflowPath)
     : resolveWorkflowPath();
 
-  console.log('[symphony] Starting...');
-  console.log('[symphony] Workflow path:', workflowPath);
+  console.log('[symphonyness] Starting...');
+  console.log('[symphonyness] Workflow path:', workflowPath);
 
   // Load initial workflow
   const loadResult = loadWorkflow(workflowPath);
   if (!loadResult.success) {
-    console.error('[symphony] ERROR: Failed to load workflow:', loadResult.errorMessage);
+    console.error('[symphonyness] ERROR: Failed to load workflow:', loadResult.errorMessage);
     process.exit(1);
   }
 
@@ -407,7 +407,7 @@ async function main(): Promise<void> {
   try {
     config = buildServiceConfig(loadResult.definition!);
   } catch (error) {
-    console.error('[symphony] ERROR: Failed to build config:', (error as Error).message);
+    console.error('[symphonyness] ERROR: Failed to build config:', (error as Error).message);
     process.exit(1);
   }
 
@@ -420,16 +420,16 @@ async function main(): Promise<void> {
   // Validate config for dispatch
   const validation = validateConfigForDispatch(config);
   if (!validation.valid) {
-    console.error('[symphony] ERROR: Configuration validation failed:');
+    console.error('[symphonyness] ERROR: Configuration validation failed:');
     validation.errors.forEach(err => console.error('  -', err));
     process.exit(1);
   }
 
-  console.log('[symphony] Configuration valid');
-  console.log('[symphony] Tracker:', config.trackerKind);
-  console.log('[symphony] Project root:', config.projectRoot);
-  console.log('[symphony] Poll interval:', config.pollIntervalMs, 'ms');
-  console.log('[symphony] Max concurrent agents:', config.maxConcurrentAgents);
+  console.log('[symphonyness] Configuration valid');
+  console.log('[symphonyness] Tracker:', config.trackerKind);
+  console.log('[symphonyness] Project root:', config.projectRoot);
+  console.log('[symphonyness] Poll interval:', config.pollIntervalMs, 'ms');
+  console.log('[symphonyness] Max concurrent agents:', config.maxConcurrentAgents);
 
   try {
     ensureEmbeddedClaudeRuntimeReady({
@@ -438,7 +438,7 @@ async function main(): Promise<void> {
       log: (message) => console.log(message),
     });
   } catch (error) {
-    console.error('[symphony] ERROR:', (error as Error).message);
+    console.error('[symphonyness] ERROR:', (error as Error).message);
     process.exit(1);
   }
 
@@ -640,17 +640,17 @@ async function main(): Promise<void> {
     onReload: (newDefinition: WorkflowDefinition, newConfig: ServiceConfig) => {
       reloadChain = reloadChain
         .then(async () => {
-          console.log('[symphony] Workflow reloaded, rebuilding orchestrator/runtime...');
+          console.log('[symphonyness] Workflow reloaded, rebuilding orchestrator/runtime...');
           await runtimeHost.reload(newDefinition, newConfig);
           config = runtimeHost.getConfig();
           const server = runtimeHost.getServer() as { getInfo?: () => { port: number | null } } | null;
           const info = server?.getInfo?.();
           if (info?.port) {
-            console.log(`[symphony] Runtime UI: http://localhost:${info.port}/runtime`);
-            console.log(`[symphony] Runtime API: http://localhost:${info.port}/api/v1/runtime/overview`);
-            console.log(`[symphony] Bot manifest: http://localhost:${info.port}/api/v1/bots/manifest`);
+            console.log(`[symphonyness] Runtime UI: http://localhost:${info.port}/runtime`);
+            console.log(`[symphonyness] Runtime API: http://localhost:${info.port}/api/v1/runtime/overview`);
+            console.log(`[symphonyness] Bot manifest: http://localhost:${info.port}/api/v1/bots/manifest`);
           }
-          console.log('[symphony] Workflow reload applied');
+          console.log('[symphonyness] Workflow reload applied');
         })
         .catch((error: Error) => {
           logger.warn('Workflow reload error', { error: error.message });
@@ -664,7 +664,7 @@ async function main(): Promise<void> {
   // Start the watcher
   const watchResult = workflowWatcher.start();
   if (!watchResult.success) {
-    console.error('[symphony] WARNING: Workflow watcher failed to start:', watchResult.error);
+    console.error('[symphonyness] WARNING: Workflow watcher failed to start:', watchResult.error);
     // Continue anyway - we already loaded the workflow
   }
 
@@ -673,21 +673,21 @@ async function main(): Promise<void> {
 
   const shutdown = async (signal: string): Promise<void> => {
     if (shuttingDown) {
-      console.log('[symphony] Force shutdown...');
+      console.log('[symphonyness] Force shutdown...');
       await killKnownSymphonyProcesses(process.pid);
       process.exit(1);
     }
 
     shuttingDown = true;
-    console.log(`[symphony] Received ${signal}, shutting down gracefully...`);
+    console.log(`[symphonyness] Received ${signal}, shutting down gracefully...`);
 
     try {
       await workflowWatcher.stop();
       await runtimeHost.stop();
-      console.log('[symphony] Shutdown complete');
+      console.log('[symphonyness] Shutdown complete');
       process.exit(0);
     } catch (err) {
-      console.error('[symphony] Shutdown error:', err);
+      console.error('[symphonyness] Shutdown error:', err);
       process.exit(1);
     }
   };
@@ -702,22 +702,22 @@ async function main(): Promise<void> {
     const server = runtimeHost.getServer() as { getInfo?: () => { port: number | null } } | null;
     const info = server?.getInfo?.();
     if (info?.port) {
-      console.log(`[symphony] Runtime UI: http://localhost:${info.port}/runtime`);
-      console.log(`[symphony] Runtime API: http://localhost:${info.port}/api/v1/runtime/overview`);
-      console.log(`[symphony] Bot manifest: http://localhost:${info.port}/api/v1/bots/manifest`);
+      console.log(`[symphonyness] Runtime UI: http://localhost:${info.port}/runtime`);
+      console.log(`[symphonyness] Runtime API: http://localhost:${info.port}/api/v1/runtime/overview`);
+      console.log(`[symphonyness] Bot manifest: http://localhost:${info.port}/api/v1/bots/manifest`);
     }
-    console.log('[symphony] Symphony is running. Press Ctrl+C to stop.');
+    console.log('[symphonyness] symphonyness is running. Press Ctrl+C to stop.');
 
     // Keep process alive
     // The orchestrator's poll timer will keep things running
   } catch (err) {
-    console.error('[symphony] Failed to start orchestrator:', err);
+    console.error('[symphonyness] Failed to start orchestrator:', err);
     process.exit(1);
   }
 }
 
 // Run main
 main().catch((err) => {
-  console.error('[symphony] Unhandled error:', err);
+  console.error('[symphonyness] Unhandled error:', err);
   process.exit(1);
 });

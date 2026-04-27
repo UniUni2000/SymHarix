@@ -112,7 +112,7 @@ def reset_workspace_artifacts(_workspace_path: Path, symphony_path: Path) -> Non
 @click.group()
 @click.pass_context
 def cli(ctx):
-    """Symphony - Issue workflow automation."""
+    """symphonyness - Issue workflow automation."""
     try:
         ctx.ensure_object(dict)
         ctx.obj["config"] = load_config()

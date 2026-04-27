@@ -3,8 +3,8 @@ export function renderRuntimeMarkup(): string {
     <div class="deck">
       <header class="topbar">
         <div>
-          <div class="brand-kicker">Symphony Runtime / Command Deck</div>
-          <h1 class="brand-title">Symphony Runtime</h1>
+          <div class="brand-kicker">symphonyness Runtime / Command Deck</div>
+          <h1 class="brand-title">symphonyness Runtime</h1>
           <p id="status-summary" class="brand-summary">Loading the current operating picture...</p>
         </div>
 
