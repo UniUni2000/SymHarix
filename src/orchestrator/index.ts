@@ -2149,6 +2149,10 @@ export class Orchestrator extends EventEmitter {
             continue;
           }
 
+          if (await this.finalizeCompletedSupervisorRootIfNeeded(issue)) {
+            continue;
+          }
+
           await this.reassessGovernanceBlockedIssueIfNeeded(issue);
 
           if (this.shouldDispatch(issue)) {
@@ -2332,6 +2336,117 @@ export class Orchestrator extends EventEmitter {
       ));
   }
 
+  private isSupervisorRootCoordinator(workItem: WorkItem | null): boolean {
+    if (!workItem || workItem.governance_parent_issue_id) {
+      return false;
+    }
+
+    return workItem.supervisor_execution_mode === 'root_with_split_queue';
+  }
+
+  private hasGovernanceChildren(workItem: WorkItem | null): boolean {
+    if (!workItem) {
+      return false;
+    }
+
+    return this.workItemRepository
+      .findByGovernanceParentIssueId(workItem.linear_issue_id)
+      .some((child) => child.linear_issue_id !== workItem.linear_issue_id);
+  }
+
+  private governanceChildren(workItem: WorkItem | null): WorkItem[] {
+    if (!workItem) {
+      return [];
+    }
+
+    return this.workItemRepository
+      .findByGovernanceParentIssueId(workItem.linear_issue_id)
+      .filter((child) => child.linear_issue_id !== workItem.linear_issue_id);
+  }
+
+  private allGovernanceChildrenTerminal(workItem: WorkItem | null): boolean {
+    const children = this.governanceChildren(workItem);
+    return children.length > 0 && children.every((child) => this.isTerminalTrackerState(child.linear_state));
+  }
+
+  private shouldBlockSupervisorRootCoordinatorDispatch(workItem: WorkItem | null): boolean {
+    return this.isSupervisorRootCoordinator(workItem) && this.hasGovernanceChildren(workItem);
+  }
+
+  private async finalizeCompletedSupervisorRootIfNeeded(issue: Issue): Promise<boolean> {
+    const workItem = this.findTrackedWorkItem(issue);
+    if (!this.isSupervisorRootCoordinator(workItem) || !this.allGovernanceChildrenTerminal(workItem)) {
+      return false;
+    }
+
+    if (
+      this.isTerminalTrackerState(workItem!.linear_state) ||
+      workItem!.orchestrator_state === 'completed' ||
+      issue.state.toLowerCase() === 'done'
+    ) {
+      return true;
+    }
+
+    const childIdentifiers = this.governanceChildren(workItem)
+      .map((child) => child.linear_identifier)
+      .join('、');
+    const summary = childIdentifiers
+      ? `所有顺序子任务已完成（${childIdentifiers}），root 线程已自动收尾。`
+      : '所有顺序子任务已完成，root 线程已自动收尾。';
+    const trackerSync = await this.syncLinearState(issue, 'Done');
+    const nextLinearState = trackerSync.success
+      ? (trackerSync.currentState ?? 'Done')
+      : workItem!.linear_state;
+
+    if (!trackerSync.success) {
+      this.workItemRepository.update({
+        id: workItem!.id,
+        orchestrator_state: 'halted',
+        delivery_code: 'tracker_state_conflict',
+        delivery_summary: trackerSync.error ?? summary,
+      });
+      this.emitTimelineEvent(issue, {
+        level: 'error',
+        category: 'diagnostic',
+        code: 'supervisor_root_finalize_failed',
+        message: trackerSync.error ?? `Failed to finalize supervisor root ${issue.identifier}.`,
+        turn: null,
+        tool_name: null,
+        detail: {
+          issue_identifier: issue.identifier,
+          child_identifiers: childIdentifiers,
+        },
+      });
+      return true;
+    }
+
+    this.workItemRepository.update({
+      id: workItem!.id,
+      linear_state: nextLinearState,
+      orchestrator_state: 'completed',
+      delivery_code: null,
+      delivery_summary: summary,
+      merged_at: new Date(),
+    });
+    await this.closeMappedGitHubIssue(workItem, `${issue.identifier} supervisor root completion`);
+    this.emitTimelineEvent(
+      { ...issue, state: nextLinearState },
+      {
+        level: 'info',
+        category: 'diagnostic',
+        code: 'supervisor_root_completed',
+        message: summary,
+        turn: null,
+        tool_name: null,
+        detail: {
+          issue_identifier: issue.identifier,
+          child_identifiers: childIdentifiers,
+        },
+      },
+    );
+    return true;
+  }
+
   private hasBlockingGovernanceSibling(workItem: WorkItem | null): boolean {
     if (!workItem?.governance_parent_issue_id) {
       return false;
@@ -2499,6 +2614,10 @@ export class Orchestrator extends EventEmitter {
     }
 
     if (this.usesPostDevReviewTransitionBlock(trackedWorkItem, issue)) {
+      return false;
+    }
+
+    if (this.shouldBlockSupervisorRootCoordinatorDispatch(trackedWorkItem)) {
       return false;
     }
 
@@ -4032,12 +4151,10 @@ export class Orchestrator extends EventEmitter {
     }
 
     const recentEvents = session
-      ? this.supervisorSessionEventRepository.listBySession(session.id).slice(-8)
+      ? this.supervisorSessionEventRepository.listBySession(session.id).slice(-4)
       : [];
     const planCard = session?.plan_card ?? null;
-    const lastOutcome = session?.last_material_outcome
-      ? JSON.stringify(session.last_material_outcome)
-      : null;
+    const lastOutcome = this.buildSupervisorOutcomePromptSummary(session?.last_material_outcome ?? null);
     const latestSupervisorInstruction = typeof session?.last_material_outcome?.latest_dev_instruction === 'string'
       ? session.last_material_outcome.latest_dev_instruction
       : typeof session?.last_material_outcome?.dev_instruction === 'string'
@@ -4063,29 +4180,29 @@ export class Orchestrator extends EventEmitter {
             planCard?.user_goal,
             latestSupervisorInstruction,
           ].filter(Boolean).join(' '),
-          limit: 6,
+          limit: 3,
         })
       : [];
 
-    return [
+    const section = [
       '## Supervisor-Approved Plan',
       session
         ? `- Session: ${session.id} (${session.state}, plan v${session.plan_version})`
         : null,
       workItem?.supervisor_plan_summary || planCard?.title
-        ? `- Plan Summary: ${workItem?.supervisor_plan_summary ?? planCard?.title}`
+        ? `- Plan Summary: ${this.compactSupervisorPromptValue(workItem?.supervisor_plan_summary ?? planCard?.title, 260)}`
         : null,
       planCard?.user_goal
-        ? `- User Goal: ${planCard.user_goal}`
+        ? `- User Goal: ${this.compactSupervisorPromptValue(planCard.user_goal, 260)}`
         : null,
       workItem?.supervisor_acceptance_summary || planCard?.acceptance?.length
-        ? `- Acceptance Summary: ${workItem?.supervisor_acceptance_summary ?? planCard?.acceptance.join('；')}`
+        ? `- Acceptance Summary: ${this.compactSupervisorPromptValue(workItem?.supervisor_acceptance_summary ?? planCard?.acceptance.join('；'), 360)}`
         : null,
       planCard?.in_scope?.length
-        ? `- In Scope: ${planCard.in_scope.join('；')}`
+        ? `- In Scope: ${this.compactSupervisorPromptValue(planCard.in_scope.join('；'), 360)}`
         : null,
       planCard?.out_of_scope?.length
-        ? `- Out of Scope: ${planCard.out_of_scope.join('；')}`
+        ? `- Out of Scope: ${this.compactSupervisorPromptValue(planCard.out_of_scope.join('；'), 320)}`
         : null,
       workItem?.supervisor_execution_mode || planCard?.materialization_mode
         ? `- Execution Mode: ${(workItem?.supervisor_execution_mode ?? planCard?.materialization_mode)?.toUpperCase()}`
@@ -4097,18 +4214,18 @@ export class Orchestrator extends EventEmitter {
         ? `- Waiting Decision: ${session.active_decision_kind}`
         : null,
       session?.delivery_state || session?.delivery_summary
-        ? `- Delivery State: ${session.delivery_state ?? 'unknown'}${session.delivery_summary ? ` - ${session.delivery_summary}` : ''}`
+        ? `- Delivery State: ${this.compactSupervisorPromptValue(`${session.delivery_state ?? 'unknown'}${session.delivery_summary ? ` - ${session.delivery_summary}` : ''}`, 320)}`
         : null,
       lastOutcome
-        ? `- Last Material Outcome: ${lastOutcome.slice(0, 900)}`
+        ? `- Last Material Outcome: ${this.compactSupervisorPromptValue(lastOutcome, 260)}`
         : null,
       latestSupervisorInstruction || latestSupervisorDecision || latestSupervisorReason
         ? [
             '## Supervisor Oversight',
             latestDirectiveKind ? `- Directive: ${latestDirectiveKind}` : null,
             latestSupervisorDecision ? `- Decision: ${latestSupervisorDecision}` : null,
-            latestSupervisorReason ? `- Reason: ${latestSupervisorReason}` : null,
-            latestSupervisorInstruction ? `- Next Instruction: ${latestSupervisorInstruction}` : null,
+            latestSupervisorReason ? `- Reason: ${this.compactSupervisorPromptValue(latestSupervisorReason, 220)}` : null,
+            latestSupervisorInstruction ? `- Next Instruction: ${this.compactSupervisorPromptValue(latestSupervisorInstruction, 260)}` : null,
           ].filter(Boolean).join('\n')
         : null,
       recentEvents.length > 0
@@ -4116,7 +4233,7 @@ export class Orchestrator extends EventEmitter {
             '## Supervisor Session Memory',
             ...recentEvents.map((event) => {
               const payload = event.payload_json ? JSON.stringify(event.payload_json) : '{}';
-              return `- ${event.event_kind}: ${payload.slice(0, 700)}`;
+              return `- ${event.event_kind}: ${this.compactSupervisorPromptValue(payload, 90)}`;
             }),
           ].join('\n')
         : null,
@@ -4124,12 +4241,60 @@ export class Orchestrator extends EventEmitter {
         ? [
             '## Supervisor Long-Term Memory',
             ...supervisorMemories.map((memory) => (
-              `- ${memory.memory_kind}/${memory.subject_key}: ${memory.summary}`
+              `- ${memory.memory_kind}/${memory.subject_key}: ${this.compactSupervisorPromptValue(memory.summary, 180)}`
             )),
           ].join('\n')
         : null,
       '- Treat this as the approved execution contract unless a later runtime milestone explicitly pauses for a new decision.',
     ].filter(Boolean).join('\n');
+
+    return this.clampSupervisorPromptSection(section, 4200);
+  }
+
+  private compactSupervisorPromptValue(value: string | null | undefined, maxLength: number): string {
+    if (!value) {
+      return '';
+    }
+    const normalized = value.replace(/\s+/g, ' ').trim();
+    if (normalized.length <= maxLength) {
+      return normalized;
+    }
+    return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+  }
+
+  private buildSupervisorOutcomePromptSummary(outcome: Record<string, unknown> | null): string | null {
+    if (!outcome) {
+      return null;
+    }
+
+    const keys = [
+      'milestone_kind',
+      'latest_dev_directive_kind',
+      'latest_dev_instruction',
+      'dev_instruction',
+      'supervisor_decision',
+      'supervisor_reason',
+      'active_decision_kind',
+      'delivery_code',
+      'message',
+    ];
+    const compactOutcome: Record<string, unknown> = {};
+    for (const key of keys) {
+      if (outcome[key] !== undefined && outcome[key] !== null) {
+        compactOutcome[key] = outcome[key];
+      }
+    }
+
+    return Object.keys(compactOutcome).length > 0
+      ? JSON.stringify(compactOutcome)
+      : null;
+  }
+
+  private clampSupervisorPromptSection(section: string, maxLength: number): string {
+    if (section.length <= maxLength) {
+      return section;
+    }
+    return `${section.slice(0, Math.max(0, maxLength - 56)).trimEnd()}\n[Supervisor context truncated for first-turn budget]`;
   }
 
   private findSupervisorSessionForWorkItem(

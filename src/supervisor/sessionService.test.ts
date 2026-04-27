@@ -1001,6 +1001,55 @@ describe('SupervisorSessionService', () => {
     expect(String(runtime.createIssueCalls[0]?.description)).not.toContain('nonce');
   });
 
+  test('keeps a focused English approval-gated smoke request root-only even when it contains and', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+    const context = createContext();
+    const request = [
+      'new thread live smoke:',
+      'please show a Plan Card first and do not create an issue before approval.',
+      'After approval create docs/supervisor-live-smoke-20260427-1305.md with text supervisor live smoke passed.',
+    ].join(' ');
+
+    const first = await service.respond({
+      context,
+      text: request,
+      intent: {
+        kind: 'create_issue',
+        title: request,
+        description: null,
+        project_slug: 'test2',
+      },
+      runtimeContext: createRuntimeContext(),
+      canWrite: true,
+    });
+
+    expect(first?.message).toContain('计划待你批准');
+    expect(runtime.createIssueCalls).toHaveLength(0);
+    const session = sessions.findActiveByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(session?.plan_card?.materialization_mode).toBe('root_only');
+
+    await service.respond({
+      context,
+      text: '批准并开始',
+      intent: null,
+      runtimeContext: createRuntimeContext(),
+      canWrite: true,
+    });
+
+    expect(runtime.createIssueCalls).toHaveLength(1);
+    expect(runtime.createIssueCalls[0]?.governance_lineage).toBeUndefined();
+    expect(runtime.createIssueCalls[0]?.title).toContain('docs/supervisor-live-smoke-20260427-1305.md');
+  });
+
   test('materializes destructive live verifier requests with a concise issue title', async () => {
     db = new Database(':memory:');
     initializeSchema(db);
@@ -1686,7 +1735,7 @@ describe('SupervisorSessionService', () => {
     expect(milestoneEvents[0]?.payload_json?.milestone_kind).toBe('child_completed');
   });
 
-  test('marks the root session completed when every queued child has completed', async () => {
+  test('keeps the root session executing when children complete before the root issue is finalized', async () => {
     db = new Database(':memory:');
     initializeSchema(db);
 
@@ -1764,6 +1813,96 @@ describe('SupervisorSessionService', () => {
           },
         ],
         next_recommended_action: '等待根治理线程重新评估。',
+      }),
+    });
+
+    expect(sessions.findById(session.id)?.state).toBe('executing');
+    const milestoneEvents = events
+      .listBySession(session.id)
+      .filter((event) => event.event_kind === 'orchestrator_milestone');
+    expect(milestoneEvents.at(-1)?.payload_json?.milestone_kind).toBe('waiting_on_child');
+  });
+
+  test('marks the root session completed after queued children and root delivery are finalized', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+    const session = sessions.create({
+      id: 'session-1',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'executing',
+      repo_ref: 'test2',
+      intake_mode: 'plan_then_approve',
+      approval_mode: 'explicit_user_approval',
+      plan_version: 1,
+      root_issue_id: 'issue-root',
+      current_child_issue_id: 'issue-child-2',
+      plan_card: {
+        title: 'Root plus child queue',
+        user_goal: 'Root plus child queue',
+        in_scope: ['完成 root child', '完成 second child'],
+        out_of_scope: [],
+        acceptance: ['所有 child 完成后 root 线程完成'],
+        known_risks: [],
+        execution_strategy: '只放行 current child，完成后自动接力。',
+        needs_user_approval: true,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_with_split_queue',
+        recommended_option: { label: '按推荐继续', summary: '继续推进。' },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    runtime.emit({
+      type: 'issue',
+      data: createIssueView({
+        issue_id: 'issue-root',
+        identifier: 'INT-1',
+        title: 'Root plus child queue',
+        orchestrator_state: 'completed',
+        delivery_state: 'completed',
+        delivery_summary: 'Root thread finalized after children completed.',
+        governance_root_issue_id: 'issue-root',
+        governance_root_issue_identifier: 'INT-1',
+        governance_thread_state: 'resolved',
+        governance_current_child: null,
+        governance_child_queue: [
+          {
+            issue_id: 'issue-child-1',
+            issue_identifier: 'INT-2',
+            title: 'First child',
+            tracker_state: 'Done',
+            orchestrator_state: 'completed',
+            governance_decision: null,
+            governance_summary: null,
+            queue_state: 'completed',
+            delivery_state: 'completed',
+            delivery_code: null,
+            delivery_summary: 'First child completed.',
+          },
+          {
+            issue_id: 'issue-child-2',
+            issue_identifier: 'INT-3',
+            title: 'Second child',
+            tracker_state: 'Done',
+            orchestrator_state: 'completed',
+            governance_decision: null,
+            governance_summary: null,
+            queue_state: 'completed',
+            delivery_state: 'completed',
+            delivery_code: null,
+            delivery_summary: 'Second child completed.',
+          },
+        ],
       }),
     });
 

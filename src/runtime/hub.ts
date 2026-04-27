@@ -1175,6 +1175,21 @@ export class RuntimeHub implements RuntimeControlPlane {
     const queuedChildren = childViews.filter((child) => child.queue_state === 'queued');
     const queuedChildIdentifiers = queuedChildren.map((child) => child.issue_identifier);
     if (!currentChild && childViews.length > 0 && childViews.every((child) => child.queue_state === 'completed')) {
+      const rootFinalized = this.isTerminalState(workItem.linear_state)
+        || workItem.orchestrator_state === 'completed'
+        || workItem.delivery_state === 'completed';
+      if (!rootFinalized) {
+        return {
+          state: 'waiting_on_child',
+          currentChild: null,
+          childQueue: childViews,
+          children: childViews,
+          pauseReason: '所有顺序子任务已完成，等待 root 线程收尾；不会把 root 当作新的开发任务派发。',
+          expectedHandoff: null,
+          queuedChildIdentifiers: [],
+          nextRecommendedAction: '所有顺序子任务已完成，等待 root 线程收尾并同步最终交付状态。',
+        };
+      }
       return {
         state: 'resolved',
         currentChild: null,
