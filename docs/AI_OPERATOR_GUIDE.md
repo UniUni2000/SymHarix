@@ -1,10 +1,10 @@
 # AI Operator Guide
 
-This guide is for AI agents or maintainers working inside this repository. It states the operating rules that are easy to forget when debugging live Supervisor/Telegram flows.
+This guide is for AI agents or maintainers working inside the symphonyness repository. It states the operating rules that are easy to forget when debugging live Supervisor/Telegram flows.
 
 ## Prime Directive
 
-Respect the operator's configured target. Symphony can create issues, branches, PRs, comments, and tracker state transitions in the routed repository, so verify `.env` and `WORKFLOW.md` before any live test.
+Respect the operator's configured target. symphonyness can create issues, branches, PRs, comments, and tracker state transitions in the routed repository, so verify `.env` and `WORKFLOW.md` before any live test.
 
 The examples in this guide use placeholder values:
 
@@ -27,7 +27,7 @@ Expected:
 
 ## What The System Is
 
-Symphony is a local control plane with a Telegram-first Supervisor.
+symphonyness is a local control plane with a Telegram-first Supervisor.
 
 The Supervisor is not simply a model call and not a Claude Code instance. It is a durable state machine plus an optional LLM brain:
 

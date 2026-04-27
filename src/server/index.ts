@@ -1,5 +1,5 @@
 /**
- * Symphony HTTP Server - Main Entry Point
+ * symphonyness HTTP Server - Main Entry Point
  * Minimal Hono REST API for the control plane
  */
 
@@ -129,7 +129,7 @@ export class SymphonyServer {
       return c.json({
         success: true,
         data: {
-          name: 'Symphony HTTP Server',
+          name: 'symphonyness HTTP Server',
           version: '1.0.0',
           endpoints: {
             health: '/api/v1/health',
@@ -174,7 +174,7 @@ export class SymphonyServer {
         });
 
         console.log(
-          `Symphony Server started on http://${this.config.hostname}:${this.server.port}`,
+          `symphonyness server started on http://${this.config.hostname}:${this.server.port}`,
         );
         const port = this.server.port ?? this.config.port ?? 0;
 
@@ -202,7 +202,7 @@ export class SymphonyServer {
       if (this.server) {
         this.server.stop();
         this.server = null;
-        console.log('Symphony Server stopped');
+      console.log('symphonyness server stopped');
       }
       this.botGateway?.dispose?.();
       resolve();

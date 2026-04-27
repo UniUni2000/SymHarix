@@ -49,11 +49,11 @@ workspace:
   root: ./workspaces
 repositories:
   routing:
-    # Key must match Linear project_slug. Symphony fails closed when a project is not routed.
+    # Key must match Linear project_slug. symphonyness fails closed when a project is not routed.
     sample-project:
       github_owner: your-github-owner
       github_repo: your-target-repo
-      # Optional. Relative paths resolve from the Symphony repository root.
+      # Optional. Relative paths resolve from the symphonyness repository root.
       local_path: ./repos/your-target-repo
 codex:
   # The default adapter invokes the bundled Claude Code runtime.
@@ -66,7 +66,7 @@ server:
   port: 8080
 ---
 
-# Symphony Agent
+# symphonyness Agent
 
 You are an AI coding assistant.
 
@@ -85,4 +85,4 @@ Repository routing is explicit:
 - `repositories.routing` keys must match Linear `project_slug`
 - each route must declare `github_owner` and `github_repo`
 - `local_path` is optional and, when relative, resolves from the repository root
-- if an issue's `project_slug` does not match a configured route, Symphony will fail closed and skip dispatch
+- if an issue's `project_slug` does not match a configured route, symphonyness will fail closed and skip dispatch

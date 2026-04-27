@@ -1,10 +1,10 @@
-# Symphony Configuration Guide
+# symphonyness Configuration Guide
 
 This guide explains what to put in `.env` and `WORKFLOW.md`.
 
 ## Configuration Layers
 
-Symphony reads configuration from three places:
+symphonyness reads configuration from three places:
 
 1. `.env`
    - Secrets and local runtime switches.
@@ -17,7 +17,9 @@ Symphony reads configuration from three places:
 3. Target repository contracts
    - `.symphony-repo.yaml`
    - `.symphony-constitution.md`
-   - These belong to the target repo, not the Symphony global config.
+   - These belong to the target repo, not the symphonyness global config.
+
+Environment variables currently keep the `SYMPHONY_` prefix for compatibility with existing deployments.
 
 ## `.env`
 
@@ -101,7 +103,7 @@ Use an existing public URL when possible:
 SYMPHONY_PUBLIC_BASE_URL=https://your-host.example.com
 ```
 
-If `SYMPHONY_PUBLIC_BASE_URL` is empty and bootstrap is not off, Symphony tries to start a temporary tunnel. If no tunnel is available, the service still starts, but Telegram inbound will not work.
+If `SYMPHONY_PUBLIC_BASE_URL` is empty and bootstrap is not off, symphonyness tries to start a temporary tunnel. If no tunnel is available, the service still starts, but Telegram inbound will not work.
 
 ### Bot LLM
 
@@ -204,7 +206,7 @@ Rules:
 
 - The key must match the Linear `project_slug`.
 - `github_owner` and `github_repo` are required.
-- `local_path` is optional; relative paths resolve from the Symphony repo root.
+- `local_path` is optional; relative paths resolve from the symphonyness repo root.
 - Missing routes fail closed before workspace creation.
 
 ### Verification Scenarios
@@ -227,7 +229,7 @@ codex:
   command: node ./scripts/claude-adapter.cjs
 ```
 
-Only change this if you know which Claude Code-compatible runner you want Symphony to invoke.
+Only change this if you know which Claude Code-compatible runner you want symphonyness to invoke.
 
 ## Target Repo Contracts
 
@@ -242,7 +244,7 @@ Target repositories can add:
 
 `.symphony-constitution.md` defines architecture preferences, forbidden directions, stable boundaries, and cleanup triggers.
 
-If a repo does not have a formal harness, Symphony uses shadow harness inference. Shadow/missing harness status is visible in runtime diagnostics, but should not dominate Telegram user-facing messages.
+If a repo does not have a formal harness, symphonyness uses shadow harness inference. Shadow/missing harness status is visible in runtime diagnostics, but should not dominate Telegram user-facing messages.
 
 ## Diagnostics Checklist
 

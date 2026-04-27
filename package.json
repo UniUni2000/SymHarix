@@ -1,5 +1,5 @@
 {
-  "name": "symphony",
+  "name": "symphonyness",
   "version": "1.0.0",
   "type": "module",
   "scripts": {
@@ -8,11 +8,11 @@
     "dev": "bun --watch src/cli/index.ts",
     "test": "bun test",
     "deploy:prepare": "./scripts/install.sh",
-    "deploy:service": "sudo cp scripts/symphony.service /etc/systemd/system/ && sudo systemctl daemon-reload",
-    "backup": "./scripts/symphony-cli.sh backup"
+    "deploy:service": "sudo cp scripts/symphonyness.service /etc/systemd/system/ && sudo systemctl daemon-reload",
+    "backup": "./scripts/symphonyness-cli.sh backup"
   },
   "bin": {
-    "symphony": "./scripts/symphony-cli.sh"
+    "symphonyness": "./scripts/symphonyness-cli.sh"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",
