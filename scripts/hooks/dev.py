@@ -239,6 +239,14 @@ Agent completed the task for issue [{self.issue_id}](https://linear.app/inteliwa
                 if recovered:
                     print(f"[DEV] Recovered existing PR after create conflict: {recovered['html_url']}")
                     return {"url": recovered["html_url"], "number": recovered["number"]}
+                self._push_branch_to_github_remote()
+                pr = self.github.create_pull_request(
+                    title=title,
+                    body=body,
+                    head=self.branch,
+                )
+                print(f"[DEV] PR created after GitHub remote repair: {pr['html_url']}")
+                return {"url": pr["html_url"], "number": pr["number"]}
             raise RuntimeError(f"ERROR creating PR: {e}") from e
         except Exception as e:
             raise RuntimeError(f"ERROR creating PR: {e}") from e
@@ -275,12 +283,53 @@ Agent completed the task for issue [{self.issue_id}](https://linear.app/inteliwa
             "push",
             "-u",
             "origin",
-            self.branch,
+            f"HEAD:{self.branch}",
             check=False,
         )
         if push_result.returncode != 0:
             message = (push_result.stderr or push_result.stdout or "").strip()
             raise RuntimeError(f"Failed to push branch {self.branch}: {message or 'unknown git error'}")
+
+    def _push_branch_to_github_remote(self) -> None:
+        """Repair local-source clones whose origin is not the GitHub repository."""
+        remote_name = "symphony-github"
+        remote_url = self._github_remote_url()
+        current_url = self._try_git_stdout("remote", "get-url", remote_name)
+        if current_url:
+            if current_url != remote_url:
+                self._git("remote", "set-url", remote_name, remote_url)
+        else:
+            self._git("remote", "add", remote_name, remote_url)
+
+        print(f"[DEV] Pushing branch {self.branch} to GitHub remote")
+        push_result = self._git(
+            "push",
+            "-u",
+            remote_name,
+            f"HEAD:{self.branch}",
+            check=False,
+        )
+        if push_result.returncode != 0:
+            message = (push_result.stderr or push_result.stdout or "").strip()
+            self._set_delivery_failure(
+                "review_submit_failed",
+                f"Failed to push branch {self.branch} to GitHub remote before PR retry: {message or 'unknown git error'}",
+            )
+            raise RuntimeError(
+                f"Failed to push branch {self.branch} to GitHub remote before PR retry: {message or 'unknown git error'}"
+            )
+
+    def _github_remote_url(self) -> str:
+        if self.github_repo and "/" in self.github_repo:
+            owner, repo = self.github_repo.split("/", 1)
+        else:
+            owner = str(getattr(self.github, "owner", "") or "")
+            repo = str(getattr(self.github, "repo", "") or self.github_repo)
+        token = getattr(self.github, "token", "")
+        token_text = token if isinstance(token, str) else ""
+        if token_text:
+            return f"https://{token_text}@github.com/{owner}/{repo}.git"
+        return f"https://github.com/{owner}/{repo}.git"
 
     def _sanitize_workflow_artifacts_for_pr(self, base_ref: str) -> None:
         """Keep workflow/process artifacts out of the branch before PR creation."""

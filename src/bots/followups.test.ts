@@ -286,7 +286,7 @@ describe('BotFollowupService', () => {
     db.close();
   });
 
-  test('edits the active supervisor session card instead of sending a second governance card to the same Telegram chat', async () => {
+  test('suppresses follow-up digests for an active supervisor session and leaves card edits to SupervisorWorker', async () => {
     const db = new Database(':memory:');
     initializeSchema(db);
     const runtime = createRuntimeControlPlane();
@@ -362,10 +362,95 @@ describe('BotFollowupService', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(notifier.messages).toHaveLength(0);
-    expect(notifier.edits).toHaveLength(1);
-    expect(notifier.edits[0]?.messageRef.provider_message_id).toBe('msg-99');
-    expect(notifier.edits[0]?.message.format).toBe('telegram_html');
-    expect(notifier.edits[0]?.message.text).toContain('计划待你批准');
+    expect(notifier.edits).toHaveLength(0);
+
+    service.dispose();
+    db.close();
+  });
+
+  test('does not edit supervisor cards from followups when runtime issue events repeat', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const notifier = new MemoryNotifier();
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+    const sessions = new SupervisorSessionRepository(db);
+
+    followups.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      user_id: 'user-1',
+      role: 'origin',
+    });
+    sessions.create({
+      id: 'session-1',
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      user_id: 'user-1',
+      state: 'executing',
+      repo_ref: 'test2',
+      intake_mode: 'direct_run',
+      approval_mode: 'auto',
+      plan_version: 1,
+      root_issue_id: 'issue-1',
+      plan_card: {
+        title: 'Clean leftover files',
+        user_goal: 'Clean leftover files',
+        in_scope: ['清理残留文件'],
+        out_of_scope: ['不删除有效源码'],
+        acceptance: ['残留文件被清理并通过验证'],
+        known_risks: [],
+        execution_strategy: '小步清理并验证。',
+        needs_user_approval: false,
+        repo_ref: 'acme/repo',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '自动执行',
+          summary: '直接执行小任务。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+      last_message_id: 'msg-existing',
+      last_card_key: 'session|stale',
+      last_material_outcome: {
+        latest_dev_directive_kind: 'request_evidence',
+        latest_dev_instruction: '下一轮请补齐 git status 和测试证据。',
+        pending_user_notification_job_id: 'job-1',
+        pending_user_notification_summary: '当前需要补证据后再继续。',
+      },
+    });
+
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, messageStates, {
+      bootstrapCurrentGovernanceCards: false,
+      supervisorSessionRepository: sessions,
+    });
+
+    runtime.emit({ type: 'issue', data: runtime.getIssue('issue-1')! });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(notifier.edits).toHaveLength(0);
+
+    sessions.update({
+      id: 'session-1',
+      last_material_outcome: {
+        latest_dev_directive_kind: 'request_evidence',
+        latest_dev_instruction: '下一轮请补齐 git status 和测试证据。',
+        pending_user_notification_job_id: 'job-2',
+        pending_user_notification_summary: '当前需要补证据后再继续。',
+      },
+    });
+    runtime.emit({ type: 'issue', data: runtime.getIssue('issue-1')! });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(notifier.edits).toHaveLength(0);
 
     service.dispose();
     db.close();
@@ -450,9 +535,7 @@ describe('BotFollowupService', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(notifier.edits).toHaveLength(1);
-    expect(notifier.edits[0]?.messageRef.provider_message_id).toBe('msg-existing');
-    expect(notifier.edits[0]?.message.text).toContain('计划已完成');
+    expect(notifier.edits).toHaveLength(0);
     expect(notifier.messages).toHaveLength(0);
 
     service.dispose();
@@ -972,6 +1055,77 @@ describe('BotFollowupService', () => {
     ).toEqual(expect.objectContaining({
       last_notification_class: 'retrying',
     }));
+
+    service.dispose();
+    db.close();
+  });
+
+  test('suppresses duplicate governance card sends while the first card send is still in flight', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const issue = runtime.getIssue('issue-1');
+    if (!issue) {
+      throw new Error('Expected issue-1 to exist');
+    }
+    issue.governance_thread_state = 'waiting_on_child';
+    issue.governance_current_child = {
+      issue_id: 'issue-child-1',
+      issue_identifier: 'INT-2',
+      title: 'Current child',
+      tracker_state: 'In Progress',
+      orchestrator_state: 'dev_running',
+      governance_decision: null,
+      governance_summary: null,
+      queue_state: 'current',
+      delivery_state: null,
+      delivery_code: null,
+      delivery_summary: null,
+    };
+    issue.governance_child_queue = [issue.governance_current_child];
+    issue.next_recommended_action = '先处理治理子任务 INT-2';
+
+    let releaseSend: (() => void) | null = null;
+    const sendGate = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    const notifier = new DeferredNotifier(sendGate);
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+    const deliveryStates = new BotFollowupDeliveryStateRepository(db);
+
+    followups.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      user_id: 'user-1',
+      role: 'origin',
+    });
+
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, messageStates, {
+      bootstrapCurrentGovernanceCards: false,
+      deliveryStateRepository: deliveryStates,
+    });
+
+    runtime.emit({ type: 'issue', data: issue });
+    runtime.emit({ type: 'issue', data: issue });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    releaseSend?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(notifier.messages).toHaveLength(1);
+    expect(
+      messageStates.findByConversationIssue({
+        transport: 'telegram',
+        conversation_id: 'chat-origin',
+        issue_id: 'issue-1',
+      })?.message_id,
+    ).toBe('msg-1');
 
     service.dispose();
     db.close();

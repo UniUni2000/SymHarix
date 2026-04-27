@@ -15,6 +15,30 @@ export interface ComplexityJudgment {
   estimatedFiles: number;
 }
 
+export function isSupervisorLiveVerifierText(value: string): boolean {
+  return /supervisor\s+live\s+e2e|docs\/supervisor-live|supervisor-live-cleanup-approval/i.test(value);
+}
+
+function extractSupervisorLiveVerifierPaths(value: string): string[] {
+  const matches = value.match(/docs\/supervisor-live[^\s，。；;、"'`)]+\.md/gi) ?? [];
+  return [...new Set(matches.map(match => match.replace(/[，。；;、]+$/, '')))];
+}
+
+function buildSupervisorLiveVerifierDescription(issue: Issue): string {
+  const combinedText = `${issue.title}\n${issue.description || ''}`;
+  const markerPaths = extractSupervisorLiveVerifierPaths(combinedText);
+  const markerLine = markerPaths.length > 0
+    ? markerPaths.join(', ')
+    : 'the explicitly requested docs/supervisor-live-*.md marker path';
+
+  return [
+    'Bounded supervisor live verifier marker task.',
+    `Create or update only: ${markerLine}.`,
+    'Do not scan the whole repo, do not inspect unrelated historical supervisor-live files, and do not create child tasks.',
+    'Use narrow verification only, then commit, push, create PR, and write .symphony/HANDOVER.md.',
+  ].join(' ');
+}
+
 /**
  * Judge issue complexity based on description and context
  */
@@ -79,6 +103,10 @@ export function judgeComplexity(issue: Issue): ComplexityJudgment {
     smallScore += 3;
   }
 
+  if (isSupervisorLiveVerifierText(combinedText)) {
+    smallScore += 4;
+  }
+
   // Determine complexity
   let complexity: 'small' | 'medium' | 'large';
   let requiresTests: boolean;
@@ -117,19 +145,65 @@ export function buildDevPrompt(
   supervisorGuidance?: string,
 ): string {
   const judgment = judgeComplexity(issue);
+  const liveVerifierFastPath = isSupervisorLiveVerifierText(`${issue.title}\n${issue.description || ''}`);
+  const promptTitle = liveVerifierFastPath ? 'Supervisor live verifier marker task' : issue.title;
+  const promptDescription = liveVerifierFastPath
+    ? buildSupervisorLiveVerifierDescription(issue)
+    : issue.description || '(no description)';
+  const effectiveGithubContext = liveVerifierFastPath
+    ? '## GitHub Context\n- Omitted for bounded live verifier. Use the compact Issue Information and exact requested marker path above.'
+    : githubContext;
+  const effectiveHarnessGuidance = liveVerifierFastPath ? undefined : harnessGuidance;
+  const effectiveSupervisorGuidance = liveVerifierFastPath ? undefined : supervisorGuidance;
+  const testResponsibility = liveVerifierFastPath
+    ? 'Do not run full repository test suites. Use narrow file checks for the requested marker path, such as `test -f <path>`, `ls -la <path>`, `git diff --stat`, and `git status`.'
+    : judgment.requiresTests
+      ? 'Write and run targeted tests for the changed code. Prefer the narrowest relevant command over a broad suite.'
+      : 'Run only narrow verification needed for the changed file; avoid broad test suites unless the issue explicitly asks for them.';
+  const liveVerifierGuidance = liveVerifierFastPath
+    ? `## Supervisor Live Verifier Fast Path
+- This is a bounded live E2E verifier task, not a product cleanup project.
+- Do not scan the whole repo or inspect unrelated historical live-verifier files.
+- Touch only the requested deliverable path(s), usually one \`docs/supervisor-live-*.md\` marker.
+- Do not run full repository test suites or broad build commands unless the issue explicitly asks for them.
+- Finish in one focused pass after the marker file exists, narrow verification is recorded, and the PR is created.
+`
+    : '';
+  const responsibilities = liveVerifierFastPath
+    ? [
+        '1. Create or update only the requested supervisor-live marker file',
+        `2. ${testResponsibility}`,
+        '3. Create `.symphony/HANDOVER.md` with a concise development summary',
+        '4. Commit product changes, push, and create PR',
+      ].join('\n')
+    : [
+        '1. Analyze the issue and implement the required changes',
+        `2. ${testResponsibility}`,
+        '3. Read repo-local contracts if present: `.symphony-repo.yaml` and `.symphony-constitution.md`',
+        '4. Keep `.symphony/change-pack/tasks.md` and `.symphony/change-pack/evidence.json` aligned with the real state of the work',
+        '5. Update `.symphony/DEVELOPMENT_LOG.md` after each significant step',
+        '6. **When done: create `.symphony/HANDOVER.md` with development summary**',
+        '7. Commit changes, push, and create PR',
+      ].join('\n');
+  const liveVerifierImportant = liveVerifierFastPath
+    ? `- Do not read or edit unrelated \`.symphony/change-pack/*\` files unless the narrow marker task cannot complete without them.
+- Do not read repo-local contracts or historical docs for this bounded verifier; the approved contract is the marker path above.
+- Do not glob \`docs/supervisor-live-*.md\`; use the exact requested marker path from Issue Information.`
+    : null;
 
   const prompt = `You are a DEV Agent working on issue ${issue.identifier}.
 
 ## Issue Information
-- **Title**: ${issue.title}
-- **Description**: ${issue.description || '(no description)'}
+- **Title**: ${promptTitle}
+- **Description**: ${promptDescription}
 - **State**: ${issue.state}
 - **Labels**: ${issue.labels.join(', ') || '(none)'}
 ${issue.branch_name ? `- **Branch**: ${issue.branch_name}` : ''}
 
-${githubContext ? `${githubContext}\n` : ''}
-${harnessGuidance ? `${harnessGuidance}\n` : ''}
-${supervisorGuidance ? `${supervisorGuidance}\n` : ''}
+${effectiveGithubContext ? `${effectiveGithubContext}\n` : ''}
+${effectiveHarnessGuidance ? `${effectiveHarnessGuidance}\n` : ''}
+${effectiveSupervisorGuidance ? `${effectiveSupervisorGuidance}\n` : ''}
+${liveVerifierGuidance}
 
 ## Complexity Assessment
 - **Complexity**: ${judgment.complexity.toUpperCase()}
@@ -138,13 +212,7 @@ ${supervisorGuidance ? `${supervisorGuidance}\n` : ''}
 ${judgment.complexity === 'small' ? '- **Execution Style**: Prefer finishing in one focused pass if the change is straightforward.' : ''}
 
 ## Your Responsibilities
-1. Analyze the issue and implement the required changes
-2. Write and run tests (required for ${judgment.complexity} complexity)
-3. Read repo-local contracts if present: \`.symphony-repo.yaml\` and \`.symphony-constitution.md\`
-4. Keep \`.symphony/change-pack/tasks.md\` and \`.symphony/change-pack/evidence.json\` aligned with the real state of the work
-5. Update \`.symphony/DEVELOPMENT_LOG.md\` after each significant step
-6. **When done: create \`.symphony/HANDOVER.md\` with development summary**
-7. Commit changes, push, and create PR
+${responsibilities}
 
 ## \`.symphony/HANDOVER.md\` Template (required when completing)
 \`\`\`markdown
@@ -171,6 +239,7 @@ ${judgment.complexity === 'small' ? '- **Execution Style**: Prefer finishing in 
 ${existingLog ? `## Existing Progress\n${existingLog}\n---\nContinue from where the previous session left off.` : ''}
 
 ## Important
+${liveVerifierImportant ? `${liveVerifierImportant}\n` : ''}
 - GitHub Issue and PR are the source of engineering context. Prefer them over stale tracker text if they conflict.
 - Do NOT decide if code is ready for review — that is Review's job
 - For SMALL issues, avoid unnecessary multi-turn exploration. If the implementation and verification are already complete, finish the turn cleanly.
@@ -178,6 +247,8 @@ ${existingLog ? `## Existing Progress\n${existingLog}\n---\nContinue from where 
 - If you discover the issue description is unclear, document it in \`.symphony/HANDOVER.md\` "已知问题" and continue with your best judgment
 - Treat \`.symphony/change-pack/evidence.json\` as a proof-of-work checklist. Do not end the turn while required evidence is still missing.
 - Workflow/process artifacts are never product files. Never stage or commit \`DEVELOPMENT_LOG.md\`, \`HANDOVER.md\`, \`REVIEW_REPORT.md\`, anything under \`.symphony/\`, or similar review/dev process notes.
+- Do not delete \`.symphony/\` or \`.symphony/state.json\`. Symphony owns that private runtime directory; damaging it can break post-processing even when the product change is correct.
+- If you are doing cleanup work, only clean user/product files explicitly in scope. Never use \`.symphony/\` as the final deliverable location.
 - When complete: commit, push, create PR, create \`.symphony/HANDOVER.md\`
 `;
 
@@ -199,5 +270,6 @@ ${logContent}
 ${judgment.requiresTests ? '## Tests Required: YES' : ''}
 
 Continue from "下次继续" section. Update \`.symphony/DEVELOPMENT_LOG.md\` as you make progress.
+Do not delete \`.symphony/\` or \`.symphony/state.json\`; Symphony owns that private runtime directory.
 `;
 }

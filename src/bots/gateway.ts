@@ -29,6 +29,7 @@ import {
   ShadowHarnessRepository,
   SupervisorSessionEventRepository,
   SupervisorSessionRepository,
+  SupervisorJobRepository,
   SupervisorMemoryRepository,
   BotTransportEventRepository,
   BotWatchSubscriptionRepository,
@@ -62,6 +63,8 @@ import type { SupervisorRepoIntelligenceResolver } from '../supervisor/repoIntel
 import { DefaultSupervisorRepoIntelligenceResolver } from '../supervisor/repoIntelligence';
 import { SupervisorWorker } from '../supervisor/worker';
 import { SupervisorJobLoop } from '../supervisor/jobLoop';
+import { SupervisorDevConversationService } from '../supervisor/devConversation';
+import { SupervisorSessionRepairService } from '../supervisor/sessionRepair';
 import { createSupervisorPlanBrainFromEnv } from '../supervisor/planBrain';
 import {
   createSupervisorExecutionOverseerFromEnv,
@@ -457,6 +460,15 @@ function createBotWriteAuthorizer(params: {
   };
 }
 
+function parsePositiveInteger(value: string | null | undefined): number | null {
+  const normalized = value?.trim();
+  if (!normalized) {
+    return null;
+  }
+  const parsed = Number.parseInt(normalized, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
 export class DefaultBotGateway implements BotGateway {
   private readonly commandService: BotCommandService;
   private readonly assistantService: BotAssistantService;
@@ -475,6 +487,8 @@ export class DefaultBotGateway implements BotGateway {
   private readonly supervisorSessionService: SupervisorSessionService | null;
   private readonly supervisorWorker: SupervisorWorker | null;
   private readonly supervisorJobLoop: SupervisorJobLoop | null;
+  private readonly telegramTextProcessingAckDelayMs: number;
+  private startupRepairTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly runtime: RuntimeControlPlane,
@@ -491,6 +505,7 @@ export class DefaultBotGateway implements BotGateway {
       transportEventRepository?: BotTransportEventRepository | null;
       supervisorSessionRepository?: SupervisorSessionRepository | null;
       supervisorSessionEventRepository?: SupervisorSessionEventRepository | null;
+      supervisorJobRepository?: SupervisorJobRepository | null;
       supervisorMemoryRepository?: SupervisorMemoryRepository | null;
       supervisorSessionService?: SupervisorSessionService | null;
       supervisorPlanBrain?: SupervisorPlanBrain | null;
@@ -501,6 +516,8 @@ export class DefaultBotGateway implements BotGateway {
       assistantModel?: BotAssistantModel;
       telegramDiagnostics?: TelegramWebhookDiagnosticsService;
       telegramBootstrapService?: TelegramWebhookBootstrapService | null;
+      telegramTextProcessingAckDelayMs?: number | null;
+      startupRepairDelayMs?: number | null;
     } = {},
   ) {
     this.followupMessageStates = options.followupMessageStateRepository ?? null;
@@ -509,7 +526,14 @@ export class DefaultBotGateway implements BotGateway {
     this.transportEvents = options.transportEventRepository ?? null;
     this.supervisorSessions = options.supervisorSessionRepository ?? null;
     this.supervisorSessionEvents = options.supervisorSessionEventRepository ?? null;
+    this.telegramTextProcessingAckDelayMs = Math.max(
+      1,
+      options.telegramTextProcessingAckDelayMs
+        ?? parsePositiveInteger(process.env.SYMPHONY_TELEGRAM_TEXT_ACK_DELAY_MS)
+        ?? 3_000,
+    );
     const supervisorMemories = options.supervisorMemoryRepository ?? null;
+    const supervisorJobs = options.supervisorJobRepository ?? null;
     this.telegramNotifier = telegramConfig.botToken ? new TelegramNotifier(telegramConfig) : null;
     this.discordNotifier = discordConfig.botToken ? new DiscordNotifier(discordConfig) : null;
     this.telegramDiagnostics = options.telegramDiagnostics
@@ -562,14 +586,38 @@ export class DefaultBotGateway implements BotGateway {
       options.followupMessageStateRepository ?? null,
       this.supervisorSessionService,
     );
-    new BotFollowupRepairService(
-      runtime,
-      options.workItemRepository ?? null,
-      options.followupRepository ?? null,
-      options.followupMessageStateRepository ?? null,
-      options.followupDeliveryStateRepository ?? null,
-      options.pendingActionRepository ?? null,
-    ).repair();
+    const runStartupRepair = () => {
+      try {
+        new BotFollowupRepairService(
+          runtime,
+          options.workItemRepository ?? null,
+          options.followupRepository ?? null,
+          options.followupMessageStateRepository ?? null,
+          options.followupDeliveryStateRepository ?? null,
+          options.pendingActionRepository ?? null,
+        ).repair();
+        if (this.supervisorSessions) {
+          new SupervisorSessionRepairService(
+            runtime,
+            this.supervisorSessions,
+            {
+              staleSessionMaxAgeMs: parsePositiveInteger(process.env.SYMPHONY_SUPERVISOR_SESSION_REPAIR_MAX_AGE_MS)
+                ?? null,
+            },
+          ).repair();
+        }
+      } catch (error) {
+        logger.warn('Bot follow-up repair failed during gateway startup', {}, error instanceof Error ? error : undefined);
+      }
+    };
+    const startupRepairDelayMs = options.startupRepairDelayMs
+      ?? parsePositiveInteger(process.env.SYMPHONY_BOT_FOLLOWUP_REPAIR_DELAY_MS)
+      ?? 5_000;
+    this.startupRepairTimer = setTimeout(() => {
+      this.startupRepairTimer = null;
+      runStartupRepair();
+    }, Math.max(0, startupRepairDelayMs));
+    this.startupRepairTimer.unref?.();
     this.followups = options.followupRepository
       ? new BotFollowupService(runtime, {
           telegram: this.telegramNotifier ?? undefined,
@@ -598,6 +646,8 @@ export class DefaultBotGateway implements BotGateway {
           sessionRepository: this.supervisorSessions,
           eventRepository: this.supervisorSessionEvents,
           memoryRepository: supervisorMemories,
+          jobRepository: supervisorJobs ?? undefined,
+          devConversationService: supervisorJobs ? new SupervisorDevConversationService() : undefined,
           syncIssue: (issue) => this.supervisorSessionService?.syncIssue(issue),
           intervalMs: Number.parseInt(process.env.SYMPHONY_SUPERVISOR_JOB_INTERVAL_MS || '', 10) || undefined,
         })
@@ -622,6 +672,23 @@ export class DefaultBotGateway implements BotGateway {
     const discordOutboundEnabled = Boolean(this.discordConfig.botToken);
     this.telegramDiagnostics.maybeRefresh();
     const telegramDiagnostics = this.telegramDiagnostics.getSnapshot();
+    const activeSupervisorSessions = (this.supervisorSessions?.findAll() ?? [])
+      .filter((session) => (
+        session.state !== 'completed' &&
+        session.state !== 'cancelled'
+      ))
+      .slice(0, 20)
+      .map((session) => ({
+        session_id: session.id,
+        transport: session.transport,
+        conversation_id: session.conversation_id,
+        state: session.state,
+        active_decision_kind: session.active_decision_kind,
+        title: session.plan_card?.title ?? null,
+        repo_ref: session.repo_ref,
+        root_issue_id: session.root_issue_id,
+        updated_at: session.updated_at,
+      }));
 
     return {
       transports: {
@@ -655,6 +722,9 @@ export class DefaultBotGateway implements BotGateway {
       watch_presets: ['default', 'verbose', 'failures', 'status'],
       assistant: this.assistantService.getDiagnostics(),
       natural_language_enabled: true,
+      supervisor: {
+        active_sessions: activeSupervisorSessions,
+      },
     };
   }
 
@@ -680,6 +750,10 @@ export class DefaultBotGateway implements BotGateway {
   }
 
   dispose(): void {
+    if (this.startupRepairTimer) {
+      clearTimeout(this.startupRepairTimer);
+      this.startupRepairTimer = null;
+    }
     this.subscriptions.dispose();
     this.followups?.dispose();
     this.supervisorWorker?.dispose();
@@ -1196,7 +1270,7 @@ export class DefaultBotGateway implements BotGateway {
     issueIdentifier: string | null;
     ordinal: number | null;
     sessionId?: string | null;
-    supervisorAction?: 'approve' | 'edit' | 'alternate' | null;
+    supervisorAction?: 'approve' | 'edit' | 'alternate' | 'focus' | 'cancel' | null;
   } {
     if (data === 'pending|confirm') {
       return {
@@ -1225,14 +1299,14 @@ export class DefaultBotGateway implements BotGateway {
       };
     }
 
-    const supervisorSelection = data.match(/^sup\|([^|]+)\|(approve|edit|alternate)$/i);
+    const supervisorSelection = data.match(/^sup\|([^|]+)\|(approve|edit|alternate|focus|cancel)$/i);
     if (supervisorSelection?.[1] && supervisorSelection?.[2]) {
       return {
         kind: 'supervisor_action',
         issueIdentifier: null,
         ordinal: null,
         sessionId: supervisorSelection[1],
-        supervisorAction: supervisorSelection[2].toLowerCase() as 'approve' | 'edit' | 'alternate',
+        supervisorAction: supervisorSelection[2].toLowerCase() as 'approve' | 'edit' | 'alternate' | 'focus' | 'cancel',
       };
     }
 
@@ -1249,7 +1323,7 @@ export class DefaultBotGateway implements BotGateway {
     context: BotCommandContext;
     parsed: {
       sessionId?: string | null;
-      supervisorAction?: 'approve' | 'edit' | 'alternate' | null;
+      supervisorAction?: 'approve' | 'edit' | 'alternate' | 'focus' | 'cancel' | null;
     };
   }): Promise<{
     outbound: BotTransportMessage;
@@ -1833,10 +1907,12 @@ export class DefaultBotGateway implements BotGateway {
   }
 
   private queueTelegramTextResponse(context: BotCommandContext, text: string): void {
+    const preemptedSessions = this.supervisorSessionService?.preemptActiveSessionsForNewThread(context, text) ?? 0;
     logger.info('Telegram text webhook queued', {
       chat_id: context.recipient.conversation_id,
       user_id: context.identity.user_id,
       is_command: text.startsWith('/'),
+      preempted_supervisor_sessions: preemptedSessions,
     });
 
     setTimeout(() => {
@@ -1851,10 +1927,53 @@ export class DefaultBotGateway implements BotGateway {
       is_command: text.startsWith('/'),
     });
 
+    let processingFinished = false;
+    let processingAckRef: BotTransportMessageRef | null = null;
+    let processingAckPromise: Promise<BotTransportMessageRef | null> | null = null;
+    const processingAckTimer = setTimeout(() => {
+      if (processingFinished || !this.telegramNotifier) {
+        return;
+      }
+      processingAckPromise = this.telegramNotifier.sendMessage(
+        {
+          transport: 'telegram',
+          conversation_id: context.recipient.conversation_id,
+        },
+        {
+          text: text.startsWith('/')
+            ? '已收到，正在处理命令。'
+            : '已收到，正在整理计划和上下文。',
+        },
+      ).then((sent) => {
+        processingAckRef = sent;
+        this.recordTransportEvent({
+          recipient: {
+            transport: 'telegram',
+            conversation_id: context.recipient.conversation_id,
+          },
+          issue: null,
+          source: 'sync_ack',
+          action: 'send',
+          result: 'success',
+          messageId: sent.provider_message_id,
+          materialKey: 'text_processing_ack',
+        });
+        return sent;
+      }).catch((error) => {
+        logger.warn('Telegram text processing acknowledgement failed', {
+          chat_id: context.recipient.conversation_id,
+          user_id: context.identity.user_id,
+        }, error instanceof Error ? error : undefined);
+        return null;
+      });
+    }, this.telegramTextProcessingAckDelayMs);
+
     try {
       const response = text.startsWith('/')
         ? await this.commandService.executeText(context, text)
         : await this.assistantService.respondToText(context, text);
+      processingFinished = true;
+      clearTimeout(processingAckTimer);
 
       logger.info('Telegram text processing finished', {
         chat_id: context.recipient.conversation_id,
@@ -1862,18 +1981,68 @@ export class DefaultBotGateway implements BotGateway {
         is_command: text.startsWith('/'),
       });
 
-      const sent = await this.telegramNotifier!.sendMessage(
-        {
-          transport: 'telegram',
-          conversation_id: context.recipient.conversation_id,
-        },
-        {
-          text: response.message,
-          format: response.format,
-          actions: response.actions,
-          action_rows: response.action_rows,
-        },
-      );
+      const recipient = {
+        transport: 'telegram' as const,
+        conversation_id: context.recipient.conversation_id,
+      };
+      const outbound = {
+        text: response.message,
+        format: response.format,
+        actions: response.actions,
+        action_rows: response.action_rows,
+      };
+      if (!processingAckRef && processingAckPromise) {
+        processingAckRef = await processingAckPromise;
+      }
+      let sent: BotTransportMessageRef;
+      if (processingAckRef && response.session_id) {
+        try {
+          sent = await this.telegramNotifier!.editMessage(
+            recipient,
+            processingAckRef,
+            outbound,
+          );
+          this.recordTransportEvent({
+            recipient,
+            issue: response.issue_id ? this.runtime.getIssue(response.issue_id) : null,
+            source: 'sync_ack',
+            action: 'edit',
+            result: 'success',
+            messageId: sent.provider_message_id,
+            materialKey: response.material_key ?? null,
+          });
+        } catch (error) {
+          if (getBotMessageEditFailureKind(error) === 'not_modified') {
+            sent = processingAckRef;
+            this.recordTransportEvent({
+              recipient,
+              issue: response.issue_id ? this.runtime.getIssue(response.issue_id) : null,
+              source: 'sync_ack',
+              action: 'edit',
+              result: 'success',
+              messageId: sent.provider_message_id,
+              materialKey: response.material_key ?? null,
+            });
+          } else {
+            logger.warn('Telegram text acknowledgement edit failed; sending final response separately', {
+              chat_id: context.recipient.conversation_id,
+              user_id: context.identity.user_id,
+            }, error instanceof Error ? error : undefined);
+            sent = await this.telegramNotifier!.sendMessage(recipient, outbound);
+            this.recordTransportEvent({
+              recipient,
+              issue: response.issue_id ? this.runtime.getIssue(response.issue_id) : null,
+              source: 'sync_ack',
+              action: 'fallback',
+              result: 'success',
+              messageId: sent.provider_message_id,
+              materialKey: response.material_key ?? null,
+            });
+          }
+        }
+      } else {
+        sent = await this.telegramNotifier!.sendMessage(recipient, outbound);
+      }
       if (response.session_id) {
         this.supervisorSessionService?.recordOutboundMessage(
           response.session_id,
@@ -1882,16 +2051,15 @@ export class DefaultBotGateway implements BotGateway {
         );
       }
       const issue = response.issue_id ? this.runtime.getIssue(response.issue_id) : null;
-      this.recordTransportEvent({
-        recipient: {
-          transport: 'telegram',
-          conversation_id: context.recipient.conversation_id,
-        },
-        issue,
-        source: 'sync_ack',
-        action: 'send',
-        result: 'success',
-      });
+      if (!(processingAckRef && response.session_id)) {
+        this.recordTransportEvent({
+          recipient,
+          issue,
+          source: 'sync_ack',
+          action: 'send',
+          result: 'success',
+        });
+      }
 
       logger.info('Telegram text outbound sent', {
         chat_id: context.recipient.conversation_id,
@@ -1899,6 +2067,8 @@ export class DefaultBotGateway implements BotGateway {
         is_command: text.startsWith('/'),
       });
     } catch (error) {
+      processingFinished = true;
+      clearTimeout(processingAckTimer);
       logger.error('Telegram text outbound failed', {
         chat_id: context.recipient.conversation_id,
         user_id: context.identity.user_id,
@@ -2053,6 +2223,7 @@ export function createBotGatewayFromEnv(
   const transportEventRepository = db ? new BotTransportEventRepository(db) : null;
   const supervisorSessionRepository = db ? new SupervisorSessionRepository(db) : null;
   const supervisorSessionEventRepository = db ? new SupervisorSessionEventRepository(db) : null;
+  const supervisorJobRepository = db ? new SupervisorJobRepository(db) : null;
   const supervisorMemoryRepository = db ? new SupervisorMemoryRepository(db) : null;
   const workItemRepository = db ? new WorkItemRepository(db) : null;
   const reviewEventRepository = db ? new ReviewEventRepository(db) : null;
@@ -2107,6 +2278,7 @@ export function createBotGatewayFromEnv(
     transportEventRepository,
     supervisorSessionRepository,
     supervisorSessionEventRepository,
+    supervisorJobRepository,
     supervisorMemoryRepository,
     supervisorRepoIntelligenceResolver,
     supervisorPlanBrain: createSupervisorPlanBrainFromEnv(),

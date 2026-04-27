@@ -169,6 +169,7 @@ export class SymphonyServer {
         this.server = Bun.serve({
           port: this.config.port,
           hostname: this.config.hostname,
+          idleTimeout: 255,
           fetch: this.app.fetch,
         });
 

@@ -133,4 +133,5 @@ export { ConflictMemoryRepository } from './repositories/conflictMemoryRepositor
 export { DebtSignalRepository } from './repositories/debtSignalRepository';
 export { SupervisorSessionRepository } from './repositories/supervisorSessionRepository';
 export { SupervisorSessionEventRepository } from './repositories/supervisorSessionEventRepository';
+export { SupervisorJobRepository } from './repositories/supervisorJobRepository';
 export { SupervisorMemoryRepository } from './repositories/supervisorMemoryRepository';

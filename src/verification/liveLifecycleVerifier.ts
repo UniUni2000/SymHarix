@@ -264,6 +264,28 @@ export class LiveLifecycleVerifier {
           this.reportPassed(checkpoints, 'work_item_created', workItem.github_repo, input.reporter);
         }
 
+        if (issueView?.orchestrator_state === 'failed' || workItem?.orchestrator_state === 'failed') {
+          const detail = issueView?.delivery_summary
+            ?? workItem?.delivery_summary
+            ?? lastTimelineMessage
+            ?? 'The orchestrator reported a failed issue state.';
+          return this.finishFailure({
+            startedAt,
+            projectSlug: input.projectSlug,
+            checkpoints,
+            diagnostics,
+            issueId,
+            issueIdentifier,
+            githubRepo,
+            branchName,
+            pullRequestNumber,
+            reviewDecision,
+            lastTimelineMessage,
+            failureCode: 'orchestrator_failed',
+            message: detail,
+          });
+        }
+
         if (issueView && issueView.phase === 'DEV') {
           this.reportPassed(
             checkpoints,

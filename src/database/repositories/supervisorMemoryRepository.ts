@@ -71,6 +71,43 @@ export class SupervisorMemoryRepository {
     return rows.map((row) => this.mapRow(row)).filter((row): row is SupervisorMemoryRecord => row !== null);
   }
 
+  searchRelevant(params: {
+    repo_ref: string;
+    query: string;
+    limit?: number;
+  }): SupervisorMemoryRecord[] {
+    const candidates = this.listRelevant(params.repo_ref, 50);
+    const terms = params.query
+      .toLowerCase()
+      .split(/[^a-z0-9\u4e00-\u9fa5]+/i)
+      .map((term) => term.trim())
+      .filter((term) => term.length >= 2);
+    if (terms.length === 0) {
+      return candidates.slice(0, Math.max(1, params.limit ?? 8));
+    }
+
+    return candidates
+      .map((memory) => {
+        const haystack = [
+          memory.memory_kind,
+          memory.subject_key,
+          memory.summary,
+          JSON.stringify(memory.evidence ?? {}),
+        ].join(' ').toLowerCase();
+        const score = terms.reduce((total, term) => total + (haystack.includes(term) ? 1 : 0), 0);
+        return { memory, score };
+      })
+      .filter((item) => item.score > 0)
+      .sort((left, right) => {
+        if (right.score !== left.score) {
+          return right.score - left.score;
+        }
+        return right.memory.updated_at.getTime() - left.memory.updated_at.getTime();
+      })
+      .slice(0, Math.max(1, params.limit ?? 8))
+      .map((item) => item.memory);
+  }
+
   private mapRow(row: Record<string, unknown> | undefined): SupervisorMemoryRecord | null {
     if (!row) {
       return null;

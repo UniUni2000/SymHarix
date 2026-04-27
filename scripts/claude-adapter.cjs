@@ -888,6 +888,7 @@ function startAdapter({
 
         const cliPath = path.resolve(__dirname, '../claude-code/bin/claude-haha');
         const args = [
+          '--bare',
           '-c',
           '-p',
           '--verbose',
@@ -900,7 +901,13 @@ function startAdapter({
 
         runtime.childProcess = cp.spawn(cliPath, args, {
           cwd,
-          env,
+          env: {
+            ...env,
+            CLAUDE_CODE_SIMPLE: env.CLAUDE_CODE_SIMPLE || '1',
+            CLAUDE_CODE_GLOB_HIDDEN: env.CLAUDE_CODE_GLOB_HIDDEN || 'false',
+            CLAUDE_CODE_DISABLE_AUTO_MEMORY: env.CLAUDE_CODE_DISABLE_AUTO_MEMORY || '1',
+            CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS || '1',
+          },
           stdio: ['pipe', 'pipe', 'pipe'],
         });
 

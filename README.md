@@ -162,6 +162,7 @@ Phase 4 之后，runtime/bot 入口还补了这几层产品化能力：
 - 消息摘要：`status`、watch 通知和网页详情都复用 runtime digest
 - 历史回放：基于 `agent_runs` / `review_events` / `sync_events` / `work_items` 提供 replay view
 - Operator Copilot：Telegram / Discord 的非命令文本会优先走专用 bot LLM；若后端未配置或不可用，会透明降级到本地 heuristic，并明确提示当前在“简化理解模式”
+- 冷启动：bot follow-up repair 默认延迟 `5000ms` 后台执行，terminal workspace / GitHub orphan cleanup 默认延迟 `900000ms`；可用 `.env` 的 `SYMPHONY_BOT_FOLLOWUP_REPAIR_DELAY_MS` / `SYMPHONY_STARTUP_CLEANUP_DELAY_MS` 调整
 
 ## 内部 Live Lifecycle 验证
 
@@ -183,6 +184,8 @@ bun --env-file=.env run src/cli/index.ts verify-live-supervisor --project-slug 1
 - `--timeout-ms <n>`
 - `--json`
 - `--title-suffix <text>`
+- `verify-live-supervisor --server-url <url> --telegram-chat-id <id>` 会从 Telegram webhook/session 入口验证
+- `verify-live-supervisor --matrix` 会顺序跑 `simple`、`governed-split`、`destructive-cleanup` 三个 Telegram-first 场景
 
 若验证失败，CLI 会保留现场，并输出 issue、PR、最后 timeline 摘要和 cleanup 状态，便于排查。
 
