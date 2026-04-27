@@ -1,6 +1,6 @@
-# Symphony
+# symphonyness
 
-Symphony is a local control plane for running coding agents against real GitHub repositories and Linear issues. The current product direction is Telegram-first: a user can describe work in Telegram, the Supervisor turns that into a plan, asks for approval when needed, materializes Linear/GitHub work, and then supervises Claude Code-style dev/review execution until delivery.
+symphonyness is a harness-based, Telegram-first control plane for end-to-end code development. It combines repo-local contracts, planning, supervised Claude Code-style execution, review, delivery, and cleanup into one recoverable flow.
 
 The repo is intentionally local-first. Secrets live in `.env`, orchestration policy lives in local `WORKFLOW.md`, and target repositories can declare their own `.symphony-repo.yaml` and `.symphony-constitution.md` contracts.
 
@@ -24,7 +24,7 @@ Open the runtime deck:
 http://localhost:3000/runtime
 ```
 
-Stop every local Symphony service and companion process:
+Stop every local symphonyness service and companion process:
 
 ```bash
 bun run start -- --kill
@@ -103,7 +103,7 @@ repositories:
       github_repo: demo-app
 ```
 
-Replace the sample values with the Linear project and GitHub repository you want Symphony to operate.
+Replace the sample values with the Linear project and GitHub repository you want symphonyness to operate.
 
 ## Telegram Setup
 
@@ -121,7 +121,7 @@ If you have a public URL:
 SYMPHONY_PUBLIC_BASE_URL=https://your-public-host
 ```
 
-If you do not have one, Symphony tries to start `cloudflared tunnel --url <local-server> --protocol http2` automatically. To disable this:
+If you do not have one, symphonyness tries to start `cloudflared tunnel --url <local-server> --protocol http2` automatically. To disable this:
 
 ```dotenv
 SYMPHONY_TELEGRAM_BOOTSTRAP=off
@@ -160,11 +160,11 @@ Execution oversight defaults to supervisor LLM settings, then bot LLM settings:
 SYMPHONY_SUPERVISOR_OVERSEER_TIMEOUT_MS=30000
 ```
 
-If a model call times out or returns unusable JSON, Symphony falls back to deterministic routing/planning. It should not block Telegram webhook ACKs.
+If a model call times out or returns unusable JSON, symphonyness falls back to deterministic routing/planning. It should not block Telegram webhook ACKs.
 
 ## Live Verification
 
-For live verification, choose a repository/project where it is acceptable for Symphony to create issues, branches, PRs, and comments. The examples below use placeholder values:
+For live verification, choose a repository/project where it is acceptable for symphonyness to create issues, branches, PRs, and comments. The examples below use placeholder values:
 
 ```text
 Linear project slug: sample-project

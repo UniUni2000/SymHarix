@@ -1,5 +1,5 @@
 /**
- * Tests for the minimal Symphony HTTP server
+ * Tests for the minimal symphonyness HTTP server
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
@@ -438,7 +438,7 @@ describe('SymphonyServer', () => {
     expect(response.headers.get('content-type')).toContain('text/html');
 
     const html = await response.text();
-    expect(html).toContain('Symphony Runtime');
+    expect(html).toContain('symphonyness Runtime');
     expect(html).toContain('Command Deck');
     expect(html).toContain('Access token');
     expect(html).toContain('New Issue');

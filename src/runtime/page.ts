@@ -8,7 +8,7 @@ export function renderRuntimePage(): string {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Symphony Runtime</title>
+    <title>symphonyness Runtime</title>
     <style>${runtimePageStyles}</style>
   </head>
   <body>

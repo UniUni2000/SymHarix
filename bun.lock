@@ -3,7 +3,7 @@
   "configVersion": 0,
   "workspaces": {
     "": {
-      "name": "symphony",
+      "name": "symphonyness",
       "dependencies": {
         "@anthropic-ai/sdk": "^0.80.0",
         "chokidar": "^3.6.0",

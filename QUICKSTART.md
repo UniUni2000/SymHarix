@@ -1,4 +1,4 @@
-# Symphony Quick Start
+# symphonyness Quick Start
 
 This guide gets a local operator from a fresh checkout to a working Runtime Deck and Telegram-first Supervisor flow.
 
@@ -12,7 +12,7 @@ cp WORKFLOW.md.example WORKFLOW.md
 
 ## 2. Choose The Target Repository
 
-Symphony routes Linear projects to GitHub repositories through `WORKFLOW.md`.
+symphonyness routes Linear projects to GitHub repositories through `WORKFLOW.md`.
 
 The examples in this guide use placeholder values:
 
@@ -31,7 +31,7 @@ repositories:
       github_repo: demo-app
 ```
 
-If an issue's Linear `project_slug` is not listed in `repositories.routing`, Symphony fails closed: it will not create a workspace or dispatch an agent.
+If an issue's Linear `project_slug` is not listed in `repositories.routing`, symphonyness fails closed: it will not create a workspace or dispatch an agent.
 
 ## 3. Fill `.env`
 
@@ -44,7 +44,7 @@ SYMPHONY_TRACKER_PROJECT_SLUG=sample-project
 ANTHROPIC_API_KEY=...
 ```
 
-If your GitHub integration uses the GitHub CLI or a token-backed app, make sure it is available in the same shell environment that starts Symphony.
+If your GitHub integration uses the GitHub CLI or a token-backed app, make sure it is available in the same shell environment that starts symphonyness.
 
 Recommended Claude Code runtime settings:
 
@@ -72,7 +72,7 @@ SYMPHONY_TELEGRAM_OPERATIONS_CHAT_ID=<chat-id>
 Webhook options:
 
 - If you have a public HTTPS URL, set `SYMPHONY_PUBLIC_BASE_URL=https://...`.
-- If you do not, leave it empty and install `cloudflared`; Symphony will try to create a temporary tunnel.
+- If you do not, leave it empty and install `cloudflared`; symphonyness will try to create a temporary tunnel.
 - If you want to manage Telegram webhook yourself, set `SYMPHONY_TELEGRAM_BOOTSTRAP=off`.
 
 Default tunnel protocol:
@@ -146,7 +146,7 @@ Expected behavior:
 2. Supervisor creates or updates one active session for the chat.
 3. Simple tasks get a compact plan and may auto-run.
 4. Larger or risky tasks show a Plan Card and wait for approval.
-5. After approval, Symphony creates a root issue and, if needed, a sequential child queue.
+5. After approval, symphonyness creates a root issue and, if needed, a sequential child queue.
 6. Only the current child runs; queued children wait.
 7. Telegram reports high-signal milestones, not every internal retry/status tick.
 
@@ -185,7 +185,7 @@ bun --env-file=.env run src/cli/index.ts verify-live-lifecycle --project-slug sa
 
 ## 9. Stop And Repair
 
-Stop all local Symphony processes:
+Stop all local symphonyness processes:
 
 ```bash
 bun run start -- --kill
