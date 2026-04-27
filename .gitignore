@@ -34,7 +34,7 @@ coverage/
 htmlcov/
 
 # Claude Code
-hooks/
+/hooks/
 !src/hooks/
 !src/hooks/**
 !scripts/hooks/
