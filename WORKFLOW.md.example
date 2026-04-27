@@ -36,6 +36,7 @@ verification:
     timeout_ms: 1800000
     poll_interval_ms: 5000
     projects:
+      # Key must match the Linear project slug you pass to verify-live-*.
       sample-project:
         title: "Live lifecycle smoke test"
         description: "Make a tiny repository-safe change, open a PR, complete review, merge, and leave the repository clean."
@@ -48,11 +49,14 @@ workspace:
   root: ./workspaces
 repositories:
   routing:
+    # Key must match Linear project_slug. Symphony fails closed when a project is not routed.
     sample-project:
       github_owner: your-github-owner
       github_repo: your-target-repo
+      # Optional. Relative paths resolve from the Symphony repository root.
       local_path: ./repos/your-target-repo
 codex:
+  # The default adapter invokes the bundled Claude Code runtime.
   command: node ./scripts/claude-adapter.cjs
 agent:
   max_concurrent_agents: 3

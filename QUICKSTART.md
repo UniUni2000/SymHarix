@@ -1,181 +1,245 @@
-# Symphony 快速开始
+# Symphony Quick Start
 
-## 当前保留的最小主链
+This guide gets a local operator from a fresh checkout to a working Runtime Deck and Telegram-first Supervisor flow.
 
-```text
-local WORKFLOW.md
-  -> CLI
-  -> Orchestrator
-  -> Runtime Hub
-  -> Runtime API / SSE / Web UI
-  -> Telegram / Discord thin adapters
-  -> Workspace Manager
-  -> Claude adapter
-  -> claude-code runtime
-  -> Python hooks
-```
-
-项目里已经移除了旧的 `task/event` 控制层和旧 dashboard 主链，当前保留的是 `V1` 控制面主链，以及建立在同一 control plane 上的最小运行态网页和 Telegram/Discord 薄适配。
-
-## 运行
+## 1. Install
 
 ```bash
 bun install
+cp .env.example .env
+cp WORKFLOW.md.example WORKFLOW.md
+```
+
+## 2. Choose The Target Repository
+
+Symphony routes Linear projects to GitHub repositories through `WORKFLOW.md`.
+
+The examples in this guide use placeholder values:
+
+```text
+Linear project slug: sample-project
+GitHub repo: acme/demo-app
+```
+
+In `WORKFLOW.md`, configure:
+
+```yaml
+repositories:
+  routing:
+    sample-project:
+      github_owner: acme
+      github_repo: demo-app
+```
+
+If an issue's Linear `project_slug` is not listed in `repositories.routing`, Symphony fails closed: it will not create a workspace or dispatch an agent.
+
+## 3. Fill `.env`
+
+Minimum local execution:
+
+```dotenv
+SYMPHONY_TRACKER_KIND=linear
+SYMPHONY_TRACKER_API_KEY=...
+SYMPHONY_TRACKER_PROJECT_SLUG=sample-project
+ANTHROPIC_API_KEY=...
+```
+
+If your GitHub integration uses the GitHub CLI or a token-backed app, make sure it is available in the same shell environment that starts Symphony.
+
+Recommended Claude Code runtime settings:
+
+```dotenv
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+CLAUDE_CODE_LOCAL_SKIP_REMOTE_PREFETCH=1
+```
+
+## 4. Configure Telegram
+
+Minimum Telegram settings:
+
+```dotenv
+SYMPHONY_TELEGRAM_BOT_TOKEN=...
+SYMPHONY_TELEGRAM_WEBHOOK_SECRET=...
+SYMPHONY_TELEGRAM_OPERATOR_IDS=<your-telegram-user-id>
+```
+
+Optional operations chat:
+
+```dotenv
+SYMPHONY_TELEGRAM_OPERATIONS_CHAT_ID=<chat-id>
+```
+
+Webhook options:
+
+- If you have a public HTTPS URL, set `SYMPHONY_PUBLIC_BASE_URL=https://...`.
+- If you do not, leave it empty and install `cloudflared`; Symphony will try to create a temporary tunnel.
+- If you want to manage Telegram webhook yourself, set `SYMPHONY_TELEGRAM_BOOTSTRAP=off`.
+
+Default tunnel protocol:
+
+```dotenv
+SYMPHONY_TELEGRAM_TUNNEL_PROTOCOL=http2
+```
+
+## 5. Configure LLMs
+
+Bot natural-language parsing:
+
+```dotenv
+SYMPHONY_BOT_LLM_PROVIDER=anthropic
+SYMPHONY_BOT_LLM_MODEL=claude-3-5-sonnet-latest
+SYMPHONY_BOT_LLM_API_KEY=...
+SYMPHONY_BOT_LLM_TIMEOUT_MS=15000
+SYMPHONY_BOT_LLM_HTTP_TRANSPORT=fetch
+```
+
+Supervisor planning defaults to bot LLM settings. Override only if needed:
+
+```dotenv
+SYMPHONY_SUPERVISOR_LLM_PROVIDER=
+SYMPHONY_SUPERVISOR_LLM_MODEL=
+SYMPHONY_SUPERVISOR_LLM_API_KEY=
+SYMPHONY_SUPERVISOR_LLM_TIMEOUT_MS=45000
+```
+
+Supervisor execution overseer defaults to supervisor LLM settings, then bot LLM settings:
+
+```dotenv
+SYMPHONY_SUPERVISOR_OVERSEER_PROVIDER=
+SYMPHONY_SUPERVISOR_OVERSEER_MODEL=
+SYMPHONY_SUPERVISOR_OVERSEER_API_KEY=
+SYMPHONY_SUPERVISOR_OVERSEER_TIMEOUT_MS=30000
+```
+
+Use `SYMPHONY_BOT_LLM_HTTP_TRANSPORT=fetch` for normal use. `auto` is useful for HTTP-client compatibility debugging but can double worst-case latency.
+
+## 6. Start
+
+```bash
 bun run start -- --port 3000
 ```
 
-开发模式：
+Open:
 
-```bash
-bun run dev
+```text
+http://localhost:3000/runtime
 ```
 
-停止所有本地 Symphony 后台进程：
+Health endpoints:
+
+```bash
+curl http://localhost:3000/api/v1/runtime/manifest
+curl http://localhost:3000/api/v1/bots/manifest
+```
+
+## 7. Use Telegram
+
+Send a normal request to the bot, for example:
+
+```text
+这个仓库还有文件残余，把它都清空
+```
+
+Expected behavior:
+
+1. Telegram receives a lightweight acknowledgement.
+2. Supervisor creates or updates one active session for the chat.
+3. Simple tasks get a compact plan and may auto-run.
+4. Larger or risky tasks show a Plan Card and wait for approval.
+5. After approval, Symphony creates a root issue and, if needed, a sequential child queue.
+6. Only the current child runs; queued children wait.
+7. Telegram reports high-signal milestones, not every internal retry/status tick.
+
+Useful text actions:
+
+- `现在是什么单子？`
+- `批准并开始`
+- `改一下计划：...`
+- `取消当前线程`
+- `新开线程：...`
+- `重新把这个单子启动下`
+
+## 8. Verify The Full Flow
+
+Start the service first, then run attach-mode live verification:
+
+```bash
+bun --env-file=.env run src/cli/index.ts verify-live-supervisor \
+  --project-slug sample-project \
+  --server-url http://localhost:3000 \
+  --telegram-chat-id <chat-id> \
+  --matrix
+```
+
+The matrix covers:
+
+- `simple`: Telegram request -> Plan Card/auto plan -> issue -> dev/review/delivery.
+- `governed-split`: root plan -> approval -> child queue -> sequential execution.
+- `destructive-cleanup`: approval-gated cleanup wording and delivery safety.
+
+Run the legacy lifecycle verifier only when you want to test the runtime/orchestrator path directly:
+
+```bash
+bun --env-file=.env run src/cli/index.ts verify-live-lifecycle --project-slug sample-project
+```
+
+## 9. Stop And Repair
+
+Stop all local Symphony processes:
 
 ```bash
 bun run start -- --kill
 ```
 
-等价 CLI 命令：
-
-```bash
-bun src/cli/index.ts --kill
-```
-
-## 必要配置
-
-1. 准备 `.env`
-2. 从 `WORKFLOW.md.example` 复制出本地 `WORKFLOW.md`
-3. 配好 `Linear` / `GitHub` / Claude 运行所需变量
-4. 如需聊天端接入，再补 Telegram / Discord 可选变量
-
-```bash
-cp WORKFLOW.md.example WORKFLOW.md
-```
-
-`WORKFLOW.md` 里需要显式配置 `repositories.routing`，用 Linear `project_slug` 路由到目标仓库：
-
-```yaml
-repositories:
-  routing:
-    repo-a:
-      github_owner: acme
-      github_repo: repo-a
-      local_path: ./repos/repo-a
-```
-
-注意：
-
-- `project_slug` 是正式命中键，不再使用 `project_name` 猜 repo
-- 未命中路由时，issue 会保留在 Linear，但 Symphony 不会创建 workspace / GitHub issue / agent session
-- 多个 Linear project 指向同一个 GitHub repo 时，会共享同一个 `source` cache
-
-最关键的是本地 `WORKFLOW.md`；仓库只提交模板 [WORKFLOW.md.example](/Users/liupenghui/Documents/code/agent/test-cc/WORKFLOW.md.example)。`codex.command` 当前默认走：
-
-```yaml
-codex:
-  command: node ./scripts/claude-adapter.cjs
-```
-
-而 `scripts/claude-adapter.cjs` 会继续调用仓库里的 `claude-code` runtime。
-
-启动后常用入口：
-
-- 运行态网页：`http://localhost:3000/runtime`
-- Runtime manifest：`http://localhost:3000/api/v1/runtime/manifest`
-- Runtime overview：`http://localhost:3000/api/v1/runtime/overview`
-- Runtime history replay：`http://localhost:3000/api/v1/runtime/issues/<ISSUE-ID>/history`
-- Bot manifest：`http://localhost:3000/api/v1/bots/manifest`
-
-内部 live lifecycle 验证命令：
-
-```bash
-bun --env-file=.env run src/cli/index.ts verify-live-lifecycle --project-slug 1d3a3f95809d
-bun --env-file=.env run src/cli/index.ts verify-live-supervisor --project-slug 1d3a3f95809d
-```
-
-这条命令会自动创建一张新的验证 issue，并真实校验：
-
-- `Todo -> Dev -> PR -> Review -> Merge -> Done`
-- worktree cleanup
-- 本地/远程 branch cleanup
-- runtime session / worker / retry cleanup
-
-可选 bot 环境变量：
-
-- `SYMPHONY_RUNTIME_WRITE_TOKEN`
-- `SYMPHONY_TELEGRAM_BOT_TOKEN`
-- `SYMPHONY_TELEGRAM_WEBHOOK_SECRET`
-- `SYMPHONY_TELEGRAM_OPERATOR_IDS`
-- `SYMPHONY_TELEGRAM_OPERATIONS_CHAT_ID`
-- `SYMPHONY_BOT_LLM_PROVIDER`
-- `SYMPHONY_BOT_LLM_MODEL`
-- `SYMPHONY_BOT_LLM_API_KEY`
-- `SYMPHONY_BOT_LLM_BASE_URL`
-- `SYMPHONY_BOT_LLM_TIMEOUT_MS`
-- `SYMPHONY_BOT_LLM_HTTP_TRANSPORT`
-- `SYMPHONY_SUPERVISOR_LLM_PROVIDER`
-- `SYMPHONY_SUPERVISOR_LLM_MODEL`
-- `SYMPHONY_SUPERVISOR_LLM_API_KEY`
-- `SYMPHONY_SUPERVISOR_LLM_BASE_URL`
-- `SYMPHONY_SUPERVISOR_LLM_TIMEOUT_MS`
-- `SYMPHONY_SUPERVISOR_OVERSEER_PROVIDER`
-- `SYMPHONY_SUPERVISOR_OVERSEER_MODEL`
-- `SYMPHONY_SUPERVISOR_OVERSEER_API_KEY`
-- `SYMPHONY_SUPERVISOR_OVERSEER_BASE_URL`
-- `SYMPHONY_SUPERVISOR_OVERSEER_TIMEOUT_MS`
-- `SYMPHONY_SUPERVISOR_JOB_INTERVAL_MS`
-- `SYMPHONY_DISCORD_BOT_TOKEN`
-- `SYMPHONY_DISCORD_PUBLIC_KEY`
-- `SYMPHONY_DISCORD_OPERATOR_IDS`
-
-Bot LLM 的运行参数统一放在 `.env`。建议本地 Telegram 使用 `SYMPHONY_BOT_LLM_TIMEOUT_MS=15000` 和 `SYMPHONY_BOT_LLM_HTTP_TRANSPORT=fetch`；`auto` 会启用 curl 到 fetch 的客户端 fallback，排障有用，但最坏情况下会拉长等待时间。
-
-Supervisor planning brain 默认复用 `SYMPHONY_BOT_LLM_*` 的 provider/model/key/base URL，但使用自己的超时预算，默认 `45000ms`；需要单独模型或超时时再设置 `SYMPHONY_SUPERVISOR_LLM_*`。它失败时会自动回落到本地计划规则。
-
-Supervisor execution overseer 默认复用 `SYMPHONY_SUPERVISOR_LLM_*`，再回退到 `SYMPHONY_BOT_LLM_*`；需要独立模型或更短超时时再设置 `SYMPHONY_SUPERVISOR_OVERSEER_*`。它只生成监督判断和下一轮 dev 指令，模型失败或输出不安全时会自动回落到本地 overseer。
-
-Supervisor job loop 会自动恢复活跃 session、重放 root issue 状态，并把监督判断写入长期记忆；这些记忆会进入后续 dev/review prompt。需要真机验证这条链路时，使用 `verify-live-supervisor --server-url <url> --telegram-chat-id <id>`，它会从 Telegram webhook/session 入口验证 Plan Card、批准、建单和执行链。需要补全矩阵时加 `--matrix`，会顺序跑 `simple`、`governed-split`、`destructive-cleanup`。
-
-启动后 bot follow-up repair 会默认延迟 `5000ms` 在后台运行，避免历史 Telegram/card/session 清理阻塞冷启动；terminal workspace / GitHub orphan cleanup 默认延迟 `900000ms`，避免和 live E2E / dev / review 主链抢资源。需要调整时统一在 `.env` 设置 `SYMPHONY_BOT_FOLLOWUP_REPAIR_DELAY_MS` / `SYMPHONY_SUPERVISOR_SESSION_REPAIR_MAX_AGE_MS` / `SYMPHONY_STARTUP_CLEANUP_DELAY_MS`。
-
-Phase 4 之后的几个实用点：
-
-- 网页/API 可以用 token 进入 operator 模式，否则默认 read-only
-- bot `watch` 支持 `default` / `verbose` / `failures` / `status`，并会在重启后自动恢复
-- `status` 和运行态详情会显示 digest 摘要与历史回放（包含 agent/review/sync 轨迹）
-- Telegram / Discord 的自然语言默认走专用 bot LLM；如果没配好或后端异常，会透明降级到本地 parser，并提示当前是“简化理解模式”
-
-Telegram 额外说明：
-
-- 只要配置了 `SYMPHONY_TELEGRAM_BOT_TOKEN`，`bun run start -- --port 3000` 就会在启动时自动初始化 Telegram webhook
-- 如果你已经有公网地址，设置 `SYMPHONY_PUBLIC_BASE_URL=https://your-host`
-- 如果没给公网地址，系统会尝试自动调用 `cloudflared` 建一条临时 tunnel，默认使用更稳的 `--protocol http2`；也可以通过 `SYMPHONY_TELEGRAM_TUNNEL_COMMAND` / `SYMPHONY_TELEGRAM_TUNNEL_PROTOCOL` 覆盖
-- 如果想关闭自动 Telegram bootstrap，设置 `SYMPHONY_TELEGRAM_BOOTSTRAP=off`
-- 如果本机没有 `cloudflared`，也没给 `SYMPHONY_PUBLIC_BASE_URL`，服务仍会启动，但 Telegram inbound 不会接通
-- `SYMPHONY_TELEGRAM_OPERATIONS_CHAT_ID` 用来指定固定运维会话；不配置时，只有已经绑定到 issue 的来源会话或手工 watch 会收到主动 follow-up
-
-一键修复 bot/GitHub 遗留：
+Repair stale bot/GitHub state:
 
 ```bash
 bun src/cli/index.ts repair all
 ```
 
-它会同时：
+Startup repair defaults:
 
-- 修复 stale Telegram follow-up / card / pending action
-- 按 terminal issue 扫描并关闭 orphan GitHub issue / PR
+```dotenv
+SYMPHONY_BOT_FOLLOWUP_REPAIR_DELAY_MS=5000
+SYMPHONY_SUPERVISOR_SESSION_REPAIR_MAX_AGE_MS=86400000
+SYMPHONY_STARTUP_CLEANUP_DELAY_MS=900000
+```
 
-bot 命令例子：
+The delays keep cold start responsive and avoid cleanup competing with active live verification.
 
-- `watch INT-1`
-- `watch verbose INT-1`
-- `watch failures INT-1`
-- `watch status INT-1`
+## 10. Troubleshooting
 
-## 常用命令
+Telegram messages send but buttons do nothing:
+
+- Check `/api/v1/bots/manifest`.
+- Check Telegram webhook diagnostics in logs.
+- Confirm public URL/tunnel is reachable by Telegram.
+- Confirm `SYMPHONY_TELEGRAM_WEBHOOK_SECRET` matches the registered webhook path.
+
+Bot says the model is unavailable:
+
+- Confirm `SYMPHONY_BOT_LLM_*` values.
+- Keep transport as `fetch` unless debugging.
+- Check provider latency and timeout logs.
+- The deterministic fallback should still route clear create/status/retry requests.
+
+Issue created but agent does not run:
+
+- Confirm `WORKFLOW.md -> repositories.routing` contains the issue's Linear project slug.
+- Confirm the route points to the intended GitHub repo.
+- Confirm `codex.command` points to `node ./scripts/claude-adapter.cjs`.
+- Check runtime issue detail for `delivery_code`, `delivery_summary`, and latest supervisor directive.
+
+Too many Telegram messages:
+
+- Confirm the issue has one active Supervisor root session.
+- Run `bun src/cli/index.ts repair all`.
+- Check `bot_transport_events` and `bot_followup_delivery_states` in SQLite to see whether sends are new, edits, or fallback sends.
+
+## 11. Development Checks
 
 ```bash
-bun run build
 bun run test
+bun run build
+git diff --check
 ```
