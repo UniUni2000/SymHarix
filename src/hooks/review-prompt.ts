@@ -98,6 +98,12 @@ ${liveVerifierGuidance}
 8. For straightforward small diffs, prefer completing the review in a single focused pass and writing the report in the same turn
 9. Treat the review as incomplete until \`.symphony/REVIEW_REPORT.md\` exists with the final decision line and review summary section
 
+## Review Report Write Protocol
+- Write the final report with the native Write tool to the exact relative path \`.symphony/REVIEW_REPORT.md\`.
+- Do not use Bash heredocs, shell redirection, \`tee\`, \`dd\`, \`cp /dev/stdin\`, \`touch\`, or absolute \`/home/...\` paths to create \`.symphony/REVIEW_REPORT.md\`.
+- After writing, read back \`.symphony/REVIEW_REPORT.md\` and confirm it contains both the exact decision line and a non-empty \`## Review Summary\` section.
+- If the first write fails, retry once with the Write tool using the same relative path; do not switch to shell-based file creation.
+
 ## Required Decision Line
 Include one exact machine-readable line near the top of \`.symphony/REVIEW_REPORT.md\`:
 - \`## Review Decision: APPROVE\`
@@ -134,7 +140,7 @@ ${devLog || '(no development log found)'}
 ${historySection}
 
 ## After Your Review
-1. Overwrite \`.symphony/REVIEW_REPORT.md\` from scratch in the workspace (do NOT append to stale content and do NOT commit it)
+1. Overwrite \`.symphony/REVIEW_REPORT.md\` from scratch in the workspace using the Write tool and the relative path exactly as shown (do NOT append to stale content and do NOT commit it)
 2. The orchestrator will sync the final summary back to GitHub / Linear
 3. The review executor will merge only if your final decision is APPROVE or APPROVE_MINOR
 4. Do not commit files under \`.symphony/\`
