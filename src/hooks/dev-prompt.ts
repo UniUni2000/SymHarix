@@ -247,6 +247,8 @@ ${liveVerifierImportant ? `${liveVerifierImportant}\n` : ''}
 - If you discover the issue description is unclear, document it in \`.symphony/HANDOVER.md\` "已知问题" and continue with your best judgment
 - Treat \`.symphony/change-pack/evidence.json\` as a proof-of-work checklist. Do not end the turn while required evidence is still missing.
 - Workflow/process artifacts are never product files. Never stage or commit \`DEVELOPMENT_LOG.md\`, \`HANDOVER.md\`, \`REVIEW_REPORT.md\`, anything under \`.symphony/\`, or similar review/dev process notes.
+- Never use broad staging commands such as \`git add .\`, \`git add -A\`, or \`git add --all\`. Run \`git status --short\`, then stage only the explicit product files you intentionally changed, for example \`git add README.md src/example.ts\`.
+- If \`.symphony/\` appears as untracked or modified, leave it alone. It is private runtime state and must stay out of the product commit.
 - Do not delete \`.symphony/\` or \`.symphony/state.json\`. Symphony owns that private runtime directory; damaging it can break post-processing even when the product change is correct.
 - If you are doing cleanup work, only clean user/product files explicitly in scope. Never use \`.symphony/\` as the final deliverable location.
 - When complete: commit, push, create PR, create \`.symphony/HANDOVER.md\`
