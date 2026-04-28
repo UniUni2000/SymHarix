@@ -4970,6 +4970,91 @@ export class Orchestrator extends EventEmitter {
     return path.join(workspacePath, '.symphony', filename);
   }
 
+  private extractCanonicalReviewReportFromRuntime(params: {
+    transcript: TurnTranscriptEntry[];
+    timeline: AgentTimelinePayload[];
+  }): string | null {
+    const candidates: string[] = [];
+
+    for (const entry of params.transcript) {
+      if (entry.text?.trim()) {
+        candidates.push(entry.text);
+      }
+    }
+
+    for (const entry of params.timeline) {
+      if (entry.message?.trim()) {
+        candidates.push(entry.message);
+      }
+      const summary = typeof entry.detail?.summary === 'string' ? entry.detail.summary : null;
+      if (summary?.trim()) {
+        candidates.push(summary);
+      }
+    }
+
+    for (const candidate of candidates) {
+      const parsed = parseCanonicalReviewReport(candidate);
+      if (parsed) {
+        return parsed.content;
+      }
+    }
+
+    return null;
+  }
+
+  private buildFallbackReviewReport(issue: Issue): string {
+    return [
+      `# Review Report: ${issue.identifier}`,
+      '',
+      '## Review Decision: REQUEST_CHANGES',
+      '',
+      '## Review Summary',
+      [
+        `Review for ${issue.identifier} reached the turn budget without a canonical `,
+        '`.symphony/REVIEW_REPORT.md` artifact. Symphony generated this conservative ',
+        'fallback report so review post-processing can return the issue to development ',
+        'instead of stalling without a machine-readable decision.',
+      ].join(''),
+      '',
+      '## Must Fix',
+      '**现状**: The review agent did not create `.symphony/REVIEW_REPORT.md` with a canonical decision line and summary section.',
+      '**期望**: Re-run review after fixing the review artifact writer so it writes `.symphony/REVIEW_REPORT.md` deterministically.',
+      '**文件**: `.symphony/REVIEW_REPORT.md`',
+    ].join('\n');
+  }
+
+  private async ensureReviewReportForBudgetExhaustion(params: {
+    issue: Issue;
+    workspacePath: string;
+    transcript: TurnTranscriptEntry[];
+    timeline: AgentTimelinePayload[];
+  }): Promise<string | null> {
+    const existing = await this.readWorkspaceFile(params.workspacePath, 'REVIEW_REPORT.md');
+    if (existing && parseCanonicalReviewReport(existing)) {
+      return existing;
+    }
+
+    const recovered = this.extractCanonicalReviewReportFromRuntime({
+      transcript: params.transcript,
+      timeline: params.timeline,
+    });
+    const content = recovered ?? this.buildFallbackReviewReport(params.issue);
+    const reportPath = this.getWorkflowArtifactPath(params.workspacePath, 'REVIEW_REPORT.md');
+
+    try {
+      const fs = await import('fs/promises');
+      await fs.mkdir(path.dirname(reportPath), { recursive: true });
+      await fs.writeFile(reportPath, `${content.trim()}\n`, 'utf-8');
+      return content;
+    } catch (err) {
+      console.warn(
+        `[orchestrator] Failed to write fallback .symphony/REVIEW_REPORT.md for ${params.issue.identifier}:`,
+        err,
+      );
+      return null;
+    }
+  }
+
   private async syncLinearState(issue: Issue, stateName: string): Promise<{
     success: boolean;
     recovered: boolean;
@@ -5660,6 +5745,21 @@ export class Orchestrator extends EventEmitter {
 
           if (nextAction.kind === 'continue') {
             if (turnNumber >= turnBudget) {
+              if (isReview) {
+                const fallbackReviewReport = await this.ensureReviewReportForBudgetExhaustion({
+                  issue: activeIssue,
+                  workspacePath: workspace.path,
+                  transcript: turnResult.transcript,
+                  timeline: turnResult.timeline,
+                });
+                if (fallbackReviewReport) {
+                  console.log(
+                    `[orchestrator] Wrote fallback .symphony/REVIEW_REPORT.md for ${activeIssue.identifier} at review turn budget.`,
+                  );
+                  sessionActive = false;
+                  continue;
+                }
+              }
               if (
                 effectiveMissingRequirements.length === 0
               ) {

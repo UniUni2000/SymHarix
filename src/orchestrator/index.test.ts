@@ -1621,7 +1621,7 @@ describe('Orchestrator Stability', () => {
     expect(state.metadata.github_repo).toBe('owner/repo');
   });
 
-  it('fails closed and schedules a review retry when the turn budget is exhausted without a canonical review report', async () => {
+  it('writes a conservative review report fallback when the review turn budget is exhausted', async () => {
     const issue = makeIssue({
       state: 'In Review',
       title: '写一个 python 文件输出 hello world',
@@ -1670,8 +1670,9 @@ describe('Orchestrator Stability', () => {
         return {
           success: true,
           result: makeCliResult({
-            final_state: 'Done',
-            review_decision: 'APPROVED',
+            final_state: 'In Progress',
+            review_decision: 'REQUEST_CHANGES',
+            retry_hint: 'retry_dev',
           }),
         };
       });
@@ -1683,12 +1684,60 @@ describe('Orchestrator Stability', () => {
       const workItem = ctx.workItemRepository.findById(issue.id);
 
       expect(ctx.agentRunner.runTurn).toHaveBeenCalledTimes(1);
-      expect(fs.existsSync(`${workspacePath}/.symphony/REVIEW_REPORT.md`)).toBe(false);
+      expect(fs.existsSync(`${workspacePath}/.symphony/REVIEW_REPORT.md`)).toBe(true);
+      const reviewReport = fs.readFileSync(`${workspacePath}/.symphony/REVIEW_REPORT.md`, 'utf8');
+      expect(reviewReport).toContain('## Review Decision: REQUEST_CHANGES');
+      expect(reviewReport).toContain('## Review Summary');
+      expect(reviewReport).toContain('turn budget');
       expect(ctx.supervisor.decideNextAction).toHaveBeenCalledTimes(1);
-      expect((orchestrator as any).runCliCommand).toHaveBeenCalledTimes(1);
+      expect((orchestrator as any).runCliCommand).toHaveBeenCalledTimes(2);
       expect(state.retry_attempts.get(issue.id)?.attempt).toBe(1);
-      expect(workItem?.linear_state).toBe('In Review');
-      expect(workItem?.orchestrator_state).toBe('retry_scheduled');
+      expect(state.retry_attempts.get(issue.id)?.error).toBe('Review requested changes');
+      expect(workItem?.linear_state).toBe('In Progress');
+      expect(workItem?.orchestrator_state).toBe('needs_rework');
+    } finally {
+      fs.rmSync(workspacePath, { recursive: true, force: true });
+    }
+  });
+
+  it('recovers a canonical review report from runtime transcript before using fallback text', async () => {
+    const issue = makeIssue({
+      state: 'In Review',
+      title: 'Review a tiny README change',
+    });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-review-recover-'));
+    fs.mkdirSync(`${workspacePath}/.symphony`, { recursive: true });
+    try {
+      const content = await (orchestrator as any).ensureReviewReportForBudgetExhaustion({
+        issue,
+        workspacePath,
+        transcript: [
+          {
+            role: 'assistant',
+            kind: 'message',
+            text: [
+              'Review complete.',
+              '',
+              '## Review Decision: APPROVE',
+              '',
+              '## Review Summary',
+              'The README-only change is safe to merge.',
+            ].join('\n'),
+            turn: 1,
+            tool_name: null,
+          },
+        ],
+        timeline: [],
+      });
+
+      const report = fs.readFileSync(`${workspacePath}/.symphony/REVIEW_REPORT.md`, 'utf8');
+      expect(content).toContain('## Review Decision: APPROVE');
+      expect(report).toContain('## Review Decision: APPROVE');
+      expect(report).toContain('The README-only change is safe to merge.');
+      expect(report).not.toContain('REQUEST_CHANGES');
     } finally {
       fs.rmSync(workspacePath, { recursive: true, force: true });
     }
