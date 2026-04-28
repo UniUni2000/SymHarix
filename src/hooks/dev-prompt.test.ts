@@ -69,4 +69,14 @@ describe('agent prompts', () => {
     expect(prompt).toContain('review only the requested marker file');
     expect(prompt).toContain('Do not run full repository test suites');
   });
+
+  test('tells review agents to write the canonical report with the Write tool', () => {
+    const prompt = buildReviewPrompt(issue(), 'Created the marker file.');
+
+    expect(prompt).toContain('Review Report Write Protocol');
+    expect(prompt).toContain('native Write tool');
+    expect(prompt).toContain('exact relative path `.symphony/REVIEW_REPORT.md`');
+    expect(prompt).toContain('Do not use Bash heredocs');
+    expect(prompt).toContain('read back `.symphony/REVIEW_REPORT.md`');
+  });
 });
