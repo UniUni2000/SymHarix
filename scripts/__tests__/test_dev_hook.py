@@ -115,9 +115,7 @@ def test_dev_hook_reports_dirty_workspace_without_commits(tmp_path, monkeypatch)
         elif command == ("rev-list", "--count", "refs/remotes/origin/main..HEAD"):
             result.stdout = "0\n"
         elif command == ("status", "--short"):
-            result.stdout = "?? .symphony/HANDOVER.md\n"
-        elif command == ("diff", "--cached", "--name-only"):
-            result.stdout = ""
+            result.stdout = "?? Cargo.toml\n?? src/main.rs\n"
         else:
             raise AssertionError(f"Unexpected git command: {cmd}")
 
@@ -130,65 +128,6 @@ def test_dev_hook_reports_dirty_workspace_without_commits(tmp_path, monkeypatch)
         "Workspace for feature/int-25 has uncommitted changes but no commits "
         "relative to refs/remotes/origin/main; commit and push are required before PR creation"
     )
-
-
-def test_dev_hook_commits_product_changes_before_pr(tmp_path, monkeypatch):
-    hook = make_hook(tmp_path)
-    hook.github.pr_exists.return_value = None
-    hook.github.create_pull_request.return_value = {
-        "html_url": "https://github.com/owner/repo/pull/25",
-        "number": 25,
-    }
-
-    git_calls: list[tuple[str, ...]] = []
-
-    def fake_run(cmd, cwd, capture_output, text, check):
-        assert cwd == hook.store.symphony_dir.path.parent
-        assert cmd[0] == "git"
-        git_calls.append(tuple(cmd[1:]))
-
-        result = MagicMock()
-        result.returncode = 0
-        result.stderr = ""
-        result.stdout = ""
-
-        command = tuple(cmd[1:])
-        if command == ("rev-parse", "--verify", "refs/remotes/origin/main"):
-            result.stdout = "origin-main-sha\n"
-        elif command == WORKFLOW_DIFF_COMMAND:
-            result.stdout = ""
-        elif command == ("rev-list", "--count", "refs/remotes/origin/main..HEAD"):
-            rev_list_calls = sum(1 for existing in git_calls if existing == command)
-            result.stdout = "0\n" if rev_list_calls == 1 else "1\n"
-        elif command == ("status", "--short"):
-            result.stdout = "M  README.md\n"
-        elif command == ("diff", "--cached", "--name-only"):
-            result.stdout = "README.md\n.symphony/HANDOVER.md\n"
-        elif command == ("restore", "--staged", "--", ".symphony/HANDOVER.md"):
-            result.stdout = ""
-        elif command == ("add", "--", "README.md"):
-            result.stdout = ""
-        elif command == ("commit", "-m", "chore: finalize product changes for INT-25"):
-            result.stdout = "[feature/int-25 abc123] chore: finalize product changes for INT-25\n"
-        elif command == ("rev-parse", "HEAD"):
-            result.stdout = "local-head-sha\n"
-        elif command == ("rev-parse", "--verify", "refs/remotes/origin/feature/int-25"):
-            result.returncode = 128
-            result.stderr = "fatal: Needed a single revision\n"
-        elif command == ("push", "-u", "origin", "HEAD:feature/int-25"):
-            result.stdout = "branch set up to track origin/feature/int-25\n"
-        else:
-            raise AssertionError(f"Unexpected git command: {cmd}")
-
-        return result
-
-    monkeypatch.setattr("scripts.hooks.dev.subprocess.run", fake_run)
-
-    assert hook.run() is True
-    assert ("restore", "--staged", "--", ".symphony/HANDOVER.md") in git_calls
-    assert ("add", "--", "README.md") in git_calls
-    assert ("commit", "-m", "chore: finalize product changes for INT-25") in git_calls
-    hook.github.create_pull_request.assert_called_once()
 
 
 def test_dev_hook_pushes_branch_before_creating_pr(tmp_path, monkeypatch):

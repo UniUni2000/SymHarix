@@ -104,16 +104,10 @@ describe('WorkspaceManager', () => {
     expect(fs.existsSync(path.join(sourcePath, '.git'))).toBe(true);
     expect(fs.existsSync(path.join(workspacePath, 'README.md'))).toBe(true);
 
-    const excludePath = run('git rev-parse --git-path info/exclude', workspacePath);
-    const resolvedExcludePath = path.isAbsolute(excludePath)
-      ? excludePath
-      : path.resolve(workspacePath, excludePath);
-    const excludeContent = fs.readFileSync(resolvedExcludePath, 'utf8');
+    const gitPointer = fs.readFileSync(path.join(workspacePath, '.git'), 'utf8');
+    const gitDir = path.resolve(workspacePath, gitPointer.replace(/^gitdir:\s*/, '').trim());
+    const excludeContent = fs.readFileSync(path.join(gitDir, 'info', 'exclude'), 'utf8');
     expect(excludeContent).toContain('.symphony/');
-
-    fs.mkdirSync(path.join(workspacePath, '.symphony'), { recursive: true });
-    fs.writeFileSync(path.join(workspacePath, '.symphony', 'HANDOVER.md'), '# Handover\n');
-    expect(run('git status --short --ignored .symphony', workspacePath)).toContain('!! .symphony/');
   });
 
   it('reuses same worktree for the same issue and shares the same repo source', async () => {

@@ -277,23 +277,6 @@ function normalizeRuntimeObservationValue(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
-function commandBelongsToWorkspace(command: string, workspacePath?: string): boolean {
-  if (!workspacePath) {
-    return true;
-  }
-  const normalizedCommand = command.replace(/\\/g, '/');
-  const currentWorktree = path.basename(workspacePath.replace(/\\/g, '/'));
-  const referencedWorktrees = [...normalizedCommand.matchAll(/(?:^|[/"'\s])worktrees\/([^/"'\s]+)/g)]
-    .map((match) => match[1])
-    .filter(Boolean);
-
-  if (referencedWorktrees.length === 0) {
-    return true;
-  }
-
-  return referencedWorktrees.every((worktree) => worktree === currentWorktree);
-}
-
 function inferCommandKey(
   command: string,
   harness?: RepositoryHarnessConfig | null,
@@ -429,7 +412,6 @@ function dedupeRuntimeObservations(
 export function collectTimelineCommandRuns(params: {
   timeline: AgentTimelinePayload[];
   harness?: RepositoryHarnessConfig | null;
-  workspacePath?: string;
 }): ChangePackCommandRun[] {
   const runs: ChangePackCommandRun[] = [];
 
@@ -446,9 +428,6 @@ export function collectTimelineCommandRuns(params: {
       ? entry.detail.command_preview.trim()
       : null;
     if (!commandPreview) {
-      continue;
-    }
-    if (!commandBelongsToWorkspace(commandPreview, params.workspacePath)) {
       continue;
     }
 
@@ -657,7 +636,6 @@ export async function recordChangePackEvidence(params: {
 
   const normalizedCommandRuns = (params.commandRuns ?? [])
     .filter((run) => Boolean(run.command?.trim()))
-    .filter((run) => commandBelongsToWorkspace(run.command, params.workspacePath))
     .map((run) => {
       const inferredCommandKey = (
         typeof run.command_key === 'string' && run.command_key.trim()
@@ -703,11 +681,9 @@ export async function recordChangePackEvidence(params: {
       summary: typeof observation.summary === 'string' ? observation.summary.trim() : null,
       recorded_at: observation.recorded_at ?? new Date().toISOString(),
     }));
-  const retainedExistingCommandRuns = existingCommandRuns
-    .filter((run) => commandBelongsToWorkspace(run.command, params.workspacePath));
 
   const mergedCommandRuns = dedupeCommandRuns([
-    ...retainedExistingCommandRuns,
+    ...existingCommandRuns,
     ...normalizedCommandRuns,
   ]);
   const mergedArtifactObservations = dedupeArtifactObservations([
@@ -736,7 +712,7 @@ export async function recordChangePackEvidence(params: {
   );
 
   return {
-    commandRunsAdded: Math.max(0, mergedCommandRuns.length - retainedExistingCommandRuns.length),
+    commandRunsAdded: Math.max(0, mergedCommandRuns.length - existingCommandRuns.length),
     artifactObservationsAdded: Math.max(0, mergedArtifactObservations.length - existingArtifactObservations.length),
     runtimeObservationsAdded: Math.max(0, mergedRuntimeObservations.length - existingRuntimeObservations.length),
   };
