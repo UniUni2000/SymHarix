@@ -1670,9 +1670,8 @@ describe('Orchestrator Stability', () => {
         return {
           success: true,
           result: makeCliResult({
-            final_state: 'In Progress',
-            review_decision: 'REQUEST_CHANGES',
-            retry_hint: 'retry_dev',
+            final_state: 'Done',
+            review_decision: 'APPROVED',
           }),
         };
       });

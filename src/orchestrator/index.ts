@@ -4449,7 +4449,6 @@ export class Orchestrator extends EventEmitter {
     const commandRuns = collectTimelineCommandRuns({
       timeline,
       harness: effectiveHarness?.config,
-      workspacePath,
     });
     const artifactObservations = await collectWorkspaceArtifactObservations({
       workspacePath,
