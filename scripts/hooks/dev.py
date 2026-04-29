@@ -258,7 +258,7 @@ Agent completed the task for issue [{self.issue_id}](https://linear.app/inteliwa
         ahead_count = self._count_commits_ahead(base_ref)
         if ahead_count <= 0:
             if self._workspace_has_uncommitted_changes():
-                if self._commit_staged_product_changes_for_pr():
+                if self._commit_product_changes_for_pr():
                     ahead_count = self._count_commits_ahead(base_ref)
                     if ahead_count > 0:
                         return self._prepare_branch_for_pr_after_commits()
@@ -298,8 +298,9 @@ Agent completed the task for issue [{self.issue_id}](https://linear.app/inteliwa
             message = (push_result.stderr or push_result.stdout or "").strip()
             raise RuntimeError(f"Failed to push branch {self.branch}: {message or 'unknown git error'}")
 
-    def _commit_staged_product_changes_for_pr(self) -> bool:
-        """Create a conservative fallback commit from already-staged product files."""
+    def _commit_product_changes_for_pr(self) -> bool:
+        """Create the delivery commit from explicit non-workflow workspace changes."""
+        changed_paths = self._changed_product_paths()
         staged_paths = self._git_path_list("diff", "--cached", "--name-only")
         workflow_paths = [
             staged_path
@@ -309,31 +310,42 @@ Agent completed the task for issue [{self.issue_id}](https://linear.app/inteliwa
         if workflow_paths:
             self._git("restore", "--staged", "--", *workflow_paths)
 
-        product_paths = [
-            staged_path
-            for staged_path in staged_paths
-            if not self._is_workflow_artifact_path(staged_path)
-        ]
-        if not product_paths:
+        if not changed_paths:
             return False
+        self._git("add", "--", *changed_paths)
 
         commit_result = self._git(
             "commit",
             "-m",
-            f"chore: finalize staged changes for {self.issue_id}",
+            f"chore: finalize product changes for {self.issue_id}",
             check=False,
         )
         if commit_result.returncode != 0:
             message = (commit_result.stderr or commit_result.stdout or "").strip()
             self._set_delivery_failure(
                 "dirty_workspace_no_commit",
-                f"Failed to commit staged changes for {self.branch}: {message or 'unknown git error'}",
+                f"Failed to commit product changes for {self.branch}: {message or 'unknown git error'}",
             )
             raise RuntimeError(
-                f"Failed to commit staged changes for {self.branch}: {message or 'unknown git error'}"
+                f"Failed to commit product changes for {self.branch}: {message or 'unknown git error'}"
             )
-        print(f"[DEV] Created fallback commit from staged product changes: {', '.join(product_paths)}")
+        print(f"[DEV] Created delivery commit from product changes: {', '.join(changed_paths)}")
         return True
+
+    def _changed_product_paths(self) -> list[str]:
+        """Return changed workspace paths that belong in the product PR."""
+        changed_paths: list[str] = []
+        for status_line in self._git_path_list("status", "--short"):
+            if len(status_line) < 4:
+                continue
+            raw_path = status_line[3:].strip()
+            if " -> " in raw_path:
+                raw_path = raw_path.split(" -> ", 1)[1].strip()
+            if not raw_path or self._is_workflow_artifact_path(raw_path):
+                continue
+            if raw_path not in changed_paths:
+                changed_paths.append(raw_path)
+        return changed_paths
 
     def _is_workflow_artifact_path(self, candidate_path: str) -> bool:
         normalized = candidate_path.strip().replace("\\", "/")
