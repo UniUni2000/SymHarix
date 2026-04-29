@@ -113,12 +113,11 @@ function reviewReportHasDecision(reviewReport: string | null | undefined): boole
 function buildReviewReportNudge(issue: Issue): string {
   return [
     `Review ${issue.identifier} is not complete yet because .symphony/REVIEW_REPORT.md is still missing or lacks the canonical decision line and summary section.`,
-    'In this turn, do only the minimum remaining review work, then overwrite .symphony/REVIEW_REPORT.md from scratch using the native Write tool with the exact relative path .symphony/REVIEW_REPORT.md.',
-    'Do not use Bash heredocs, shell redirection, tee, dd, cp /dev/stdin, touch, or absolute /home/... paths to create the review report.',
+    'In this turn, do only the minimum remaining review work, then overwrite .symphony/REVIEW_REPORT.md from scratch.',
     'Include one exact machine-readable line near the top:',
     '## Review Decision: APPROVE or APPROVE_MINOR or REQUEST_CHANGES or REQUEST_TESTS or REJECT',
     'Also include a non-empty ## Review Summary section.',
-    'Read the file back after writing and end the turn only after the final .symphony/REVIEW_REPORT.md exists.',
+    'End the turn only after the final .symphony/REVIEW_REPORT.md exists.',
   ].join(' ');
 }
 

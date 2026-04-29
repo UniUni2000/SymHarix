@@ -35,7 +35,7 @@ function buildSupervisorLiveVerifierDescription(issue: Issue): string {
     'Bounded supervisor live verifier marker task.',
     `Create or update only: ${markerLine}.`,
     'Do not scan the whole repo, do not inspect unrelated historical supervisor-live files, and do not create child tasks.',
-    'Use narrow verification only, then write .symphony/HANDOVER.md and stop. Symphony post-processing owns commit, push, and PR creation.',
+    'Use narrow verification only, then commit, push, create PR, and write .symphony/HANDOVER.md.',
   ].join(' ');
 }
 
@@ -166,7 +166,7 @@ export function buildDevPrompt(
 - Do not scan the whole repo or inspect unrelated historical live-verifier files.
 - Touch only the requested deliverable path(s), usually one \`docs/supervisor-live-*.md\` marker.
 - Do not run full repository test suites or broad build commands unless the issue explicitly asks for them.
-- Finish in one focused pass after the marker file exists, narrow verification is recorded, and .symphony/HANDOVER.md is written.
+- Finish in one focused pass after the marker file exists, narrow verification is recorded, and the PR is created.
 `
     : '';
   const responsibilities = liveVerifierFastPath
@@ -174,7 +174,7 @@ export function buildDevPrompt(
         '1. Create or update only the requested supervisor-live marker file',
         `2. ${testResponsibility}`,
         '3. Create `.symphony/HANDOVER.md` with a concise development summary',
-        '4. Stop after the handover is written; Symphony post-processing will commit product changes, push, and create the PR',
+        '4. Commit product changes, push, and create PR',
       ].join('\n')
     : [
         '1. Analyze the issue and implement the required changes',
@@ -183,7 +183,7 @@ export function buildDevPrompt(
         '4. Keep `.symphony/change-pack/tasks.md` and `.symphony/change-pack/evidence.json` aligned with the real state of the work',
         '5. Update `.symphony/DEVELOPMENT_LOG.md` after each significant step',
         '6. **When done: create `.symphony/HANDOVER.md` with development summary**',
-        '7. Stop after the handover is written; Symphony post-processing will commit product changes, push, and create the PR',
+        '7. Commit changes, push, and create PR',
       ].join('\n');
   const liveVerifierImportant = liveVerifierFastPath
     ? `- Do not read or edit unrelated \`.symphony/change-pack/*\` files unless the narrow marker task cannot complete without them.
@@ -247,11 +247,9 @@ ${liveVerifierImportant ? `${liveVerifierImportant}\n` : ''}
 - If you discover the issue description is unclear, document it in \`.symphony/HANDOVER.md\` "已知问题" and continue with your best judgment
 - Treat \`.symphony/change-pack/evidence.json\` as a proof-of-work checklist. Do not end the turn while required evidence is still missing.
 - Workflow/process artifacts are never product files. Never stage or commit \`DEVELOPMENT_LOG.md\`, \`HANDOVER.md\`, \`REVIEW_REPORT.md\`, anything under \`.symphony/\`, or similar review/dev process notes.
-- Do not run \`git add\`, \`git commit\`, \`git push\`, \`gh pr\`, or other PR creation commands. Symphony post-processing owns all git and PR delivery.
-- If \`.symphony/\` appears as untracked or modified, leave it alone. It is private runtime state and must stay out of the product commit.
 - Do not delete \`.symphony/\` or \`.symphony/state.json\`. Symphony owns that private runtime directory; damaging it can break post-processing even when the product change is correct.
 - If you are doing cleanup work, only clean user/product files explicitly in scope. Never use \`.symphony/\` as the final deliverable location.
-- When complete: create \`.symphony/HANDOVER.md\`, confirm the changed product files are present in the worktree, and stop.
+- When complete: commit, push, create PR, create \`.symphony/HANDOVER.md\`
 `;
 
   return prompt;
