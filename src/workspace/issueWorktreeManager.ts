@@ -214,18 +214,17 @@ export class IssueWorktreeManager {
   }
 
   private async ensureLocalRuntimeExcludes(workspacePath: string): Promise<void> {
-    const gitFile = path.join(workspacePath, '.git');
-
     try {
-      const gitPointer = await fs.promises.readFile(gitFile, 'utf-8');
-      const match = gitPointer.match(/gitdir:\s*(.+)\s*$/m);
-      if (!match) {
+      const excludeOutput = await execAsync(`git -C "${workspacePath}" rev-parse --git-path info/exclude`);
+      const rawExcludePath = excludeOutput.stdout.trim();
+      if (!rawExcludePath) {
         return;
       }
 
-      const gitDir = path.resolve(workspacePath, match[1]);
-      const infoDir = path.join(gitDir, 'info');
-      const excludePath = path.join(infoDir, 'exclude');
+      const excludePath = path.isAbsolute(rawExcludePath)
+        ? rawExcludePath
+        : path.resolve(workspacePath, rawExcludePath);
+      const infoDir = path.dirname(excludePath);
       await fs.promises.mkdir(infoDir, { recursive: true });
 
       let current = '';

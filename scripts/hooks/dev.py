@@ -258,6 +258,10 @@ Agent completed the task for issue [{self.issue_id}](https://linear.app/inteliwa
         ahead_count = self._count_commits_ahead(base_ref)
         if ahead_count <= 0:
             if self._workspace_has_uncommitted_changes():
+                if self._commit_product_changes_for_pr():
+                    ahead_count = self._count_commits_ahead(base_ref)
+                    if ahead_count > 0:
+                        return self._prepare_branch_for_pr_after_commits()
                 message = (
                     f"Workspace for {self.branch} has uncommitted changes but no commits "
                     f"relative to {base_ref}; commit and push are required before PR creation"
@@ -270,6 +274,10 @@ Agent completed the task for issue [{self.issue_id}](https://linear.app/inteliwa
             self._set_delivery_failure("no_actionable_diff", message)
             raise RuntimeError(message)
 
+        return self._prepare_branch_for_pr_after_commits()
+
+    def _prepare_branch_for_pr_after_commits(self) -> None:
+        """Push the current branch after at least one PR commit exists."""
         local_head = self._git_stdout("rev-parse", "HEAD")
         remote_ref = f"refs/remotes/origin/{self.branch}"
         remote_head = self._try_git_stdout("rev-parse", "--verify", remote_ref)
@@ -289,6 +297,64 @@ Agent completed the task for issue [{self.issue_id}](https://linear.app/inteliwa
         if push_result.returncode != 0:
             message = (push_result.stderr or push_result.stdout or "").strip()
             raise RuntimeError(f"Failed to push branch {self.branch}: {message or 'unknown git error'}")
+
+    def _commit_product_changes_for_pr(self) -> bool:
+        """Create the delivery commit from explicit non-workflow workspace changes."""
+        changed_paths = self._changed_product_paths()
+        staged_paths = self._git_path_list("diff", "--cached", "--name-only")
+        workflow_paths = [
+            staged_path
+            for staged_path in staged_paths
+            if self._is_workflow_artifact_path(staged_path)
+        ]
+        if workflow_paths:
+            self._git("restore", "--staged", "--", *workflow_paths)
+
+        if not changed_paths:
+            return False
+        self._git("add", "--", *changed_paths)
+
+        commit_result = self._git(
+            "commit",
+            "-m",
+            f"chore: finalize product changes for {self.issue_id}",
+            check=False,
+        )
+        if commit_result.returncode != 0:
+            message = (commit_result.stderr or commit_result.stdout or "").strip()
+            self._set_delivery_failure(
+                "dirty_workspace_no_commit",
+                f"Failed to commit product changes for {self.branch}: {message or 'unknown git error'}",
+            )
+            raise RuntimeError(
+                f"Failed to commit product changes for {self.branch}: {message or 'unknown git error'}"
+            )
+        print(f"[DEV] Created delivery commit from product changes: {', '.join(changed_paths)}")
+        return True
+
+    def _changed_product_paths(self) -> list[str]:
+        """Return changed workspace paths that belong in the product PR."""
+        changed_paths: list[str] = []
+        for status_line in self._git_path_list("status", "--short"):
+            if len(status_line) < 4:
+                continue
+            raw_path = status_line[3:].strip()
+            if " -> " in raw_path:
+                raw_path = raw_path.split(" -> ", 1)[1].strip()
+            if not raw_path or self._is_workflow_artifact_path(raw_path):
+                continue
+            if raw_path not in changed_paths:
+                changed_paths.append(raw_path)
+        return changed_paths
+
+    def _is_workflow_artifact_path(self, candidate_path: str) -> bool:
+        normalized = candidate_path.strip().replace("\\", "/")
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        return any(
+            normalized == artifact_path or normalized.startswith(f"{artifact_path}/")
+            for artifact_path in self.WORKFLOW_ARTIFACT_PATHS
+        )
 
     def _push_branch_to_github_remote(self) -> None:
         """Repair local-source clones whose origin is not the GitHub repository."""
