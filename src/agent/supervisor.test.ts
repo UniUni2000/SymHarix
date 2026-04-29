@@ -147,6 +147,10 @@ describe('AnthropicSupervisorService', () => {
       kind: 'continue',
       message: expect.stringContaining('.symphony/REVIEW_REPORT.md'),
     });
+    expect(String(result.message || '')).toContain('native Write tool');
+    expect(String(result.message || '')).toContain('exact relative path');
+    expect(String(result.message || '')).toContain('Do not use Bash heredocs');
+    expect(String(result.message || '')).toContain('Read the file back');
   });
 
   test('finishes deterministically once the canonical review report has a decision', async () => {

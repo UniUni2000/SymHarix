@@ -4,6 +4,7 @@ import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
 import {
+  collectTimelineCommandRuns,
   collectRuntimeObservations,
   collectWorkspaceArtifactObservations,
   evaluateChangePackState,
@@ -254,6 +255,82 @@ describe('changePackService', () => {
         summary: 'eslint found one error',
       }),
     ]));
+  });
+
+  test('filters command evidence that references a different issue worktree', async () => {
+    workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-change-pack-cross-worktree-'));
+    const currentWorktree = path.basename(workspacePath);
+    fs.mkdirSync(path.join(workspacePath, '.symphony', 'change-pack'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspacePath, '.symphony', 'change-pack', 'evidence.json'),
+      JSON.stringify({
+        command_runs: [
+          {
+            phase: 'dev',
+            command: 'ls -la /tmp/worktrees/INT-7/',
+            command_key: 'test',
+            status: 'failed',
+            source: 'timeline',
+            turn: 1,
+            exit_code: 1,
+            summary: 'old issue worktree',
+            recorded_at: '2026-04-28T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    );
+
+    const commandRuns = collectTimelineCommandRuns({
+      workspacePath,
+      timeline: [
+        {
+          level: 'info',
+          category: 'tool',
+          code: 'tool_completed',
+          message: 'ran command',
+          turn: 1,
+          tool_name: 'Bash',
+          detail: {
+            command_preview: 'ls -la /tmp/worktrees/INT-7/',
+            summary: 'old issue worktree',
+            exit_code: 0,
+          },
+        },
+        {
+          level: 'info',
+          category: 'tool',
+          code: 'tool_completed',
+          message: 'ran command',
+          turn: 1,
+          tool_name: 'Bash',
+          detail: {
+            command_preview: `ls -la /tmp/worktrees/${currentWorktree}/`,
+            summary: 'current issue worktree',
+            exit_code: 0,
+          },
+        },
+      ],
+    });
+
+    await expect(recordChangePackEvidence({
+      workspacePath,
+      commandRuns,
+    })).resolves.toEqual({
+      commandRunsAdded: 1,
+      artifactObservationsAdded: 0,
+      runtimeObservationsAdded: 0,
+    });
+
+    const evidence = JSON.parse(
+      fs.readFileSync(path.join(workspacePath, '.symphony', 'change-pack', 'evidence.json'), 'utf8'),
+    ) as {
+      command_runs?: Array<{ command?: string }>;
+    };
+
+    expect(evidence.command_runs?.map((run) => run.command)).toEqual([
+      `ls -la /tmp/worktrees/${currentWorktree}/`,
+    ]);
   });
 
   test('treats custom verification requirements with structured evidence as satisfied', async () => {
