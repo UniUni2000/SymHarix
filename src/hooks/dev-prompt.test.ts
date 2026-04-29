@@ -30,9 +30,24 @@ describe('agent prompts', () => {
     expect(prompt).toContain('Supervisor Live Verifier Fast Path');
     expect(prompt).toContain('Do not scan the whole repo');
     expect(prompt).toContain('Do not run full repository test suites');
+    expect(prompt).toContain('Symphony post-processing owns commit, push, and PR creation');
     expect(prompt).not.toContain('Read repo-local contracts if present');
     expect(prompt).not.toContain('Keep `.symphony/change-pack/tasks.md`');
     expect(prompt).not.toContain('Write and run tests (required for small complexity)');
+    expect(prompt).not.toContain('Commit product changes, push, and create PR');
+  });
+
+  test('keeps git delivery out of the dev agent prompt', () => {
+    const prompt = buildDevPrompt(issue({
+      title: 'Add a README smoke line',
+      description: 'Append one sentence to README.md.',
+    }));
+
+    expect(prompt).toContain('Do not run `git add`, `git commit`, `git push`, `gh pr`');
+    expect(prompt).toContain('Symphony post-processing will commit product changes, push, and create the PR');
+    expect(prompt).toContain('When complete: create `.symphony/HANDOVER.md`');
+    expect(prompt).not.toContain('Commit changes, push, and create PR');
+    expect(prompt).not.toContain('When complete: commit, push, create PR');
   });
 
   test('compacts supervisor live verifier issue and injected context before the first dev turn', () => {

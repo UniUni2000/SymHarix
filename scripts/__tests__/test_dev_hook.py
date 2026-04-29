@@ -115,7 +115,7 @@ def test_dev_hook_reports_dirty_workspace_without_commits(tmp_path, monkeypatch)
         elif command == ("rev-list", "--count", "refs/remotes/origin/main..HEAD"):
             result.stdout = "0\n"
         elif command == ("status", "--short"):
-            result.stdout = "?? Cargo.toml\n?? src/main.rs\n"
+            result.stdout = "?? .symphony/HANDOVER.md\n"
         elif command == ("diff", "--cached", "--name-only"):
             result.stdout = ""
         else:
@@ -132,7 +132,7 @@ def test_dev_hook_reports_dirty_workspace_without_commits(tmp_path, monkeypatch)
     )
 
 
-def test_dev_hook_commits_staged_product_changes_before_pr(tmp_path, monkeypatch):
+def test_dev_hook_commits_product_changes_before_pr(tmp_path, monkeypatch):
     hook = make_hook(tmp_path)
     hook.github.pr_exists.return_value = None
     hook.github.create_pull_request.return_value = {
@@ -166,8 +166,10 @@ def test_dev_hook_commits_staged_product_changes_before_pr(tmp_path, monkeypatch
             result.stdout = "README.md\n.symphony/HANDOVER.md\n"
         elif command == ("restore", "--staged", "--", ".symphony/HANDOVER.md"):
             result.stdout = ""
-        elif command == ("commit", "-m", "chore: finalize staged changes for INT-25"):
-            result.stdout = "[feature/int-25 abc123] chore: finalize staged changes for INT-25\n"
+        elif command == ("add", "--", "README.md"):
+            result.stdout = ""
+        elif command == ("commit", "-m", "chore: finalize product changes for INT-25"):
+            result.stdout = "[feature/int-25 abc123] chore: finalize product changes for INT-25\n"
         elif command == ("rev-parse", "HEAD"):
             result.stdout = "local-head-sha\n"
         elif command == ("rev-parse", "--verify", "refs/remotes/origin/feature/int-25"):
@@ -184,7 +186,8 @@ def test_dev_hook_commits_staged_product_changes_before_pr(tmp_path, monkeypatch
 
     assert hook.run() is True
     assert ("restore", "--staged", "--", ".symphony/HANDOVER.md") in git_calls
-    assert ("commit", "-m", "chore: finalize staged changes for INT-25") in git_calls
+    assert ("add", "--", "README.md") in git_calls
+    assert ("commit", "-m", "chore: finalize product changes for INT-25") in git_calls
     hook.github.create_pull_request.assert_called_once()
 
 
