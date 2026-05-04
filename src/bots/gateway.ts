@@ -132,6 +132,17 @@ interface DiscordAdapterConfig {
 }
 
 type TelegramCallbackKind = 'select_governance_action' | 'confirm_pending' | 'cancel_pending' | 'supervisor_action' | 'unknown';
+type TelegramCallbackDeliveryMode = 'edited' | 'sent_fallback' | 'kept_original';
+
+function telegramCallbackDeliveryResult(mode: TelegramCallbackDeliveryMode): TelegramCallbackAuditRecord['result'] {
+  if (mode === 'edited') {
+    return 'edited';
+  }
+  if (mode === 'sent_fallback') {
+    return 'sent_fallback';
+  }
+  return 'failed';
+}
 
 interface DiscordRequestVerifier {
   verify(params: {
@@ -157,8 +168,43 @@ function getHeaderValue(headers: Headers | Record<string, string | undefined>, k
   return null;
 }
 
-function buildTelegramInlineKeyboard(message: BotTransportMessage):
-  | { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> }
+type TelegramInlineKeyboardButton = {
+  text: string;
+  style?: 'primary' | 'success' | 'danger';
+  callback_data?: string;
+  url?: string;
+  web_app?: {
+    url: string;
+  };
+};
+
+function normalizePublicBaseUrl(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return trimmed.replace(/\/+$/, '');
+}
+
+function resolveTelegramActionUrl(url: string, publicBaseUrl: string | null): string | null {
+  const trimmed = url.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (/^(https?:\/\/|tg:\/\/)/i.test(trimmed)) {
+    return trimmed;
+  }
+  if (trimmed.startsWith('/') && publicBaseUrl) {
+    return `${publicBaseUrl}${trimmed}`;
+  }
+  return null;
+}
+
+function buildTelegramInlineKeyboard(
+  message: BotTransportMessage,
+  publicBaseUrl: string | null = null,
+):
+  | { inline_keyboard: TelegramInlineKeyboardButton[][] }
   | undefined {
   const rows = message.action_rows
     ?? (message.actions?.length
@@ -169,16 +215,46 @@ function buildTelegramInlineKeyboard(message: BotTransportMessage):
     return undefined;
   }
 
-  return {
-    inline_keyboard: rows.map((row) => row.map((action) => ({
-      text: action.label,
-      callback_data: action.callback_data,
-    }))),
-  };
+  const inlineRows = rows
+    .map((row) => row
+      .map((action): TelegramInlineKeyboardButton | null => {
+        const button: TelegramInlineKeyboardButton = { text: action.label };
+        if (action.style && action.style !== 'default') {
+          button.style = action.style;
+        }
+        if (action.callback_data) {
+          button.callback_data = action.callback_data;
+          return button;
+        }
+        if (action.web_app?.url) {
+          const url = resolveTelegramActionUrl(action.web_app.url, publicBaseUrl);
+          if (url) {
+            button.web_app = { url };
+            return button;
+          }
+        }
+        if (action.url) {
+          const url = resolveTelegramActionUrl(action.url, publicBaseUrl);
+          if (url) {
+            button.url = url;
+            return button;
+          }
+        }
+        return null;
+      })
+      .filter((button): button is TelegramInlineKeyboardButton => button !== null))
+    .filter((row) => row.length > 0);
+
+  return inlineRows.length > 0
+    ? { inline_keyboard: inlineRows }
+    : undefined;
 }
 
 class TelegramNotifier implements BotTransportNotifier {
-  constructor(private readonly config: TelegramAdapterConfig) {}
+  constructor(
+    private readonly config: TelegramAdapterConfig,
+    private readonly getPublicBaseUrl: () => string | null = () => null,
+  ) {}
 
   private classifyEditFailure(description: string | null): BotMessageEditFailureKind {
     const normalized = (description ?? '').toLowerCase();
@@ -199,7 +275,10 @@ class TelegramNotifier implements BotTransportNotifier {
     if (!this.config.botToken) {
       throw new Error('Telegram bot token is not configured');
     }
-    const keyboard = buildTelegramInlineKeyboard(message);
+    if (message.photo) {
+      return this.sendPhoto(recipient, message);
+    }
+    const keyboard = buildTelegramInlineKeyboard(message, this.getPublicBaseUrl());
 
     const response = await fetch(
       `https://api.telegram.org/bot${this.config.botToken}/sendMessage`,
@@ -227,6 +306,58 @@ class TelegramNotifier implements BotTransportNotifier {
     };
   }
 
+  private appendPhoto(form: FormData, message: BotTransportMessage): void {
+    const photo = message.photo;
+    if (!photo) {
+      throw new Error('Telegram photo message is missing photo data');
+    }
+    if (photo.bytes) {
+      form.set(
+        'photo',
+        new Blob([photo.bytes], { type: photo.content_type || 'image/png' }),
+        photo.filename || 'issue-card.png',
+      );
+      return;
+    }
+    const remotePhoto = photo.url || photo.file_id;
+    if (!remotePhoto) {
+      throw new Error('Telegram photo message requires bytes, url, or file_id');
+    }
+    form.set('photo', remotePhoto);
+  }
+
+  private async sendPhoto(recipient: BotRecipient, message: BotTransportMessage): Promise<BotTransportMessageRef> {
+    const keyboard = buildTelegramInlineKeyboard(message, this.getPublicBaseUrl());
+    const form = new FormData();
+    form.set('chat_id', recipient.conversation_id);
+    this.appendPhoto(form, message);
+    form.set('caption', message.caption ?? message.text);
+    if (message.format === 'telegram_html') {
+      form.set('parse_mode', 'HTML');
+    }
+    form.set('show_caption_above_media', String(message.show_caption_above_media ?? true));
+    if (keyboard) {
+      form.set('reply_markup', JSON.stringify(keyboard));
+    }
+
+    const response = await fetch(
+      `https://api.telegram.org/bot${this.config.botToken}/sendPhoto`,
+      {
+        method: 'POST',
+        body: form,
+      },
+    );
+
+    if (!response.ok) {
+      throw new Error(`Telegram sendPhoto failed with status ${response.status}`);
+    }
+
+    const payload = await response.json() as { result?: { message_id?: number | string } };
+    return {
+      provider_message_id: String(payload.result?.message_id ?? ''),
+    };
+  }
+
   async editMessage(
     recipient: BotRecipient,
     messageRef: BotTransportMessageRef,
@@ -235,7 +366,13 @@ class TelegramNotifier implements BotTransportNotifier {
     if (!this.config.botToken) {
       throw new Error('Telegram bot token is not configured');
     }
-    const keyboard = buildTelegramInlineKeyboard(message);
+    if (message.photo) {
+      return this.editPhoto(recipient, messageRef, message);
+    }
+    if (message.caption !== undefined) {
+      return this.editCaption(recipient, messageRef, message);
+    }
+    const keyboard = buildTelegramInlineKeyboard(message, this.getPublicBaseUrl());
 
     const response = await fetch(
       `https://api.telegram.org/bot${this.config.botToken}/editMessageText`,
@@ -273,6 +410,127 @@ class TelegramNotifier implements BotTransportNotifier {
       throw new BotMessageEditError(
         this.classifyEditFailure(description),
         `Telegram editMessageText failed with status ${response.status}${description ? `: ${description}` : ''}`,
+        response.status,
+        description,
+      );
+    }
+
+    return {
+      provider_message_id: messageRef.provider_message_id,
+    };
+  }
+
+  private async editCaption(
+    recipient: BotRecipient,
+    messageRef: BotTransportMessageRef,
+    message: BotTransportMessage,
+  ): Promise<BotTransportMessageRef> {
+    const keyboard = buildTelegramInlineKeyboard(message, this.getPublicBaseUrl());
+
+    const response = await fetch(
+      `https://api.telegram.org/bot${this.config.botToken}/editMessageCaption`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          chat_id: recipient.conversation_id,
+          message_id: messageRef.provider_message_id,
+          caption: message.caption,
+          parse_mode: message.format === 'telegram_html' ? 'HTML' : undefined,
+          reply_markup: keyboard,
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      let description: string | null = null;
+      try {
+        const raw = await response.text();
+        if (raw.trim()) {
+          try {
+            const payload = JSON.parse(raw) as { description?: string };
+            description = typeof payload.description === 'string' ? payload.description : raw;
+          } catch {
+            description = raw;
+          }
+        }
+      } catch {
+        description = null;
+      }
+
+      throw new BotMessageEditError(
+        this.classifyEditFailure(description),
+        `Telegram editMessageCaption failed with status ${response.status}${description ? `: ${description}` : ''}`,
+        response.status,
+        description,
+      );
+    }
+
+    return {
+      provider_message_id: messageRef.provider_message_id,
+    };
+  }
+
+  private async editPhoto(
+    recipient: BotRecipient,
+    messageRef: BotTransportMessageRef,
+    message: BotTransportMessage,
+  ): Promise<BotTransportMessageRef> {
+    const keyboard = buildTelegramInlineKeyboard(message, this.getPublicBaseUrl());
+    const form = new FormData();
+    form.set('chat_id', recipient.conversation_id);
+    form.set('message_id', messageRef.provider_message_id);
+    const photo = message.photo;
+    if (!photo) {
+      throw new Error('Telegram photo edit is missing photo data');
+    }
+    const mediaPhoto = photo.bytes ? 'attach://photo' : (photo.url || photo.file_id);
+    if (!mediaPhoto) {
+      throw new Error('Telegram photo edit requires bytes, url, or file_id');
+    }
+    form.set('media', JSON.stringify({
+      type: 'photo',
+      media: mediaPhoto,
+      caption: message.caption ?? message.text,
+      parse_mode: message.format === 'telegram_html' ? 'HTML' : undefined,
+      show_caption_above_media: message.show_caption_above_media ?? true,
+    }));
+    if (photo.bytes) {
+      this.appendPhoto(form, message);
+    }
+    if (keyboard) {
+      form.set('reply_markup', JSON.stringify(keyboard));
+    }
+
+    const response = await fetch(
+      `https://api.telegram.org/bot${this.config.botToken}/editMessageMedia`,
+      {
+        method: 'POST',
+        body: form,
+      },
+    );
+
+    if (!response.ok) {
+      let description: string | null = null;
+      try {
+        const raw = await response.text();
+        if (raw.trim()) {
+          try {
+            const payload = JSON.parse(raw) as { description?: string };
+            description = typeof payload.description === 'string' ? payload.description : raw;
+          } catch {
+            description = raw;
+          }
+        }
+      } catch {
+        description = null;
+      }
+
+      throw new BotMessageEditError(
+        this.classifyEditFailure(description),
+        `Telegram editMessageMedia failed with status ${response.status}${description ? `: ${description}` : ''}`,
         response.status,
         description,
       );
@@ -488,6 +746,8 @@ export class DefaultBotGateway implements BotGateway {
   private readonly supervisorWorker: SupervisorWorker | null;
   private readonly supervisorJobLoop: SupervisorJobLoop | null;
   private readonly telegramTextProcessingAckDelayMs: number;
+  private telegramPublicBaseUrl: string | null = normalizePublicBaseUrl(process.env.SYMPHONY_PUBLIC_BASE_URL || null);
+  private telegramWebhookUsedTunnel: boolean | null = null;
   private startupRepairTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
@@ -534,7 +794,9 @@ export class DefaultBotGateway implements BotGateway {
     );
     const supervisorMemories = options.supervisorMemoryRepository ?? null;
     const supervisorJobs = options.supervisorJobRepository ?? null;
-    this.telegramNotifier = telegramConfig.botToken ? new TelegramNotifier(telegramConfig) : null;
+    this.telegramNotifier = telegramConfig.botToken
+      ? new TelegramNotifier(telegramConfig, () => this.telegramPublicBaseUrl)
+      : null;
     this.discordNotifier = discordConfig.botToken ? new DiscordNotifier(discordConfig) : null;
     this.telegramDiagnostics = options.telegramDiagnostics
       ?? new DefaultTelegramWebhookDiagnosticsService(telegramConfig.botToken);
@@ -672,6 +934,7 @@ export class DefaultBotGateway implements BotGateway {
     const discordOutboundEnabled = Boolean(this.discordConfig.botToken);
     this.telegramDiagnostics.maybeRefresh();
     const telegramDiagnostics = this.telegramDiagnostics.getSnapshot();
+    const telegramPublicBaseUrl = this.telegramPublicBaseUrl;
     const activeSupervisorSessions = (this.supervisorSessions?.findAll() ?? [])
       .filter((session) => (
         session.state !== 'completed' &&
@@ -704,6 +967,13 @@ export class DefaultBotGateway implements BotGateway {
           operations_chat_configured: Boolean(this.telegramConfig.operationsChatId),
           health: telegramDiagnostics.health,
           webhook_url: telegramDiagnostics.webhook_url,
+          ...(telegramPublicBaseUrl
+            ? {
+                public_base_url: telegramPublicBaseUrl,
+                mini_app_base_url: telegramPublicBaseUrl,
+                webhook_used_tunnel: this.telegramWebhookUsedTunnel,
+              }
+            : {}),
           webhook_pending_update_count: telegramDiagnostics.webhook_pending_update_count,
           webhook_last_error_message: telegramDiagnostics.webhook_last_error_message,
           webhook_last_error_at: telegramDiagnostics.webhook_last_error_at,
@@ -737,10 +1007,14 @@ export class DefaultBotGateway implements BotGateway {
     }
 
     try {
-      await this.telegramBootstrap.bootstrap({
+      const result = await this.telegramBootstrap.bootstrap({
         localBaseUrl: params.localBaseUrl,
         inboundPath: params.inboundPath ?? '/api/v1/bots/telegram/webhook',
       });
+      if (result.publicBaseUrl) {
+        this.telegramPublicBaseUrl = normalizePublicBaseUrl(result.publicBaseUrl);
+        this.telegramWebhookUsedTunnel = result.usedTunnel;
+      }
       await this.telegramDiagnostics.refreshNow();
     } catch (error) {
       logger.warn('Telegram inbound bootstrap failed', {
@@ -876,10 +1150,11 @@ export class DefaultBotGateway implements BotGateway {
             message: supervisorResult.outbound,
             issue: callbackIssue,
             materialKey: supervisorResult.materialKey,
+            allowFallback: false,
           });
           this.recordTelegramCallbackAudit({
             ...auditBase,
-            result: delivered.mode === 'edited' ? 'edited' : 'sent_fallback',
+            result: telegramCallbackDeliveryResult(delivered.mode),
             error_message: null,
             timestamp: new Date().toISOString(),
           });
@@ -938,7 +1213,7 @@ export class DefaultBotGateway implements BotGateway {
 
         this.recordTelegramCallbackAudit({
           ...auditBase,
-          result: delivered.mode === 'edited' ? 'edited' : 'sent_fallback',
+          result: telegramCallbackDeliveryResult(delivered.mode),
           error_message: null,
           timestamp: new Date().toISOString(),
         });
@@ -1354,7 +1629,11 @@ export class DefaultBotGateway implements BotGateway {
     return {
       outbound: {
         text: response.message,
+        caption: response.caption,
         format: response.format,
+        media_key: response.media_key ?? undefined,
+        photo: response.photo,
+        show_caption_above_media: response.show_caption_above_media,
         actions: response.actions,
         action_rows: response.action_rows,
       },
@@ -1402,8 +1681,10 @@ export class DefaultBotGateway implements BotGateway {
     issue?: RuntimeIssueView | null;
     materialKey?: string | null;
     source?: 'callback_update';
-  }): Promise<{ ref: BotTransportMessageRef; mode: 'edited' | 'sent_fallback' }> {
+    allowFallback?: boolean;
+  }): Promise<{ ref: BotTransportMessageRef; mode: TelegramCallbackDeliveryMode }> {
     const source = params.source ?? 'callback_update';
+    const allowFallback = params.allowFallback ?? true;
     if (params.originalMessageId) {
       try {
         const ref = await this.telegramNotifier!.editMessage(
@@ -1454,10 +1735,24 @@ export class DefaultBotGateway implements BotGateway {
           materialKey: params.materialKey ?? null,
           errorMessage: error instanceof Error ? error.message : String(error),
         });
-        logger.warn('Telegram editMessageText failed; falling back to sendMessage', {
+        logger.warn('Telegram message edit failed', {
           conversation_id: params.recipient.conversation_id,
           message_id: params.originalMessageId,
         }, error instanceof Error ? error : undefined);
+        if (!allowFallback || getBotMessageEditFailureKind(error) !== 'message_not_found') {
+          logger.warn('Telegram callback kept original message to preserve one-card continuity', {
+            conversation_id: params.recipient.conversation_id,
+            message_id: params.originalMessageId,
+            fallback_allowed: allowFallback,
+            failure_kind: getBotMessageEditFailureKind(error) ?? 'unknown',
+          }, error instanceof Error ? error : undefined);
+          return {
+            ref: {
+              provider_message_id: params.originalMessageId,
+            },
+            mode: 'kept_original',
+          };
+        }
       }
     }
 
@@ -1809,7 +2104,7 @@ export class DefaultBotGateway implements BotGateway {
 
         this.recordTelegramCallbackAudit({
           ...params.auditBase,
-          result: delivered.mode === 'edited' ? 'edited' : 'sent_fallback',
+          result: telegramCallbackDeliveryResult(delivered.mode),
           error_message: null,
           timestamp: new Date().toISOString(),
         });
@@ -1848,7 +2143,7 @@ export class DefaultBotGateway implements BotGateway {
 
           this.recordTelegramCallbackAudit({
             ...params.auditBase,
-            result: delivered.mode === 'edited' ? 'edited' : 'sent_fallback',
+            result: telegramCallbackDeliveryResult(delivered.mode),
             error_message: null,
             timestamp: new Date().toISOString(),
           });
@@ -1942,7 +2237,7 @@ export class DefaultBotGateway implements BotGateway {
         {
           text: text.startsWith('/')
             ? '已收到，正在处理命令。'
-            : '已收到，正在整理计划和上下文。',
+            : '收到您的消息了，我这边正在思考和处理，给我点时间',
         },
       ).then((sent) => {
         processingAckRef = sent;
@@ -1987,7 +2282,11 @@ export class DefaultBotGateway implements BotGateway {
       };
       const outbound = {
         text: response.message,
+        caption: response.caption,
         format: response.format,
+        media_key: response.media_key ?? undefined,
+        photo: response.photo,
+        show_caption_above_media: response.show_caption_above_media,
         actions: response.actions,
         action_rows: response.action_rows,
       };

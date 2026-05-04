@@ -26,8 +26,18 @@ Environment variables currently keep the `SYMPHONY_` prefix for compatibility wi
 Start from:
 
 ```bash
-cp .env.example .env
+bun run setup:local
 ```
+
+`setup:local` installs dependencies if needed and creates `.env` and `WORKFLOW.md` from their examples when they do not exist. Existing local files are left untouched.
+
+After `.env` and `WORKFLOW.md` are filled once, use the one-command local loop:
+
+```bash
+bun run start:local
+```
+
+That command reruns the setup guard and starts the server. It does not overwrite existing local config.
 
 ### Tracker
 
@@ -105,6 +115,14 @@ SYMPHONY_PUBLIC_BASE_URL=https://your-host.example.com
 
 If `SYMPHONY_PUBLIC_BASE_URL` is empty and bootstrap is not off, symphonyness tries to start a temporary tunnel. If no tunnel is available, the service still starts, but Telegram inbound will not work.
 
+After startup, confirm Telegram really points at this process:
+
+```bash
+curl http://localhost:3000/api/v1/bots/manifest
+```
+
+Healthy Telegram ingress should show a non-empty `webhook_url` ending in `/api/v1/bots/telegram/webhook`. If `webhook_url` is empty, messages in the Telegram app are not reaching this local server. In that case either set `SYMPHONY_PUBLIC_BASE_URL=https://...` to a reachable HTTPS host, or install `cloudflared` and leave `SYMPHONY_PUBLIC_BASE_URL` empty so local auto-tunnel bootstrap can run.
+
 ### Bot LLM
 
 | Variable | Required | Meaning |
@@ -127,6 +145,20 @@ SYMPHONY_BOT_LLM_HTTP_TRANSPORT=fetch
 ```
 
 Use `auto` only for transport debugging. It can increase worst-case latency because it tries multiple clients.
+
+If Telegram replies with a provider error such as `HTTP 401: invalid access token or token expired`, first check which process is answering. A healthy local manifest should show:
+
+```bash
+curl http://localhost:3000/api/v1/bots/manifest
+```
+
+Expected:
+
+- `data.transports.telegram.health` is `healthy`.
+- `data.transports.telegram.webhook_url` points at this local server's public URL.
+- `data.assistant.health` becomes `healthy` after a natural-language message is processed.
+
+If `webhook_url` is empty but Telegram still replies, another deployment or polling process is using the same bot token. Stop that process or reset the webhook to the current server. If the webhook is correct and `data.assistant.last_error_code` is `auth_error`, rotate or correct `SYMPHONY_BOT_LLM_API_KEY`, `SYMPHONY_BOT_LLM_BASE_URL`, and `SYMPHONY_BOT_LLM_MODEL` as a set.
 
 ### Supervisor Planning LLM
 
@@ -170,7 +202,7 @@ The delays are intentional. They make `bun run start` responsive before cleanup 
 Start from:
 
 ```bash
-cp WORKFLOW.md.example WORKFLOW.md
+bun run setup:local
 ```
 
 Important sections:
@@ -251,8 +283,7 @@ If a repo does not have a formal harness, symphonyness uses shadow harness infer
 Use these endpoints after startup:
 
 ```bash
-curl http://localhost:3000/api/v1/runtime/manifest
-curl http://localhost:3000/api/v1/bots/manifest
+bun run health
 curl http://localhost:3000/api/v1/runtime/overview
 ```
 
@@ -260,7 +291,16 @@ Use these commands for repairs:
 
 ```bash
 bun src/cli/index.ts repair all
-bun run start -- --kill
+bun run stop
+```
+
+Use these commands for the normal local loop:
+
+```bash
+bun run setup:local
+bun run start:local
+PORT=4000 bun run start
+bun run stop
 ```
 
 Use this to validate Telegram-first behavior:

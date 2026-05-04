@@ -366,7 +366,7 @@ def test_dev_hook_removes_workflow_artifacts_from_branch_diff_before_pr(tmp_path
             result.stdout = " M HANDOVER.md\n" if status_call_count == 1 else ""
         elif command == ("add", "--all", "--", "HANDOVER.md"):
             result.stdout = ""
-        elif command == ("commit", "-m", "chore: remove workflow artifacts from submission"):
+        elif command == ("commit", "--no-verify", "-m", "chore: remove workflow artifacts from submission"):
             result.stdout = "[feature/int-25 abc123] cleanup\n"
         elif command == ("rev-list", "--count", "refs/remotes/origin/main..HEAD"):
             result.stdout = "2\n"
@@ -385,7 +385,7 @@ def test_dev_hook_removes_workflow_artifacts_from_branch_diff_before_pr(tmp_path
     monkeypatch.setattr("scripts.hooks.dev.subprocess.run", fake_run)
 
     assert hook.run() is True
-    assert ("commit", "-m", "chore: remove workflow artifacts from submission") in git_calls
+    assert ("commit", "--no-verify", "-m", "chore: remove workflow artifacts from submission") in git_calls
 
 
 def test_dev_hook_recovers_when_pr_create_returns_422_but_pr_already_exists(tmp_path, monkeypatch):

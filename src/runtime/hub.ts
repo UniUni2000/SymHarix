@@ -18,6 +18,8 @@ import type {
   CreateIssueRequest,
   CreateIssueResult,
   RuntimeActionResult,
+  RuntimeAgentProgressItem,
+  RuntimeComplexityLevel,
   RuntimeControlPlane,
   RuntimeDeliveryState,
   RuntimeFileActivity,
@@ -26,7 +28,9 @@ import type {
   RuntimeIssueDigest,
   RuntimeIssueHistoryView,
   RuntimeIssueView,
+  RuntimeMilestoneView,
   RuntimeOverview,
+  RuntimeRoundView,
   RuntimeSessionView,
   RuntimeStreamEvent,
   RuntimeStreamEventType,
@@ -528,6 +532,7 @@ export class RuntimeHub implements RuntimeControlPlane {
       (entry) => entry.issue_id === workItem.linear_issue_id,
     ) ?? null;
     const timeline = this.timelineByIssueId.get(workItem.linear_issue_id) ?? [];
+    const runtimeSession = running ? this.buildSessionView(running, timeline) : null;
     const hasOverride = Boolean(workItem.governance_override_at);
     const canOverrideGovernance =
       !hasOverride &&
@@ -559,6 +564,8 @@ export class RuntimeHub implements RuntimeControlPlane {
       workItem,
       governanceThread,
     );
+    const supervisorSession = this.supervisorSessionRepository.findByRootIssueId(governanceRootIssueId);
+    const complexity = this.deriveComplexityLevel(workItem, supervisorSession, governanceThread?.childQueue ?? []);
     const governanceThreadState = governanceThread?.state ?? (
       workItem.orchestrator_state === 'halted' &&
       Boolean(workItem.governance_decision && workItem.governance_decision !== 'accept')
@@ -573,6 +580,10 @@ export class RuntimeHub implements RuntimeControlPlane {
             ? '先把需求改写成一个更聚焦的任务'
             : null
       );
+    const round = this.buildRoundView(workItem, supervisorSession, complexity, governanceThread?.childQueue ?? [], nextRecommendedAction);
+    const agentRecentProgress = this.buildAgentRecentProgress(workItem, runtimeSession);
+    const milestones = this.buildIssueMilestones(workItem, supervisorSession, delivery);
+    const riskDelta = this.buildRiskDelta(workItem, supervisorSession, delivery);
     const effectiveOrchestratorState =
       ['waiting_on_child', 'child_failed'].includes(governanceThreadState ?? '') && !running && !retrying
         ? 'halted'
@@ -591,7 +602,15 @@ export class RuntimeHub implements RuntimeControlPlane {
       github_repo: workItem.github_repo,
       github_issue_number: workItem.github_issue_number,
       active_pr_number: workItem.active_pr_number,
-      session: running ? this.buildSessionView(running, timeline) : null,
+      session: runtimeSession,
+      complexity,
+      round,
+      roundGoal: round.goal,
+      agentRecentProgress,
+      agent_recent_progress: agentRecentProgress,
+      milestones,
+      riskDelta,
+      risk_delta: riskDelta,
       repo_harness_status: workItem.repo_harness_status
         ? {
             status: workItem.repo_harness_status,
@@ -707,6 +726,24 @@ export class RuntimeHub implements RuntimeControlPlane {
       github_issue_number: null,
       active_pr_number: null,
       session: running ? this.buildSessionView(running, timeline) : null,
+      complexity: 'L1',
+      round: {
+        index: 1,
+        total: 1,
+        goal: 'Waiting for runtime state.',
+      },
+      roundGoal: 'Waiting for runtime state.',
+      agentRecentProgress: {
+        dev: [],
+        review: [],
+      },
+      agent_recent_progress: {
+        dev: [],
+        review: [],
+      },
+      milestones: [],
+      riskDelta: null,
+      risk_delta: null,
       repo_harness_status: null,
       constitution_status: null,
       change_pack_summary: null,
@@ -768,6 +805,196 @@ export class RuntimeHub implements RuntimeControlPlane {
       recent_tools: this.extractRecentTools(timeline),
       recent_files: this.extractRecentFiles(timeline),
     };
+  }
+
+  private getOutcomeRecord(session: SupervisorSessionRecord | null): Record<string, unknown> | null {
+    return asRecord(session?.last_material_outcome);
+  }
+
+  private getOutcomeString(session: SupervisorSessionRecord | null, key: string): string | null {
+    const value = this.getOutcomeRecord(session)?.[key];
+    return typeof value === 'string' && value.trim() ? value.trim() : null;
+  }
+
+  private getOutcomeNumber(session: SupervisorSessionRecord | null, key: string): number | null {
+    const value = this.getOutcomeRecord(session)?.[key];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === 'string') {
+      const parsed = Number.parseInt(value, 10);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
+  }
+
+  private deriveComplexityLevel(
+    workItem: WorkItem,
+    session: SupervisorSessionRecord | null,
+    childQueue: RuntimeGovernanceChildIssueView[],
+  ): RuntimeComplexityLevel {
+    const explicit = this.getOutcomeString(session, 'complexity');
+    if (explicit && /^L[1-4]$/i.test(explicit)) {
+      return explicit.toUpperCase() as RuntimeComplexityLevel;
+    }
+    if (
+      childQueue.length > 0 ||
+      session?.plan_card?.materialization_mode === 'root_with_split_queue' ||
+      workItem.supervisor_execution_mode === 'root_with_split_queue'
+    ) {
+      return 'L4';
+    }
+    switch (workItem.change_pack_summary?.complexity) {
+      case 'small':
+        return 'L1';
+      case 'medium':
+        return 'L2';
+      case 'large':
+        return 'L3';
+      default:
+        return workItem.governance_decision && workItem.governance_decision !== 'accept' ? 'L3' : 'L2';
+    }
+  }
+
+  private buildRoundView(
+    workItem: WorkItem,
+    session: SupervisorSessionRecord | null,
+    complexity: RuntimeComplexityLevel,
+    childQueue: RuntimeGovernanceChildIssueView[],
+    nextRecommendedAction: string | null,
+  ): RuntimeRoundView {
+    const defaultTotal = complexity === 'L1'
+      ? 1
+      : complexity === 'L2'
+        ? 2
+        : complexity === 'L3'
+          ? 3
+          : Math.max(4, childQueue.length || 0);
+    const total = Math.max(1, this.getOutcomeNumber(session, 'round_total') ?? defaultTotal);
+    const derivedIndex = Math.max(1, workItem.review_round + 1, workItem.dev_attempt_count || 0);
+    const index = Math.max(1, Math.min(total, this.getOutcomeNumber(session, 'round_index') ?? derivedIndex));
+    const goal = this.getOutcomeString(session, 'round_goal')
+      ?? this.getOutcomeString(session, 'latest_dev_instruction')
+      ?? nextRecommendedAction
+      ?? workItem.delivery_summary
+      ?? 'Advance the current issue to the next verified checkpoint.';
+    return {
+      index,
+      total,
+      goal: normalizeSummary(goal, 'Advance the current issue to the next verified checkpoint.', 180),
+    };
+  }
+
+  private buildAgentRecentProgress(
+    workItem: WorkItem,
+    session: RuntimeSessionView | null,
+  ): {
+    dev: RuntimeAgentProgressItem[];
+    review: RuntimeAgentProgressItem[];
+  } {
+    const devItems: RuntimeAgentProgressItem[] = [];
+    if (session?.last_message) {
+      devItems.push({
+        summary: normalizeSummary(session.last_message, 'Latest dev activity.'),
+        status: session.stage ?? 'running',
+        timestamp: session.last_event_at,
+      });
+    }
+    for (const run of this.agentRunRepository.findByWorkItemId(workItem.id)) {
+      if (run.agent_type !== 'dev') {
+        continue;
+      }
+      devItems.push({
+        summary: normalizeSummary(run.output_summary ?? run.error ?? run.decision ?? run.input_summary, `${run.phase} run ${run.run_status}.`),
+        status: run.run_status,
+        timestamp: (run.finished_at ?? run.started_at).toISOString(),
+      });
+    }
+
+    const reviewItems = this.reviewEventRepository.findByWorkItemId(workItem.id)
+      .map((review): RuntimeAgentProgressItem => ({
+        summary: normalizeSummary(review.summary_md, `${review.decision} for ${workItem.linear_identifier}.`),
+        status: review.decision,
+        timestamp: review.created_at.toISOString(),
+      }));
+
+    const sortRecent = (items: RuntimeAgentProgressItem[]) => [...items]
+      .sort((left, right) => (right.timestamp ?? '').localeCompare(left.timestamp ?? ''))
+      .slice(0, 3);
+
+    return {
+      dev: sortRecent(devItems),
+      review: sortRecent(reviewItems),
+    };
+  }
+
+  private buildIssueMilestones(
+    workItem: WorkItem,
+    session: SupervisorSessionRecord | null,
+    delivery: ReturnType<RuntimeHub['buildDeliveryProjection']>,
+  ): RuntimeMilestoneView[] {
+    const milestones: RuntimeMilestoneView[] = [];
+    const outcome = this.getOutcomeRecord(session);
+    const milestoneKey = typeof outcome?.milestone_key === 'string' ? outcome.milestone_key : null;
+    const milestoneKind = typeof outcome?.milestone_kind === 'string' ? outcome.milestone_kind : null;
+    if (milestoneKey && milestoneKind) {
+      milestones.push({
+        kind: milestoneKind,
+        key: milestoneKey,
+        summary: normalizeSummary(
+          typeof outcome?.user_summary === 'string'
+            ? outcome.user_summary
+            : typeof outcome?.next_recommended_action === 'string'
+              ? outcome.next_recommended_action
+              : delivery.summary,
+          `${milestoneKind} milestone.`,
+        ),
+        timestamp: toIso(session?.updated_at ?? workItem.updated_at),
+      });
+    }
+    if (delivery.state) {
+      milestones.push({
+        kind: delivery.state,
+        key: `delivery:${workItem.linear_issue_id}:${delivery.state}:${delivery.code ?? ''}`,
+        summary: normalizeSummary(delivery.summary, `${workItem.linear_identifier} delivery state ${delivery.state}.`),
+        timestamp: toIso(workItem.updated_at),
+      });
+    }
+    for (const review of this.reviewEventRepository.findByWorkItemId(workItem.id)) {
+      milestones.push({
+        kind: 'review_completed',
+        key: `review:${review.id}`,
+        summary: normalizeSummary(review.summary_md, `Review ${review.decision}.`),
+        timestamp: review.created_at.toISOString(),
+      });
+    }
+    const [supervisorMilestone, ...otherMilestones] = milestones;
+    return [
+      ...(supervisorMilestone ? [supervisorMilestone] : []),
+      ...otherMilestones
+        .sort((left, right) => (right.timestamp ?? '').localeCompare(left.timestamp ?? '') || left.key.localeCompare(right.key)),
+    ].slice(0, 6);
+  }
+
+  private buildRiskDelta(
+    workItem: WorkItem,
+    session: SupervisorSessionRecord | null,
+    delivery: ReturnType<RuntimeHub['buildDeliveryProjection']>,
+  ): string | null {
+    const explicit = this.getOutcomeString(session, 'risk_delta');
+    if (explicit) {
+      return explicit;
+    }
+    if (delivery.state === 'delivery_failed') {
+      return normalizeSummary(delivery.summary, 'Risk up: delivery failed.', 180);
+    }
+    if (delivery.state === 'proof_satisfied') {
+      return 'Risk down: required proof is satisfied and final delivery is pending.';
+    }
+    if (workItem.governance_status === 'blocked') {
+      return normalizeSummary(workItem.governance_summary, 'Risk up: governance is blocked.', 180);
+    }
+    return null;
   }
 
   private buildIssueDigest(

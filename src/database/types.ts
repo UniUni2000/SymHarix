@@ -103,7 +103,13 @@ export type SupervisorSessionState =
   | 'cancelled';
 export type SupervisorIntakeMode = 'direct_run' | 'clarify_then_plan' | 'plan_then_approve';
 export type SupervisorApprovalMode = 'auto' | 'explicit_user_approval' | 'explicit_reapproval';
-export type SupervisorDecisionKind = 'plan_approval' | 'plan_revision' | 'execution_decision';
+export type SupervisorDecisionKind =
+  | 'plan_approval'
+  | 'plan_revision'
+  | 'execution_decision'
+  | 'delivery_failure'
+  | 'scope_change'
+  | 'governance_decision';
 export type SupervisorMaterializationMode = 'root_only' | 'root_with_split_queue';
 export type SupervisorMemoryKind =
   | 'architecture_preference'

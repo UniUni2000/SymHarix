@@ -9,7 +9,7 @@ export interface SupervisorOversightAssessment {
   reason: string;
   dev_instruction: string | null;
   user_summary: string | null;
-  active_decision_kind: 'delivery_failure' | 'scope_change' | 'governance_decision' | null;
+  active_decision_kind: 'delivery_failure' | 'scope_change' | 'governance_decision' | 'execution_decision' | null;
   key: string;
   source?: 'deterministic' | 'llm';
   fallback_reason?: string | null;
@@ -24,6 +24,7 @@ export interface SupervisorExecutionOverseer {
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+const MAX_TIMEOUT_MS = 300_000;
 
 function normalize(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
@@ -256,7 +257,8 @@ function parseDecisionKind(value: unknown): SupervisorOversightAssessment['activ
   }
   return value === 'delivery_failure' ||
     value === 'scope_change' ||
-    value === 'governance_decision'
+    value === 'governance_decision' ||
+    value === 'execution_decision'
     ? value
     : undefined;
 }
@@ -314,7 +316,7 @@ function buildOverseerPrompt(input: {
     'You do not execute tools. You decide the next supervision move and produce one concise instruction for the dev agent when safe.',
     'Return JSON only. Prefer Chinese for user_summary; dev_instruction may be Chinese and should be concrete.',
     'Allowed JSON shape:',
-    '{"decision":"continue|ask_user|report|complete","reason":"short_machine_reason","dev_instruction":"... or null","user_summary":"... or null","active_decision_kind":"delivery_failure|scope_change|governance_decision|null","confidence":0.0}',
+    '{"decision":"continue|ask_user|report|complete","reason":"short_machine_reason","dev_instruction":"... or null","user_summary":"... or null","active_decision_kind":"delivery_failure|scope_change|governance_decision|execution_decision|null","confidence":0.0}',
     'Rules:',
     '- If the milestone indicates delivery_failed, child_failed, or requires_user_decision, do not choose continue unless the provided facts prove it is already recovered.',
     '- If continuing, give the dev agent a precise next move: what to inspect, what not to change, what proof to produce.',
@@ -381,7 +383,7 @@ export class HttpSupervisorExecutionOverseer implements SupervisorExecutionOvers
     this.model = config.model;
     this.apiKey = config.apiKey;
     this.baseUrl = config.baseUrl.replace(/\/$/, '');
-    this.timeoutMs = Math.max(1_000, Math.min(120_000, config.timeoutMs ?? DEFAULT_TIMEOUT_MS));
+    this.timeoutMs = Math.max(1_000, Math.min(MAX_TIMEOUT_MS, config.timeoutMs ?? DEFAULT_TIMEOUT_MS));
   }
 
   async assess(input: {

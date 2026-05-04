@@ -88,6 +88,16 @@ function cardKeyRepresentsChildFailure(cardKey: string | null | undefined, curre
   return cardKey.includes('|child_failed|') && cardKey.includes(`|${currentChildIdentifier}|`);
 }
 
+function hasSupervisorRuntimeProjection(issue: RuntimeIssueView | null | undefined): boolean {
+  return Boolean(
+    issue?.supervisor_session_state ||
+    issue?.supervisor_plan_summary ||
+    issue?.supervisor_job_state ||
+    issue?.latest_supervisor_directive ||
+    issue?.active_decision_kind,
+  );
+}
+
 function buildLifecycleMessage(issue: RuntimeIssueView, notificationClass: LifecycleNotificationClass): BotTransportMessage {
   const headline = notificationClass === 'retrying'
     ? `Symphony 重试中 · ${issue.identifier}`
@@ -186,6 +196,9 @@ export class BotFollowupService {
       if (recipients.length === 0) {
         return;
       }
+      if (this.isSupervisorManagedIssue(threadIssue)) {
+        return;
+      }
       const followupRecipients = await this.upsertSupervisorSessionCards(recipients, threadIssue);
       if (followupRecipients.length === 0) {
         return;
@@ -238,6 +251,9 @@ export class BotFollowupService {
     if (recipients.length === 0) {
       return;
     }
+    if (this.isSupervisorManagedIssue(threadIssue)) {
+      return;
+    }
     const followupRecipients = await this.upsertSupervisorSessionCards(recipients, threadIssue);
     if (followupRecipients.length === 0) {
       return;
@@ -282,6 +298,9 @@ export class BotFollowupService {
       const threadIssue = this.resolveGovernanceThreadIssue(issue);
       const recipients = this.collectRecipients(threadIssue.issue_id);
       if (recipients.length === 0) {
+        continue;
+      }
+      if (this.isSupervisorManagedIssue(threadIssue)) {
         continue;
       }
 
@@ -393,6 +412,13 @@ export class BotFollowupService {
     }
 
     return Array.from(recipients.values());
+  }
+
+  private isSupervisorManagedIssue(issue: RuntimeIssueView): boolean {
+    if (hasSupervisorRuntimeProjection(issue)) {
+      return true;
+    }
+    return Boolean(this.options.supervisorSessionRepository?.findByRootIssueId(issue.issue_id));
   }
 
   private hasActiveGovernanceCard(recipients: BotRecipient[], issueId: string): boolean {

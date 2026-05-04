@@ -112,6 +112,18 @@ function anthropicText(text: string): Response {
 }
 
 describe('HttpSupervisorExecutionOverseer', () => {
+  test('allows supervisor LLM timeouts up to five minutes', () => {
+    const overseer = new HttpSupervisorExecutionOverseer({
+      provider: 'anthropic',
+      model: 'claude-test',
+      apiKey: 'test-key',
+      baseUrl: 'https://example.test/v1',
+      timeoutMs: 300_000,
+    });
+
+    expect((overseer as any).timeoutMs).toBe(300_000);
+  });
+
   test('uses model JSON to produce the next dev instruction', async () => {
     const overseer = new HttpSupervisorExecutionOverseer({
       provider: 'anthropic',

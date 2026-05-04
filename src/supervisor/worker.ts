@@ -1,5 +1,6 @@
 import type { BotTransportEventRepository, SupervisorSessionRepository } from '../database';
-import type { RuntimeControlPlane } from '../runtime/types';
+import type { SupervisorSessionRecord } from '../database/types';
+import type { RuntimeControlPlane, RuntimeIssueView } from '../runtime/types';
 import { logger } from '../logging';
 import { buildSupervisorSessionFollowupMessage, type SupervisorSessionService } from './sessionService';
 import {
@@ -88,7 +89,10 @@ export class SupervisorWorker {
     };
     const message: BotTransportMessage = {
       text: card.message,
+      caption: card.caption,
       format: card.format,
+      media_key: card.media_key ?? undefined,
+      photo: card.photo,
       action_rows: card.action_rows,
     };
     const coalesceKey = `${session.id}|${card.material_key}`;
@@ -172,6 +176,16 @@ export class SupervisorWorker {
           material_key: card.material_key,
           error_message: error instanceof Error ? error.message : String(error),
         });
+        if (failureKind !== 'message_not_found') {
+          logger.warn('Supervisor worker kept the existing session card after edit failure', {
+            session_id: session.id,
+            transport: session.transport,
+            conversation_id: session.conversation_id,
+            message_id: session.last_message_id,
+            failure_kind: failureKind ?? 'unknown',
+          }, error instanceof Error ? error : undefined);
+          return;
+        }
       } finally {
         this.inFlightMaterialKeys.delete(coalesceKey);
       }
@@ -249,7 +263,6 @@ export class SupervisorWorker {
     if (!session || !RENDERABLE_SESSION_STATES.has(session.state) || !session.last_message_id) {
       return;
     }
-
     await this.reconcileSession(session.id);
   }
 }

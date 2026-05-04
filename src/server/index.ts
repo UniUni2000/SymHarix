@@ -14,6 +14,7 @@ import { createBotRoutes } from './routes/bots';
 import type { ServerConfig, ApiResponse } from './types';
 import type { RuntimeControlPlane } from '../runtime/types';
 import { renderRuntimePage } from '../runtime/page';
+import { renderRuntimeMiniAppPage } from '../runtime/miniAppPage';
 import { createBotGatewayFromEnv } from '../bots/gateway';
 import type { BotGateway } from '../bots/types';
 import {
@@ -111,7 +112,9 @@ export class SymphonyServer {
     apiV1.route('/health', createHealthRoutes(this.db));
     apiV1.route('/work-items', createWorkItemRoutes(this.db));
     if (this.runtimeControlPlane && this.runtimeAccessController) {
-      apiV1.route('/runtime', createRuntimeRoutes(this.runtimeControlPlane, this.runtimeAccessController));
+      apiV1.route('/runtime', createRuntimeRoutes(this.runtimeControlPlane, this.runtimeAccessController, {
+        getPublicBaseUrl: () => this.getPublicBaseUrl(),
+      }));
     }
     if (this.botGateway) {
       apiV1.route('/bots', createBotRoutes(this.botGateway));
@@ -122,6 +125,7 @@ export class SymphonyServer {
 
     if (this.runtimeControlPlane) {
       this.app.get('/runtime', (c) => c.html(renderRuntimePage()));
+      this.app.get('/runtime/issues/:id/app', (c) => c.html(renderRuntimeMiniAppPage(c.req.param('id'))));
     }
 
     // Root endpoint
@@ -140,6 +144,7 @@ export class SymphonyServer {
                   runtimeManifest: '/api/v1/runtime/manifest',
                   runtimeStream: '/api/v1/runtime/stream',
                   runtimeApp: '/runtime',
+                  runtimeIssueMiniApp: '/runtime/issues/:id/app',
                   ...(this.botGateway
                     ? {
                         botsManifest: '/api/v1/bots/manifest',
@@ -158,6 +163,16 @@ export class SymphonyServer {
    */
   getApp(): Hono {
     return this.app;
+  }
+
+  private getPublicBaseUrl(): string | null {
+    const manifestUrl = this.botGateway?.getManifest().transports.telegram.public_base_url ?? null;
+    const envUrl = process.env.SYMPHONY_PUBLIC_BASE_URL || null;
+    const raw = manifestUrl || envUrl;
+    if (!raw) {
+      return null;
+    }
+    return raw.replace(/\/+$/, '');
   }
 
   /**

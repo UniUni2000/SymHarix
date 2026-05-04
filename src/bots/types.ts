@@ -30,8 +30,12 @@ export interface BotRecipient {
 
 export interface BotTransportAction {
   label: string;
-  style?: 'default' | 'danger';
-  callback_data: string;
+  style?: 'default' | 'primary' | 'success' | 'danger';
+  callback_data?: string;
+  url?: string;
+  web_app?: {
+    url: string;
+  };
 }
 
 export type BotTransportMessageFormat = 'plain' | 'telegram_html';
@@ -40,9 +44,21 @@ export interface BotTransportMessageRef {
   provider_message_id: string;
 }
 
+export interface BotTransportPhoto {
+  bytes?: Uint8Array;
+  url?: string;
+  file_id?: string;
+  filename?: string;
+  content_type?: string;
+}
+
 export interface BotTransportMessage {
   text: string;
+  caption?: string;
   format?: BotTransportMessageFormat;
+  media_key?: string | null;
+  photo?: BotTransportPhoto | null;
+  show_caption_above_media?: boolean;
   actions?: BotTransportAction[];
   action_rows?: BotTransportAction[][];
 }
@@ -86,7 +102,11 @@ export interface BotCommandRequest {
 
 export interface BotCommandResponse {
   message: string;
+  caption?: string;
   format?: BotTransportMessageFormat;
+  media_key?: string | null;
+  photo?: BotTransportPhoto | null;
+  show_caption_above_media?: boolean;
   actions?: BotTransportAction[];
   action_rows?: BotTransportAction[][];
   watch_registered?: boolean;
@@ -121,6 +141,9 @@ export interface BotTransportManifest {
   operations_chat_configured?: boolean;
   health?: 'healthy' | 'degraded' | 'unconfigured';
   webhook_url?: string | null;
+  public_base_url?: string | null;
+  mini_app_base_url?: string | null;
+  webhook_used_tunnel?: boolean | null;
   webhook_pending_update_count?: number | null;
   webhook_last_error_message?: string | null;
   webhook_last_error_at?: string | null;

@@ -134,6 +134,32 @@ export interface RuntimeSessionView {
   recent_files: RuntimeFileActivity[];
 }
 
+export type RuntimeComplexityLevel = 'L1' | 'L2' | 'L3' | 'L4';
+
+export interface RuntimeRoundView {
+  index: number;
+  total: number;
+  goal: string;
+}
+
+export interface RuntimeAgentProgressItem {
+  summary: string;
+  status: string;
+  timestamp: string | null;
+}
+
+export interface RuntimeAgentRecentProgressView {
+  dev: RuntimeAgentProgressItem[];
+  review: RuntimeAgentProgressItem[];
+}
+
+export interface RuntimeMilestoneView {
+  kind: string;
+  key: string;
+  summary: string;
+  timestamp: string | null;
+}
+
 export interface RuntimeIssueView {
   issue_id: string;
   work_item_id: string | null;
@@ -148,6 +174,14 @@ export interface RuntimeIssueView {
   github_issue_number: number | null;
   active_pr_number: number | null;
   session: RuntimeSessionView | null;
+  complexity?: RuntimeComplexityLevel;
+  round?: RuntimeRoundView;
+  roundGoal?: string;
+  agentRecentProgress?: RuntimeAgentRecentProgressView;
+  agent_recent_progress?: RuntimeAgentRecentProgressView;
+  milestones?: RuntimeMilestoneView[];
+  riskDelta?: string | null;
+  risk_delta?: string | null;
   repo_harness_status?: RuntimeHarnessStatusView | null;
   constitution_status?: ConstitutionStatus | null;
   change_pack_summary?: ChangePackSummary | null;
@@ -230,6 +264,8 @@ export interface RuntimeAccessView {
 
 export interface RuntimeManifest {
   access: RuntimeAccessView;
+  public_base_url?: string | null;
+  mini_app_base_url?: string | null;
   features: {
     history_replay: boolean;
     message_summaries: boolean;
