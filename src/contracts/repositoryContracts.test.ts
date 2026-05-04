@@ -426,6 +426,92 @@ describe('repositoryContracts', () => {
     });
   });
 
+  test('drops issue worktree commands from shadow harness learning', async () => {
+    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-shadow-worktree-command-'));
+    const staleWorktree = path.join(tempRoot, 'workspaces', 'acme__repo', 'worktrees', 'VAR-7');
+    const currentWorktree = path.join(tempRoot, 'workspaces', 'acme__repo', 'worktrees', 'VAR-14');
+    fs.mkdirSync(path.join(currentWorktree, '.symphony', 'change-pack'), { recursive: true });
+    fs.writeFileSync(
+      path.join(currentWorktree, '.symphony', 'change-pack', 'evidence.json'),
+      JSON.stringify(
+        {
+          command_runs: [
+            {
+              command: `ls -la ${staleWorktree}/`,
+              command_key: 'test',
+              status: 'satisfied',
+              source: 'timeline',
+              turn: 1,
+              exit_code: 0,
+              summary: 'stale worktree listing succeeded before cleanup',
+              recorded_at: '2026-04-23T00:00:00.000Z',
+            },
+            {
+              command: `ls -la ${currentWorktree}/`,
+              command_key: 'build',
+              status: 'satisfied',
+              source: 'timeline',
+              turn: 1,
+              exit_code: 0,
+              summary: 'current worktree listing succeeded',
+              recorded_at: '2026-04-23T00:01:00.000Z',
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+
+    db = new Database(':memory:');
+    initializeSchema(db);
+    const repository = new ShadowHarnessRepository(db);
+    repository.upsert({
+      repo_key: 'acme/repo',
+      source: 'shadow',
+      config_json: {
+        commands: {
+          test: `ls -la ${staleWorktree}/`,
+          dev: 'python3 ./scripts/cli.py dev VAR-10',
+          lint: 'bunx eslint .',
+        },
+        verification: {
+          required_commands: ['test', 'lint'],
+        },
+      },
+      inference_details_json: {
+        inferred_from: ['.symphony/change-pack/evidence.json'],
+        observed_commands: {
+          test: {
+            command: `ls -la ${staleWorktree}/`,
+            success_count: 96,
+            failure_count: 48,
+            last_status: 'satisfied',
+            last_work_item_id: 'wi-stale',
+          },
+        },
+        observed_artifacts: {},
+        observed_runtime_hints: {},
+        learning_confidence: 'medium',
+      },
+    });
+
+    const strengthened = await strengthenShadowHarnessFromWorkspace({
+      workspacePath: currentWorktree,
+      repoKey: 'acme/repo',
+      repository,
+      workItemId: 'wi-current',
+    });
+
+    expect(strengthened.config?.commands?.test).toBeUndefined();
+    expect(strengthened.config?.commands?.build).toBeUndefined();
+    expect(strengthened.config?.commands?.dev).toBeUndefined();
+    expect(strengthened.config?.commands?.lint).toBe('bunx eslint .');
+    expect(strengthened.config?.verification?.required_commands).toEqual(['lint']);
+    expect(repository.findByRepoKey('acme/repo')?.inference_details_json.observed_commands.test).toBeUndefined();
+  });
+
   test('skips malformed artifact and runtime observations while strengthening a shadow harness', async () => {
     tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-shadow-malformed-'));
     const workspace = path.join(tempRoot, 'run-malformed');

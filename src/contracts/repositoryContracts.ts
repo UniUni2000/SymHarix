@@ -111,6 +111,60 @@ function mergeUniqueStrings(values: Array<string | null | undefined>): string[] 
   return merged;
 }
 
+function normalizePathForCommand(value: string): string {
+  return path.resolve(value).replace(/\\/g, '/');
+}
+
+function commandReferencesIssueScope(command: string, workspacePath: string): boolean {
+  const normalizedCommand = command.replace(/\\/g, '/');
+  const normalizedWorkspacePath = normalizePathForCommand(workspacePath);
+
+  return (
+    normalizedCommand.includes(normalizedWorkspacePath) ||
+    /(?:^|[/"'\s])worktrees\/[^/"'\s]+/.test(normalizedCommand) ||
+    /\b[A-Z][A-Z0-9]+-\d+\b/.test(normalizedCommand)
+  );
+}
+
+function filterLearnableCommands(
+  commands: Partial<Record<RepositoryHarnessCommandKey, string>>,
+  workspacePath: string,
+): Partial<Record<RepositoryHarnessCommandKey, string>> {
+  const filtered: Partial<Record<RepositoryHarnessCommandKey, string>> = {};
+  for (const [key, command] of Object.entries(commands)) {
+    if (typeof command !== 'string' || commandReferencesIssueScope(command, workspacePath)) {
+      continue;
+    }
+    filtered[key as RepositoryHarnessCommandKey] = command;
+  }
+  return filtered;
+}
+
+function filterLearnableRequiredCommands(
+  requiredCommands: string[],
+  baseCommands: Partial<Record<RepositoryHarnessCommandKey, string>>,
+  workspacePath: string,
+): string[] {
+  return requiredCommands.filter((commandKey) => {
+    const configuredCommand = baseCommands[commandKey as RepositoryHarnessCommandKey];
+    return typeof configuredCommand !== 'string' || !commandReferencesIssueScope(configuredCommand, workspacePath);
+  });
+}
+
+function filterLearnableObservedCommands(
+  observedCommands: ShadowHarnessInferenceDetails['observed_commands'],
+  workspacePath: string,
+): ShadowHarnessInferenceDetails['observed_commands'] {
+  const filtered: ShadowHarnessInferenceDetails['observed_commands'] = {};
+  for (const [key, record] of Object.entries(observedCommands)) {
+    if (typeof record.command === 'string' && commandReferencesIssueScope(record.command, workspacePath)) {
+      continue;
+    }
+    filtered[key] = record;
+  }
+  return filtered;
+}
+
 function parseInferenceSources(value: unknown): string[] {
   if (!Array.isArray(value)) {
     return [];
@@ -238,18 +292,27 @@ function learnShadowHarnessConfigFromEvidence(params: {
   baseConfig: RepositoryHarnessConfig;
   inferenceDetails: ShadowHarnessInferenceDetails;
   evidence: ReturnType<typeof parseChangePackEvidence>;
+  workspacePath: string;
   workItemId?: string | null;
 }): {
   config: RepositoryHarnessConfig;
   inferenceDetails: ShadowHarnessInferenceDetails;
   learnedFromEvidence: boolean;
 } {
-  const commands = { ...(params.baseConfig.commands ?? {}) };
-  const verificationRequiredCommands = [...(params.baseConfig.verification?.required_commands ?? [])];
+  const baseCommands = params.baseConfig.commands ?? {};
+  const commands = filterLearnableCommands(baseCommands, params.workspacePath);
+  const verificationRequiredCommands = filterLearnableRequiredCommands(
+    params.baseConfig.verification?.required_commands ?? [],
+    baseCommands,
+    params.workspacePath,
+  );
   const artifacts = [...(params.baseConfig.artifacts ?? [])];
   const runtimeHints = { ...(params.baseConfig.runtime_hints ?? {}) };
   const inferredFrom = [...params.inferenceDetails.inferred_from];
-  const observedCommands = { ...params.inferenceDetails.observed_commands };
+  const observedCommands = filterLearnableObservedCommands(
+    params.inferenceDetails.observed_commands,
+    params.workspacePath,
+  );
   const observedArtifacts = { ...params.inferenceDetails.observed_artifacts };
   const observedRuntimeHints = { ...params.inferenceDetails.observed_runtime_hints };
   const successfulWorkItemIds = new Set(params.inferenceDetails.successful_work_item_ids ?? []);
@@ -268,6 +331,9 @@ function learnShadowHarnessConfigFromEvidence(params: {
 
     const key = run.command_key as RepositoryHarnessCommandKey;
     const normalizedCommand = run.command.trim();
+    if (commandReferencesIssueScope(normalizedCommand, params.workspacePath)) {
+      continue;
+    }
     const previous = observedCommands[key] ?? {
       command: normalizedCommand,
       success_count: 0,
@@ -718,6 +784,7 @@ export async function strengthenShadowHarnessFromWorkspace(params: {
     baseConfig: existing.config_json,
     inferenceDetails: existing.inference_details_json,
     evidence: parsedEvidence,
+    workspacePath: params.workspacePath,
     workItemId: params.workItemId,
   });
   const updated = params.repository.upsert({
