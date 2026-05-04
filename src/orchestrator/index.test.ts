@@ -1395,6 +1395,98 @@ describe('Orchestrator Stability', () => {
     expect(state.claimed.has(issue.id)).toBe(false);
   });
 
+  it('pauses for a supervisor decision instead of retrying when dev turn budget is exhausted', async () => {
+    const issue = makeIssue({
+      state: 'Todo',
+      title: '把这个仓库清空成 GitHub 空仓库状态',
+      description: '删除所有 tracked files，只留下空仓库可验证状态。',
+    });
+    const ctx = createOrchestrator(issue, { maxTurns: 1 });
+    orchestrator = ctx.orchestrator;
+    const sessions = new SupervisorSessionRepository(ctx.db);
+    const events = new SupervisorSessionEventRepository(ctx.db);
+    const session = sessions.create({
+      id: 'session-turn-budget',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'executing',
+      repo_ref: 'UniUni2000/test2',
+      intake_mode: 'plan_then_approve',
+      approval_mode: 'explicit_user_approval',
+      plan_version: 1,
+      root_issue_id: issue.id,
+      plan_card: {
+        title: '把这个仓库清空成 GitHub 空仓库状态',
+        user_goal: '把这个仓库清空成 GitHub 空仓库状态',
+        in_scope: ['删除所有 tracked files', '给出可验证交付证据'],
+        out_of_scope: ['不删除 .git 目录', '不绕过用户确认'],
+        acceptance: ['仓库只剩空仓库状态', '最终交付前用户确认范围'],
+        known_risks: ['误删风险高'],
+        execution_strategy: '先确认范围，再执行删除并交付。',
+        needs_user_approval: true,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: { label: '批准并开始', summary: '按受控清理计划执行。' },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    ctx.supervisor.decideNextAction = mock(async () => ({
+      kind: 'continue',
+      message: 'Need one more dev turn.',
+    }));
+    (orchestrator as any).supervisor = ctx.supervisor;
+    (orchestrator as any).reconcileMissingRequirementsWithArtifacts = mock(() => [
+      {
+        key: 'verification:empty_state',
+        label: 'Verify empty repository state',
+        reason: 'The final empty-state proof is still missing.',
+        kind: 'verification',
+      },
+    ]);
+
+    ctx.agentRunner.runTurn = mock(async () => ({
+      success: true,
+      completed: true,
+      cancelled: false,
+      tokens: { input: 10, output: 5, total: 15 },
+      claude_api_calls: 1,
+      timeline: [],
+      transcript: [],
+    }));
+    (orchestrator as any).agentRunner = ctx.agentRunner;
+
+    (orchestrator as any).readWorkspaceFile = mock(async () => null);
+    (orchestrator as any).runCliCommand = mock(async (command: string) => {
+      if (command === 'dispatch') {
+        return { success: true, result: makeCliResult({ final_state: 'In Progress' }) };
+      }
+      throw new Error(`Unexpected ${command} post-processing`);
+    });
+
+    await (orchestrator as any).dispatchIssue(issue, null);
+    await awaitWorker(orchestrator, issue.id);
+
+    const state = (orchestrator as any).state;
+    const workItem = ctx.workItemRepository.findById(issue.id);
+    const updatedSession = sessions.findById(session.id);
+    const eventKinds = events.listBySession(session.id).map((event) => event.event_kind);
+
+    expect(ctx.agentRunner.runTurn).toHaveBeenCalledTimes(1);
+    expect((orchestrator as any).runCliCommand).toHaveBeenCalledTimes(1);
+    expect(state.retry_attempts.size).toBe(0);
+    expect(state.claimed.has(issue.id)).toBe(false);
+    expect(workItem?.orchestrator_state).toBe('halted');
+    expect(workItem?.delivery_code).toBe('supervisor_turn_budget_exhausted');
+    expect(updatedSession?.state).toBe('awaiting_user_decision');
+    expect(updatedSession?.active_decision_kind).toBe('execution_decision');
+    expect(eventKinds).toContain('supervisor_turn_budget_exhausted');
+  });
+
   it('auto-finishes supervisor live docs verification at the turn budget even when harness checks remain noisy', () => {
     const issue = makeIssue({
       title: '创建 docs/supervisor-live-smoke.md 验证文件',
@@ -4361,6 +4453,35 @@ describe('Orchestrator Stability', () => {
 
     await (orchestrator as any).reconcileRunningIssues();
 
+    expect(ctx.workspaceManager.removeWorkspace).toHaveBeenCalledWith('/tmp/symphony-tests/repo/INT-1');
+    expect(ctx.githubIssueClient.closeIssue).toHaveBeenCalledWith(501);
+  });
+
+  it('reconcileTrackedTerminalStates cancels a failed non-running issue after Linear is cancelled externally', async () => {
+    const cancelledIssue = makeIssue({ state: 'Canceled' });
+    const ctx = createOrchestrator(cancelledIssue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.workItemRepository.create({
+      id: cancelledIssue.id,
+      linear_issue_id: cancelledIssue.id,
+      linear_identifier: cancelledIssue.identifier,
+      linear_title: cancelledIssue.title,
+      linear_state: 'In Progress',
+      github_repo: 'owner/repo',
+      github_issue_number: 501,
+      workspace_path: '/tmp/symphony-tests/repo/INT-1',
+      orchestrator_state: 'failed',
+      delivery_code: 'dirty_workspace_no_commit',
+      delivery_summary: 'Needs user decision.',
+    });
+
+    await (orchestrator as any).reconcileTrackedTerminalStates();
+
+    const updated = ctx.workItemRepository.findByLinearIssueId(cancelledIssue.id);
+    expect(updated?.linear_state).toBe('Canceled');
+    expect(updated?.orchestrator_state).toBe('cancelled');
+    expect(updated?.cancelled_at).toBeInstanceOf(Date);
     expect(ctx.workspaceManager.removeWorkspace).toHaveBeenCalledWith('/tmp/symphony-tests/repo/INT-1');
     expect(ctx.githubIssueClient.closeIssue).toHaveBeenCalledWith(501);
   });

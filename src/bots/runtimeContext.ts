@@ -71,6 +71,30 @@ function compareTimeline(left: RuntimeTimelineEvent, right: RuntimeTimelineEvent
   return left.timestamp.localeCompare(right.timestamp);
 }
 
+function isTerminalTrackerState(state: string | null | undefined): boolean {
+  return /^(done|completed|cancelled|canceled|duplicate|closed)$/i.test(state || '');
+}
+
+function isActiveSupervisorState(state: string | null | undefined): boolean {
+  return Boolean(state && !/^(completed|cancelled|canceled)$/i.test(state));
+}
+
+function isUserVisibleActiveIssue(issue: RuntimeIssueView): boolean {
+  if (isTerminalTrackerState(issue.tracker_state)) {
+    return false;
+  }
+  if (issue.actions.can_stop) {
+    return true;
+  }
+  if (isActiveSupervisorState(issue.supervisor_session_state)) {
+    return true;
+  }
+  if (issue.delivery_state === 'delivery_failed' && issue.delivery_code !== 'manual_stop') {
+    return true;
+  }
+  return false;
+}
+
 function resolveFocusIssue(
   runtime: RuntimeControlPlane,
   overviewIssues: RuntimeIssueView[],
@@ -95,8 +119,7 @@ function resolveFocusIssue(
   }
 
   const activeIssues = overviewIssues.filter((issue) =>
-    issue.actions.can_stop ||
-    issue.actions.can_retry ||
+    isUserVisibleActiveIssue(issue) ||
     issue.actions.can_override_governance ||
     issue.actions.can_rewrite_governance ||
     issue.actions.can_split_governance,
@@ -132,7 +155,7 @@ export class BotRuntimeContextService {
       conversation_id: context.recipient.conversation_id,
     })?.default_project_slug ?? null;
     const activeIssues = overview.issues
-      .filter((issue) => issue.actions.can_stop || issue.actions.can_retry)
+      .filter(isUserVisibleActiveIssue)
       .slice(0, 8)
       .map(toIssueContextView);
     const openGovernanceCards = this.followupMessageStates?.findOpenByConversation({

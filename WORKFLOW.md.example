@@ -63,7 +63,8 @@ agent:
   max_retry_backoff_ms: 300000
   max_turns: 3
 server:
-  port: 8080
+  # `bun run start` also defaults to 3000. Override with `PORT=4000 bun run start`.
+  port: 3000
 ---
 
 # symphonyness Agent

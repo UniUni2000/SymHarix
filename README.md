@@ -6,28 +6,42 @@ The repo is intentionally local-first. Secrets live in `.env`, orchestration pol
 
 ## Quick Start
 
-```bash
-bun install
-cp .env.example .env
-cp WORKFLOW.md.example WORKFLOW.md
-```
-
-Edit `.env` and `WORKFLOW.md`, then start:
+From a fresh checkout, create local config files once:
 
 ```bash
-bun run start -- --port 3000
+bun run setup:local
 ```
 
-Open the runtime deck:
+Fill the required values in `.env` and set the target repo route in `WORKFLOW.md`.
+
+After that, the normal local loop is one command:
+
+```bash
+bun run start:local
+```
+
+`start:local` reruns the safe setup guard, then starts the whole local product. If the config files already exist, they are not overwritten. If you only want to start without the setup guard:
+
+```bash
+bun run start
+```
+
+Open the runtime deck and Telegram Mini App pages from the same server:
 
 ```text
 http://localhost:3000/runtime
 ```
 
+Use another port only when `3000` is occupied:
+
+```bash
+PORT=4000 bun run start
+```
+
 Stop every local symphonyness service and companion process:
 
 ```bash
-bun run start -- --kill
+bun run stop
 ```
 
 More detail:
@@ -77,7 +91,8 @@ Typical flow:
 5. After approval, Supervisor creates a root issue and, for larger plans, a sequential child queue.
 6. Orchestrator runs only the current child while later children stay queued.
 7. Supervisor watches dev/review milestones, writes directives for the next dev turn, and asks the user only for high-risk decisions.
-8. Telegram gets high-signal updates, not raw retry/status noise.
+8. Telegram edits the same lifecycle card with the latest issue state instead of posting noisy event streams.
+9. The Mini App shows the rich cockpit: progress, live tool/file events, key milestones, code-change preview, PR/delivery, and child queue.
 
 Linear and GitHub are records and delivery surfaces. They are not the main place for clarification or approval.
 
@@ -130,7 +145,13 @@ SYMPHONY_TELEGRAM_BOOTSTRAP=off
 Check bot health:
 
 ```bash
-curl http://localhost:3000/api/v1/bots/manifest
+bun run health
+```
+
+The runtime manifest should also show the current public/Mini App base URL when Telegram bootstrap has a public HTTPS URL or tunnel:
+
+```bash
+curl http://localhost:3000/api/v1/runtime/manifest
 ```
 
 ## LLM Configuration
@@ -200,7 +221,7 @@ bun src/cli/index.ts repair all
 Stop all local processes:
 
 ```bash
-bun run start -- --kill
+bun run stop
 ```
 
 If a previous run left active sessions, the startup repair path cancels stale pre-materialization sessions and folds old follow-up state back into the current root thread. Startup cleanup is intentionally delayed by default so `bun run start` becomes responsive before heavier orphan repair runs.

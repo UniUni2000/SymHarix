@@ -34,6 +34,8 @@ import {
   type SupervisorOversightAssessment,
   type SupervisorExecutionOverseer,
 } from './executionOverseer';
+import { buildSupervisorSessionVisualCard } from './sessionVisualCard';
+import { isInternalSupervisorTurnBudgetFailure } from './milestoneVisibility';
 
 export interface SupervisorServiceResponseParams {
   context: BotCommandContext;
@@ -130,6 +132,67 @@ function lastOutcomeString(
   return typeof value === 'string' && value.trim() ? value : null;
 }
 
+function runtimeIssueAppPath(session: SupervisorSessionRecord, issue: RuntimeIssueView | null): string {
+  const target = issue?.identifier || issue?.issue_id || session.root_issue_id;
+  if (target) {
+    return `/runtime/issues/${encodeURIComponent(target)}/app`;
+  }
+  return `/runtime?session=${encodeURIComponent(session.id)}`;
+}
+
+function isRetryableDeliveryDecision(session: SupervisorSessionRecord, issue: RuntimeIssueView | null): boolean {
+  return session.state === 'awaiting_user_decision' &&
+    session.active_decision_kind === 'delivery_failure' &&
+    Boolean(issue?.actions.can_retry) &&
+    Boolean(issue?.delivery_state === 'delivery_failed' || issue?.delivery_code || issue?.orchestrator_state === 'failed');
+}
+
+function supervisorPrimaryAction(session: SupervisorSessionRecord, issue: RuntimeIssueView | null = null): {
+  label: string;
+  action: SupervisorSessionAction;
+} {
+  if (session.state === 'awaiting_user_approval' || session.state === 'plan_ready') {
+    return { label: '批准并开始', action: 'approve' };
+  }
+  if (isRetryableDeliveryDecision(session, issue)) {
+    return { label: '修复交付并重试', action: 'approve' };
+  }
+  if (session.state === 'awaiting_user_decision') {
+    return { label: '按推荐继续', action: 'approve' };
+  }
+  if (session.state === 'completed') {
+    return { label: '已完成', action: 'focus' };
+  }
+  if (session.state === 'cancelled') {
+    return { label: '已取消', action: 'focus' };
+  }
+  return { label: '已批准开始', action: 'focus' };
+}
+
+function supervisorActionRows(
+  session: SupervisorSessionRecord,
+  issue: RuntimeIssueView | null,
+  primaryLabel = supervisorPrimaryAction(session, issue).label,
+  primaryAction: SupervisorSessionAction = supervisorPrimaryAction(session, issue).action,
+): NonNullable<BotCommandResponse['action_rows']> {
+  if (session.state === 'completed') {
+    return [
+      [
+        { label: '已完成', style: 'success', callback_data: `sup|${session.id}|focus` },
+        { label: '打开运行视图', style: 'primary', web_app: { url: runtimeIssueAppPath(session, issue) } },
+      ],
+    ];
+  }
+
+  return [
+    [{ label: primaryLabel, style: 'success', callback_data: `sup|${session.id}|${primaryAction}` }],
+    [
+      { label: '改一下计划', callback_data: `sup|${session.id}|edit` },
+      { label: '打开运行视图', style: 'primary', web_app: { url: runtimeIssueAppPath(session, issue) } },
+    ],
+  ];
+}
+
 function supervisorOutcomeMaterialParts(session: SupervisorSessionRecord): string[] {
   return [
     lastOutcomeString(session, 'pending_user_notification_summary')
@@ -141,6 +204,45 @@ function supervisorOutcomeMaterialParts(session: SupervisorSessionRecord): strin
     lastOutcomeString(session, 'latest_dev_instruction')
       ? `instruction:${compact(lastOutcomeString(session, 'latest_dev_instruction'), 96)}`
       : null,
+    lastOutcomeString(session, 'milestone_key')
+      ? `milestone:${compact(lastOutcomeString(session, 'milestone_key'), 128)}`
+      : null,
+  ].filter((part): part is string => Boolean(part));
+}
+
+function runtimeIssueMaterialParts(issue: RuntimeIssueView | null): string[] {
+  if (!issue) {
+    return [];
+  }
+  const latestTools = (issue.session?.recent_tools ?? []).slice(-2).map((tool) => (
+    `tool:${tool.tool_name}:${tool.status}:${compact(tool.summary ?? tool.message, 72)}:${tool.timestamp}`
+  ));
+  const latestFiles = (issue.session?.recent_files ?? []).slice(-2).map((file) => (
+    `file:${file.operation}:${file.status}:${compact(file.path, 72)}:${file.timestamp}`
+  ));
+  const latestMilestones = (issue.milestones ?? []).slice(-2).map((milestone) => (
+    `runtime-milestone:${milestone.kind}:${compact(milestone.summary, 72)}:${milestone.timestamp ?? ''}`
+  ));
+  const agentProgress = issue.agentRecentProgress ?? issue.agent_recent_progress ?? null;
+  const recentAgentProgress = [
+    ...(agentProgress?.dev ?? []),
+    ...(agentProgress?.review ?? []),
+  ].slice(-3).map((progress) => (
+    `agent:${progress.status}:${compact(progress.summary, 72)}:${progress.timestamp ?? ''}`
+  ));
+
+  return [
+    `phase:${issue.phase}`,
+    `tracker:${issue.tracker_state}`,
+    `orchestrator:${issue.orchestrator_state ?? ''}`,
+    `delivery:${issue.delivery_state ?? ''}:${issue.delivery_code ?? ''}:${compact(issue.delivery_summary, 96)}`,
+    `next:${compact(issue.next_recommended_action, 96)}`,
+    `session:${issue.session?.stage ?? ''}:${compact(issue.session?.last_message, 96)}:${issue.session?.last_event_at ?? ''}`,
+    issue.round ? `round:${issue.round.index}/${issue.round.total}:${compact(issue.round.goal, 72)}` : null,
+    ...latestTools,
+    ...latestFiles,
+    ...latestMilestones,
+    ...recentAgentProgress,
   ].filter((part): part is string => Boolean(part));
 }
 
@@ -296,6 +398,25 @@ function buildScopeChangedPlanCard(
   };
 }
 
+function buildDestructiveApprovalPolicyText(
+  session: SupervisorSessionRecord,
+  issue: RuntimeIssueView,
+): string {
+  const plan = session.plan_card;
+  return [
+    plan?.title,
+    plan?.user_goal,
+    ...(plan?.in_scope ?? []),
+    ...(plan?.out_of_scope ?? []),
+    ...(plan?.acceptance ?? []),
+    ...(plan?.known_risks ?? []),
+    plan?.execution_strategy,
+    issue.title,
+    issue.next_recommended_action,
+    issue.delivery_summary,
+  ].filter((value): value is string => Boolean(value)).join('\n');
+}
+
 function isApprovalText(text: string): boolean {
   const normalized = text.trim().toLowerCase();
   return APPROVE_WORDS.some((word) => normalized.includes(word.toLowerCase()));
@@ -337,6 +458,35 @@ function isPlanMemoryQuestion(text: string): boolean {
   return /计划|范围|验收|完成算什么|目标|为什么|子任务|子单|plan|scope|acceptance|goal/i.test(text);
 }
 
+function shouldRouteReadOnlyIntentToActiveSession(
+  session: SupervisorSessionRecord,
+  intent: BotAssistantIntent | null,
+  text: string,
+): boolean {
+  if (!intent || intent.kind === 'create_issue') {
+    return true;
+  }
+  if (
+    isApprovalText(text) ||
+    isEditText(text) ||
+    isAlternateText(text) ||
+    isCancelText(text) ||
+    isScopeChangeText(text) ||
+    isPlanMemoryQuestion(text)
+  ) {
+    return true;
+  }
+  if (
+    intent.kind === 'status' ||
+    intent.kind === 'show_default_project' ||
+    intent.kind === 'help' ||
+    intent.kind === 'answer_question'
+  ) {
+    return false;
+  }
+  return session.state === 'clarifying' || session.state === 'drafting';
+}
+
 function shouldClarifyAcceptance(text: string, description: string | null): boolean {
   const combined = `${text}\n${description || ''}`;
   if (isRiskyCleanupRequest(combined)) {
@@ -345,13 +495,29 @@ function shouldClarifyAcceptance(text: string, description: string | null): bool
   return !/验收|测试|verify|验证|输出|页面|命令|结果|完成后|应该/.test(combined);
 }
 
+function clarificationAnswerUpdatesGoal(question: string | null | undefined, answer: string): boolean {
+  const normalizedQuestion = question || '';
+  const normalizedAnswer = answer.trim();
+  if (!normalizedQuestion || !normalizedAnswer) {
+    return false;
+  }
+  if (/验收|完成以后|完成后|可验证|acceptance/i.test(normalizedQuestion)) {
+    return false;
+  }
+  return /笔误|实际想|具体目标|清空的是|清理的是|删除的是|目标/i.test(normalizedQuestion);
+}
+
 function asksForRepoClarification(question: string | null | undefined): boolean {
   return /仓库|project slug|repo/i.test(question || '');
 }
 
 function isLikelyMultiObjective(text: string, description: string | null): boolean {
   const combined = `${text}\n${description || ''}`;
-  return /同时|并且|以及|一起|顺便|另外|两个|多个|子任务|子单|拆分|顺序|排队|child queue|root \+ child|also|multiple|sequential|split/i.test(combined);
+  if (/子任务|子单|拆分|顺序|排队|child queue|root \+ child|multiple|sequential|split/i.test(combined)) {
+    return true;
+  }
+  const implementationText = stripLifecycleOnlySteps(combined);
+  return /同时|一起|顺便|另外|两个|多个|also/i.test(implementationText);
 }
 
 function explicitlyForbidsSplitQueue(text: string, description: string | null): boolean {
@@ -359,14 +525,114 @@ function explicitlyForbidsSplitQueue(text: string, description: string | null): 
   return /(?:不要|不需要|禁止|别).{0,12}(?:拆分|子任务|子单|child queue|split queue)|(?:root-only|单一\s*issue|一张\s*root-only|只创建一张).{0,24}(?:单|issue|任务)|(?:不要|不需要|禁止|别).{0,12}(?:创建|生成).{0,12}(?:child queue|子任务|子单)/i.test(combined);
 }
 
+function explicitlyRequestsSplitQueue(text: string, description: string | null): boolean {
+  const combined = `${text}\n${description || ''}`;
+  return /(?:要求|使用|需要|请|必须|拆成|拆分).{0,24}(?:root\s*\+\s*child|child queue|split queue|子任务|子单)|(?:root\s*\+\s*child|child queue|split queue)|顺序子任务/i.test(combined);
+}
+
 function isRiskyCleanupRequest(text: string): boolean {
   return /(?:清空|清理|删除|移除|删掉).*(?:残余|垃圾|遗留|多余|无用|文件|目录|仓库|项目)|(?:残余|垃圾|遗留|多余|无用).*(?:清空|清理|删除|移除|删掉)|把.+(?:清空|清理|删除|移除|删掉)/i.test(text);
 }
 
-function deriveSupervisorMilestone(issue: RuntimeIssueView): SupervisorMilestone | null {
+function stripLifecycleOnlySteps(value: string): string {
+  return value
+    .replace(/(?:创建|打开|提交|发起|更新)?\s*(?:PR|pull request|merge request)(?:\s*#?\d+)?/gi, '')
+    .replace(/(?:review|delivery|review\/delivery|审阅|评审|交付|合并|merge|提交成功|提交|验收|验证|测试|跑测试|跑命令)/gi, '')
+    .replace(/(?:创建|建立)\s*(?:issue|Issue|任务|单)(?:\s*描述)?/gi, '')
+    .replace(/(?:确认|明确|限定).{0,12}(?:范围|边界|保留项|清理边界)/gi, '')
+    .replace(/(?:生成|列出|提供).{0,20}(?:清单|证明|证据|文件列表|git diff)/gi, '')
+    .replace(/(?:执行|完成).{0,8}(?:清理|删除|移除|重置)(?:操作|动作)?/gi, '');
+}
+
+function isFocusedCleanupPlan(planCard: SupervisorPlanCard): boolean {
+  const combined = [
+    planCard.user_goal,
+    ...planCard.in_scope,
+    ...planCard.acceptance,
+    planCard.execution_strategy,
+  ].join('\n');
+  if (!isRiskyCleanupRequest(combined)) {
+    return false;
+  }
+  if (/多\s*agent|多个\s*agent|并行|root\s*\+\s*child|child queue|split queue|子任务|子单|拆分|分阶段实现/i.test(planCard.user_goal)) {
+    return false;
+  }
+  return /只保留|仅保留|空\s*README|readme|当前仓库|这个仓库|仓库内容|单个目录|docs?\s*(?:文件夹|目录)/i.test(combined);
+}
+
+function extractMarkdownPaths(value: string): string[] {
+  return Array.from(new Set(
+    [...value.matchAll(/(?:^|\s)([\w./-]+\.md)(?=[\s，。；,;]|$)/g)]
+      .map((match) => match[1])
+      .filter((value): value is string => Boolean(value)),
+  ));
+}
+
+function isLifecycleOnlyScope(value: string): boolean {
+  const normalized = value.trim();
+  if (!normalized) {
+    return true;
+  }
+  const withoutLifecycle = stripLifecycleOnlySteps(normalized).replace(/[，。；,;/\s-]+/g, '');
+  return withoutLifecycle.length === 0;
+}
+
+function supportsSplitQueue(planCard: SupervisorPlanCard): boolean {
+  if (explicitlyForbidsSplitQueue(planCard.user_goal, planCard.execution_strategy)) {
+    return false;
+  }
+  if (explicitlyRequestsSplitQueue(planCard.user_goal, null)) {
+    return true;
+  }
+  if (isFocusedCleanupPlan(planCard)) {
+    return false;
+  }
+  const visibleScopeText = [
+    planCard.user_goal,
+    ...planCard.in_scope,
+  ].join('\n');
+  const allPlanText = [
+    visibleScopeText,
+    planCard.execution_strategy,
+    ...planCard.acceptance,
+  ].join('\n');
+  const visiblePaths = extractMarkdownPaths(visibleScopeText);
+  if ((visiblePaths.length >= 2 ? visiblePaths : extractMarkdownPaths(allPlanText)).length >= 2) {
+    return true;
+  }
+  const implementationScopes = planCard.in_scope
+    .map((scope) => compact(stripLifecycleOnlySteps(scope), 120))
+    .filter((scope) => scope && !isLifecycleOnlyScope(scope));
+  if (implementationScopes.length >= 2) {
+    return true;
+  }
+  return isLikelyMultiObjective(planCard.user_goal, planCard.execution_strategy)
+    && implementationScopes.length >= 2;
+}
+
+export function deriveSupervisorMilestone(issue: RuntimeIssueView): SupervisorMilestone | null {
   const rootIssueId = issue.governance_root_issue_id ?? issue.issue_id;
   const isChildIssue = rootIssueId !== issue.issue_id;
   const childQueue = issue.governance_child_queue ?? [];
+  const rootCancelled = !isChildIssue && (
+    issue.orchestrator_state === 'cancelled' ||
+    /^(cancelled|canceled)$/i.test(issue.tracker_state || '')
+  );
+
+  if (rootCancelled) {
+    return {
+      kind: 'cancelled',
+      key: ['cancelled', issue.issue_id, issue.updated_at ?? '', issue.tracker_state ?? ''].join('|'),
+      issue_id: issue.issue_id,
+      issue_identifier: issue.identifier,
+      summary: '计划线程已取消。',
+      delivery_state: issue.delivery_state ?? null,
+      delivery_code: issue.delivery_code ?? null,
+      governance_thread_state: issue.governance_thread_state ?? null,
+      current_child_issue_id: null,
+    };
+  }
+
   const rootDeliveryFailed = !isChildIssue && (
     issue.delivery_state === 'delivery_failed' ||
     issue.orchestrator_state === 'failed' ||
@@ -683,11 +949,6 @@ function buildSupervisorSplitChildPlans(planCard: SupervisorPlanCard): Array<{
     visibleScopeText,
     planCard.execution_strategy,
   ].join('\n');
-  const extractMarkdownPaths = (value: string) => Array.from(new Set(
-    [...value.matchAll(/(?:^|\s)([\w./-]+\.md)(?=[\s，。；,;]|$)/g)]
-      .map((match) => match[1])
-      .filter((value): value is string => Boolean(value)),
-  ));
   const visiblePaths = extractMarkdownPaths(visibleScopeText);
   const paths = visiblePaths.length >= 2 ? visiblePaths : extractMarkdownPaths(text);
   const pathLimit = /两个|两张|2\s*个|2\s*张/i.test(text) ? 2 : 4;
@@ -722,7 +983,7 @@ function buildSupervisorSplitChildPlans(planCard: SupervisorPlanCard): Array<{
       `来源 root 计划：${planCard.title}`,
       `子任务序号：${index + 1}/${targets.length}`,
       `用途：${target.purpose}`,
-      `完成算什么：${target.acceptance}`,
+      `验收标准：${target.acceptance}`,
       '执行规则：这是 Supervisor root + child queue 的一个顺序 child；只处理本子任务，不抢跑后续 sibling。',
     ].join('\n'),
   }));
@@ -743,8 +1004,12 @@ function mergePlanCard(
     ...fallback.out_of_scope,
     ...fallback.acceptance,
   ].some((value) => explicitlyForbidsSplitQueue(value, null));
+  const explicitlyRequestedSplitQueue = [
+    fallback.user_goal,
+    ...fallback.in_scope,
+  ].some((value) => explicitlyRequestsSplitQueue(value, null));
 
-  return {
+  const candidate: SupervisorPlanCard = {
     ...fallback,
     title: compact(override.title, 120) || fallback.title,
     user_goal: compact(override.user_goal, 220) || fallback.user_goal,
@@ -772,6 +1037,14 @@ function mergePlanCard(
           })
         : fallback.alternate_option,
     governance_preview: override.governance_preview ?? fallback.governance_preview,
+  };
+  return {
+    ...candidate,
+    materialization_mode: candidate.materialization_mode === 'root_with_split_queue'
+      && !explicitlyRequestedSplitQueue
+      && !supportsSplitQueue(candidate)
+      ? 'root_only'
+      : candidate.materialization_mode,
   };
 }
 
@@ -810,6 +1083,22 @@ function normalizePlanComputation(
   };
 }
 
+function hasRecentClarificationAnswer(events: SupervisorSessionEventRecord[]): boolean {
+  return events.some((event) => event.event_kind === 'clarification_answer_recorded');
+}
+
+function shouldPreferDeterministicAfterClarification(
+  recentEvents: SupervisorSessionEventRecord[],
+  deterministicPlan: PlanComputation,
+  computedPlan: PlanComputation,
+): boolean {
+  return (
+    hasRecentClarificationAnswer(recentEvents) &&
+    deterministicPlan.state !== 'clarifying' &&
+    computedPlan.state === 'clarifying'
+  );
+}
+
 export function buildSupervisorSessionFollowupMessage(
   session: SupervisorSessionRecord,
   issue: RuntimeIssueView | null = null,
@@ -818,6 +1107,9 @@ export function buildSupervisorSessionFollowupMessage(
   format: 'telegram_html';
   action_rows: NonNullable<BotCommandResponse['action_rows']>;
   material_key: string;
+  caption?: string;
+  media_key?: string | null;
+  photo?: BotCommandResponse['photo'];
 } {
   const planCard = session.plan_card;
   const title = planCard?.title || issue?.title || '当前计划线程';
@@ -838,21 +1130,29 @@ export function buildSupervisorSessionFollowupMessage(
     currentChild,
     childQueue: queue,
   });
-  const approvalPrimaryLabel = waitingForApproval ? '批准并开始' : '按推荐继续';
   const materialKey = [
     'session',
     session.id,
     `v${session.plan_version}`,
     session.state,
     issue?.identifier ?? '',
+    ...runtimeIssueMaterialParts(issue),
     currentChild?.issue_identifier ?? '',
     queue.map((child) => `${child.issue_identifier}:${child.queue_state ?? ''}`).join(','),
     ...supervisorOutcomeMaterialParts(session),
   ].join('|');
 
+  const visual = buildSupervisorSessionVisualCard(session, issue, materialKey);
+  const actionRows = session.root_issue_id || issue || waitingForApproval || waitingForDecision
+    ? supervisorActionRows(session, issue)
+    : [];
+
   return {
     format: 'telegram_html',
     material_key: materialKey,
+    caption: visual?.caption,
+    media_key: visual?.media_key,
+    photo: visual?.photo,
     message: joinHtmlLines([
       waitingForApproval
         ? `<b>计划待你批准 · v${session.plan_version}</b>`
@@ -883,7 +1183,7 @@ export function buildSupervisorSessionFollowupMessage(
         : null,
       planCard ? '<b>本次范围</b>' : null,
       planCard ? escapeHtml(textList(planCard.in_scope, '按当前目标推进。')) : null,
-      planCard ? '<b>完成算什么</b>' : null,
+      planCard ? '<b>验收标准</b>' : null,
       planCard ? escapeHtml(textList(planCard.acceptance, '结果可验证。')) : null,
       waitingForApproval && planCard ? '<b>批准后会发生什么</b>' : null,
       waitingForApproval && planCard ? escapeHtml(planCard.execution_strategy || '批准后我会开始物化并推进这条计划线程。') : null,
@@ -917,15 +1217,7 @@ export function buildSupervisorSessionFollowupMessage(
           ? '这张卡会停留在这里作为结果记录。'
           : '我会继续盯关键节点，有需要你决定时再回来。',
     ]),
-    action_rows: waitingForApproval || waitingForDecision
-      ? [
-          [{ label: approvalPrimaryLabel, callback_data: `sup|${session.id}|approve` }],
-          [
-            { label: '改一下计划', callback_data: `sup|${session.id}|edit` },
-            { label: '换用备选方案', callback_data: `sup|${session.id}|alternate` },
-          ],
-        ]
-      : [],
+    action_rows: actionRows,
   };
 }
 
@@ -1030,6 +1322,10 @@ export class SupervisorSessionService {
       return this.cancelSession(activeSession, params.text);
     }
 
+    if (!shouldRouteReadOnlyIntentToActiveSession(activeSession, params.intent, params.text)) {
+      return null;
+    }
+
     if (params.intent?.kind === 'create_issue' && isNewThreadText(params.text)) {
       for (const session of this.findActiveSessionsForConversation(params.context)) {
         this.sessions.update({
@@ -1059,7 +1355,11 @@ export class SupervisorSessionService {
       || isApprovalText(params.text)
       || isEditText(params.text)
       || isAlternateText(params.text)
-      || isScopeChangeText(params.text);
+      || isScopeChangeText(params.text)
+      || (
+        activeSession.state === 'clarifying'
+        && clarificationAnswerUpdatesGoal(activeSession.plan_card?.clarification_question, params.text)
+      );
 
     if (!shouldContinueActiveSession && params.intent?.kind === 'create_issue') {
       const incomingTitle = normalizeTitle(params.intent.title);
@@ -1239,10 +1539,19 @@ export class SupervisorSessionService {
     if (session.state === 'clarifying' || session.state === 'drafting') {
       const planCard = session.plan_card;
       const repoClarification = asksForRepoClarification(planCard?.clarification_question);
+      const answerUpdatesGoal = !repoClarification
+        && clarificationAnswerUpdatesGoal(planCard?.clarification_question, params.text);
       const draft: DraftInput = {
-        title: planCard?.title || compact(params.text, 80) || '未命名计划',
+        title: answerUpdatesGoal
+          ? normalizeTitle(params.text)
+          : planCard?.title || compact(params.text, 80) || '未命名计划',
         description: repoClarification
           ? planCard?.acceptance?.join('\n') || params.text
+          : answerUpdatesGoal
+            ? [
+                planCard?.user_goal || planCard?.title || null,
+                `用户澄清：${params.text}`,
+              ].filter((value): value is string => Boolean(value)).join('\n')
           : params.text,
         project_slug: session.repo_ref,
       };
@@ -1446,12 +1755,13 @@ export class SupervisorSessionService {
         })
       : null;
 
+    const riskyCleanup = isRiskyCleanupRequest(`${draft.title}\n${draft.description || ''}`);
     const splitQueueForbidden = explicitlyForbidsSplitQueue(draft.title, draft.description);
-    const multiObjective = !splitQueueForbidden && (
+    const focusedCleanup = riskyCleanup && /只保留|仅保留|空\s*README|readme|当前仓库|这个仓库|仓库内容|docs?\s*(?:文件夹|目录)/i.test(`${draft.title}\n${draft.description || ''}`);
+    const multiObjective = !splitQueueForbidden && !focusedCleanup && (
       governance?.decision === 'split_before_implement'
       || isLikelyMultiObjective(draft.title, draft.description)
     );
-    const riskyCleanup = isRiskyCleanupRequest(`${draft.title}\n${draft.description || ''}`);
     const needsClarify = shouldClarifyAcceptance(draft.title, draft.description)
       && !multiObjective
       && !explicitApprovalRequested
@@ -1575,13 +1885,17 @@ export class SupervisorSessionService {
         deterministicPlan,
         recentEvents,
       });
-      const computed = normalizePlanComputation(deterministicPlan, refinement);
+      const refined = normalizePlanComputation(deterministicPlan, refinement);
+      const computed = shouldPreferDeterministicAfterClarification(recentEvents, deterministicPlan, refined)
+        ? deterministicPlan
+        : refined;
       if (refinement) {
         this.recordEvent(session.id, 'plan_brain_applied', {
           rationale: refinement.rationale ?? null,
           state: computed.state,
           intake_mode: computed.intakeMode,
           approval_mode: computed.approvalMode,
+          stale_clarification_suppressed: computed !== refined,
         });
       }
       return computed;
@@ -1639,7 +1953,7 @@ export class SupervisorSessionService {
         `用户目标：${planCard.user_goal}`,
         `本次范围：${planCard.in_scope.join('；')}`,
         `暂不处理：${planCard.out_of_scope.join('；')}`,
-        `完成算什么：${planCard.acceptance.join('；')}`,
+        `验收标准：${planCard.acceptance.join('；')}`,
         `执行方式：${planCard.execution_strategy}`,
       ].join('\n'),
       project_slug: planCard.project_slug,
@@ -1802,7 +2116,9 @@ export class SupervisorSessionService {
     }
 
     let result;
-    if (issue.governance_decision === 'split_before_implement' && issue.actions.can_split_governance) {
+    if (isRetryableDeliveryDecision(session, issue)) {
+      result = await this.runtime.retryIssue(issue.issue_id);
+    } else if (issue.governance_decision === 'split_before_implement' && issue.actions.can_split_governance) {
       result = await this.runtime.splitGovernance(issue.issue_id);
     } else if (issue.governance_decision === 'accept_with_rewrite' && issue.actions.can_rewrite_governance) {
       result = await this.runtime.rewriteGovernance(issue.issue_id);
@@ -1827,8 +2143,13 @@ export class SupervisorSessionService {
       id: session.id,
       state: nextState,
       current_child_issue_id: latestIssue.governance_current_child?.issue_id ?? session.current_child_issue_id,
-      delivery_state: latestIssue.delivery_state ?? session.delivery_state,
-      delivery_summary: latestIssue.delivery_summary ?? result.message,
+      active_decision_kind: result.accepted ? null : session.active_decision_kind,
+      delivery_state: result.accepted && isRetryableDeliveryDecision(session, issue)
+        ? null
+        : latestIssue.delivery_state ?? session.delivery_state,
+      delivery_summary: result.accepted && isRetryableDeliveryDecision(session, issue)
+        ? result.message
+        : latestIssue.delivery_summary ?? result.message,
       last_material_outcome: {
         governance_action: result.governance_action ?? null,
         message: result.message,
@@ -1911,7 +2232,7 @@ export class SupervisorSessionService {
             '<b>暂不处理</b>',
             escapeHtml(textList(planCard.out_of_scope, '不扩大到无关模块。')),
             null,
-            '<b>完成算什么</b>',
+            '<b>验收标准</b>',
             escapeHtml(textList(planCard.acceptance, '结果可验证。')),
             visibleRisks.length > 0 ? null : null,
             visibleRisks.length > 0 ? '<b>已知风险</b>' : null,
@@ -1927,15 +2248,10 @@ export class SupervisorSessionService {
             null,
             '点按钮继续，或者直接回复你的想法。',
           ]),
-          action_rows: [
-            [{ label: '批准并开始', callback_data: `sup|${session.id}|approve` }],
-            [
-              { label: '改一下计划', callback_data: `sup|${session.id}|edit` },
-              { label: '换用备选方案', callback_data: `sup|${session.id}|alternate` },
-            ],
-          ],
+          action_rows: supervisorActionRows(session, issue, '批准并开始'),
         },
         'approval',
+        issue,
       );
     }
 
@@ -1971,12 +2287,10 @@ export class SupervisorSessionService {
             null,
             '点“按推荐继续”，或者直接回复你想怎么改。',
           ]),
-          action_rows: [
-            [{ label: '按推荐继续', callback_data: `sup|${session.id}|approve` }],
-            [{ label: '改一下计划', callback_data: `sup|${session.id}|edit` }],
-          ],
+          action_rows: supervisorActionRows(session, issue),
         },
         `decision:${issue?.identifier ?? 'none'}`,
+        issue,
       );
     }
 
@@ -1994,6 +2308,7 @@ export class SupervisorSessionService {
           ]),
         },
         'cancelled',
+        issue,
       );
     }
 
@@ -2014,11 +2329,13 @@ export class SupervisorSessionService {
             ? escapeHtml(lastOutcomeString(session, 'latest_dev_instruction')!)
             : null,
         ]),
+        action_rows: supervisorActionRows(session, issue),
       },
       [
         session.state,
         ...supervisorOutcomeMaterialParts(session),
       ].filter(Boolean).join(':'),
+      issue,
     );
   }
 
@@ -2056,9 +2373,10 @@ export class SupervisorSessionService {
           null,
           escapeHtml(issue?.next_recommended_action || '我会继续盯关键节点，有需要你决定时再回来。'),
         ]),
-        action_rows: [],
+        action_rows: supervisorActionRows(session, issue),
       },
       `executing:${issue?.identifier ?? 'none'}:${currentChild?.issue_identifier ?? 'none'}:${queue.map((child) => `${child.issue_identifier}:${child.queue_state ?? ''}`).join(',')}`,
+      issue,
     );
   }
 
@@ -2098,7 +2416,7 @@ export class SupervisorSessionService {
           '<b>暂不处理</b>',
           escapeHtml(textList(planCard.out_of_scope, '不扩大到无关模块。')),
           null,
-          '<b>完成算什么</b>',
+          '<b>验收标准</b>',
           escapeHtml(textList(planCard.acceptance, '结果可验证。')),
           currentChild ? '<b>当前子任务</b>' : null,
           currentChild ? `${escapeHtml(currentChild.issue_identifier)} · ${escapeHtml(currentChild.title)}` : null,
@@ -2115,11 +2433,36 @@ export class SupervisorSessionService {
     session: SupervisorSessionRecord,
     response: BotCommandResponse,
     materialKey: string,
+    issue: RuntimeIssueView | null = null,
   ): BotCommandResponse {
+    const visualIssue = issue ?? (session.root_issue_id ? this.runtime.getIssue(session.root_issue_id) : null);
+    const fullMaterialKey = [
+      'session',
+      session.id,
+      `v${session.plan_version}`,
+      materialKey,
+      ...runtimeIssueMaterialParts(visualIssue),
+    ].filter(Boolean).join('|');
+    const responseFormat = response.format ?? (session.transport === 'telegram' ? 'telegram_html' : undefined);
+    const shouldRenderVisual =
+      session.transport === 'telegram' &&
+      Boolean(session.plan_card) &&
+      materialKey !== 'clarifying' &&
+      !materialKey.startsWith('plan-memory');
+    const visual = shouldRenderVisual
+      ? buildSupervisorSessionVisualCard(session, visualIssue, fullMaterialKey)
+      : null;
+    const visualCaption = visual?.caption;
     return {
       ...response,
+      format: responseFormat,
+      caption: response.caption ?? visualCaption,
+      media_key: response.media_key ?? visual?.media_key,
+      photo: response.photo ?? visual?.photo,
+      show_caption_above_media: response.show_caption_above_media ?? (visual ? false : undefined),
+      action_rows: response.action_rows ?? (visual ? supervisorActionRows(session, visualIssue) : undefined),
       session_id: session.id,
-      material_key: `session|${session.id}|v${session.plan_version}|${materialKey}`,
+      material_key: fullMaterialKey,
     };
   }
 
@@ -2159,11 +2502,14 @@ export class SupervisorSessionService {
         current_child_issue_id: milestone.current_child_issue_id ?? null,
       });
     }
+    const userVisibleMilestone = isInternalSupervisorTurnBudgetFailure(milestone)
+      ? null
+      : milestone;
 
     const oversightResult = this.executionOverseer.assess({
       session,
       issue,
-      milestone,
+      milestone: userVisibleMilestone,
     });
     if (oversightResult && typeof (oversightResult as Promise<unknown>).then === 'function') {
       void (oversightResult as Promise<SupervisorOversightAssessment | null>)
@@ -2175,7 +2521,7 @@ export class SupervisorSessionService {
           if (freshSession.state === 'cancelled' || freshSession.state === 'completed') {
             return;
           }
-          this.applyIssueOversightUpdate(freshSession, issue, milestone, oversight);
+          this.applyIssueOversightUpdate(freshSession, issue, userVisibleMilestone, oversight);
         })
         .catch(() => {
           // The overseer owns fallback behavior; a rejected async brain must not break runtime event fanout.
@@ -2186,7 +2532,7 @@ export class SupervisorSessionService {
     this.applyIssueOversightUpdate(
       session,
       issue,
-      milestone,
+      userVisibleMilestone,
       oversightResult as SupervisorOversightAssessment | null,
     );
   }
@@ -2205,10 +2551,21 @@ export class SupervisorSessionService {
           delivery_summary: issue.delivery_summary ?? milestone?.summary ?? null,
           plan_title: session.plan_card?.title ?? issue.title,
           user_text: null,
+          destructive_text: buildDestructiveApprovalPolicyText(session, issue),
         })
       : null;
     const rootIssueId = issue.governance_root_issue_id ?? issue.issue_id;
     const isRootIssueEvent = rootIssueId === issue.issue_id;
+    const shouldMirrorRootDelivery =
+      isRootIssueEvent &&
+      (issue.delivery_state == null || issue.delivery_state !== 'delivery_failed');
+    const userVisibleDeliveryFailure = issue.delivery_state === 'delivery_failed'
+      && !isInternalSupervisorTurnBudgetFailure(milestone ?? {
+        kind: 'delivery_failed',
+        key: issue.delivery_code ?? issue.delivery_summary ?? '',
+        summary: issue.delivery_summary ?? issue.delivery_code ?? null,
+        delivery_code: issue.delivery_code ?? null,
+      });
     const previousOversightKey = typeof session.last_material_outcome?.oversight_key === 'string'
       ? session.last_material_outcome.oversight_key
       : null;
@@ -2229,7 +2586,9 @@ export class SupervisorSessionService {
     }
 
     let nextState = session.state;
-    if (isRootIssueEvent && (
+    if (isRootIssueEvent && milestone?.kind === 'cancelled') {
+      nextState = 'cancelled';
+    } else if (isRootIssueEvent && (
       issue.orchestrator_state === 'completed' ||
       issue.delivery_state === 'completed' ||
       milestone?.kind === 'completed'
@@ -2259,10 +2618,10 @@ export class SupervisorSessionService {
         : nextState === 'awaiting_user_decision'
           ? session.active_decision_kind
           : null,
-      delivery_state: isRootIssueEvent || issue.delivery_state === 'delivery_failed'
+      delivery_state: shouldMirrorRootDelivery || userVisibleDeliveryFailure
         ? issue.delivery_state ?? session.delivery_state
         : session.delivery_state,
-      delivery_summary: isRootIssueEvent || issue.delivery_state === 'delivery_failed'
+      delivery_summary: shouldMirrorRootDelivery || userVisibleDeliveryFailure
         ? issue.delivery_summary ?? session.delivery_summary
         : session.delivery_summary,
       last_material_outcome: {

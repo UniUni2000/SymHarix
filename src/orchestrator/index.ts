@@ -1001,6 +1001,8 @@ export class Orchestrator extends EventEmitter {
           id: workItem.id,
           linear_state: issue.state,
           orchestrator_state: 'discovering',
+          delivery_code: null,
+          delivery_summary: null,
         });
       }
       await this.dispatchIssue(issue, null);
@@ -1018,6 +1020,8 @@ export class Orchestrator extends EventEmitter {
         id: workItem.id,
         linear_state: issue.state,
         orchestrator_state: 'retry_scheduled',
+        delivery_code: null,
+        delivery_summary: null,
       });
     }
     await this.scheduleRetry(issue.id, issue.identifier, 1, 'Manual retry requested', 250);
@@ -2106,6 +2110,7 @@ export class Orchestrator extends EventEmitter {
       try {
         // Step 1: Reconcile running issues (Section 8.5)
         await this.reconcileRunningIssues();
+        await this.reconcileTrackedTerminalStates();
 
         // Step 2: Run dispatch preflight validation (Section 6.3)
         const validation = this.validateDispatchConfig();
@@ -4315,6 +4320,60 @@ export class Orchestrator extends EventEmitter {
     return this.supervisorSessionRepository.findByRootIssueId(rootIssueId);
   }
 
+  private pauseSupervisorSessionForTurnBudget(params: {
+    workItem: WorkItem | null | undefined;
+    issue: Issue;
+    turnBudget: number;
+    missingRequirements: CompletionRequirement[];
+    supervisorMessage: string | null;
+  }): string {
+    const missingSummary = params.missingRequirements
+      .map((requirement) => requirement.label || requirement.key)
+      .filter(Boolean)
+      .slice(0, 3)
+      .join('；');
+    const summary = [
+      `开发 agent 已用完本轮 ${params.turnBudget} 个 turn，但 supervisor 认为还需要继续。`,
+      missingSummary ? `仍缺少：${missingSummary}。` : null,
+      '我已暂停自动重试，需要你确认继续、调整范围，或停止这条任务。',
+    ].filter(Boolean).join('\n');
+    const session = this.findSupervisorSessionForWorkItem(params.workItem);
+    if (!session) {
+      return summary;
+    }
+
+    this.supervisorSessionRepository.update({
+      id: session.id,
+      state: 'awaiting_user_decision',
+      active_decision_kind: 'execution_decision',
+      delivery_state: 'delivery_failed',
+      delivery_summary: summary,
+      last_material_outcome: {
+        ...(session.last_material_outcome ?? {}),
+        supervisor_decision: 'ask_user',
+        supervisor_reason: 'turn_budget_exhausted',
+        user_summary: summary,
+        dev_instruction: null,
+        turn_budget: params.turnBudget,
+        supervisor_continue_message: params.supervisorMessage,
+        missing_requirements: params.missingRequirements,
+      },
+    });
+    this.supervisorSessionEventRepository.create({
+      id: crypto.randomUUID(),
+      session_id: session.id,
+      event_kind: 'supervisor_turn_budget_exhausted',
+      payload_json: {
+        issue_id: params.issue.id,
+        issue_identifier: params.issue.identifier,
+        turn_budget: params.turnBudget,
+        missing_requirements: params.missingRequirements,
+        supervisor_continue_message: params.supervisorMessage,
+      },
+    });
+    return summary;
+  }
+
   private inheritSupervisorContext(
     sourceWorkItem: WorkItem,
     targetWorkItemId: string,
@@ -5667,12 +5726,35 @@ export class Orchestrator extends EventEmitter {
                 );
                 sessionActive = false;
               } else {
-                result.next_action = isReview ? 'retry_review' : 'none';
-                result.retry_delay_ms = isReview ? 1000 : undefined;
-                result.failure_reason = 'agent_turn';
-                result.error = isReview
-                  ? `Review turn budget exhausted without a canonical .symphony/REVIEW_REPORT.md for ${activeIssue.identifier}.`
-                  : `Supervisor requested another turn after reaching max turns (${turnBudget}).`;
+                if (isReview) {
+                  result.next_action = 'retry_review';
+                  result.retry_delay_ms = 1000;
+                  result.failure_reason = 'agent_turn';
+                  result.error = `Review turn budget exhausted without a canonical .symphony/REVIEW_REPORT.md for ${activeIssue.identifier}.`;
+                } else {
+                  const deliverySummary = this.pauseSupervisorSessionForTurnBudget({
+                    workItem,
+                    issue: activeIssue,
+                    turnBudget,
+                    missingRequirements: effectiveMissingRequirements,
+                    supervisorMessage: nextAction.message ?? null,
+                  });
+                  result.outcome = 'halted';
+                  result.next_action = 'stop';
+                  result.final_state = activeIssue.state;
+                  result.cleanup_workspace = false;
+                  result.cli_result = {
+                    ok: false,
+                    final_state: activeIssue.state,
+                    review_decision: null,
+                    feedback: deliverySummary,
+                    delivery_code: 'supervisor_turn_budget_exhausted',
+                    delivery_summary: deliverySummary,
+                    retry_hint: 'stop',
+                    linear_api_calls: 0,
+                    github_api_calls: 0,
+                  };
+                }
                 sessionActive = false;
               }
             } else {
@@ -6766,6 +6848,74 @@ export class Orchestrator extends EventEmitter {
         console.log('[orchestrator] Issue in non-active state, stopping:', runningEntry.identifier);
         await this.terminateRunningIssue(runningEntry, false);
       }
+    }
+  }
+
+  private isCancelledTrackerState(state: string | undefined): boolean {
+    return Boolean(state && /^(cancelled|canceled)$/i.test(state));
+  }
+
+  private async reconcileTrackedTerminalStates(): Promise<void> {
+    const tracked = this.workItemRepository.findAll()
+      .filter((workItem) => (
+        Boolean(workItem.linear_issue_id) &&
+        !this.isTerminalTrackerState(workItem.linear_state)
+      ));
+    if (tracked.length === 0) {
+      return;
+    }
+
+    const ids = Array.from(new Set(
+      tracked.map((workItem) => workItem.linear_issue_id).filter((id): id is string => Boolean(id)),
+    ));
+    const { issues, error } = await this.tracker.fetchIssueStatesByIds(ids);
+    if (error) {
+      console.error('[orchestrator] Tracked state refresh failed:', error);
+      return;
+    }
+
+    for (const issue of issues) {
+      if (!this.isTerminalTrackerState(issue.state)) {
+        continue;
+      }
+      const workItem = this.workItemRepository.findByLinearIssueId(issue.id);
+      if (!workItem) {
+        continue;
+      }
+
+      if (!this.isCancelledTrackerState(issue.state)) {
+        this.workItemRepository.update({
+          id: workItem.id,
+          linear_state: issue.state,
+        });
+        continue;
+      }
+
+      console.log(`[orchestrator] Reconcile detected cancelled tracked issue: ${workItem.linear_identifier}`);
+      const updatedWorkItem = this.workItemRepository.update({
+        id: workItem.id,
+        linear_state: issue.state,
+        orchestrator_state: 'cancelled',
+        cancelled_at: new Date(),
+      });
+      this.state.running.delete(issue.id);
+      this.state.claimed.delete(issue.id);
+      this.state.retry_attempts.delete(issue.id);
+      this.state.completed.add(issue.id);
+
+      await this.closeMappedGitHubIssue(updatedWorkItem ?? workItem, `${workItem.linear_identifier} tracked-state reconciliation`);
+
+      if (workItem.workspace_path) {
+        try {
+          await this.workspaceManager.removeWorkspace(workItem.workspace_path);
+          console.log(`[orchestrator] Workspace cleaned for cancelled tracked issue: ${workItem.linear_identifier}`);
+        } catch (err) {
+          console.warn(`[orchestrator] Failed to clean workspace for ${workItem.linear_identifier}:`, err);
+        }
+      }
+
+      this.emit('issue:completed', issue, false);
+      this.emit('state:changed', this.getStateSnapshot());
     }
   }
 

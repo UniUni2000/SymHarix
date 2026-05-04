@@ -376,6 +376,105 @@ describe('BotAssistantService', () => {
     supervisorService.dispose();
   });
 
+  test('answers issue-list questions instead of surfacing the active supervisor card', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const sessions = new SupervisorSessionRepository(db);
+    const sessionEvents = new SupervisorSessionEventRepository(db);
+    const supervisorService = new SupervisorSessionService(
+      runtime,
+      null,
+      sessions,
+      sessionEvents,
+    );
+    sessions.create({
+      id: 'session-active-card',
+      transport: 'telegram',
+      conversation_id: 'chat-supervisor-query',
+      user_id: 'user-1',
+      state: 'awaiting_user_decision',
+      repo_ref: 'test2',
+      intake_mode: 'plan_then_approve',
+      approval_mode: 'explicit_user_approval',
+      plan_version: 1,
+      root_issue_id: 'issue-31',
+      last_message_id: 'msg-existing',
+      last_card_key: 'session|stale',
+      active_decision_kind: 'delivery_failure',
+      plan_card: {
+        title: '清空当前仓库（安全清理计划）',
+        user_goal: '清空当前仓库',
+        in_scope: ['确认范围', '执行清理'],
+        out_of_scope: ['不删除 GitHub 仓库'],
+        acceptance: ['结果可验证'],
+        known_risks: ['需要确认范围'],
+        execution_strategy: '先确认后执行。',
+        needs_user_approval: true,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '按推荐继续',
+          summary: '继续处理交付阻塞。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+    let modelCalled = false;
+    const assistant = new BotAssistantService(
+      runtime,
+      new BotCommandService(runtime, subscriptions, () => true, preferences),
+      preferences,
+      pending,
+      null,
+      {
+        decide: async () => {
+          modelCalled = true;
+          return '{"intent":{"kind":"answer_question","answer":"不应该走到模型"}}';
+        },
+        getDiagnostics: () => ({
+          provider: 'test',
+          model: 'heuristic',
+          configured: true,
+          health: 'healthy',
+          fallback_available: true,
+          last_error_code: null,
+        }),
+      },
+      undefined,
+      subscriptions,
+      null,
+      supervisorService,
+    );
+
+    const response = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-supervisor-query' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      '有哪些 issue',
+    );
+
+    expect(response.message).toContain('当前活跃 issue');
+    expect(response.message).toContain('INT-31 · Hello world');
+    expect(response.message).not.toContain('计划待你批准');
+    expect(response.message).not.toContain('执行中需要你决定');
+    expect(response.photo).toBeUndefined();
+    expect(response.action_rows).toBeUndefined();
+    expect(modelCalled).toBe(false);
+
+    subscriptions.dispose();
+    supervisorService.dispose();
+  });
+
   test('passes supervisor session projection into the model runtime context', async () => {
     const runtime = createRuntimeControlPlane();
     const subscriptions = new BotSubscriptionService(runtime, {});
@@ -913,7 +1012,6 @@ describe('BotAssistantService', () => {
       '当前有哪些活跃 issue？',
     );
 
-    expect(response.message).toContain('当前自然语言模型暂不可用');
     expect(response.message).toContain('INT-31');
     expect(response.message).toContain('failed');
 

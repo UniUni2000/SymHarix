@@ -13,6 +13,7 @@ import type {
   BotTransportMessageRef,
   BotTransportNotifier,
 } from '../bots/types';
+import { BotMessageEditError } from '../bots/types';
 import { SupervisorSessionService } from './sessionService';
 import { SupervisorWorker } from './worker';
 
@@ -197,6 +198,26 @@ class SlowEditNotifier extends MemoryNotifier {
   }
 }
 
+class HardFailEditNotifier extends MemoryNotifier {
+  async editMessage(): Promise<BotTransportMessageRef> {
+    throw new BotMessageEditError('hard_failure', 'cannot edit media message', 400, 'Bad Request');
+  }
+}
+
+async function waitForNotifier(
+  notifier: MemoryNotifier,
+  expectedEdits: number,
+  expectedMessages: number,
+): Promise<void> {
+  const deadline = Date.now() + 4_000;
+  while (Date.now() < deadline) {
+    if (notifier.edits.length >= expectedEdits && notifier.messages.length >= expectedMessages) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 describe('SupervisorWorker', () => {
   test('restores awaiting-approval session cards on reconcile without duplicating the same card twice', async () => {
     const db = new Database(':memory:');
@@ -328,6 +349,83 @@ describe('SupervisorWorker', () => {
     expect(notifier.edits[0]?.messageRef.provider_message_id).toBe('msg-existing');
     expect(sessions.findById('session-1')?.last_message_id).toBe('msg-existing');
     expect(sessions.findById('session-1')?.last_card_key).toContain('session|session-1|v2|executing');
+  });
+
+  test('keeps one supervisor card when a Telegram edit fails with a hard error', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const transportEvents = new BotTransportEventRepository(db);
+    const issue = createIssueView({
+      session: {
+        session_id: 'live-1',
+        turn_count: 2,
+        stage: 'coding',
+        last_event: 'tool',
+        last_message: '正在检查删除范围。',
+        started_at: '2026-01-01T00:00:00.000Z',
+        last_event_at: '2026-01-01T00:02:00.000Z',
+        tokens: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        recent_tools: [],
+        recent_files: [],
+      },
+    });
+    const { runtime } = createRuntimeHarness(issue);
+    const notifier = new HardFailEditNotifier();
+    const sessionService = new SupervisorSessionService(runtime, null, sessions, events);
+    const worker = new SupervisorWorker({
+      runtime,
+      sessionService,
+      sessionRepository: sessions,
+      transportEventRepository: transportEvents,
+      notifiers: {
+        telegram: notifier,
+      },
+    });
+
+    sessions.create({
+      id: 'session-1',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'executing',
+      repo_ref: 'test2',
+      intake_mode: 'plan_then_approve',
+      approval_mode: 'explicit_user_approval',
+      plan_version: 2,
+      root_issue_id: 'issue-root',
+      last_message_id: 'msg-existing',
+      last_card_key: 'session|session-1|stale',
+      plan_card: {
+        title: 'Root issue',
+        user_goal: 'Root issue',
+        in_scope: ['删除 docs 目录'],
+        out_of_scope: ['不删除 GitHub 仓库'],
+        acceptance: ['变更可验证'],
+        known_risks: [],
+        execution_strategy: '单 issue 执行并交付证据。',
+        needs_user_approval: true,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '继续',
+          summary: '继续推进。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    await worker.reconcileSession('session-1');
+
+    expect(notifier.messages).toHaveLength(0);
+    expect(sessions.findById('session-1')?.last_message_id).toBe('msg-existing');
+    expect(sessions.findById('session-1')?.last_card_key).toBe('session|session-1|stale');
+    expect(transportEvents.findAll().map((event) => event.action)).toEqual(['edit']);
+    expect(transportEvents.findAll()[0]?.result).toBe('failed');
   });
 
   test('coalesces concurrent reconciles for the same session material key into one edit', async () => {
@@ -481,14 +579,90 @@ describe('SupervisorWorker', () => {
         },
       ],
     }));
-    await Promise.resolve();
+    await waitForNotifier(notifier, 1, 0);
+    await new Promise((resolve) => setTimeout(resolve, 100));
 
     expect(notifier.edits).toHaveLength(1);
     expect(notifier.edits[0]?.messageRef.provider_message_id).toBe('msg-existing');
     expect(notifier.edits[0]?.message.text).toContain('INT-2');
     expect(notifier.edits[0]?.message.text).toContain('需要你决定');
+    expect(notifier.messages).toHaveLength(0);
     expect(sessions.findById('session-1')?.state).toBe('awaiting_user_decision');
     expect(sessions.findById('session-1')?.last_card_key).toContain('awaiting_user_decision');
+    expect(sessions.findById('session-1')?.last_card_key).toContain('milestone:delivery_failed');
+    expect(sessions.findById('session-1')?.last_material_outcome?.last_milestone_summary_key).toBeUndefined();
+  });
+
+  test('keeps supervisor turn-budget delivery failures internal instead of sending a scary milestone card', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const transportEvents = new BotTransportEventRepository(db);
+    const issue = createIssueView({
+      governance_thread_state: null,
+      governance_current_child: null,
+      governance_child_queue: [],
+      delivery_state: 'delivery_failed',
+      delivery_code: null,
+      delivery_summary: 'supervisor_turn_budget_exhausted',
+      orchestrator_state: 'halted',
+    });
+    const { runtime, emitIssue } = createRuntimeHarness(issue);
+    const notifier = new MemoryNotifier();
+    const sessionService = new SupervisorSessionService(runtime, null, sessions, events);
+    const worker = new SupervisorWorker({
+      runtime,
+      sessionService,
+      sessionRepository: sessions,
+      transportEventRepository: transportEvents,
+      notifiers: {
+        telegram: notifier,
+      },
+    });
+
+    sessions.create({
+      id: 'session-1',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'executing',
+      repo_ref: 'test2',
+      intake_mode: 'plan_then_approve',
+      approval_mode: 'explicit_user_approval',
+      plan_version: 2,
+      root_issue_id: 'issue-root',
+      last_message_id: 'msg-existing',
+      last_card_key: 'session|session-1|stale',
+      plan_card: {
+        title: 'Root issue',
+        user_goal: 'Root issue',
+        in_scope: ['按顺序执行 child queue'],
+        out_of_scope: [],
+        acceptance: ['完成 root issue'],
+        known_risks: [],
+        execution_strategy: '继续推进。',
+        needs_user_approval: true,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '按推荐继续',
+          summary: '继续推进。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    emitIssue(issue);
+    await waitForNotifier(notifier, 1, 0);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(notifier.edits).toHaveLength(1);
+    expect(notifier.messages).toHaveLength(0);
+    expect(sessions.findById('session-1')?.last_material_outcome?.last_milestone_summary_key).toBeUndefined();
   });
 
   test('reconciles an executing session to completed when the root issue is already done', async () => {

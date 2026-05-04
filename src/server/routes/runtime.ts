@@ -21,13 +21,20 @@ function buildActionStatus(result: { accepted: boolean; status: string }): Runti
 export function createRuntimeRoutes(
   controlPlane: RuntimeControlPlane,
   accessController: RuntimeAccessController,
+  options: {
+    getPublicBaseUrl?: () => string | null;
+  } = {},
 ): Hono {
   const runtime = new Hono();
 
   runtime.get('/manifest', (c) => {
+    const publicBaseUrl = options.getPublicBaseUrl?.() ?? null;
     return c.json({
       success: true,
-      data: buildRuntimeManifest(accessController.describe(c.req.raw.headers)),
+      data: buildRuntimeManifest(accessController.describe(c.req.raw.headers), {
+        publicBaseUrl,
+        miniAppBaseUrl: publicBaseUrl,
+      }),
     });
   });
 
