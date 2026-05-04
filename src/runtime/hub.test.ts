@@ -486,6 +486,8 @@ describe('RuntimeHub', () => {
     initializeSchema(db);
 
     const workItemRepository = new WorkItemRepository(db);
+    const agentRunRepository = new AgentRunRepository(db);
+    const reviewEventRepository = new ReviewEventRepository(db);
     const supervisorSessions = new SupervisorSessionRepository(db);
 
     workItemRepository.create({
@@ -502,6 +504,12 @@ describe('RuntimeHub', () => {
       governance_root_issue_id: 'issue-root',
       governance_parent_issue_id: null,
       governance_generation: 0,
+      change_pack_summary: {
+        profile: 'coding',
+        complexity: 'large',
+        files: ['src/runtime/hub.ts'],
+        overview: 'Cross-surface runtime and Telegram control work.',
+      },
     });
     workItemRepository.create({
       id: 'issue-child',
@@ -531,6 +539,15 @@ describe('RuntimeHub', () => {
       plan_version: 2,
       root_issue_id: 'issue-root',
       current_child_issue_id: 'issue-child',
+      last_material_outcome: {
+        round_index: 2,
+        round_total: 4,
+        round_goal: 'Finish current child and prepare review evidence.',
+        milestone_kind: 'waiting_on_child',
+        milestone_key: 'waiting_on_child|issue-root|issue-child',
+        user_summary: 'Current child is running.',
+        risk_delta: 'Risk down after the child queue was isolated.',
+      },
       plan_card: {
         title: 'Root issue with supervisor thread',
         user_goal: 'Root issue with supervisor thread',
@@ -554,6 +571,24 @@ describe('RuntimeHub', () => {
         },
         governance_preview: null,
       },
+    });
+    agentRunRepository.create({
+      id: 'run-dev-1',
+      work_item_id: 'issue-root',
+      agent_type: 'dev',
+      phase: 'DEV',
+      run_status: 'completed',
+      output_summary: 'Implemented the root control card plumbing.',
+      started_at: new Date('2026-01-01T00:00:00.000Z'),
+      finished_at: new Date('2026-01-01T00:04:00.000Z'),
+    });
+    reviewEventRepository.create({
+      id: 'review-1',
+      work_item_id: 'issue-root',
+      pr_number: 42,
+      review_round: 1,
+      decision: 'REQUEST_CHANGES',
+      summary_md: 'Review found one missing milestone summary path.',
     });
 
     const controller = new FakeController();
@@ -580,6 +615,24 @@ describe('RuntimeHub', () => {
     expect(issue?.supervisor_session_state).toBe('executing');
     expect(issue?.supervisor_plan_summary).toContain('当前子任务');
     expect(issue?.supervisor_plan_summary).toContain('INT-53');
+    expect(issue?.complexity).toBe('L4');
+    expect(issue?.round).toEqual({
+      index: 2,
+      total: 4,
+      goal: 'Finish current child and prepare review evidence.',
+    });
+    expect(issue?.roundGoal).toBe('Finish current child and prepare review evidence.');
+    expect(issue?.riskDelta).toBe('Risk down after the child queue was isolated.');
+    expect(issue?.risk_delta).toBe('Risk down after the child queue was isolated.');
+    expect(issue?.milestones?.[0]).toMatchObject({
+      kind: 'waiting_on_child',
+      key: 'waiting_on_child|issue-root|issue-child',
+      summary: 'Current child is running.',
+    });
+    expect(issue?.agent_recent_progress?.dev[0]?.summary).toContain('root control card');
+    expect(issue?.agent_recent_progress?.review[0]?.summary).toContain('missing milestone');
+    expect(issue?.agentRecentProgress?.dev[0]?.summary).toContain('root control card');
+    expect(issue?.agentRecentProgress?.review[0]?.summary).toContain('missing milestone');
 
     hub.dispose();
   });

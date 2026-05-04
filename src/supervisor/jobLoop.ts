@@ -11,6 +11,7 @@ import {
   SupervisorDevConversationService,
   type SupervisorDevDirective,
 } from './devConversation';
+import { isInternalSupervisorTurnBudgetFailure } from './milestoneVisibility';
 
 const LOOP_ACTIVE_STATES = new Set([
   'materialized',
@@ -92,7 +93,11 @@ export class SupervisorJobLoop {
         if (issue) {
           this.options.syncIssue(issue);
           issuesSynced += 1;
-          if (this.enqueueIssueJobs(session, issue)) {
+          const refreshedSession = this.options.sessionRepository.findById(session.id);
+          if (!refreshedSession || refreshedSession.state === 'cancelled' || refreshedSession.state === 'completed') {
+            continue;
+          }
+          if (this.enqueueIssueJobs(refreshedSession, issue)) {
             jobsEnqueued += 1;
           }
         }
@@ -169,15 +174,28 @@ export class SupervisorJobLoop {
       return false;
     }
     const rootIssueId = issue.governance_root_issue_id ?? issue.issue_id;
-    const milestoneKind = issue.delivery_state === 'delivery_failed' || issue.delivery_code
-      ? 'delivery_failed'
-      : issue.orchestrator_state === 'completed' || issue.delivery_state === 'completed'
-        ? 'completed'
-        : issue.orchestrator_state === 'failed'
-          ? 'child_failed'
-          : issue.orchestrator_state === 'retry_scheduled'
-            ? 'retrying'
-            : issue.governance_thread_state ?? issue.orchestrator_state ?? 'sync';
+    const internalDeliveryFailure = isInternalSupervisorTurnBudgetFailure({
+      kind: issue.delivery_state,
+      key: issue.delivery_code ?? issue.delivery_summary ?? '',
+      summary: issue.delivery_summary,
+      delivery_code: issue.delivery_code,
+    });
+    const cancelled = issue.orchestrator_state === 'cancelled' || /^(cancelled|canceled)$/i.test(issue.tracker_state || '');
+    if (cancelled) {
+      return false;
+    }
+    const completed = issue.orchestrator_state === 'completed' || issue.delivery_state === 'completed';
+    const milestoneKind = completed
+      ? 'completed'
+      : (issue.delivery_state === 'delivery_failed' || issue.delivery_code) && !internalDeliveryFailure
+        ? 'delivery_failed'
+        : internalDeliveryFailure
+          ? 'sync'
+          : issue.orchestrator_state === 'failed'
+            ? 'child_failed'
+            : issue.orchestrator_state === 'retry_scheduled'
+              ? 'retrying'
+              : issue.governance_thread_state ?? issue.orchestrator_state ?? 'sync';
     const milestoneKey = [
       session.id,
       session.plan_version,
@@ -187,13 +205,14 @@ export class SupervisorJobLoop {
       issue.updated_at ?? '',
       issue.delivery_code ?? '',
     ].join('|');
+    const shouldIssueDevInstruction = session.state !== 'awaiting_user_decision' && !internalDeliveryFailure;
     const kinds = [
-      'issue_dev_instruction',
+      ...(shouldIssueDevInstruction ? ['issue_dev_instruction' as const] : []),
       'sync_runtime_state',
       'assess_milestone',
       'verify_handoff',
       'summarize_memory',
-      ...(session.active_decision_kind || issue.delivery_state === 'delivery_failed' || issue.orchestrator_state === 'failed'
+      ...(session.active_decision_kind || (!internalDeliveryFailure && issue.delivery_state === 'delivery_failed') || issue.orchestrator_state === 'failed'
         ? ['notify_user' as const]
         : []),
     ] as const;
@@ -251,6 +270,33 @@ export class SupervisorJobLoop {
         return 1;
       }
 
+      if (job.job_kind === 'issue_dev_instruction' && session.state === 'awaiting_user_decision') {
+        jobs.complete(job.id, {
+          result: {
+            skipped: true,
+            reason: 'awaiting_user_decision',
+          },
+          now: this.now(),
+        });
+        return 1;
+      }
+
+      if (job.job_kind === 'issue_dev_instruction' && isInternalSupervisorTurnBudgetFailure({
+        kind: issue.delivery_state,
+        key: issue.delivery_code ?? issue.delivery_summary ?? '',
+        summary: issue.delivery_summary,
+        delivery_code: issue.delivery_code,
+      })) {
+        jobs.complete(job.id, {
+          result: {
+            skipped: true,
+            reason: 'internal_delivery_milestone',
+          },
+          now: this.now(),
+        });
+        return 1;
+      }
+
       if (job.job_kind === 'sync_runtime_state') {
         this.options.syncIssue(issue);
         this.options.eventRepository.create({
@@ -280,6 +326,12 @@ export class SupervisorJobLoop {
         const milestoneKind = typeof job.payload?.milestone_kind === 'string'
           ? job.payload.milestone_kind
           : issue.orchestrator_state ?? 'sync';
+        const internalDeliveryFailure = isInternalSupervisorTurnBudgetFailure({
+          kind: issue.delivery_state,
+          key: issue.delivery_code ?? issue.delivery_summary ?? '',
+          summary: issue.delivery_summary,
+          delivery_code: issue.delivery_code,
+        });
         this.options.eventRepository.create({
           id: crypto.randomUUID(),
           session_id: session.id,
@@ -296,7 +348,7 @@ export class SupervisorJobLoop {
         jobs.complete(job.id, {
           result: {
             milestone_kind: milestoneKind,
-            needs_user: Boolean(session.active_decision_kind || issue.delivery_state === 'delivery_failed'),
+            needs_user: Boolean(session.active_decision_kind || (!internalDeliveryFailure && issue.delivery_state === 'delivery_failed')),
           },
           now: this.now(),
         });

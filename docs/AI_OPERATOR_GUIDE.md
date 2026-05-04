@@ -42,22 +42,43 @@ The Supervisor is not simply a model call and not a Claude Code instance. It is 
 Use:
 
 ```bash
-bun run start -- --port 3000
+bun run setup:local
+bun run start:local
 ```
+
+`start:local` reruns the non-destructive setup guard before starting the server. Use plain `bun run start` only when you intentionally want to skip that guard.
 
 Stop:
 
 ```bash
-bun run start -- --kill
+bun run stop
+```
+
+Use another port only when `3000` is already occupied:
+
+```bash
+PORT=4000 bun run start
 ```
 
 If startup behaves strangely, inspect before changing code:
 
 ```bash
-curl http://localhost:3000/api/v1/runtime/manifest
-curl http://localhost:3000/api/v1/bots/manifest
+bun run health
 curl http://localhost:3000/api/v1/runtime/overview
 ```
+
+For Telegram specifically, verify that `/api/v1/bots/manifest` reports:
+
+- `data.transports.telegram.health = healthy`
+- a non-empty `data.transports.telegram.webhook_url`
+- `data.transports.telegram.mini_app_base_url` matching the public HTTPS base URL
+
+If Telegram replies but this manifest has an empty webhook URL, the reply is coming from another bot process or deployment that is using the same token.
+
+For natural-language failures, distinguish provider config from Telegram ingress:
+
+- `HTTP 401: invalid access token or token expired` with a healthy local webhook means `SYMPHONY_BOT_LLM_API_KEY`, `SYMPHONY_BOT_LLM_BASE_URL`, or `SYMPHONY_BOT_LLM_MODEL` is wrong for the configured provider.
+- The same error while local `webhook_url` is empty usually means a stale remote process or polling worker is answering instead of this local server.
 
 ## Live E2E Rules
 
@@ -176,7 +197,7 @@ Do not assume code evidence means delivery completed. Check:
 Stop everything first if the run is confused:
 
 ```bash
-bun run start -- --kill
+bun run stop
 ```
 
 Repair local bot/GitHub residue:

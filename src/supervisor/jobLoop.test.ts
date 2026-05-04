@@ -301,6 +301,175 @@ describe('SupervisorJobLoop', () => {
     expect(sessions.findById('new-plan')?.state).toBe('awaiting_user_decision');
   });
 
+  test('does not enqueue dev instructions while the supervisor is waiting for a user decision', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const memories = new SupervisorMemoryRepository(db);
+    const jobs = new SupervisorJobRepository(db);
+    const issue = createIssue({
+      orchestrator_state: 'halted',
+      next_recommended_action: '等待用户确认清理范围后再继续。',
+    });
+    const runtime: RuntimeControlPlane = {
+      getOverview: () => ({
+        generated_at: '2026-01-01T01:00:00.000Z',
+        counts: { running: 0, retrying: 0, total: 1 },
+        issues: [issue],
+      }),
+      getIssue: () => issue,
+      getTimeline: () => [],
+      getHistoryView: () => null,
+      subscribe: () => () => undefined,
+      createIssue: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null, issue: null }),
+      stopIssue: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null }),
+      retryIssue: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null }),
+      overrideGovernance: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null }),
+      rewriteGovernance: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null }),
+      splitGovernance: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null }),
+      executeGovernanceSuggestion: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null }),
+      dismissGovernanceSuggestion: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null }),
+    };
+    sessions.create({
+      id: 'session-waiting',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      state: 'awaiting_user_decision',
+      repo_ref: 'UniUni2000/test2',
+      root_issue_id: issue.issue_id,
+      active_decision_kind: 'execution_decision',
+      plan_card: {
+        title: '清空仓库',
+        user_goal: '把仓库清空成空仓库状态',
+        in_scope: ['删除 tracked files'],
+        out_of_scope: ['不删除 .git'],
+        acceptance: ['用户确认范围后再继续'],
+        known_risks: ['误删风险'],
+        execution_strategy: '等待用户确认。',
+        needs_user_approval: true,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: { label: '按推荐继续', summary: '确认后继续。' },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    const loop = new SupervisorJobLoop({
+      runtime,
+      sessionRepository: sessions,
+      eventRepository: events,
+      memoryRepository: memories,
+      jobRepository: jobs,
+      devConversationService: new SupervisorDevConversationService(),
+      workerId: 'test-loop',
+      syncIssue: () => undefined,
+    });
+
+    await loop.tick();
+    for (let index = 0; index < 6; index += 1) {
+      await loop.tick();
+    }
+
+    expect(jobs.listBySession('session-waiting').map((job) => job.job_kind)).not.toContain('issue_dev_instruction');
+    expect(events.listBySession('session-waiting').some((event) => event.event_kind === 'supervisor_dev_directive')).toBe(false);
+    expect(events.listBySession('session-waiting').map((event) => event.event_kind)).toContain('supervisor_user_notification_requested');
+  });
+
+  test('keeps supervisor turn-budget delivery failures out of user notification jobs', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const memories = new SupervisorMemoryRepository(db);
+    const jobs = new SupervisorJobRepository(db);
+    const issue = createIssue({
+      orchestrator_state: 'halted',
+      delivery_state: 'delivery_failed',
+      delivery_code: null,
+      delivery_summary: 'supervisor_turn_budget_exhausted',
+      next_recommended_action: 'Supervisor turn budget reached after evidence was collected.',
+    });
+    const runtime: RuntimeControlPlane = {
+      getOverview: () => ({
+        generated_at: '2026-01-01T01:00:00.000Z',
+        counts: { running: 0, retrying: 0, total: 1 },
+        issues: [issue],
+      }),
+      getIssue: () => issue,
+      getTimeline: () => [{
+        id: 'timeline-internal-delivery-failed',
+        issue_id: issue.issue_id,
+        issue_identifier: issue.identifier,
+        timestamp: '2026-01-01T01:00:00.000Z',
+        type: 'message',
+        message: 'Supervisor turn budget exhausted after proof collection.',
+      } as any],
+      getHistoryView: () => null,
+      subscribe: () => () => undefined,
+      createIssue: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null, issue: null }),
+      stopIssue: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null }),
+      retryIssue: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null }),
+      overrideGovernance: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null }),
+      rewriteGovernance: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null }),
+      splitGovernance: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null }),
+      executeGovernanceSuggestion: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null }),
+      dismissGovernanceSuggestion: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null }),
+    };
+    sessions.create({
+      id: 'session-internal-delivery-failed',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      state: 'executing',
+      repo_ref: 'UniUni2000/test2',
+      root_issue_id: issue.issue_id,
+      plan_card: {
+        title: '清理 runtime 残余文件',
+        user_goal: '清空安全范围内的残余文件',
+        in_scope: ['识别残余文件', '删除临时产物'],
+        out_of_scope: ['不删除业务源码'],
+        acceptance: ['git status 证明'],
+        known_risks: [],
+        execution_strategy: '先审计再删除。',
+        needs_user_approval: false,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: { label: '自动执行', summary: '继续推进。' },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    const loop = new SupervisorJobLoop({
+      runtime,
+      sessionRepository: sessions,
+      eventRepository: events,
+      memoryRepository: memories,
+      jobRepository: jobs,
+      devConversationService: new SupervisorDevConversationService(),
+      workerId: 'test-loop',
+      syncIssue: () => undefined,
+    });
+
+    await loop.tick();
+    for (let index = 0; index < 7; index += 1) {
+      await loop.tick();
+    }
+
+    const sessionJobs = jobs.listBySession('session-internal-delivery-failed');
+    const jobKinds = sessionJobs.map((job) => job.job_kind);
+    const assessJob = sessionJobs.find((job) => job.job_kind === 'assess_milestone');
+    expect(jobKinds).not.toContain('notify_user');
+    expect(assessJob?.result?.milestone_kind).toBe('sync');
+    expect(assessJob?.result?.needs_user).toBe(false);
+    expect(events.listBySession('session-internal-delivery-failed').map((event) => event.event_kind)).not.toContain('supervisor_user_notification_requested');
+  });
+
   test('processes durable supervision jobs for sync, milestone assessment, notification, handoff verification, and memory summary', async () => {
     const db = new Database(':memory:');
     initializeSchema(db);

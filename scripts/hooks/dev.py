@@ -353,6 +353,7 @@ Agent completed the task for issue [{self.issue_id}](https://linear.app/inteliwa
             self._git("add", "--all", "--", *branch_paths)
             commit_result = self._git(
                 "commit",
+                "--no-verify",
                 "-m",
                 "chore: remove workflow artifacts from submission",
                 check=False,

@@ -472,6 +472,31 @@ describe('SymphonyServer', () => {
     expect(html).toContain('supervisor_session_state');
   });
 
+  test('GET /runtime/issues/:id/app serves the Telegram Mini App issue cockpit', async () => {
+    const response = await request('/runtime/issues/INT-RT-1/app');
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('text/html');
+
+    const html = await response.text();
+    expect(html).toContain('telegram-web-app.js');
+    expect(html).toContain('symphonyness');
+    expect(html).toContain('issue cockpit');
+    expect(html).toContain('INT-RT-1');
+    expect(html).toContain('/api/v1/runtime/issues/INT-RT-1');
+    expect(html).toContain('/api/v1/runtime/issues/INT-RT-1/timeline');
+    expect(html).toContain('/api/v1/runtime/issues/INT-RT-1/history');
+    expect(html).toContain('实时事件流');
+    expect(html).toContain('当前轮次目标');
+    expect(html).toContain('Agent 进度');
+    expect(html).toContain('关键节点');
+    expect(html).toContain('risk_delta');
+    expect(html).toContain('agent_recent_progress');
+    expect(html).toContain('riskDelta');
+    expect(html).toContain('agentRecentProgress');
+    expect(html).toContain('milestones');
+    expect(html).toContain('子任务队列');
+  });
+
   test('GET /api/v1/runtime/overview returns runtime snapshot data', async () => {
     const response = await request('/api/v1/runtime/overview');
     expect(response.status).toBe(200);

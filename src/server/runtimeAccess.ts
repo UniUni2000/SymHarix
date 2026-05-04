@@ -93,9 +93,16 @@ export function createRuntimeAccessControllerFromEnv(): RuntimeAccessController 
   });
 }
 
-export function buildRuntimeManifest(access: RuntimeAccessView): RuntimeManifest {
+export function buildRuntimeManifest(access: RuntimeAccessView, options: {
+  publicBaseUrl?: string | null;
+  miniAppBaseUrl?: string | null;
+} = {}): RuntimeManifest {
+  const publicBaseUrl = options.publicBaseUrl?.replace(/\/+$/, '') || null;
+  const miniAppBaseUrl = options.miniAppBaseUrl?.replace(/\/+$/, '') || publicBaseUrl;
   return {
     access,
+    public_base_url: publicBaseUrl,
+    mini_app_base_url: miniAppBaseUrl,
     features: {
       history_replay: true,
       message_summaries: true,

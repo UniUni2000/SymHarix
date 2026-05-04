@@ -368,6 +368,78 @@ describe('BotFollowupService', () => {
     db.close();
   });
 
+  test('does not post textual governance cards for supervisor-managed child queues', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const issue = runtime.getIssue('issue-1')!;
+    Object.assign(issue, {
+      identifier: 'INT-150',
+      title: '清空仓库，只保留 README',
+      governance_thread_state: 'waiting_on_child',
+      governance_child_queue: [
+        {
+          issue_id: 'issue-2',
+          issue_identifier: 'INT-151',
+          title: '[SUPERVISOR CHILD 1/4 for INT-150] 完成子任务 1',
+          tracker_state: 'Todo',
+          orchestrator_state: 'discovering',
+          governance_decision: null,
+          governance_summary: null,
+          queue_state: 'current',
+          delivery_state: null,
+          delivery_code: null,
+          delivery_summary: null,
+        },
+      ],
+      governance_current_child: {
+        issue_id: 'issue-2',
+        issue_identifier: 'INT-151',
+        title: '[SUPERVISOR CHILD 1/4 for INT-150] 完成子任务 1',
+        tracker_state: 'Todo',
+        orchestrator_state: 'discovering',
+        governance_decision: null,
+        governance_summary: null,
+        queue_state: 'current',
+        delivery_state: null,
+        delivery_code: null,
+        delivery_summary: null,
+      },
+      next_recommended_action: '先处理治理子任务 INT-151',
+      supervisor_session_state: 'executing',
+      supervisor_plan_summary: '清空仓库，只保留 README',
+      supervisor_job_state: 'running',
+    });
+    const notifier = new MemoryNotifier();
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+
+    followups.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-150',
+      user_id: 'user-1',
+      role: 'origin',
+    });
+
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, messageStates, {
+      telegramOperationsChatId: 'chat-ops',
+      bootstrapCurrentGovernanceCards: false,
+    });
+
+    runtime.emit({ type: 'issue', data: issue });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(notifier.messages).toHaveLength(0);
+    expect(notifier.edits).toHaveLength(0);
+
+    service.dispose();
+    db.close();
+  });
+
   test('does not edit supervisor cards from followups when runtime issue events repeat', async () => {
     const db = new Database(':memory:');
     initializeSchema(db);

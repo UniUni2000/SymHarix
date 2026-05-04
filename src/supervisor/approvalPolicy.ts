@@ -30,6 +30,7 @@ export function applySupervisorApprovalPolicy(params: {
   delivery_summary: string | null;
   plan_title: string | null;
   user_text: string | null;
+  destructive_text?: string | null;
   repeated_failure_count?: number | null;
 }): SupervisorOversightAssessment {
   if ((params.repeated_failure_count ?? 0) >= 2) {
@@ -69,10 +70,14 @@ export function applySupervisorApprovalPolicy(params: {
   }
 
   const normalizedText = params.user_text?.replace(/\s+/g, ' ').trim() ?? '';
+  const normalizedDestructiveText = (params.destructive_text ?? params.user_text)
+    ?.replace(/\s+/g, ' ')
+    .trim()
+    ?? '';
   if (
-    normalizedText &&
+    normalizedDestructiveText &&
     params.assessment.decision === 'continue' &&
-    DESTRUCTIVE_CLEANUP_HINTS.some((hint) => normalizedText.toLowerCase().includes(hint))
+    DESTRUCTIVE_CLEANUP_HINTS.some((hint) => normalizedDestructiveText.toLowerCase().includes(hint))
   ) {
     return {
       ...params.assessment,

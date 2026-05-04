@@ -318,6 +318,10 @@ function summarizeActiveIssues(context: BotRuntimeCopilotContext): string {
   ].join('\n');
 }
 
+function isIssueListQuestion(text: string): boolean {
+  return /当前有哪些活跃 issue|当前有哪些 issue|有哪些\s*issue|有什么\s*issue|issue\s*有哪些|what.?s running|active issues|现在在跑什么/i.test(text.trim());
+}
+
 function summarizeIssueActivity(focusIssue: BotFocusedIssueContext): string {
   const latestTimeline = focusIssue.recent_timeline[focusIssue.recent_timeline.length - 1] ?? null;
   return [
@@ -565,7 +569,7 @@ function buildHeuristicDecision(
     };
   }
 
-  if (/当前有哪些活跃 issue|当前有哪些 issue|what.?s running|active issues|现在在跑什么/i.test(trimmed)) {
+  if (isIssueListQuestion(trimmed)) {
     return {
       intent: {
         kind: 'answer_question',
@@ -951,6 +955,12 @@ export class BotAssistantService {
       if (supervisorResponse) {
         return supervisorResponse;
       }
+    }
+
+    if (fastHeuristic.intent.kind === 'answer_question' && isIssueListQuestion(text)) {
+      return {
+        message: fastHeuristic.intent.answer,
+      };
     }
 
     let decision: BotAssistantDecision | null = null;

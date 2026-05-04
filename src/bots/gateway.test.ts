@@ -389,6 +389,9 @@ describe('DefaultBotGateway', () => {
 
     expect(refreshCount).toBe(1);
     expect(gateway.getManifest().transports.telegram.webhook_url).toBe('https://example.test/api/v1/bots/telegram/webhook');
+    expect(gateway.getManifest().transports.telegram.public_base_url).toBe('https://example.test');
+    expect(gateway.getManifest().transports.telegram.mini_app_base_url).toBe('https://example.test');
+    expect(gateway.getManifest().transports.telegram.webhook_used_tunnel).toBe(true);
 
     gateway.dispose();
   });
@@ -676,7 +679,7 @@ describe('DefaultBotGateway', () => {
     expect(result.status).toBe(200);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(requests).toHaveLength(1);
-    expect(String(requests[0]?.body.text)).toContain('已收到');
+    expect(String(requests[0]?.body.text)).toContain('收到您的消息了，我这边正在思考和处理，给我点时间');
 
     resolveAssistant?.();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -771,7 +774,7 @@ describe('DefaultBotGateway', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(requests).toHaveLength(1);
     expect(requests[0]?.url).toContain('sendMessage');
-    expect(String(requests[0]?.body.text)).toContain('已收到');
+    expect(String(requests[0]?.body.text)).toContain('收到您的消息了，我这边正在思考和处理，给我点时间');
 
     resolveAssistant?.();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -798,7 +801,7 @@ describe('DefaultBotGateway', () => {
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body || '{}'));
       requests.push({ url: String(input), body });
-      if (String(input).includes('sendMessage') && String(body.text).includes('已收到')) {
+      if (String(input).includes('sendMessage') && String(body.text).includes('收到您的消息了，我这边正在思考和处理，给我点时间')) {
         await ackSendDone;
       }
       return new Response(JSON.stringify({ ok: true, result: { message_id: nextMessageId += 1 } }), {
@@ -960,9 +963,229 @@ describe('DefaultBotGateway', () => {
     expect(requests[0]?.body.reply_markup).toEqual({
       inline_keyboard: [
         [{ text: '按方案拆成两个任务', callback_data: 'govsel|INT-2|1' }],
-        [{ text: '强制继续开发', callback_data: 'govsel|INT-2|2' }],
+        [{ text: '强制继续开发', style: 'danger', callback_data: 'govsel|INT-2|2' }],
       ],
     });
+  });
+
+  test('sends Telegram visual issue cards as photos with three native action buttons', async () => {
+    const requests: Array<{ url: string; body: FormData }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: init?.body as FormData,
+      });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 333 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        assistantModel: {
+          decide: async () => null,
+          getDiagnostics: () => ({
+            provider: null,
+            model: null,
+            configured: false,
+            health: 'unconfigured',
+            fallback_available: true,
+            last_error_code: 'unconfigured',
+          }),
+        },
+      },
+    );
+
+    await (gateway as any).telegramNotifier.sendMessage(
+      {
+        transport: 'telegram',
+        conversation_id: '42',
+      },
+      {
+        text: 'INT-248 · Production Ready 计划',
+        caption: '<b>INT-248 · Production Ready 计划</b>',
+        format: 'telegram_html',
+        media_key: 'visual|session-1|approval',
+        photo: {
+          bytes: new Uint8Array([137, 80, 78, 71]),
+          filename: 'int-248-card.png',
+          content_type: 'image/png',
+        },
+        action_rows: [
+          [{ label: '批准并开始', style: 'success', callback_data: 'sup|session-1|approve' }],
+          [
+            { label: '改一下计划', callback_data: 'sup|session-1|edit' },
+            { label: '打开运行视图', style: 'primary', web_app: { url: 'https://app.example.test/runtime/issues/INT-248/app' } },
+          ],
+        ],
+      },
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toContain('sendPhoto');
+    expect(requests[0]?.body.get('chat_id')).toBe('42');
+    expect(requests[0]?.body.get('caption')).toContain('INT-248');
+    expect(requests[0]?.body.get('parse_mode')).toBe('HTML');
+    expect(requests[0]?.body.get('photo')).toBeInstanceOf(Blob);
+    expect(JSON.parse(String(requests[0]?.body.get('reply_markup')))).toEqual({
+      inline_keyboard: [
+        [{ text: '批准并开始', style: 'success', callback_data: 'sup|session-1|approve' }],
+        [
+          { text: '改一下计划', callback_data: 'sup|session-1|edit' },
+          { text: '打开运行视图', style: 'primary', web_app: { url: 'https://app.example.test/runtime/issues/INT-248/app' } },
+        ],
+      ],
+    });
+
+    gateway.dispose();
+  });
+
+  test('edits Telegram visual issue cards with editMessageMedia instead of text edits', async () => {
+    const requests: Array<{ url: string; body: FormData }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: init?.body as FormData,
+      });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 444 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+    );
+
+    await (gateway as any).telegramNotifier.editMessage(
+      {
+        transport: 'telegram',
+        conversation_id: '42',
+      },
+      {
+        provider_message_id: '101',
+      },
+      {
+        text: 'INT-248 updated',
+        caption: '<b>INT-248 · 执行中</b>',
+        format: 'telegram_html',
+        media_key: 'visual|session-1|executing',
+        photo: {
+          bytes: new Uint8Array([137, 80, 78, 71]),
+          filename: 'int-248-card.png',
+          content_type: 'image/png',
+        },
+        action_rows: [[{ label: '打开运行视图', style: 'primary', url: 'https://app.example.test/runtime/issues/INT-248/app' }]],
+      },
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toContain('editMessageMedia');
+    expect(requests[0]?.body.get('chat_id')).toBe('42');
+    expect(requests[0]?.body.get('message_id')).toBe('101');
+    expect(requests[0]?.body.get('photo')).toBeInstanceOf(Blob);
+    expect(JSON.parse(String(requests[0]?.body.get('media')))).toEqual({
+      type: 'photo',
+      media: 'attach://photo',
+      caption: '<b>INT-248 · 执行中</b>',
+      parse_mode: 'HTML',
+      show_caption_above_media: true,
+    });
+    expect(JSON.parse(String(requests[0]?.body.get('reply_markup')))).toEqual({
+      inline_keyboard: [
+        [{ text: '打开运行视图', style: 'primary', url: 'https://app.example.test/runtime/issues/INT-248/app' }],
+      ],
+    });
+
+    gateway.dispose();
+  });
+
+  test('edits Telegram visual card captions with editMessageCaption when media is unchanged', async () => {
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>,
+      });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 444 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+    );
+
+    await (gateway as any).telegramNotifier.editMessage(
+      {
+        transport: 'telegram',
+        conversation_id: '42',
+      },
+      {
+        provider_message_id: '101',
+      },
+      {
+        text: 'INT-248 updated',
+        caption: '<b>INT-248 · 等待确认</b>',
+        format: 'telegram_html',
+        media_key: 'visual|session-1|approval',
+        action_rows: [[{ label: '打开运行视图', style: 'primary', url: 'https://app.example.test/runtime/issues/INT-248/app' }]],
+      },
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toContain('editMessageCaption');
+    expect(requests[0]?.body).toMatchObject({
+      chat_id: '42',
+      message_id: '101',
+      caption: '<b>INT-248 · 等待确认</b>',
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '打开运行视图', style: 'primary', url: 'https://app.example.test/runtime/issues/INT-248/app' }],
+        ],
+      },
+    });
+
+    gateway.dispose();
   });
 
   test('handles Telegram supervisor approval callbacks by editing the same message into a materialized plan result', async () => {
@@ -972,9 +1195,18 @@ describe('DefaultBotGateway', () => {
     const sessionEvents = new SupervisorSessionEventRepository(db);
     const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      let body: Record<string, unknown>;
+      if (init?.body instanceof FormData) {
+        body = {};
+        for (const [key, value] of init.body.entries()) {
+          body[key] = value;
+        }
+      } else {
+        body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>;
+      }
       requests.push({
         url: String(input),
-        body: JSON.parse(String(init?.body || '{}')),
+        body,
       });
       return new Response(JSON.stringify({ ok: true, result: { message_id: 101 } }), {
         status: 200,
@@ -1110,8 +1342,11 @@ describe('DefaultBotGateway', () => {
 
     expect(result.status).toBe(200);
     expect(requests.find((request) => request.url.includes('answerCallbackQuery'))?.body.text).toBe('已收到，正在处理');
-    const editRequests = requests.filter((request) => request.url.includes('editMessageText'));
-    expect(String(editRequests.at(-1)?.body.text)).toContain('已创建');
+    const editRequests = requests.filter((request) => request.url.includes('editMessageMedia'));
+    const media = JSON.parse(String(editRequests.at(-1)?.body.media || '{}'));
+    expect(media.caption).toContain('已创建');
+    expect(media.caption).toContain('INT-32');
+    expect(editRequests.at(-1)?.body.photo).toBeInstanceOf(Blob);
     expect(sessions.findById(session.id)?.root_issue_id).toBe('issue-32');
 
     gateway.dispose();
@@ -1497,7 +1732,7 @@ describe('DefaultBotGateway', () => {
     db.close();
   });
 
-  test('falls back to a new Telegram message when editing the governance card fails', async () => {
+  test('keeps the original Telegram card when an edit fails with a hard error', async () => {
     const db = new Database(':memory:');
     initializeSchema(db);
     const pendingActions = new BotPendingActionRepository(db);
@@ -1658,14 +1893,14 @@ describe('DefaultBotGateway', () => {
 
     expect(result.status).toBe(200);
     expect(requests.some((request) => request.url.includes('editMessageText'))).toBe(true);
-    expect(requests.some((request) => request.url.includes('sendMessage'))).toBe(true);
+    expect(requests.some((request) => request.url.includes('sendMessage'))).toBe(false);
     expect(
       followupMessageStates.findByConversationIssue({
         transport: 'telegram',
         conversation_id: '42',
         issue_id: 'issue-2',
       })?.message_id,
-    ).toBe('202');
+    ).toBe('101');
 
     db.close();
   });

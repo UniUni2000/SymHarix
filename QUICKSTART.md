@@ -2,13 +2,25 @@
 
 This guide gets a local operator from a fresh checkout to a working Runtime Deck and Telegram-first Supervisor flow.
 
+## Fast Path
+
+Run setup once, fill `.env` and `WORKFLOW.md`, then use one command for normal local startup:
+
+```bash
+bun run setup:local
+# edit .env and WORKFLOW.md once
+bun run start:local
+```
+
+`start:local` is intentionally safe: it runs the setup guard, keeps existing local config files, and then starts the server. Telegram does not require a fixed public IP; leave `SYMPHONY_PUBLIC_BASE_URL` empty and install `cloudflared` if you want automatic local HTTPS tunneling.
+
 ## 1. Install
 
 ```bash
-bun install
-cp .env.example .env
-cp WORKFLOW.md.example WORKFLOW.md
+bun run setup:local
 ```
+
+That command installs dependencies and creates `.env` / `WORKFLOW.md` only if they do not already exist.
 
 ## 2. Choose The Target Repository
 
@@ -116,7 +128,7 @@ Use `SYMPHONY_BOT_LLM_HTTP_TRANSPORT=fetch` for normal use. `auto` is useful for
 ## 6. Start
 
 ```bash
-bun run start -- --port 3000
+bun run start:local
 ```
 
 Open:
@@ -125,11 +137,16 @@ Open:
 http://localhost:3000/runtime
 ```
 
+If port `3000` is busy:
+
+```bash
+PORT=4000 bun run start
+```
+
 Health endpoints:
 
 ```bash
-curl http://localhost:3000/api/v1/runtime/manifest
-curl http://localhost:3000/api/v1/bots/manifest
+bun run health
 ```
 
 ## 7. Use Telegram
@@ -144,11 +161,13 @@ Expected behavior:
 
 1. Telegram receives a lightweight acknowledgement.
 2. Supervisor creates or updates one active session for the chat.
-3. Simple tasks get a compact plan and may auto-run.
-4. Larger or risky tasks show a Plan Card and wait for approval.
-5. After approval, symphonyness creates a root issue and, if needed, a sequential child queue.
-6. Only the current child runs; queued children wait.
-7. Telegram reports high-signal milestones, not every internal retry/status tick.
+3. Telegram shows one lifecycle card for the issue: image summary plus native buttons.
+4. The same card is edited through plan, approval, execution, decision, and completion states.
+5. Larger or risky tasks wait for approval before materializing work.
+6. After approval, symphonyness creates a root issue and only creates a child queue when the task is genuinely multi-part.
+7. Only the current child runs; queued children wait.
+8. The Mini App button opens the issue cockpit with live tool/file events, key milestones, code-change preview, PR/delivery, and child queue.
+9. Telegram should not post a long stream of duplicate lifecycle cards during normal operation.
 
 Useful text actions:
 
@@ -188,7 +207,7 @@ bun --env-file=.env run src/cli/index.ts verify-live-lifecycle --project-slug sa
 Stop all local symphonyness processes:
 
 ```bash
-bun run start -- --kill
+bun run stop
 ```
 
 Repair stale bot/GitHub state:
@@ -235,6 +254,7 @@ Too many Telegram messages:
 - Confirm the issue has one active Supervisor root session.
 - Run `bun src/cli/index.ts repair all`.
 - Check `bot_transport_events` and `bot_followup_delivery_states` in SQLite to see whether sends are new, edits, or fallback sends.
+- Normal issue lifecycle updates should edit the existing Telegram control card. Extra messages are expected only for explicit user replies or edit fallback after Telegram says the original message cannot be edited.
 
 ## 11. Development Checks
 

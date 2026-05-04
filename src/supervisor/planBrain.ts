@@ -11,6 +11,7 @@ import type {
 } from './sessionService';
 
 const DEFAULT_TIMEOUT_MS = 45_000;
+const MAX_TIMEOUT_MS = 300_000;
 
 function normalize(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
@@ -208,6 +209,7 @@ function buildPrompt(input: SupervisorPlanBrainInput): string {
     '- Small single-surface tasks may be auto approved only when acceptance is clear.',
     '- Cleanup/delete requests need explicit approval unless the user gave a narrow safe target.',
     '- Multi-objective or cross-surface requests should become root_with_split_queue.',
+    '- Do not split simple lifecycle work. A focused cleanup/delete/reset request (including emptying one repository, deleting one folder, then testing/reviewing/delivering) stays root_only unless the user explicitly asks for child tasks, multi-agent work, or independent implementation deliverables.',
     '- If repo is unknown, ask one concrete repo clarification question.',
     '- Preserve the deterministic plan unless you can make it clearer, safer, or more user-aligned.',
     '',
@@ -250,7 +252,7 @@ export class HttpSupervisorPlanBrain implements SupervisorPlanBrain {
     this.model = config.model;
     this.apiKey = config.apiKey;
     this.baseUrl = config.baseUrl.replace(/\/$/, '');
-    this.timeoutMs = Math.max(1_000, Math.min(120_000, config.timeoutMs ?? DEFAULT_TIMEOUT_MS));
+    this.timeoutMs = Math.max(1_000, Math.min(MAX_TIMEOUT_MS, config.timeoutMs ?? DEFAULT_TIMEOUT_MS));
   }
 
   async refinePlan(input: SupervisorPlanBrainInput): Promise<SupervisorPlanBrainResult | null> {
