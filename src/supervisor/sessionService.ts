@@ -321,6 +321,17 @@ function inferAcceptance(title: string, description: string | null): string[] {
   return [`完成 ${title}，并让结果可验证。`];
 }
 
+function extractAcceptanceFromClarificationAnswer(answer: string): string[] | null {
+  const normalized = answer.trim();
+  if (!normalized || isDelegatingAcceptanceChoice(normalized)) {
+    return null;
+  }
+  if (/验收|完成后|完成以后|可验证|测试|通过|输出|页面|命令|结果|应该/.test(normalized)) {
+    return [compact(normalized, 220)];
+  }
+  return null;
+}
+
 function inferOutOfScope(title: string): string[] {
   if (/同时|并且|以及|一起|and/i.test(title)) {
     return ['这次不把所有并列目标一起并发推进。'];
@@ -492,7 +503,14 @@ function shouldClarifyAcceptance(text: string, description: string | null): bool
   if (isRiskyCleanupRequest(combined)) {
     return false;
   }
+  if (canInferConcreteAcceptanceFromTask(text, description)) {
+    return false;
+  }
   return !/验收|测试|verify|验证|输出|页面|命令|结果|完成后|应该/.test(combined);
+}
+
+function isDelegatingAcceptanceChoice(answer: string): boolean {
+  return /你自己决定|你定|你看着办|你来定|你决定|随便|都可以|你拿主意|按你判断/i.test(answer.trim());
 }
 
 function clarificationAnswerUpdatesGoal(question: string | null | undefined, answer: string): boolean {
@@ -532,6 +550,36 @@ function explicitlyRequestsSplitQueue(text: string, description: string | null):
 
 function isRiskyCleanupRequest(text: string): boolean {
   return /(?:清空|清理|删除|移除|删掉).*(?:残余|垃圾|遗留|多余|无用|文件|目录|仓库|项目)|(?:残余|垃圾|遗留|多余|无用).*(?:清空|清理|删除|移除|删掉)|把.+(?:清空|清理|删除|移除|删掉)/i.test(text);
+}
+
+function canInferConcreteAcceptanceFromTask(text: string, description: string | null): boolean {
+  const combined = `${text}\n${description || ''}`;
+  if (/理论公式|标度律|总结/i.test(combined) && /(python|脚本|绘图|plot|matplotlib|运行)/i.test(combined)) {
+    return true;
+  }
+  if (/研究|分析|总结|整理/i.test(combined) && /(脚本|代码|图|图表|notebook|python)/i.test(combined)) {
+    return true;
+  }
+  return false;
+}
+
+function inferDefaultClarificationAcceptance(
+  title: string,
+  description: string | null,
+): string[] | null {
+  const combined = `${title}\n${description || ''}`;
+  if (/理论公式|标度律|总结/i.test(combined) && /(python|脚本|绘图|plot|matplotlib|运行)/i.test(combined)) {
+    return [
+      '总结不同质量恒星随 M 变化的主要理论公式或标度律，并说明适用范围。',
+      '至少包含一份可运行脚本或图表输出，能展示关键参数随 M 的变化。',
+    ];
+  }
+  if (/体验|用户体验|易用性|可用性|交互/i.test(combined)) {
+    return [
+      '给出至少一个可直接验证的用户结果，并说明它相对当前体验的改善点。',
+    ];
+  }
+  return null;
 }
 
 function stripLifecycleOnlySteps(value: string): string {
@@ -881,6 +929,7 @@ export interface DraftInput {
   title: string;
   description: string | null;
   project_slug: string | null;
+  acceptance_override?: string[] | null;
 }
 
 export interface PlanComputation {
@@ -1541,19 +1590,48 @@ export class SupervisorSessionService {
       const repoClarification = asksForRepoClarification(planCard?.clarification_question);
       const answerUpdatesGoal = !repoClarification
         && clarificationAnswerUpdatesGoal(planCard?.clarification_question, params.text);
+      const delegatedAcceptanceChoice = !repoClarification
+        && Boolean(planCard?.clarification_question)
+        && isDelegatingAcceptanceChoice(params.text);
+      const explicitClarifiedAcceptance = !repoClarification
+        ? extractAcceptanceFromClarificationAnswer(params.text)
+        : null;
+      const delegatedAcceptance = delegatedAcceptanceChoice
+        ? inferDefaultClarificationAcceptance(
+            planCard?.title || params.text,
+            [
+              planCard?.user_goal,
+              ...(planCard?.in_scope ?? []),
+              ...(planCard?.acceptance ?? []),
+              params.text,
+            ].filter((value): value is string => Boolean(value)).join('\n')
+          )
+        : null;
       const draft: DraftInput = {
         title: answerUpdatesGoal
           ? normalizeTitle(params.text)
           : planCard?.title || compact(params.text, 80) || '未命名计划',
         description: repoClarification
           ? planCard?.acceptance?.join('\n') || params.text
+          : explicitClarifiedAcceptance
+            ? [
+                planCard?.user_goal || planCard?.title || null,
+                `验收标准：${explicitClarifiedAcceptance.join('；')}`,
+              ].filter((value): value is string => Boolean(value)).join('\n')
+          : delegatedAcceptance
+            ? [
+                planCard?.user_goal || planCard?.title || null,
+                ...(planCard?.in_scope ?? []),
+                `默认验收：${delegatedAcceptance.join('；')}`,
+              ].filter((value): value is string => Boolean(value)).join('\n')
           : answerUpdatesGoal
             ? [
                 planCard?.user_goal || planCard?.title || null,
                 `用户澄清：${params.text}`,
               ].filter((value): value is string => Boolean(value)).join('\n')
-          : params.text,
+            : params.text,
         project_slug: session.repo_ref,
+        acceptance_override: explicitClarifiedAcceptance ?? delegatedAcceptance ?? null,
       };
 
       const resolvedProjectSlug = session.repo_ref
@@ -1577,6 +1655,7 @@ export class SupervisorSessionService {
         this.recordEvent(session.id, 'clarification_answer_recorded', {
           question: planCard.clarification_question,
           answer: params.text,
+          delegated_default_used: delegatedAcceptanceChoice,
         });
       }
 
@@ -1688,6 +1767,8 @@ export class SupervisorSessionService {
     const requestTitle = normalizeRequirementText(draft.title);
     const requestDescription = draft.description ? normalizeRequirementText(draft.description) : null;
     const explicitApprovalRequested = explicitlyRequestsApprovalBeforeExecution(draft.title, draft.description);
+    const inferredAcceptance = draft.acceptance_override
+      ?? inferDefaultClarificationAcceptance(requestTitle, requestDescription);
     const repoRef = draft.project_slug
       || runtimeContext.default_project_slug
       || resolveProjectAlias(draft.title, runtimeContext.available_projects)
@@ -1762,7 +1843,8 @@ export class SupervisorSessionService {
       governance?.decision === 'split_before_implement'
       || isLikelyMultiObjective(draft.title, draft.description)
     );
-    const needsClarify = shouldClarifyAcceptance(draft.title, draft.description)
+    const needsClarify = !inferredAcceptance
+      && shouldClarifyAcceptance(draft.title, draft.description)
       && !multiObjective
       && !explicitApprovalRequested
       && governance?.decision !== 'accept_with_rewrite';
@@ -1814,7 +1896,7 @@ export class SupervisorSessionService {
           ...inferOutOfScope(requestTitle),
           splitQueueForbidden ? '不拆分、不创建 child queue；本轮只创建一张 root-only 验证单。' : null,
         ].filter((value): value is string => Boolean(value)),
-        acceptance: inferAcceptance(requestTitle, requestDescription),
+        acceptance: inferredAcceptance ?? inferAcceptance(requestTitle, requestDescription),
         known_risks: [
           governance?.summary ? compact(governance.summary, 180) : null,
           riskyCleanup ? '这类清理可能删除文件，需要先确认范围和验收方式。' : null,

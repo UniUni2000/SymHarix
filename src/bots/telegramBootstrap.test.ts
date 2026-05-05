@@ -40,6 +40,94 @@ describe('TelegramWebhookBootstrapService', () => {
     );
   });
 
+  test('treats a configured trycloudflare public base URL like a tunnel and waits for reachability before setWebhook', async () => {
+    const calls: string[] = [];
+    let probeAttempts = 0;
+    let webhookAttempts = 0;
+    const fetcher = mock(async (input: string) => {
+      calls.push(input);
+      if (input === 'https://fresh.trycloudflare.com') {
+        probeAttempts += 1;
+        if (probeAttempts === 1) {
+          throw new Error('dns not ready');
+        }
+        return new Response('ok', { status: 200 });
+      }
+      if (input.endsWith('/setWebhook')) {
+        webhookAttempts += 1;
+        if (webhookAttempts === 1) {
+          return new Response(
+            JSON.stringify({
+              ok: false,
+              error_code: 400,
+              description: 'Bad Request: bad webhook: Failed to resolve host: Name or service not known',
+            }),
+            { status: 400 },
+          );
+        }
+        return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+    });
+
+    const service = new TelegramWebhookBootstrapService({
+      botToken: 'telegram-token',
+      webhookSecret: 'secret',
+      publicBaseUrl: 'https://fresh.trycloudflare.com',
+      fetcher: fetcher as unknown as typeof fetch,
+      retryDelayMs: 0,
+      retryAttempts: 2,
+      tunnelReadyDelayMs: 0,
+      tunnelReadyAttempts: 2,
+    });
+
+    const result = await service.bootstrap({
+      localBaseUrl: 'http://127.0.0.1:8080',
+      inboundPath: '/api/v1/bots/telegram/webhook',
+    });
+
+    expect(result).toEqual({
+      enabled: true,
+      publicBaseUrl: 'https://fresh.trycloudflare.com',
+      webhookUrl: 'https://fresh.trycloudflare.com/api/v1/bots/telegram/webhook',
+      usedTunnel: true,
+    });
+    expect(probeAttempts).toBe(2);
+    expect(webhookAttempts).toBe(2);
+  });
+
+  test('falls back to the injected fetcher when the default runtime fetch cannot verify Telegram certificates', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new Error('unknown certificate verification error');
+    }) as unknown as typeof globalThis.fetch;
+
+    const fallbackFetcher = mock(async (input: string | URL | RequestInfo) => {
+      if (String(input).includes('/setWebhook')) {
+        return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+      }
+      return new Response('ok', { status: 200 });
+    });
+
+    const service = new TelegramWebhookBootstrapService({
+      botToken: 'telegram-token',
+      webhookSecret: 'secret',
+      publicBaseUrl: 'https://fresh.trycloudflare.com',
+      fetcher: fallbackFetcher as unknown as typeof fetch,
+      tunnelReadyDelayMs: 0,
+      tunnelReadyAttempts: 1,
+    });
+
+    const result = await service.bootstrap({
+      localBaseUrl: 'http://127.0.0.1:8080',
+      inboundPath: '/api/v1/bots/telegram/webhook',
+    });
+
+    expect(result.webhookUrl).toBe('https://fresh.trycloudflare.com/api/v1/bots/telegram/webhook');
+    expect(fallbackFetcher).toHaveBeenCalled();
+    globalThis.fetch = originalFetch;
+  });
+
   test('creates a tunnel automatically when no public base URL is configured and deletes the webhook on dispose', async () => {
     const fetcher = mock(async (input: string) => {
       if (input.endsWith('/setWebhook')) {

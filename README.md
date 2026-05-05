@@ -20,7 +20,7 @@ After that, the normal local loop is one command:
 bun run start:local
 ```
 
-`start:local` reruns the safe setup guard, then starts the whole local product. If the config files already exist, they are not overwritten. If you only want to start without the setup guard:
+`start:local` reruns the safe setup guard, then starts the whole local product. If Telegram is configured and `SYMPHONY_PUBLIC_BASE_URL` is empty, it now pre-provisions a temporary `cloudflared` tunnel before launching the server so webhook registration does not depend on in-process tunnel bootstrap timing. The temporary URL is injected only for the current run. If the config files already exist, they are not overwritten. If you only want to start without the setup guard:
 
 ```bash
 bun run start

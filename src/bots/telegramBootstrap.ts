@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
+import { createDefaultTelegramApiFetch } from './telegramHttp';
 
 export interface TelegramTunnelHandle {
   publicBaseUrl: string;
@@ -35,13 +36,17 @@ function normalizeBaseUrl(value: string | null | undefined): string | null {
   return trimmed.replace(/\/+$/, '');
 }
 
+function isTryCloudflareUrl(value: string | null | undefined): boolean {
+  return Boolean(value && /^https:\/\/[a-z0-9.-]+trycloudflare\.com$/i.test(value));
+}
+
 function buildWebhookUrl(baseUrl: string, inboundPath: string): string {
   const normalizedPath = inboundPath.startsWith('/') ? inboundPath : `/${inboundPath}`;
   return `${baseUrl}${normalizedPath}`;
 }
 
 async function defaultFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  return fetch(input, init);
+  return createDefaultTelegramApiFetch()(input, init);
 }
 
 function isRetryableTunnelWebhookError(error: unknown): boolean {
@@ -188,9 +193,14 @@ export class TelegramWebhookBootstrapService {
     }
 
     let publicBaseUrl = normalizeBaseUrl(this.options.publicBaseUrl);
-    const usedTunnel = !publicBaseUrl;
+    const configuredTryCloudflare = Boolean(publicBaseUrl && isTryCloudflareUrl(publicBaseUrl));
+    const usedTunnel = !publicBaseUrl || configuredTryCloudflare;
     if (!publicBaseUrl) {
       publicBaseUrl = await this.createReachableTunnel(params.localBaseUrl);
+    }
+
+    if (configuredTryCloudflare && publicBaseUrl) {
+      await this.waitForTunnelReachability(publicBaseUrl);
     }
 
     if (!publicBaseUrl) {
