@@ -57,6 +57,7 @@ import {
   type TelegramWebhookDiagnosticsService,
 } from './telegramDiagnostics';
 import { TelegramWebhookBootstrapService } from './telegramBootstrap';
+import { createDefaultTelegramApiFetch } from './telegramHttp';
 import { logger } from '../logging';
 import { SupervisorSessionService, type SupervisorPlanBrain } from '../supervisor/sessionService';
 import type { SupervisorRepoIntelligenceResolver } from '../supervisor/repoIntelligence';
@@ -251,10 +252,15 @@ function buildTelegramInlineKeyboard(
 }
 
 class TelegramNotifier implements BotTransportNotifier {
+  private readonly telegramFetch: typeof fetch;
+
   constructor(
     private readonly config: TelegramAdapterConfig,
     private readonly getPublicBaseUrl: () => string | null = () => null,
-  ) {}
+    telegramFetch: typeof fetch = createDefaultTelegramApiFetch(),
+  ) {
+    this.telegramFetch = telegramFetch;
+  }
 
   private classifyEditFailure(description: string | null): BotMessageEditFailureKind {
     const normalized = (description ?? '').toLowerCase();
@@ -280,7 +286,7 @@ class TelegramNotifier implements BotTransportNotifier {
     }
     const keyboard = buildTelegramInlineKeyboard(message, this.getPublicBaseUrl());
 
-    const response = await fetch(
+    const response = await this.telegramFetch(
       `https://api.telegram.org/bot${this.config.botToken}/sendMessage`,
       {
         method: 'POST',
@@ -340,7 +346,7 @@ class TelegramNotifier implements BotTransportNotifier {
       form.set('reply_markup', JSON.stringify(keyboard));
     }
 
-    const response = await fetch(
+    const response = await this.telegramFetch(
       `https://api.telegram.org/bot${this.config.botToken}/sendPhoto`,
       {
         method: 'POST',
@@ -374,7 +380,7 @@ class TelegramNotifier implements BotTransportNotifier {
     }
     const keyboard = buildTelegramInlineKeyboard(message, this.getPublicBaseUrl());
 
-    const response = await fetch(
+    const response = await this.telegramFetch(
       `https://api.telegram.org/bot${this.config.botToken}/editMessageText`,
       {
         method: 'POST',
@@ -427,7 +433,7 @@ class TelegramNotifier implements BotTransportNotifier {
   ): Promise<BotTransportMessageRef> {
     const keyboard = buildTelegramInlineKeyboard(message, this.getPublicBaseUrl());
 
-    const response = await fetch(
+    const response = await this.telegramFetch(
       `https://api.telegram.org/bot${this.config.botToken}/editMessageCaption`,
       {
         method: 'POST',
@@ -504,7 +510,7 @@ class TelegramNotifier implements BotTransportNotifier {
       form.set('reply_markup', JSON.stringify(keyboard));
     }
 
-    const response = await fetch(
+    const response = await this.telegramFetch(
       `https://api.telegram.org/bot${this.config.botToken}/editMessageMedia`,
       {
         method: 'POST',
@@ -546,7 +552,7 @@ class TelegramNotifier implements BotTransportNotifier {
       throw new Error('Telegram bot token is not configured');
     }
 
-    const response = await fetch(
+    const response = await this.telegramFetch(
       `https://api.telegram.org/bot${this.config.botToken}/answerCallbackQuery`,
       {
         method: 'POST',

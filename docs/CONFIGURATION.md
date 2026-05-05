@@ -113,7 +113,12 @@ Use an existing public URL when possible:
 SYMPHONY_PUBLIC_BASE_URL=https://your-host.example.com
 ```
 
-If `SYMPHONY_PUBLIC_BASE_URL` is empty and bootstrap is not off, symphonyness tries to start a temporary tunnel. If no tunnel is available, the service still starts, but Telegram inbound will not work.
+If `SYMPHONY_PUBLIC_BASE_URL` is empty and bootstrap is not off, symphonyness can start a temporary tunnel in two ways:
+
+- `bun run start:local`: pre-provisions a temporary `cloudflared` URL before the app starts and injects it for that run.
+- Other startup paths: fall back to in-process webhook/tunnel bootstrap.
+
+If no tunnel is available, the service still starts, but Telegram inbound will not work.
 
 After startup, confirm Telegram really points at this process:
 

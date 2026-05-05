@@ -143,10 +143,16 @@ function createRuntimeControlPlane(): RuntimeControlPlane {
 describe('DefaultBotGateway', () => {
   const originalFetch = globalThis.fetch;
   const originalRepair = BotFollowupRepairService.prototype.repair;
+  const originalPublicBaseUrl = process.env.SYMPHONY_PUBLIC_BASE_URL;
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
     BotFollowupRepairService.prototype.repair = originalRepair;
+    if (originalPublicBaseUrl === undefined) {
+      delete process.env.SYMPHONY_PUBLIC_BASE_URL;
+    } else {
+      process.env.SYMPHONY_PUBLIC_BASE_URL = originalPublicBaseUrl;
+    }
   });
 
   test('defers bot follow-up repair after construction so startup can become responsive first', () => {
@@ -230,6 +236,7 @@ describe('DefaultBotGateway', () => {
   });
 
   test('reports operator-gated write access and watch presets in the manifest', () => {
+    delete process.env.SYMPHONY_PUBLIC_BASE_URL;
     const telegramDiagnostics = {
       getSnapshot: () => ({
         webhook_url: 'https://example.test/telegram',
