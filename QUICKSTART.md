@@ -12,7 +12,7 @@ bun run setup:local
 bun run start:local
 ```
 
-`start:local` is intentionally safe: it runs the setup guard, keeps existing local config files, and then starts the server. Telegram does not require a fixed public IP; leave `SYMPHONY_PUBLIC_BASE_URL` empty and install `cloudflared` if you want automatic local HTTPS tunneling.
+`start:local` is intentionally safe: it runs the setup guard, keeps existing local config files, and then starts the server. When Telegram is configured and `SYMPHONY_PUBLIC_BASE_URL` is empty, `start:local` pre-provisions a temporary `cloudflared` URL and injects it for that run before the app starts, so Telegram webhook registration can use a ready public HTTPS base without manual setup.
 
 ## 1. Install
 

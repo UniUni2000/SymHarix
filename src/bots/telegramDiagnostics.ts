@@ -1,5 +1,6 @@
 import { logger } from '../logging';
 import type { TelegramCallbackAuditRecord, TelegramWebhookDiagnostics } from './types';
+import { createDefaultTelegramApiFetch } from './telegramHttp';
 
 const CALLBACK_OK_WINDOW_MS = 15 * 60 * 1000;
 const REFRESH_INTERVAL_MS = 60 * 1000;
@@ -51,7 +52,7 @@ export class DefaultTelegramWebhookDiagnosticsService implements TelegramWebhook
 
   constructor(
     private readonly botToken: string | null,
-    private readonly fetcher: typeof fetch = fetch,
+    private readonly fetcher: typeof fetch = createDefaultTelegramApiFetch(),
   ) {
     this.snapshot = {
       health: botToken ? 'degraded' : 'unconfigured',

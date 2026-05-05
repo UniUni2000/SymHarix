@@ -1,0 +1,146 @@
+import { describe, expect, test } from 'bun:test';
+import {
+  buildTelegramStartupSummary,
+  resolveStartLocalPort,
+  shouldEmitTelegramStartupSummary,
+  shouldProvisionStartLocalTunnel,
+  upsertEnvAssignment,
+} from './startLocalTunnel';
+
+describe('startLocalTunnel', () => {
+  test('provisions a temporary tunnel when Telegram bootstrap is enabled and no public base URL is configured', () => {
+    expect(shouldProvisionStartLocalTunnel({
+      SYMPHONY_TELEGRAM_BOT_TOKEN: 'telegram-token',
+      SYMPHONY_PUBLIC_BASE_URL: '',
+    })).toBe(true);
+  });
+
+  test('skips temporary tunnel provisioning when a public base URL is already configured', () => {
+    expect(shouldProvisionStartLocalTunnel({
+      SYMPHONY_TELEGRAM_BOT_TOKEN: 'telegram-token',
+      SYMPHONY_PUBLIC_BASE_URL: 'https://bot.example.test',
+    })).toBe(false);
+  });
+
+  test('re-provisions temporary tunnels when the configured public base URL is a stale trycloudflare url', () => {
+    expect(shouldProvisionStartLocalTunnel({
+      SYMPHONY_TELEGRAM_BOT_TOKEN: 'telegram-token',
+      SYMPHONY_PUBLIC_BASE_URL: 'https://stale-demo.trycloudflare.com',
+    })).toBe(true);
+  });
+
+  test('skips temporary tunnel provisioning when Telegram bootstrap is disabled', () => {
+    expect(shouldProvisionStartLocalTunnel({
+      SYMPHONY_TELEGRAM_BOT_TOKEN: 'telegram-token',
+      SYMPHONY_TELEGRAM_BOOTSTRAP: 'off',
+      SYMPHONY_PUBLIC_BASE_URL: '',
+    })).toBe(false);
+  });
+
+  test('upserts an existing public base URL assignment in .env content', () => {
+    const result = upsertEnvAssignment(
+      'FOO=bar\nSYMPHONY_PUBLIC_BASE_URL=\nBAZ=qux\n',
+      'SYMPHONY_PUBLIC_BASE_URL',
+      'https://fresh.trycloudflare.com',
+    );
+
+    expect(result).toBe(
+      'FOO=bar\nSYMPHONY_PUBLIC_BASE_URL=https://fresh.trycloudflare.com\nBAZ=qux\n',
+    );
+  });
+
+  test('appends a missing public base URL assignment to .env content', () => {
+    const result = upsertEnvAssignment(
+      'FOO=bar\n',
+      'SYMPHONY_PUBLIC_BASE_URL',
+      'https://fresh.trycloudflare.com',
+    );
+
+    expect(result).toBe(
+      'FOO=bar\nSYMPHONY_PUBLIC_BASE_URL=https://fresh.trycloudflare.com\n',
+    );
+  });
+
+  test('resolves the requested local port from cli arguments before env', () => {
+    expect(resolveStartLocalPort(['--port', '4123'], { PORT: '3000' })).toBe(4123);
+    expect(resolveStartLocalPort(['--port=5123'], { PORT: '3000' })).toBe(5123);
+  });
+
+  test('falls back to PORT env and then to the default local port', () => {
+    expect(resolveStartLocalPort([], { PORT: '4333' })).toBe(4333);
+    expect(resolveStartLocalPort([], {})).toBe(3000);
+  });
+
+  test('prefers workflow server port when no cli or PORT override is present', () => {
+    expect(resolveStartLocalPort([], {}, 8080)).toBe(8080);
+  });
+
+  test('builds a concise telegram startup summary with webhook url when present', () => {
+    expect(buildTelegramStartupSummary({
+      health: 'healthy',
+      webhook_url: 'https://bot.example.test/api/v1/bots/telegram/webhook',
+    })).toBe(
+      'telegram: healthy webhook_url=https://bot.example.test/api/v1/bots/telegram/webhook',
+    );
+  });
+
+  test('builds a concise telegram startup summary without a webhook url', () => {
+    expect(buildTelegramStartupSummary({
+      health: 'unconfigured',
+      webhook_url: null,
+    })).toBe('telegram: unhealthy webhook_url=(none)');
+  });
+
+  test('includes webhook error details in the telegram startup summary when present', () => {
+    expect(buildTelegramStartupSummary({
+      health: 'degraded',
+      webhook_url: null,
+      webhook_last_error_message: 'Failed to resolve host',
+    })).toBe('telegram: unhealthy webhook_url=(none) error=Failed to resolve host');
+  });
+
+  test('waits to emit the telegram startup summary until webhook state is meaningful', () => {
+    expect(shouldEmitTelegramStartupSummary({
+      health: 'unconfigured',
+      webhook_url: null,
+      webhook_last_error_message: null,
+    })).toBe(false);
+
+    expect(shouldEmitTelegramStartupSummary({
+      health: 'degraded',
+      webhook_url: 'https://bot.example.test/api/v1/bots/telegram/webhook',
+      webhook_last_error_message: null,
+    })).toBe(true);
+
+    expect(shouldEmitTelegramStartupSummary({
+      health: 'degraded',
+      webhook_url: null,
+      webhook_last_error_message: 'unknown certificate verification error',
+    })).toBe(false);
+  });
+
+  test('does not emit startup summary from a stale process bound to an older public base url', () => {
+    expect(shouldEmitTelegramStartupSummary({
+      health: 'healthy',
+      webhook_url: 'https://old.trycloudflare.com/api/v1/bots/telegram/webhook',
+      webhook_last_error_message: null,
+      public_base_url: 'https://old.trycloudflare.com',
+    }, 'https://fresh.trycloudflare.com')).toBe(false);
+
+    expect(shouldEmitTelegramStartupSummary({
+      health: 'healthy',
+      webhook_url: 'https://fresh.trycloudflare.com/api/v1/bots/telegram/webhook',
+      webhook_last_error_message: null,
+      public_base_url: 'https://fresh.trycloudflare.com',
+    }, 'https://fresh.trycloudflare.com')).toBe(true);
+  });
+
+  test('does not emit startup summary when webhook_url still points at the previous public base url', () => {
+    expect(shouldEmitTelegramStartupSummary({
+      health: 'healthy',
+      webhook_url: 'https://old.trycloudflare.com/api/v1/bots/telegram/webhook',
+      webhook_last_error_message: null,
+      public_base_url: 'https://fresh.trycloudflare.com',
+    }, 'https://fresh.trycloudflare.com')).toBe(false);
+  });
+});

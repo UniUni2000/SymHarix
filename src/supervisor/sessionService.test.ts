@@ -1861,27 +1861,40 @@ describe('SupervisorSessionService', () => {
     const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
     const context = createContext();
 
-    const first = await service.respond({
-      context,
-      text: '改善用户体验',
-      intent: {
-        kind: 'create_issue',
-        title: '改善用户体验',
-        description: null,
-        project_slug: 'test2',
-      },
-      runtimeContext: createRuntimeContext(),
-      canWrite: true,
-    });
-
-    expect(first).not.toBeNull();
-    expect(first?.message).toContain('还缺什么');
-    expect(runtime.createIssueCalls).toHaveLength(0);
-    const session = sessions.findActiveByConversation({
+    const session = sessions.create({
+      id: 'session-clarify-answer',
       transport: 'telegram',
       conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'clarifying',
+      repo_ref: 'test2',
+      intake_mode: 'clarify_then_plan',
+      approval_mode: 'auto',
+      plan_version: 1,
+      plan_card: {
+        title: '改善用户体验',
+        user_goal: '改善用户体验',
+        in_scope: ['改善用户体验'],
+        out_of_scope: [],
+        acceptance: ['结果可验证。'],
+        known_risks: ['当前验收条件还不够稳，需要先补清楚。'],
+        execution_strategy: '保持单目标推进，避免顺手扩大范围。',
+        needs_user_approval: false,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: '这条需求完成以后，你最想看到的可验证结果是什么？',
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '按推荐继续',
+          summary: '按这张精简计划直接开跑。',
+        },
+        alternate_option: {
+          label: '改一下计划',
+          summary: '如果你不想按推荐路径走，我可以先把计划重写得更合适。',
+        },
+        governance_preview: null,
+      },
     });
-    expect(session?.state).toBe('clarifying');
 
     const second = await service.respond({
       context,
@@ -1895,9 +1908,108 @@ describe('SupervisorSessionService', () => {
     expect(second?.message).toContain('计划执行中');
     expect(runtime.createIssueCalls).toHaveLength(1);
     expect(String(runtime.createIssueCalls[0]?.description)).toContain('/settings 页面保存主题');
-    const updated = sessions.findById(session!.id);
+    const updated = sessions.findById(session.id);
     expect(updated?.plan_card?.acceptance.join('\n')).toContain('/settings 页面保存主题');
-    expect(events.listBySession(session!.id).some((event) => event.event_kind === 'clarification_answer_recorded')).toBe(true);
+    expect(events.listBySession(session.id).some((event) => event.event_kind === 'clarification_answer_recorded')).toBe(true);
+  });
+
+  test('treats "你自己决定吧" as authorization to fill a default acceptance target and exit clarifying', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+    const context = createContext();
+
+    const session = sessions.create({
+      id: 'session-clarify-defaults',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'clarifying',
+      repo_ref: 'test2',
+      intake_mode: 'clarify_then_plan',
+      approval_mode: 'auto',
+      plan_version: 1,
+      plan_card: {
+        title: '改善用户体验',
+        user_goal: '改善用户体验',
+        in_scope: ['改善用户体验'],
+        out_of_scope: [],
+        acceptance: ['结果可验证。'],
+        known_risks: ['当前验收条件还不够稳，需要先补清楚。'],
+        execution_strategy: '保持单目标推进，避免顺手扩大范围。',
+        needs_user_approval: false,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: '这条需求完成以后，你最想看到的可验证结果是什么？',
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '按推荐继续',
+          summary: '按这张精简计划直接开跑。',
+        },
+        alternate_option: {
+          label: '改一下计划',
+          summary: '如果你不想按推荐路径走，我可以先把计划重写得更合适。',
+        },
+        governance_preview: null,
+      },
+    });
+
+    const second = await service.respond({
+      context,
+      text: '你自己决定吧',
+      intent: null,
+      runtimeContext: createRuntimeContext(),
+      canWrite: true,
+    });
+
+    expect(second).not.toBeNull();
+    expect(second?.message).toContain('计划执行中');
+    expect(second?.message).not.toContain('一起补计划');
+    expect(runtime.createIssueCalls).toHaveLength(1);
+    expect(String(runtime.createIssueCalls[0]?.description)).toContain('给出至少一个可直接验证的用户结果');
+    const updated = sessions.findById(session.id);
+    expect(updated?.state).toBe('executing');
+    expect(updated?.plan_card?.clarification_question).toBeNull();
+    expect(updated?.plan_card?.acceptance.join('\n')).toContain('给出至少一个可直接验证的用户结果');
+  });
+
+  test('renders a recommended issue card directly for a low-risk create-issue request instead of forcing clarification', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+
+    const response = await service.respond({
+      context: createContext(),
+      text: '创建 Issue：计算不同质量恒星的光度等参数随 M 的变化',
+      intent: {
+        kind: 'create_issue',
+        title: '创建 Issue：计算不同质量恒星的光度等参数随 M 的变化',
+        description: '主要包含理论公式/标度律总结，还需要附带一段可运行的 Python 计算脚本或绘图代码',
+        project_slug: 'test2',
+      },
+      runtimeContext: createRuntimeContext(),
+      canWrite: true,
+    });
+
+    expect(response).not.toBeNull();
+    expect(response?.format).toBe('telegram_html');
+    expect(response?.message).toContain('计划执行中');
+    expect(response?.message).not.toContain('一起补计划');
+    expect(runtime.createIssueCalls).toHaveLength(1);
+    const session = sessions.findActiveByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(session?.state).toBe('executing');
+    expect(session?.plan_card?.clarification_question).toBeNull();
   });
 
   test('does not repeat a stale typo clarification once the user provides a concrete cleanup target', async () => {
