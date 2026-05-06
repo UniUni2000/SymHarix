@@ -11,14 +11,33 @@ export function buildTelegramStartupSummary(telegram: {
   health?: string | null;
   webhook_url?: string | null;
   webhook_last_error_message?: string | null;
-}): string {
+  public_base_url?: string | null;
+  webhook_pending_update_count?: number | null;
+}, expectedPublicBaseUrl?: string | null): string {
   const webhookUrl = normalizeEnvValue(telegram.webhook_url ?? undefined) ?? '(none)';
-  const status = webhookUrl === '(none)' ? 'unhealthy' : 'healthy';
+  const expectedBaseUrl = normalizeEnvValue(expectedPublicBaseUrl ?? undefined);
+  const currentBaseUrl = normalizeEnvValue(telegram.public_base_url ?? undefined);
+  const staleWebhook = Boolean(expectedBaseUrl && webhookUrl !== '(none)' && !webhookUrl.startsWith(`${expectedBaseUrl}/`));
+  const status = staleWebhook
+    ? 'stale'
+    : webhookUrl === '(none)'
+      ? 'unhealthy'
+      : telegram.health ?? 'healthy';
   const error = normalizeEnvValue(telegram.webhook_last_error_message ?? undefined);
-  if (error) {
-    return `telegram: ${status} webhook_url=${webhookUrl} error=${error}`;
+  const details = [`webhook_url=${webhookUrl}`];
+  if (expectedBaseUrl) {
+    details.push(`expected_base=${expectedBaseUrl}`);
   }
-  return `telegram: ${status} webhook_url=${webhookUrl}`;
+  if (currentBaseUrl && currentBaseUrl !== expectedBaseUrl) {
+    details.push(`public_base=${currentBaseUrl}`);
+  }
+  if (typeof telegram.webhook_pending_update_count === 'number' && telegram.webhook_pending_update_count > 0) {
+    details.push(`pending_updates=${telegram.webhook_pending_update_count}`);
+  }
+  if (error) {
+    details.push(`error=${error}`);
+  }
+  return `telegram: ${status} ${details.join(' ')}`;
 }
 
 export function shouldEmitTelegramStartupSummary(telegram: {
@@ -31,12 +50,15 @@ export function shouldEmitTelegramStartupSummary(telegram: {
   const currentBaseUrl = normalizeEnvValue(telegram.public_base_url ?? undefined);
   const webhookUrl = normalizeEnvValue(telegram.webhook_url ?? undefined);
   if (expectedBaseUrl && currentBaseUrl && expectedBaseUrl !== currentBaseUrl) {
-    return false;
+    return true;
   }
   if (expectedBaseUrl && webhookUrl && !webhookUrl.startsWith(`${expectedBaseUrl}/`)) {
-    return false;
+    return true;
   }
   if (webhookUrl) {
+    return true;
+  }
+  if (normalizeEnvValue(telegram.webhook_last_error_message ?? undefined)) {
     return true;
   }
   return false;
@@ -56,6 +78,38 @@ export function shouldProvisionStartLocalTunnel(
     return false;
   }
   return true;
+}
+
+export function hasHttpProxyEnv(env: Record<string, string | undefined>): boolean {
+  return Boolean(
+    normalizeEnvValue(env.HTTP_PROXY)
+      || normalizeEnvValue(env.HTTPS_PROXY)
+      || normalizeEnvValue(env.http_proxy)
+      || normalizeEnvValue(env.https_proxy),
+  );
+}
+
+export function applyProxyEnv(
+  env: Record<string, string | undefined>,
+  proxyUrl: string,
+): void {
+  env.HTTP_PROXY = proxyUrl;
+  env.HTTPS_PROXY = proxyUrl;
+  env.http_proxy = proxyUrl;
+  env.https_proxy = proxyUrl;
+}
+
+export function disableProxyEnv(env: Record<string, string | undefined>): void {
+  delete env.HTTP_PROXY;
+  delete env.HTTPS_PROXY;
+  delete env.http_proxy;
+  delete env.https_proxy;
+}
+
+export function ensureNoProxyForLocalhost(env: Record<string, string | undefined>): void {
+  if (!normalizeEnvValue(env.NO_PROXY) && !normalizeEnvValue(env.no_proxy)) {
+    env.NO_PROXY = '127.0.0.1,localhost';
+  }
 }
 
 export function upsertEnvAssignment(

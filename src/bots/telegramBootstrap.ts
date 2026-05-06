@@ -24,6 +24,8 @@ export interface TelegramWebhookBootstrapOptions {
   fetcher?: typeof fetch;
   retryDelayMs?: number;
   retryAttempts?: number;
+  webhookRetryDelayMs?: number;
+  webhookRetryAttempts?: number;
   tunnelReadyDelayMs?: number;
   tunnelReadyAttempts?: number;
 }
@@ -49,16 +51,21 @@ async function defaultFetch(input: RequestInfo | URL, init?: RequestInit): Promi
   return createDefaultTelegramApiFetch()(input, init);
 }
 
-function isRetryableTunnelWebhookError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /setWebhook failed/i.test(message) && /failed to resolve host|host.*not known|dns/i.test(message);
-}
-
 function sleep(ms: number): Promise<void> {
   if (ms <= 0) {
     return Promise.resolve();
   }
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parsePositiveIntegerEnv(name: string): number | null {
+  const parsed = Number.parseInt(process.env[name] || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function isRetryableTunnelWebhookError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /setWebhook failed/i.test(message) && /failed to resolve host|host.*not known|dns|timed out|connection reset|fetch failed|network error/i.test(message);
 }
 
 export function createCloudflaredTunnelProvider(
@@ -88,7 +95,7 @@ export function createCloudflaredTunnelProvider(
       };
 
       const tryExtractUrl = (chunk: string): void => {
-        const match = chunk.match(/https:\/\/[a-z0-9.-]+trycloudflare\.com/i);
+        const match = chunk.match(/https:\/\/(?!api\.)[a-z0-9.-]+trycloudflare\.com/i);
         if (!match?.[0]) {
           return;
         }
@@ -153,6 +160,8 @@ export class TelegramWebhookBootstrapService {
   private readonly tunnelProvider: TelegramTunnelProvider;
   private readonly retryDelayMs: number;
   private readonly retryAttempts: number;
+  private readonly webhookRetryDelayMs: number;
+  private readonly webhookRetryAttempts: number;
   private readonly tunnelReadyDelayMs: number;
   private readonly tunnelReadyAttempts: number;
   private tunnelHandle: TelegramTunnelHandle | null = null;
@@ -166,6 +175,20 @@ export class TelegramWebhookBootstrapService {
     this.tunnelProvider = options.tunnelProvider ?? createCloudflaredTunnelProvider();
     this.retryDelayMs = Math.max(0, options.retryDelayMs ?? 1_500);
     this.retryAttempts = Math.max(1, options.retryAttempts ?? 3);
+    this.webhookRetryDelayMs = Math.max(
+      0,
+      options.webhookRetryDelayMs
+        ?? options.retryDelayMs
+        ?? parsePositiveIntegerEnv('SYMPHONY_TELEGRAM_WEBHOOK_RETRY_DELAY_MS')
+        ?? 5_000,
+    );
+    this.webhookRetryAttempts = Math.max(
+      1,
+      options.webhookRetryAttempts
+        ?? options.retryAttempts
+        ?? parsePositiveIntegerEnv('SYMPHONY_TELEGRAM_WEBHOOK_RETRY_ATTEMPTS')
+        ?? 30,
+    );
     this.tunnelReadyDelayMs = Math.max(0, options.tunnelReadyDelayMs ?? 1_000);
     this.tunnelReadyAttempts = Math.max(1, options.tunnelReadyAttempts ?? 10);
   }
@@ -200,7 +223,14 @@ export class TelegramWebhookBootstrapService {
     }
 
     if (configuredTryCloudflare && publicBaseUrl) {
-      await this.waitForTunnelReachability(publicBaseUrl);
+      try {
+        await this.waitForTunnelReachability(publicBaseUrl);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(
+          `[telegram-bootstrap] Public trycloudflare URL probe failed; continuing with Telegram setWebhook retry: ${message}`,
+        );
+      }
     }
 
     if (!publicBaseUrl) {
@@ -273,7 +303,7 @@ export class TelegramWebhookBootstrapService {
 
   private async setWebhookWithRetry(webhookUrl: string, usedTunnel: boolean): Promise<void> {
     let lastError: unknown = null;
-    for (let attempt = 1; attempt <= this.retryAttempts; attempt += 1) {
+    for (let attempt = 1; attempt <= this.webhookRetryAttempts; attempt += 1) {
       try {
         await this.callTelegram('setWebhook', {
           url: webhookUrl,
@@ -284,12 +314,16 @@ export class TelegramWebhookBootstrapService {
       } catch (error) {
         lastError = error;
         const shouldRetry = usedTunnel
-          && attempt < this.retryAttempts
+          && attempt < this.webhookRetryAttempts
           && isRetryableTunnelWebhookError(error);
         if (!shouldRetry) {
           throw error;
         }
-        await sleep(this.retryDelayMs);
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(
+          `[telegram-bootstrap] setWebhook failed; retrying ${attempt}/${this.webhookRetryAttempts}: ${message}`,
+        );
+        await sleep(this.webhookRetryDelayMs);
       }
     }
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
