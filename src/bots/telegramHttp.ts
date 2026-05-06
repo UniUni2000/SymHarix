@@ -31,6 +31,10 @@ function hasProxyEnv(): boolean {
   );
 }
 
+function telegramProxyDisabled(): boolean {
+  return /^(1|true|yes|on)$/i.test(process.env.SYMPHONY_TELEGRAM_DISABLE_PROXY?.trim() || '');
+}
+
 function normalizeUrl(input: RequestInfo | URL): string {
   if (typeof input === 'string') {
     return input;
@@ -214,7 +218,7 @@ export function createDefaultTelegramApiFetch(): typeof fetch {
       curlFetch as typeof fetch,
     ),
   );
-  if (!hasProxyEnv()) {
+  if (!hasProxyEnv() || telegramProxyDisabled()) {
     return fallbackChain;
   }
   return (async (input: RequestInfo | URL, init?: RequestInit) => {

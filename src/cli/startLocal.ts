@@ -97,10 +97,12 @@ async function detectLocalHttpProxy(): Promise<string | null> {
 async function configureStartLocalProxyEnv(env: Record<string, string | undefined>): Promise<void> {
   const proxyMode = env.SYMPHONY_PROXY_MODE?.trim().toLowerCase() || 'auto';
   if (proxyMode === 'off') {
-    disableProxyEnv(env);
+    env.SYMPHONY_TELEGRAM_DISABLE_PROXY = '1';
     console.log('[symphonyness] start:local Telegram proxy disabled by SYMPHONY_PROXY_MODE=off');
     return;
   }
+
+  delete env.SYMPHONY_TELEGRAM_DISABLE_PROXY;
 
   const configuredProxy = env.SYMPHONY_PROXY_URL?.trim();
   if (configuredProxy) {
