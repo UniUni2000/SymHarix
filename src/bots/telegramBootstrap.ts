@@ -63,6 +63,11 @@ function parsePositiveIntegerEnv(name: string): number | null {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+function isRetryableTunnelWebhookError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /setWebhook failed/i.test(message) && /failed to resolve host|host.*not known|dns|timed out|connection reset|fetch failed|network error/i.test(message);
+}
+
 export function createCloudflaredTunnelProvider(
   tunnelCommand: string = process.env.SYMPHONY_TELEGRAM_TUNNEL_COMMAND?.trim() || 'cloudflared',
   timeoutMs: number = 15_000,
@@ -309,7 +314,8 @@ export class TelegramWebhookBootstrapService {
       } catch (error) {
         lastError = error;
         const shouldRetry = usedTunnel
-          && attempt < this.webhookRetryAttempts;
+          && attempt < this.webhookRetryAttempts
+          && isRetryableTunnelWebhookError(error);
         if (!shouldRetry) {
           throw error;
         }
