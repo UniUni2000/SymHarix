@@ -39,7 +39,7 @@ describe('createTelegramApiFetch', () => {
     expect(fallbackFetch).toHaveBeenCalledTimes(0);
   });
 
-  test('does not fall back for unrelated fetch errors', async () => {
+  test('falls back for Telegram network errors', async () => {
     const primaryFetch = mock(async () => {
       throw new Error('connection reset by peer');
     });
@@ -52,7 +52,26 @@ describe('createTelegramApiFetch', () => {
       fallbackFetch as unknown as typeof fetch,
     );
 
-    await expect(telegramFetch('https://api.telegram.org/bottoken/getWebhookInfo')).rejects.toThrow('connection reset by peer');
+    const response = await telegramFetch('https://api.telegram.org/bottoken/getWebhookInfo');
+
+    expect(response.status).toBe(200);
+    expect(fallbackFetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not fall back for unrelated Telegram fetch errors', async () => {
+    const primaryFetch = mock(async () => {
+      throw new Error('request body is invalid');
+    });
+    const fallbackFetch = mock(async () =>
+      new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    );
+
+    const telegramFetch = createTelegramApiFetch(
+      primaryFetch as unknown as typeof fetch,
+      fallbackFetch as unknown as typeof fetch,
+    );
+
+    await expect(telegramFetch('https://api.telegram.org/bottoken/getWebhookInfo')).rejects.toThrow('request body is invalid');
     expect(fallbackFetch).toHaveBeenCalledTimes(0);
   });
 });
