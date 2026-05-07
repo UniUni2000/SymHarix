@@ -125,7 +125,14 @@ export class SymphonyServer {
 
     if (this.runtimeControlPlane) {
       this.app.get('/runtime', (c) => c.html(renderRuntimePage()));
-      this.app.get('/runtime/issues/:id/app', (c) => c.html(renderRuntimeMiniAppPage(c.req.param('id'))));
+      this.app.get('/runtime/issues/:id/app', (c) => {
+        // Disable caching of the Mini App HTML — Telegram WebView would otherwise serve a stale
+        // build, hiding fixes & breaking client-side fetch logic that depends on the latest script.
+        c.header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+        c.header('Pragma', 'no-cache');
+        c.header('Expires', '0');
+        return c.html(renderRuntimeMiniAppPage(c.req.param('id')));
+      });
     }
 
     // Root endpoint

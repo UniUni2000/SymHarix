@@ -239,6 +239,7 @@ export class TelegramWebhookBootstrapService {
 
     const webhookUrl = buildWebhookUrl(publicBaseUrl, params.inboundPath);
     await this.setWebhookWithRetry(webhookUrl, usedTunnel);
+    await this.updateChatMenuButton(publicBaseUrl);
 
     this.activePublicBaseUrl = publicBaseUrl;
     this.activeWebhookUrl = webhookUrl;
@@ -329,6 +330,23 @@ export class TelegramWebhookBootstrapService {
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
+  private async updateChatMenuButton(publicBaseUrl: string): Promise<void> {
+    try {
+      await this.callTelegram('setChatMenuButton', {
+        menu_button: {
+          type: 'web_app',
+          text: 'Open',
+          web_app: { url: publicBaseUrl + '/runtime' },
+        },
+      });
+      console.log(`[telegram-bootstrap] chat menu button updated to ${publicBaseUrl}/runtime`);
+    } catch (error) {
+      console.warn(
+        `[telegram-bootstrap] setChatMenuButton failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   private async waitForTunnelReachability(publicBaseUrl: string): Promise<void> {
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= this.tunnelReadyAttempts; attempt += 1) {
@@ -353,7 +371,7 @@ export class TelegramWebhookBootstrapService {
       : new Error(`Timed out waiting for Telegram tunnel URL to become reachable: ${publicBaseUrl}`);
   }
 
-  private async callTelegram(method: 'setWebhook' | 'deleteWebhook', payload: Record<string, unknown>): Promise<void> {
+  private async callTelegram(method: 'setWebhook' | 'deleteWebhook' | 'setChatMenuButton', payload: Record<string, unknown>): Promise<void> {
     if (!this.options.botToken) {
       throw new Error('Telegram bot token is not configured');
     }

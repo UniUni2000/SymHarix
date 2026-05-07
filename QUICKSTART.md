@@ -20,7 +20,13 @@ bun run start:local
 bun run setup:local
 ```
 
-That command installs dependencies and creates `.env` / `WORKFLOW.md` only if they do not already exist.
+That command installs Bun dependencies, installs the Python runtime dependencies from `scripts/requirements.txt`, and creates `.env` / `WORKFLOW.md` only if they do not already exist.
+
+If you plan to run the Python test suite in `scripts/__tests__`, install the extra test dependencies once:
+
+```bash
+bun run setup:python-dev
+```
 
 ## 2. Choose The Target Repository
 

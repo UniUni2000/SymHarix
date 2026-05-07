@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "build": "bun build --target bun src/cli/index.ts --outdir dist",
-    "setup:local": "bun install && (test -f .env || cp .env.example .env) && (test -f WORKFLOW.md || cp WORKFLOW.md.example WORKFLOW.md)",
+    "setup:local": "bun install && python3 -m pip install -r scripts/requirements.txt && (test -f .env || cp .env.example .env) && (test -f WORKFLOW.md || cp WORKFLOW.md.example WORKFLOW.md)",
+    "setup:python-dev": "python3 -m pip install -r scripts/requirements-dev.txt",
     "start:local": "bun run setup:local && bun --env-file=.env run src/cli/startLocal.ts",
     "start": "bun --env-file=.env run src/cli/index.ts --port ${PORT:-3000}",
     "stop": "bun --env-file=.env run src/cli/index.ts --kill",

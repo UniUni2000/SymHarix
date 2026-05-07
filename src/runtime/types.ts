@@ -115,6 +115,7 @@ export interface RuntimeFileActivity {
   operation: 'read' | 'write' | 'edit' | 'other';
   status: 'started' | 'completed' | 'failed';
   timestamp: string;
+  patch?: string | null;
 }
 
 export interface RuntimeSessionView {

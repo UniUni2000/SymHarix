@@ -5,6 +5,7 @@ import {
   buildRuntimeMiniAppDiffFiles,
   buildRuntimeMiniAppIssuePresentation,
   renderRuntimeMiniAppPage,
+  translateRuntimeMiniApp,
   visibleRuntimeMiniAppMilestones,
 } from './miniAppPage';
 
@@ -65,9 +66,9 @@ describe('Telegram Mini App issue presentation', () => {
     }));
 
     expect(presentation.progress).toBe(100);
-    expect(presentation.stateLabel).toBe('Completed');
-    expect(presentation.nextRecommendation).toContain('已完成');
-    expect(presentation.reviewStatus).toBe('完成');
+    expect(presentation.stateLabel).toBe('label.completed');
+    expect(presentation.nextRecommendation).toContain('copy.completed');
+    expect(presentation.reviewStatus).toBe('state.completed');
     expect(presentation.visibleMilestones.map((item) => item.kind)).not.toContain('delivery_failed');
   });
 
@@ -121,7 +122,7 @@ describe('Telegram Mini App issue presentation', () => {
           {
             tool_name: 'Bash',
             status: 'started',
-            message: 'cat > "/Users/liupenghui/Documents/code/agent/test-cc/workspaces/uniuni2000__test2/worktrees/INT-149/.symphony/state.json" << EOF',
+            message: 'cat > "/tmp/workspaces/uniuni2000__test2/worktrees/INT-149/.symphony/state.json" << EOF',
             summary: '删除 docs 后运行测试',
             path: null,
             timestamp: '2026-05-04T04:17:00.000Z',
@@ -142,7 +143,7 @@ describe('Telegram Mini App issue presentation', () => {
 
     expect(feed.map((item) => item.label)).toEqual(['Bash', 'Edit', 'Read']);
     expect(feed[0]?.summary).toBe('写入 state.json');
-    expect(feed[0]?.summary).not.toContain('/Users/liupenghui');
+    expect(feed[0]?.summary).not.toContain('/tmp/workspaces');
     expect(feed[1]?.summary).toContain('miniAppPage.ts');
     expect(feed[1]?.detail).toBe('编辑 · src/runtime');
     expect(feed.every((item) => item.timestamp)).toBe(true);
@@ -157,10 +158,10 @@ describe('Telegram Mini App issue presentation', () => {
     }));
 
     expect(presentation.mode).toBe('completed');
-    expect(presentation.liveBadgeLabel).toBe('Final');
-    expect(presentation.timelineTitle).toBe('交付总结');
+    expect(presentation.liveBadgeLabel).toBe('label.final');
+    expect(presentation.timelineTitle).toBe('title.delivery_summary');
     expect(presentation.activityFeed[0]?.label).toBe('Closed');
-    expect(presentation.emptyChildQueueLabel).toContain('单 issue');
+    expect(presentation.emptyChildQueueLabel).toContain('copy.single_issue');
   });
 
   test('reserves an auto-sized column for activity feed badges', () => {
@@ -248,7 +249,7 @@ describe('Telegram Mini App issue presentation', () => {
         profile: 'coding',
         complexity: 'small',
         files: [
-          '/Users/liupenghui/Documents/code/agent/test-cc/workspaces/uniuni2000__test2/worktrees/INT-149/src/runtime/miniAppPage.ts',
+          '/tmp/workspaces/uniuni2000__test2/worktrees/INT-149/src/runtime/miniAppPage.ts',
         ],
         overview: 'go complexity profile repeated metadata',
       },
@@ -264,7 +265,7 @@ describe('Telegram Mini App issue presentation', () => {
         recent_tools: [],
         recent_files: [
           {
-            path: '/Users/liupenghui/Documents/code/agent/test-cc/workspaces/uniuni2000__test2/worktrees/INT-149/.symphony/state.json',
+            path: '/tmp/workspaces/uniuni2000__test2/worktrees/INT-149/.symphony/state.json',
             operation: 'read',
             status: 'completed',
             timestamp: '2026-05-04T04:17:00.000Z',
@@ -311,10 +312,10 @@ describe('Telegram Mini App issue presentation', () => {
     }));
     const html = renderRuntimeMiniAppPage('INT-155');
 
-    expect(presentation.stateLabel).toBe('Needs recovery');
-    expect(presentation.nextRecommendation).toContain('一键重试');
-    expect(html).toContain('修复交付并重试');
-    expect(html).toContain("setRuntimeAction(el.pauseButton, 'retry', '修复交付并重试'");
+    expect(presentation.stateLabel).toBe('label.needs_recovery');
+    expect(presentation.nextRecommendation).toContain('copy.recovery_stuck');
+    expect(html).toContain('action.retry');
+    expect(html).toContain("setRuntimeAction(el.pauseButton, 'retry', 'action.retry'");
     expect(html).toContain('/api/v1/runtime/issues/');
   });
 
@@ -323,10 +324,10 @@ describe('Telegram Mini App issue presentation', () => {
 
     expect(html).toContain('id="history-panel"');
     expect(html).toContain('id="history-entry-list"');
-    expect(html).toContain("setRuntimeAction(el.pauseButton, 'history', '完整日志'");
+    expect(html).toContain("setRuntimeAction(el.pauseButton, 'history', 'action.full_log'");
     expect(html).toContain("if (action === 'history')");
     expect(html).toContain('renderHistoryPanel()');
-    expect(html).toContain('完整日志');
+    expect(html).toContain('action.full_log');
   });
 
   test('renders expandable controls for long Mini App summaries', () => {
@@ -398,5 +399,30 @@ describe('Telegram Mini App issue presentation', () => {
     expect(html).toContain('.agent-row span,');
     expect(html).toContain('white-space: normal;');
     expect(html).toContain('overflow-wrap: anywhere;');
+  });
+
+  test('localizes runtime-generated mini app copy through shared translation keys', () => {
+    expect(translateRuntimeMiniApp('zh', 'chip.diff')).toBe('差异');
+    expect(translateRuntimeMiniApp('en', 'chip.milestones')).toBe('Milestones');
+    expect(translateRuntimeMiniApp('en', 'file.activity_started', {
+      action: 'Read',
+      summary: 'Update documentation.',
+    })).toBe('Read in progress · Update documentation.');
+    expect(translateRuntimeMiniApp('en', 'diff.summary_ui')).toBe('Adjust UI logic and layout.');
+  });
+
+  test('keeps runtime language switching free of hardcoded helper copy', () => {
+    const html = renderRuntimeMiniAppPage('INT-143');
+    const runtimeScript = html.slice(html.indexOf('const I18N ='));
+
+    expect(html).toContain('data-i18n="chip.milestones"');
+    expect(html).toContain('data-i18n="chip.diff"');
+    expect(runtimeScript).toContain("applyLanguage(detectPreferredLang())");
+    expect(runtimeScript).toContain("return t('tool.running', { name: toolName })");
+    expect(runtimeScript).toContain("return t('diff.summary_ui')");
+    expect(runtimeScript).toContain("return pr && pr[1] ? t('bash.view_pr', { pr: pr[1] }) : t('bash.view_pr_status')");
+    expect(runtimeScript).not.toContain("return toolName + ' 正在运行'");
+    expect(runtimeScript).not.toContain("return '查看 PR 状态'");
+    expect(runtimeScript).not.toContain("return '补充或更新回归测试。'");
   });
 });

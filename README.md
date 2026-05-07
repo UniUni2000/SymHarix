@@ -12,6 +12,14 @@ From a fresh checkout, create local config files once:
 bun run setup:local
 ```
 
+`setup:local` installs Bun packages, installs the Python runtime dependencies from `scripts/requirements.txt`, and creates the local config files if they are missing.
+
+If you also want to run the Python unit tests under `scripts/__tests__`, install the test extras once:
+
+```bash
+bun run setup:python-dev
+```
+
 Fill the required values in `.env` and set the target repo route in `WORKFLOW.md`.
 
 After that, the normal local loop is one command:

@@ -301,7 +301,7 @@ describe('TelegramWebhookBootstrapService', () => {
     });
 
     expect(probeAttempts).toBe(3);
-    expect(calls.at(-1)).toBe('https://api.telegram.org/bottelegram-token/setWebhook');
+    expect(calls.at(-1)).toBe('https://api.telegram.org/bottelegram-token/setChatMenuButton');
   });
 
   test('treats Cloudflare 5xx tunnel probes as not ready before setting webhook', async () => {
@@ -347,6 +347,7 @@ describe('TelegramWebhookBootstrapService', () => {
       'https://autogen.trycloudflare.com',
       'https://autogen.trycloudflare.com',
       'https://api.telegram.org/bottelegram-token/setWebhook',
+      'https://api.telegram.org/bottelegram-token/setChatMenuButton',
     ]);
   });
 
@@ -402,6 +403,7 @@ describe('TelegramWebhookBootstrapService', () => {
       'https://bad.trycloudflare.com',
       'https://good.trycloudflare.com',
       'https://api.telegram.org/bottelegram-token/setWebhook',
+      'https://api.telegram.org/bottelegram-token/setChatMenuButton',
     ]);
   });
 });

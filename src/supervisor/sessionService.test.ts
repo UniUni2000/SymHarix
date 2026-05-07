@@ -942,7 +942,7 @@ describe('SupervisorSessionService', () => {
         ],
         recent_files: [
           {
-            path: '/Users/liupenghui/Documents/code/agent/test-cc/worktrees/int-144/docs',
+            path: '/tmp/worktrees/int-144/docs',
             operation: 'edit',
             status: 'completed',
             timestamp: '2026-01-01T00:02:00.000Z',

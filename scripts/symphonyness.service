@@ -6,8 +6,8 @@ After=network.target
 Type=simple
 User=%USER%
 WorkingDirectory=/home/%USER%/symphonyness
-Environment=PATH=/usr/bin:/home/%USER%/.bun/bin
-ExecStart=/home/%USER%/.bun/bin/bun run start
+Environment=PATH=/usr/bin:/usr/local/bin:/home/%USER%/.bun/bin
+ExecStart=/usr/bin/env bun run start
 Restart=always
 RestartSec=10
 StandardOutput=append:/home/%USER%/symphonyness/symphonyness.log
