@@ -29,6 +29,7 @@ function listCommands(): string {
   return [
     'Commands:',
     'help',
+    'clear [all]',
     'status [ISSUE-ID]',
     'new <title> (add description on the next line for Telegram)',
     'project [PROJECT-SLUG|clear]',
@@ -182,6 +183,8 @@ export function parseTextCommand(text: string): BotCommandRequest {
   const readIssueArg = () => inlineArgs || null;
 
   switch (normalizedCommand) {
+    case 'clear':
+      return { command: 'clear', raw_text: text };
     case 'status':
       return { command: 'status', issue_id: readIssueArg(), raw_text: text };
     case 'stop':
@@ -276,6 +279,10 @@ export class BotCommandService {
         return this.handleExecuteGovernanceSuggestion(context, request.issue_id, request.suggestion_id);
       case 'dismiss_governance_suggestion':
         return this.handleDismissGovernanceSuggestion(context, request.issue_id, request.suggestion_id);
+      case 'clear':
+        return {
+          message: 'Clear is handled by the Telegram supervisor assistant.',
+        };
       case 'help':
       default:
         return { message: listCommands() };

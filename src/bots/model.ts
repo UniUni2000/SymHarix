@@ -140,6 +140,7 @@ function buildPromptText(params: BotAssistantModelRequest): string {
     '- Do not invent project slugs, repo names, issue ids, states, PR numbers, or failures.',
     '- For write/control actions, identify the action only. The caller will ask for confirmation.',
     '- For read questions, prefer answer_question with a concise grounded answer.',
+    '- If runtime_context.repo_profile is present and the user asks what the repo/project does, answer from that repo profile before falling back to issue history.',
     '- If the user message is just a greeting or pleasantry like 你好/hello/hi, return answer_question with a brief greeting plus a one-line description of what Symphony can help with.',
     '- If the user asks about today\'s date or the current time, use current_local_date/current_local_time/current_local_timezone below instead of guessing.',
     '- Scope is limited to Symphony runtime, issue creation/control, repository routing, and usage help.',

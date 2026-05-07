@@ -346,6 +346,24 @@ export const SUPERVISOR_MEMORIES_TABLE_SCHEMA = `
   );
 `;
 
+export const SUPERVISOR_REPO_UNDERSTANDINGS_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS supervisor_repo_understandings (
+    id TEXT PRIMARY KEY,
+    repo_ref TEXT NOT NULL,
+    local_path TEXT,
+    commit_sha TEXT NOT NULL,
+    status TEXT NOT NULL,
+    summary TEXT,
+    understanding_json TEXT NOT NULL,
+    evidence_paths_json TEXT NOT NULL,
+    generated_by TEXT NOT NULL,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(repo_ref, commit_sha)
+  );
+`;
+
 /**
  * SQL schema for service_leases table
  * Stores short-lived singleton leadership leases for control-plane services
@@ -612,6 +630,7 @@ export function initializeSchema(db: Database): void {
   db.exec(SUPERVISOR_SESSION_EVENTS_TABLE_SCHEMA);
   db.exec(SUPERVISOR_JOBS_TABLE_SCHEMA);
   db.exec(SUPERVISOR_MEMORIES_TABLE_SCHEMA);
+  db.exec(SUPERVISOR_REPO_UNDERSTANDINGS_TABLE_SCHEMA);
   db.exec(SERVICE_LEASES_TABLE_SCHEMA);
   db.exec(SHADOW_HARNESSES_TABLE_SCHEMA);
   db.exec(GOVERNANCE_ASSESSMENTS_TABLE_SCHEMA);
@@ -667,6 +686,7 @@ export function dropAllTables(db: Database): void {
   db.exec('DROP TABLE IF EXISTS shadow_harnesses;');
   db.exec('DROP TABLE IF EXISTS service_leases;');
   db.exec('DROP TABLE IF EXISTS bot_transport_events;');
+  db.exec('DROP TABLE IF EXISTS supervisor_repo_understandings;');
   db.exec('DROP TABLE IF EXISTS supervisor_memories;');
   db.exec('DROP TABLE IF EXISTS supervisor_jobs;');
   db.exec('DROP TABLE IF EXISTS supervisor_session_events;');
