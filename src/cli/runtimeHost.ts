@@ -119,7 +119,11 @@ export class RuntimeHost {
           db,
           config,
           runtimeHub,
-          createBotGatewayFromEnv(runtimeHub, db, { projectResolver }),
+          createBotGatewayFromEnv(runtimeHub, db, {
+            projectResolver,
+            workspaceRoot: this.config.workspaceRoot,
+            githubToken: this.config.githubToken,
+          }),
           createRuntimeAccessControllerFromEnv(),
         );
       });

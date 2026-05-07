@@ -163,6 +163,25 @@ For user-facing UX, the bot should offer clear options:
 - cancel current thread
 - new thread
 
+### Supervisor answers feel shallow
+
+Check whether the repo understanding cache exists for the configured repo and current commit:
+
+```bash
+sqlite3 symphony.db "select repo_ref, local_path, commit_sha, status, summary, error, updated_at from supervisor_repo_understandings order by updated_at desc limit 20;"
+```
+
+If the row is missing or failed, verify:
+
+- the chat has a default project
+- `WORKFLOW.md -> repositories.routing` includes that project
+- the route has a local path
+- `SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_COMMAND` points to `node scripts/claude-adapter.cjs` or another Claude Code-compatible runner
+- `claude-code/bin/claude-haha --help` works from this checkout
+- the repository path is readable and has a valid Git `HEAD`
+
+Repo understanding is read-only. It should improve conversation, repo answers, and artifact recommendations, but it must not create issues or edit code before a Supervisor Plan Card is approved.
+
 ### Dev agent fails immediately
 
 Check the true runner path:

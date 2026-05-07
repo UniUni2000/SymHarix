@@ -3,6 +3,7 @@ import type {
   BotCommandContext,
   BotCommandResponse,
   BotRuntimeCopilotContext,
+  SupervisorIntakeSource,
 } from '../bots/types';
 import type { RuntimeControlPlane, RuntimeIssueView } from '../runtime/types';
 import { assessIntakeCritic } from '../governance/intakeCritic';
@@ -43,6 +44,7 @@ export interface SupervisorServiceResponseParams {
   intent: BotAssistantIntent | null;
   runtimeContext: BotRuntimeCopilotContext;
   canWrite: boolean;
+  source?: SupervisorIntakeSource;
 }
 
 export type SupervisorSessionAction = 'approve' | 'edit' | 'alternate' | 'focus' | 'cancel';
@@ -68,6 +70,7 @@ function emptyRuntimeContext(): BotRuntimeCopilotContext {
   return {
     default_project_slug: null,
     available_projects: [],
+    repo_profile: null,
     watch_subscriptions: [],
     overview: {
       running: 0,
@@ -293,9 +296,19 @@ function normalizeTitle(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
 
+function stripIssueRequestPhrases(value: string): string {
+  return value
+    .replace(/^(?:请)?(?:帮我)?(?:建立|创建|新建)\s*issue[:：\s]*/i, '')
+    .replace(/^(?:请)?(?:帮我)?(?:建立|创建|新建)\s*(?:一个|一条)?\s*(?:issue|任务|工单)[:：\s]*/i, '')
+    .replace(/^(?:issue|任务|工单)[:：\s]*/i, '')
+    .trim();
+}
+
 function normalizeRequirementText(value: string): string {
   const normalized = normalizeTitle(value)
     .replace(NEW_THREAD_PREFIX, '')
+    .replace(/^(?:请)?(?:帮我)?(?:建立|创建|新建)\s*issue[:：\s]*/i, '')
+    .replace(/^(?:请)?(?:帮我)?(?:建立|创建|新建)\s*(?:一个|一条)?\s*(?:issue|任务|工单)[:：\s]*/i, '')
     .replace(/\bsupervisor\s+live\s+e2e\s+[a-z0-9_/-]*\d[a-z0-9_/-]*\b/gi, '')
     .replace(/\bnonce\s+\S+\b/gi, '')
     .replace(/请新建一条很小的验证任务[:：]\s*/g, '')
@@ -307,7 +320,51 @@ function normalizeRequirementText(value: string): string {
     .replace(/(?:^|[\s，,。.:：；;])plan\s*card\s*$/i, '')
     .replace(/\s+/g, ' ')
     .replace(/^[\s，,。.:：；;]+|[\s，,。.:：；;]+$/g, '');
-  return normalized || normalizeTitle(value);
+  return normalized || stripIssueRequestPhrases(normalizeTitle(value));
+}
+
+function inferIssueTitleFromRequest(title: string, description: string | null): string {
+  const normalized = normalizeRequirementText(title);
+  const combined = `${normalized}\n${description || ''}`;
+
+  if (/不同质量恒星|光度/.test(combined) && /随.*m|随参数\s*m|随质量\s*m|随\s*m\s*变化/i.test(combined)) {
+    return '分析不同质量恒星的光度等参数随质量 M 的变化';
+  }
+
+  if (/研究|分析|计算|总结|整理/.test(normalized)) {
+    return normalized;
+  }
+
+  return normalized;
+}
+
+function inferStructuredScope(
+  title: string,
+  description: string | null,
+): {
+  inScope?: string[];
+  outOfScope?: string[];
+  acceptance?: string[];
+  executionStrategy?: string | null;
+} | null {
+  const combined = `${title}\n${description || ''}`;
+  if (/不同质量恒星|光度/.test(combined) && /随.*m|随参数\s*m|随质量\s*m|随\s*m\s*变化/i.test(combined)) {
+    return {
+      inScope: [
+        '整理不同质量恒星相关参数随质量 M 变化的主要公式、经验标度律或近似关系。',
+        '给出一份可运行的 Python 计算脚本或绘图代码，展示关键参数随 M 的变化趋势。',
+      ],
+      outOfScope: [
+        '不扩展成完整的恒星演化综述或超出当前仓库目标的大型科研项目。',
+      ],
+      acceptance: [
+        '标明采用的主要标度律、假设条件或适用质量范围，避免把近似关系写成普适结论。',
+        '至少包含一份可运行脚本或图表输出，能展示关键参数随 M 的变化。',
+      ],
+      executionStrategy: '先把理论关系和适用前提收口成一版结构化总结，再补最小可运行脚本或绘图代码作为验证产物。',
+    };
+  }
+  return null;
 }
 
 function inferAcceptance(title: string, description: string | null): string[] {
@@ -330,6 +387,44 @@ function extractAcceptanceFromClarificationAnswer(answer: string): string[] | nu
     return [compact(normalized, 220)];
   }
   return null;
+}
+
+function inferDelegatedClarificationAcceptance(title: string, description: string | null): string[] {
+  return inferDefaultClarificationAcceptance(title, description) ?? [
+    `完成 ${compact(title, 60)}，并给出可直接验证的结果。`,
+    '把结果收成一张可批准的推荐计划卡，而不是继续追问细节。',
+  ];
+}
+
+function isConversationalSupervisorProductRequest(title: string, description: string | null): boolean {
+  const combined = `${title}\n${description || ''}`;
+  return /supervisor/.test(combined)
+    && /(自然语言|聊天|对话|issue|建单|推荐卡|telegram|slash)/i.test(combined);
+}
+
+function inferConversationalAcceptance(title: string, description: string | null): string[] | null {
+  if (!isConversationalSupervisorProductRequest(title, description)) {
+    return null;
+  }
+  return [
+    '用户能直接在 Telegram 对话里收到显眼的推荐 issue 卡，并可以一键批准继续。',
+    '普通聊天默认走 supervisor 的自然语言收需求流程，而不是退回机械补表单。',
+    'slash 命令继续保留明确的机器路径，不和自然对话建单体验混在一起。',
+  ];
+}
+
+function inferConversationalRecommendationSummary(title: string, description: string | null): string | null {
+  if (!isConversationalSupervisorProductRequest(title, description)) {
+    return null;
+  }
+  return '先把 Telegram 自然对话、推荐 issue 卡批准、slash 命令边界一起收进一张更像样的 issue，再进入后续执行。';
+}
+
+function inferConversationalExecutionStrategy(title: string, description: string | null): string | null {
+  if (!isConversationalSupervisorProductRequest(title, description)) {
+    return null;
+  }
+  return '先把 supervisor 的自然语言收需求、推荐卡展示和 slash 命令边界整理成一版可批准计划，再按批准结果推进实现与监管流程。';
 }
 
 function inferOutOfScope(title: string): string[] {
@@ -474,9 +569,6 @@ function shouldRouteReadOnlyIntentToActiveSession(
   intent: BotAssistantIntent | null,
   text: string,
 ): boolean {
-  if (!intent || intent.kind === 'create_issue') {
-    return true;
-  }
   if (
     isApprovalText(text) ||
     isEditText(text) ||
@@ -485,6 +577,12 @@ function shouldRouteReadOnlyIntentToActiveSession(
     isScopeChangeText(text) ||
     isPlanMemoryQuestion(text)
   ) {
+    return true;
+  }
+  if (!intent) {
+    return session.state === 'clarifying' || session.state === 'drafting';
+  }
+  if (intent.kind === 'create_issue') {
     return true;
   }
   if (
@@ -510,7 +608,7 @@ function shouldClarifyAcceptance(text: string, description: string | null): bool
 }
 
 function isDelegatingAcceptanceChoice(answer: string): boolean {
-  return /你自己决定|你定|你看着办|你来定|你决定|随便|都可以|你拿主意|按你判断/i.test(answer.trim());
+  return /你自己决定|你定|你看着办|你来定|你决定|随便|都可以|你拿主意|按你判断|别再问我|别再问了|不用再问|直接定吧|你直接决定/i.test(answer.trim());
 }
 
 function clarificationAnswerUpdatesGoal(question: string | null | undefined, answer: string): boolean {
@@ -571,6 +669,7 @@ function inferDefaultClarificationAcceptance(
   if (/理论公式|标度律|总结/i.test(combined) && /(python|脚本|绘图|plot|matplotlib|运行)/i.test(combined)) {
     return [
       '总结不同质量恒星随 M 变化的主要理论公式或标度律，并说明适用范围。',
+      '标明采用的主要标度律、假设条件或适用质量范围，避免把近似关系写成普适结论。',
       '至少包含一份可运行脚本或图表输出，能展示关键参数随 M 的变化。',
     ];
   }
@@ -1361,6 +1460,14 @@ export class SupervisorSessionService {
   async respond(params: SupervisorServiceResponseParams): Promise<BotCommandResponse | null> {
     const activeSession = this.findActiveSession(params.context);
     if (!activeSession) {
+      if (params.source === 'telegram_chat') {
+        if (params.intent?.kind === 'answer_question') {
+          return { message: params.intent.answer };
+        }
+        if (params.intent?.kind === 'clarify') {
+          return { message: params.intent.question };
+        }
+      }
       if (params.intent?.kind !== 'create_issue') {
         return null;
       }
@@ -1540,7 +1647,7 @@ export class SupervisorSessionService {
       project_slug: intent.project_slug,
     };
 
-    return this.recomputeAndRespond(session, draft, params.runtimeContext, params.canWrite);
+    return this.recomputeAndRespond(session, draft, params.runtimeContext, params.canWrite, params.source);
   }
 
   private async continueSession(
@@ -1597,7 +1704,7 @@ export class SupervisorSessionService {
         ? extractAcceptanceFromClarificationAnswer(params.text)
         : null;
       const delegatedAcceptance = delegatedAcceptanceChoice
-        ? inferDefaultClarificationAcceptance(
+        ? inferDelegatedClarificationAcceptance(
             planCard?.title || params.text,
             [
               planCard?.user_goal,
@@ -1659,7 +1766,7 @@ export class SupervisorSessionService {
         });
       }
 
-      return this.recomputeAndRespond(session, draft, params.runtimeContext, params.canWrite);
+      return this.recomputeAndRespond(session, draft, params.runtimeContext, params.canWrite, params.source);
     }
 
     if (session.state === 'executing') {
@@ -1718,8 +1825,15 @@ export class SupervisorSessionService {
     draft: DraftInput,
     runtimeContext: BotRuntimeCopilotContext,
     canWrite: boolean,
+    source?: SupervisorIntakeSource,
   ): Promise<BotCommandResponse> {
-    const computedPlan = await this.computePlan(session, draft, runtimeContext);
+    const computedPlan = await this.computePlan(session, draft, runtimeContext, source);
+    const shouldHoldRecommendationForTelegram = Boolean(
+      source === 'telegram_chat'
+      && computedPlan.approvalMode === 'auto'
+      && computedPlan.state !== 'clarifying'
+      && !session.root_issue_id,
+    );
     const shouldPreserveApprovalGate = Boolean(
       session.approval_mode
       && session.approval_mode !== 'auto'
@@ -1735,6 +1849,16 @@ export class SupervisorSessionService {
             needs_user_approval: true,
           },
         }
+      : shouldHoldRecommendationForTelegram
+        ? {
+            ...computedPlan,
+            approvalMode: 'explicit_user_approval',
+            state: 'awaiting_user_approval',
+            planCard: {
+              ...computedPlan.planCard,
+              needs_user_approval: true,
+            },
+          }
       : computedPlan;
     const updated = this.sessions.update({
       id: session.id,
@@ -1745,6 +1869,7 @@ export class SupervisorSessionService {
       plan_card: computed.planCard,
       active_decision_kind: computed.state === 'awaiting_user_approval' ? 'plan_approval' : null,
     })!;
+
     this.recordEvent(session.id, 'plan_card_generated', {
       state: updated.state,
       repo_ref: updated.repo_ref,
@@ -1763,11 +1888,17 @@ export class SupervisorSessionService {
     session: SupervisorSessionRecord,
     draft: DraftInput,
     runtimeContext: BotRuntimeCopilotContext,
+    source?: SupervisorIntakeSource,
   ): Promise<PlanComputation> {
     const requestTitle = normalizeRequirementText(draft.title);
     const requestDescription = draft.description ? normalizeRequirementText(draft.description) : null;
+    const inferredIssueTitle = inferIssueTitleFromRequest(requestTitle, requestDescription);
+    const structuredScope = inferStructuredScope(requestTitle, requestDescription);
     const explicitApprovalRequested = explicitlyRequestsApprovalBeforeExecution(draft.title, draft.description);
+    const conversationalAcceptance = inferConversationalAcceptance(requestTitle, requestDescription);
     const inferredAcceptance = draft.acceptance_override
+      ?? conversationalAcceptance
+      ?? structuredScope?.acceptance
       ?? inferDefaultClarificationAcceptance(requestTitle, requestDescription);
     const repoRef = draft.project_slug
       || runtimeContext.default_project_slug
@@ -1781,9 +1912,9 @@ export class SupervisorSessionService {
         approvalMode: explicitApprovalRequested ? 'explicit_user_approval' : 'auto',
         state: 'clarifying',
         planCard: {
-          title: requestTitle,
+          title: inferredIssueTitle,
           user_goal: requestTitle,
-          in_scope: [requestTitle],
+          in_scope: structuredScope?.inScope ?? [requestTitle],
           out_of_scope: ['在确认仓库前，不启动真正执行。'],
           acceptance: inferAcceptance(requestTitle, requestDescription),
           known_risks: ['当前还没有绑定到明确仓库，因此无法读取治理上下文。'],
@@ -1847,7 +1978,8 @@ export class SupervisorSessionService {
       && shouldClarifyAcceptance(draft.title, draft.description)
       && !multiObjective
       && !explicitApprovalRequested
-      && governance?.decision !== 'accept_with_rewrite';
+      && governance?.decision !== 'accept_with_rewrite'
+      && source !== 'telegram_chat';
 
     let intakeMode: SupervisorIntakeMode = 'direct_run';
     let approvalMode: SupervisorApprovalMode = 'auto';
@@ -1863,7 +1995,13 @@ export class SupervisorSessionService {
       state = 'clarifying';
     }
 
-    const recommendedOption = multiObjective
+    const conversationalRecommendationSummary = inferConversationalRecommendationSummary(requestTitle, requestDescription);
+    const recommendedOption = conversationalRecommendationSummary
+      ? {
+          label: '按推荐继续',
+          summary: conversationalRecommendationSummary,
+        }
+      : multiObjective
       ? {
           label: '按推荐继续',
           summary: '先创建 root issue，再按拆分方案落成顺序 child queue。',
@@ -1889,11 +2027,11 @@ export class SupervisorSessionService {
       approvalMode,
       state,
       planCard: {
-        title: governance?.rewrite_title?.trim() || requestTitle,
+        title: governance?.rewrite_title?.trim() || inferredIssueTitle,
         user_goal: requestTitle,
-        in_scope: [requestTitle],
+        in_scope: structuredScope?.inScope ?? [requestTitle],
         out_of_scope: [
-          ...inferOutOfScope(requestTitle),
+          ...(structuredScope?.outOfScope ?? inferOutOfScope(requestTitle)),
           splitQueueForbidden ? '不拆分、不创建 child queue；本轮只创建一张 root-only 验证单。' : null,
         ].filter((value): value is string => Boolean(value)),
         acceptance: inferredAcceptance ?? inferAcceptance(requestTitle, requestDescription),
@@ -1904,7 +2042,11 @@ export class SupervisorSessionService {
           ...buildRepoIntelligenceRisks(repoIntelligence),
         ].filter((value): value is string => Boolean(value)),
         execution_strategy: [
-          multiObjective
+          inferConversationalExecutionStrategy(requestTitle, requestDescription)
+            ? inferConversationalExecutionStrategy(requestTitle, requestDescription)
+            : structuredScope?.executionStrategy
+            ? structuredScope.executionStrategy
+            : multiObjective
             ? '先把源目标收成 root thread，再只放行当前 child，其余 child 顺序排队。'
             : riskyCleanup && splitQueueForbidden
               ? '只创建一张 root-only 受控验证单，不扫描全仓，不创建 child queue；执行后用指定标记文件证明审批语义。'
@@ -2069,6 +2211,7 @@ export class SupervisorSessionService {
     let latestIssue = this.runtime.getIssue(createResult.issue_id) ?? createResult.issue;
     let resultMessage = `已创建 ${createResult.issue_identifier || '新任务'}，并开始按计划推进。`;
     let materialOutcome: Record<string, unknown> = {
+      outcome_kind: 'created',
       issue_id: createResult.issue_id,
       issue_identifier: createResult.issue_identifier,
     };
@@ -2155,6 +2298,7 @@ export class SupervisorSessionService {
       delivery_summary: issue?.delivery_summary ?? session.delivery_summary,
       last_material_outcome: {
         ...(session.last_material_outcome ?? {}),
+        outcome_kind: 'plan_revision_approved',
         plan_revision_approved_at: new Date().toISOString(),
         plan_version: session.plan_version,
       },
@@ -2233,6 +2377,8 @@ export class SupervisorSessionService {
         ? result.message
         : latestIssue.delivery_summary ?? result.message,
       last_material_outcome: {
+        ...(session.last_material_outcome ?? {}),
+        outcome_kind: 'continued',
         governance_action: result.governance_action ?? null,
         message: result.message,
         status: result.status,

@@ -177,6 +177,24 @@ Supervisor planning defaults to bot LLM settings. Override only when you need a 
 | `SYMPHONY_SUPERVISOR_LLM_BASE_URL` | optional | Overrides bot base URL. |
 | `SYMPHONY_SUPERVISOR_LLM_TIMEOUT_MS` | optional | Default `45000`. |
 
+### Supervisor Repo Understanding
+
+The Telegram supervisor uses two read-only repository layers:
+
+- a durable repo-understanding cache that provides warm context and fallback summaries;
+- an on-demand Claude Code advisor that syncs the configured shared repo source before answering repo, code, architecture, artifact, or explicit research questions.
+
+When `repositories.routing` omits `local_path`, the supervisor still prepares the shared `workspace/<repo>/source` cache from `github_owner/github_repo`, fetches remote updates, fast-forwards the default branch when possible, and runs read-only analysis from that source path. It must not hard-reset, rewrite, or mutate a user checkout.
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_COMMAND` | optional | Command used for read-only repo understanding. Defaults to `node scripts/claude-adapter.cjs`. |
+| `SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_TIMEOUT_MS` | optional | Timeout for a read-only repo-understanding run. Defaults to `120000`. |
+| `SYMPHONY_SUPERVISOR_READONLY_ADVISOR_COMMAND` | optional | Command used for per-turn read-only supervisor repo advice. Defaults to `SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_COMMAND`, then `node scripts/claude-adapter.cjs`. |
+| `SYMPHONY_SUPERVISOR_READONLY_ADVISOR_TIMEOUT_MS` | optional | Timeout for a per-turn read-only advisor run. Defaults to `SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_TIMEOUT_MS`, then `120000`. |
+
+The read-only layers must not edit files, create issues, or dispatch work. Repo answers and artifact recommendations remain advisory. Code changes still happen later through the approved Supervisor session and dev-agent execution path. External WebFetch/WebSearch is prompt-gated to requests that explicitly ask for latest information, official docs, APIs, or external research.
+
 ### Supervisor Overseer LLM
 
 The execution overseer reads dev/review milestones and generates the next directive. It defaults to supervisor LLM settings, then bot LLM settings.
@@ -243,7 +261,7 @@ Rules:
 
 - The key must match the Linear `project_slug`.
 - `github_owner` and `github_repo` are required.
-- `local_path` is optional; relative paths resolve from the symphonyness repo root.
+- `local_path` is optional; when omitted, execution and supervisor analysis use the shared source cache cloned from `github_owner/github_repo`. Relative paths resolve from the symphonyness repo root.
 - Missing routes fail closed before workspace creation.
 
 ### Verification Scenarios

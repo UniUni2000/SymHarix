@@ -25,6 +25,7 @@ import {
   SupervisorSessionEventRepository,
   SupervisorJobRepository,
   SupervisorMemoryRepository,
+  SupervisorRepoUnderstandingRepository,
   SupervisorSessionRepository,
   SyncEventRepository,
   WorkItemRepository,
@@ -68,6 +69,7 @@ describe('database schema', () => {
     expect(tableNames).toContain('supervisor_session_events');
     expect(tableNames).toContain('supervisor_jobs');
     expect(tableNames).toContain('supervisor_memories');
+    expect(tableNames).toContain('supervisor_repo_understandings');
     expect(tableNames).not.toContain('tasks');
     expect(tableNames).not.toContain('execution_events');
   });
@@ -80,6 +82,109 @@ describe('database schema', () => {
       .all() as Array<{ name: string }>;
 
     expect(rows).toEqual([]);
+  });
+});
+
+describe('SupervisorRepoUnderstandingRepository', () => {
+  test('stores and replaces repo understanding snapshots by repo and commit', () => {
+    const repository = new SupervisorRepoUnderstandingRepository(db);
+
+    repository.upsert({
+      id: 'snapshot-1',
+      repo_ref: 'sample-project',
+      local_path: '/tmp/sample-project',
+      commit_sha: 'abc123',
+      status: 'ready',
+      summary: 'Initial repo understanding.',
+      understanding_json: {
+        project_purpose: 'Initial purpose',
+        tech_stack: ['Bun'],
+        key_paths: ['src/index.ts'],
+        architecture_notes: ['Small service'],
+        artifact_opportunities: ['Plan card'],
+        test_commands: ['bun test'],
+        risks: ['Sparse docs'],
+      },
+      evidence_paths_json: ['README.md'],
+      generated_by: 'claude_code',
+    });
+
+    const second = repository.upsert({
+      id: 'snapshot-2',
+      repo_ref: 'sample-project',
+      local_path: '/tmp/sample-project',
+      commit_sha: 'abc123',
+      status: 'ready',
+      summary: 'Updated repo understanding.',
+      understanding_json: {
+        project_purpose: 'Updated purpose',
+        tech_stack: ['Bun', 'SQLite'],
+        key_paths: ['src/database/index.ts'],
+        architecture_notes: ['Durable cache'],
+        artifact_opportunities: ['Repo brain'],
+        test_commands: ['bun test src/database/index.test.ts'],
+        risks: [],
+      },
+      evidence_paths_json: ['src/database/index.ts'],
+      generated_by: 'claude_code',
+    });
+
+    expect(second.id).toBe('snapshot-2');
+    expect(second.summary).toBe('Updated repo understanding.');
+    expect(second.understanding_json.project_purpose).toBe('Updated purpose');
+    expect(repository.findByRepoAndCommit('sample-project', 'abc123')?.id).toBe('snapshot-2');
+    expect(repository.findLatestReadyByRepo('sample-project')?.summary).toBe('Updated repo understanding.');
+  });
+
+  test('finds latest ready repo understanding with deterministic tie breakers', () => {
+    const repository = new SupervisorRepoUnderstandingRepository(db);
+    const understanding = JSON.stringify({
+      project_purpose: 'Tie breaker purpose',
+      tech_stack: [],
+      key_paths: [],
+      architecture_notes: [],
+      artifact_opportunities: [],
+      test_commands: [],
+      risks: [],
+    });
+    const timestamp = '2026-01-01T00:00:00.000Z';
+    const stmt = db.prepare(`
+      INSERT INTO supervisor_repo_understandings (
+        id, repo_ref, local_path, commit_sha, status, summary,
+        understanding_json, evidence_paths_json, generated_by, error, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    stmt.run(
+      'snapshot-a',
+      'sample-project',
+      null,
+      'commit-a',
+      'ready',
+      'Lower id snapshot.',
+      understanding,
+      '[]',
+      'claude_code',
+      null,
+      timestamp,
+      timestamp,
+    );
+    stmt.run(
+      'snapshot-b',
+      'sample-project',
+      null,
+      'commit-b',
+      'ready',
+      'Higher id snapshot.',
+      understanding,
+      '[]',
+      'claude_code',
+      null,
+      timestamp,
+      timestamp,
+    );
+
+    expect(repository.findLatestReadyByRepo('sample-project')?.id).toBe('snapshot-b');
   });
 });
 

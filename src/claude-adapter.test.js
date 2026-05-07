@@ -373,6 +373,173 @@ describe('claude-adapter timeline helpers', () => {
     }
   });
 
+  test('denies mutating tool control requests in read-only thread mode', async () => {
+    const originalSpawn = childProcess.spawn;
+    const originalExit = process.exit;
+    const fakeClaude = createFakeClaudeProcess();
+    const adapterIn = new PassThrough();
+    const adapterOut = new PassThrough();
+    const adapterErr = new PassThrough();
+    const adapterCollector = createJsonCollector(adapterOut);
+    const claudeCollector = createJsonCollector(fakeClaude.stdin);
+    let runtime;
+    let capturedEnv = {};
+
+    childProcess.spawn = (_cmd, _args, options) => {
+      capturedEnv = options.env;
+      return fakeClaude;
+    };
+    process.exit = () => {};
+
+    try {
+      runtime = startAdapter({
+        env: { ...process.env, SYMPHONY_ADAPTER_DEBUG: '0' },
+        stdin: adapterIn,
+        stdout: adapterOut,
+        stderr: adapterErr,
+      });
+
+      adapterIn.write(`${JSON.stringify({ id: 1, method: 'initialize', params: {} })}\n`);
+      await adapterCollector.waitFor((message) => message.id === 1);
+
+      adapterIn.write(`${JSON.stringify({
+        id: 2,
+        method: 'thread/start',
+        params: { cwd: process.cwd(), sandbox: 'workspace-read' },
+      })}\n`);
+      await adapterCollector.waitFor((message) => message.id === 2);
+      expect(capturedEnv.CLAUDE_CODE_READ_ONLY).toBe('1');
+
+      adapterIn.write(`${JSON.stringify({
+        id: 3,
+        method: 'turn/start',
+        params: {
+          input: [{ type: 'text', text: 'hello' }],
+        },
+      })}\n`);
+      await adapterCollector.waitFor((message) => message.id === 3);
+      await claudeCollector.waitFor((message) => message.type === 'user');
+
+      fakeClaude.stdout.write(`${JSON.stringify({
+        type: 'control_request',
+        request_id: 'cc-readonly-request-1',
+        request: {
+          subtype: 'can_use_tool',
+          tool_name: 'Bash',
+          tool_use_id: 'tool-readonly-1',
+          title: 'Use Bash',
+          input: { command: 'touch should-not-run' },
+        },
+      })}\n`);
+
+      const controlResponse = await claudeCollector.waitFor(
+        (message) => message.type === 'control_response',
+      );
+      expect(controlResponse.response.subtype).toBe('success');
+      expect(controlResponse.response.request_id).toBe('cc-readonly-request-1');
+      expect(controlResponse.response.response.behavior).toBe('deny');
+      expect(controlResponse.response.response.message).toContain('read-only repo understanding mode');
+    } finally {
+      runtime?.rl.close();
+      childProcess.spawn = originalSpawn;
+      process.exit = originalExit;
+    }
+  });
+
+  test('denies external web tools in read-only mode unless the turn explicitly allows research', async () => {
+    const originalSpawn = childProcess.spawn;
+    const originalExit = process.exit;
+    const fakeClaude = createFakeClaudeProcess();
+    const adapterIn = new PassThrough();
+    const adapterOut = new PassThrough();
+    const adapterErr = new PassThrough();
+    const adapterCollector = createJsonCollector(adapterOut);
+    const claudeCollector = createJsonCollector(fakeClaude.stdin);
+    let runtime;
+
+    childProcess.spawn = () => fakeClaude;
+    process.exit = () => {};
+
+    try {
+      runtime = startAdapter({
+        env: { ...process.env, SYMPHONY_ADAPTER_DEBUG: '0' },
+        stdin: adapterIn,
+        stdout: adapterOut,
+        stderr: adapterErr,
+      });
+
+      adapterIn.write(`${JSON.stringify({ id: 1, method: 'initialize', params: {} })}\n`);
+      await adapterCollector.waitFor((message) => message.id === 1);
+
+      adapterIn.write(`${JSON.stringify({
+        id: 2,
+        method: 'thread/start',
+        params: { cwd: process.cwd(), sandbox: 'workspace-read' },
+      })}\n`);
+      await adapterCollector.waitFor((message) => message.id === 2);
+
+      adapterIn.write(`${JSON.stringify({
+        id: 3,
+        method: 'turn/start',
+        params: {
+          input: [{ type: 'text', text: 'answer from repo only' }],
+        },
+      })}\n`);
+      await adapterCollector.waitFor((message) => message.id === 3);
+      await claudeCollector.waitFor((message) => message.type === 'user');
+
+      fakeClaude.stdout.write(`${JSON.stringify({
+        type: 'control_request',
+        request_id: 'cc-web-denied',
+        request: {
+          subtype: 'can_use_tool',
+          tool_name: 'WebFetch',
+          tool_use_id: 'tool-web-denied',
+          title: 'Fetch docs',
+          input: { url: 'https://example.com/docs' },
+        },
+      })}\n`);
+
+      const deniedResponse = await claudeCollector.waitFor(
+        (message) => message.type === 'control_response',
+      );
+      expect(deniedResponse.response.response.behavior).toBe('deny');
+      expect(deniedResponse.response.response.message).toContain('explicitly asks for external research');
+
+      adapterIn.write(`${JSON.stringify({
+        id: 4,
+        method: 'turn/start',
+        params: {
+          input: [{ type: 'text', text: 'look up latest docs' }],
+          sandboxPolicy: { type: 'read-only', allowExternalResearch: true },
+        },
+      })}\n`);
+      await adapterCollector.waitFor((message) => message.id === 4);
+      await claudeCollector.waitFor((message) => message.type === 'user');
+
+      fakeClaude.stdout.write(`${JSON.stringify({
+        type: 'control_request',
+        request_id: 'cc-web-allowed',
+        request: {
+          subtype: 'can_use_tool',
+          tool_name: 'WebSearch',
+          tool_use_id: 'tool-web-allowed',
+          title: 'Search docs',
+          input: { query: 'latest API docs' },
+        },
+      })}\n`);
+
+      const approvalRequest = await adapterCollector.waitFor(
+        (message) => message.method === 'approval/request',
+      );
+      expect(approvalRequest.params.request.tool_name).toBe('WebSearch');
+    } finally {
+      runtime?.rl.close();
+      childProcess.spawn = originalSpawn;
+      process.exit = originalExit;
+    }
+  });
+
   test('forwards elicitation requests to the runner and sends accepted content back to Claude', async () => {
     const originalSpawn = childProcess.spawn;
     const originalExit = process.exit;
