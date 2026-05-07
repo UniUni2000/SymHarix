@@ -5,6 +5,7 @@ import {
   BotFollowupMessageStateRepository,
   BotIssueFollowupRepository,
   BotPendingActionRepository,
+  BotConversationFocusRepository,
   WorkItemRepository,
   initializeSchema,
 } from '../database';
@@ -205,6 +206,9 @@ describe('BotFollowupRepairService', () => {
       orphan_message_states_deleted: 0,
       orphan_delivery_states_deleted: 0,
       delivery_baselines_seeded: 1,
+      terminal_message_states_resolved: 0,
+      terminal_pending_actions_cancelled: 0,
+      terminal_conversation_focuses_cleared: 0,
     });
 
     db.close();
@@ -268,7 +272,121 @@ describe('BotFollowupRepairService', () => {
       orphan_message_states_deleted: 1,
       orphan_delivery_states_deleted: 1,
       delivery_baselines_seeded: 0,
+      terminal_message_states_resolved: 0,
+      terminal_pending_actions_cancelled: 0,
+      terminal_conversation_focuses_cleared: 0,
     });
+
+    db.close();
+  });
+
+  test('resolves terminal legacy cards and cancels their pending actions during startup repair', () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const workItems = new WorkItemRepository(db);
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+    const deliveryStates = new BotFollowupDeliveryStateRepository(db);
+    const pendingActions = new BotPendingActionRepository(db);
+    const conversationFocuses = new BotConversationFocusRepository(db);
+    const terminalIssue: RuntimeIssueView = {
+      ...createRootIssue(),
+      issue_id: 'issue-150',
+      work_item_id: 'issue-150',
+      identifier: 'INT-150',
+      title: 'Canceled legacy card',
+      tracker_state: 'Canceled',
+      orchestrator_state: 'cancelled',
+      governance_thread_state: 'waiting_on_child',
+      governance_root_issue_id: 'issue-150',
+      governance_root_issue_identifier: 'INT-150',
+      actions: {
+        can_stop: false,
+        can_retry: false,
+        can_override_governance: false,
+        can_rewrite_governance: false,
+        can_split_governance: false,
+        can_open_pr: false,
+      },
+    };
+    workItems.create({
+      id: 'issue-150',
+      linear_issue_id: 'issue-150',
+      linear_identifier: 'INT-150',
+      linear_title: 'Canceled legacy card',
+      linear_state: 'Canceled',
+      github_repo: 'UniUni2000/test2',
+      orchestrator_state: 'cancelled',
+    });
+    messageStates.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      issue_id: 'issue-150',
+      issue_identifier: 'INT-150',
+      message_id: '265',
+      card_kind: 'governance_blocked',
+      card_key: 'root_thread|INT-150',
+      card_state: 'waiting_on_child',
+    });
+    pendingActions.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      issue_id: 'issue-150',
+      user_id: 'user-1',
+      intent_kind: 'split',
+      normalized_payload: {
+        command: 'split',
+        issue_id: 'issue-150',
+      },
+      summary_message: 'Action: split INT-150',
+      expires_at: new Date('2026-01-01T00:15:00.000Z'),
+      status: 'pending_confirm',
+      message_id: '265',
+    });
+    conversationFocuses.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      issue_id: 'issue-150',
+      issue_identifier: 'INT-150',
+      repo_ref: 'UniUni2000/test2',
+      source: 'callback',
+    });
+    const runtime = {
+      getIssue: (id: string) => ['issue-150', 'INT-150'].includes(id) ? terminalIssue : null,
+      getOverview: () => ({
+        generated_at: '2026-01-01T00:00:00.000Z',
+        counts: { running: 0, retrying: 0, total: 1 },
+        issues: [terminalIssue],
+      }),
+    } as unknown as RuntimeControlPlane;
+
+    const summary = new BotFollowupRepairService(
+      runtime,
+      workItems,
+      followups,
+      messageStates,
+      deliveryStates,
+      pendingActions,
+      conversationFocuses,
+    ).repair(new Date('2026-01-01T00:00:00.000Z'));
+
+    expect(messageStates.findByConversationIssue({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      issue_id: 'issue-150',
+    })?.card_state).toBe('resolved');
+    expect(pendingActions.findByConversationIssue({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      issue_id: 'issue-150',
+    })?.status).toBe('cancelled');
+    expect(conversationFocuses.findByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    })).toBeNull();
+    expect(summary.terminal_message_states_resolved).toBe(1);
+    expect(summary.terminal_pending_actions_cancelled).toBe(1);
+    expect(summary.terminal_conversation_focuses_cleared).toBe(1);
 
     db.close();
   });

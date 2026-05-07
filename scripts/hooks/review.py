@@ -179,11 +179,11 @@ class ReviewHook:
             {
                 "phase": phase,
                 "command": normalized_command,
-                "command_key": command_key,
+                "command_key": command_key if command_key is not None else "",
                 "status": status,
                 "source": source,
-                "turn": None,
-                "exit_code": exit_code,
+                "turn": turn if turn is not None else 0,
+                "exit_code": exit_code if exit_code is not None else 0,
                 "summary": summary,
                 "recorded_at": datetime.now(timezone.utc).isoformat(),
             }

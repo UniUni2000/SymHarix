@@ -168,6 +168,9 @@ describe('DefaultBotGateway', () => {
         orphan_message_states_deleted: 0,
         orphan_delivery_states_deleted: 0,
         delivery_baselines_seeded: 0,
+        terminal_message_states_resolved: 0,
+        terminal_pending_actions_cancelled: 0,
+        terminal_conversation_focuses_cleared: 0,
       };
     };
 
@@ -207,6 +210,9 @@ describe('DefaultBotGateway', () => {
         orphan_message_states_deleted: 0,
         orphan_delivery_states_deleted: 0,
         delivery_baselines_seeded: 0,
+        terminal_message_states_resolved: 0,
+        terminal_pending_actions_cancelled: 0,
+        terminal_conversation_focuses_cleared: 0,
       };
     };
 
@@ -311,7 +317,7 @@ describe('DefaultBotGateway', () => {
           inbound_path: '/api/v1/bots/discord/interactions',
         },
       },
-      commands: ['help', 'clear', 'status', 'new', 'project', 'watch', 'unwatch', 'stop', 'retry', 'override', 'rewrite', 'split'],
+      commands: ['help', 'clear', 'status', 'new', 'project', 'watch', 'unwatch', 'stop', 'retry', 'close', 'supersede', 'override', 'rewrite', 'split'],
       watch_presets: ['default', 'verbose', 'failures', 'status'],
       assistant: {
         provider: null,
@@ -324,6 +330,10 @@ describe('DefaultBotGateway', () => {
       natural_language_enabled: true,
       supervisor: {
         active_sessions: [],
+        agent_runtime: {
+          active_runs: [],
+          pending_actions: [],
+        },
         repo_sources: [],
         repo_advisor_sessions: [],
       },
@@ -1957,6 +1967,158 @@ describe('DefaultBotGateway', () => {
     db.close();
   });
 
+  test('binds a generic pending confirmation to the sent Telegram message and executes its confirm callback', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const pendingActions = new BotPendingActionRepository(db);
+    const issue = {
+      issue_id: 'issue-157',
+      work_item_id: 'issue-157',
+      identifier: 'INT-157',
+      title: '补充 README.md 项目文档',
+      phase: 'DEV',
+      tracker_state: 'In Progress',
+      orchestrator_state: 'halted',
+      workspace_path: null,
+      branch_name: 'feature/int-157',
+      github_repo: 'UniUni2000/test2',
+      github_issue_number: 100,
+      active_pr_number: null,
+      session: null,
+      actions: {
+        can_stop: false,
+        can_retry: true,
+        can_open_pr: false,
+      },
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+    };
+    const closeIssueCalls: Array<{ id: string; reason: string | null }> = [];
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    let nextMessageId = 300;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body || '{}')),
+      });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: nextMessageId++ } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const runtime = {
+      ...createRuntimeControlPlane(),
+      getOverview: () => ({
+        generated_at: '2026-01-01T00:00:00.000Z',
+        counts: { running: 0, retrying: 0, total: 1 },
+        issues: [issue],
+      }),
+      getIssue: (id: string) => ['issue-157', 'INT-157'].includes(id) ? issue : null,
+      closeIssue: async (id: string, request?: { reason?: string | null }) => {
+        closeIssueCalls.push({ id, reason: request?.reason ?? null });
+        return {
+          accepted: true,
+          status: 'accepted',
+          message: `Closed ${id}`,
+          issue_id: 'issue-157',
+          issue_identifier: 'INT-157',
+          governance_action: null,
+        };
+      },
+    } as RuntimeControlPlane;
+
+    const gateway = new DefaultBotGateway(
+      runtime,
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        pendingActionRepository: pendingActions,
+        assistantModel: {
+          decide: async () => null,
+          getDiagnostics: () => ({
+            provider: null,
+            model: null,
+            configured: false,
+            health: 'unconfigured',
+            fallback_available: true,
+            last_error_code: 'unconfigured',
+          }),
+        },
+      },
+    );
+
+    await gateway.handleTelegramWebhook(
+      {
+        message: {
+          text: '吧 157 给清理了，不再需要',
+          chat: { id: 42 },
+          from: { id: 9, username: 'alice' },
+        },
+      } as any,
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const pending = pendingActions.findByConversation({
+      transport: 'telegram',
+      conversation_id: '42',
+    });
+    expect(pending?.intent_kind).toBe('close_issue');
+    expect(pending?.message_id).toBe('300');
+
+    const result = await gateway.handleTelegramWebhook(
+      {
+        callback_query: {
+          id: 'callback-confirm-generic',
+          data: 'pending|confirm',
+          message: {
+            chat: { id: 42 },
+            message_id: 300,
+          },
+          from: { id: 9, username: 'alice' },
+        },
+      } as any,
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(result.status).toBe(200);
+    expect(requests.find((request) => request.url.includes('answerCallbackQuery'))?.body.text).toBe('已收到，正在执行');
+    expect(
+      requests.find((request) =>
+        request.url.includes('editMessageText') && String(request.body.text).includes('正在执行 · INT-157'),
+      ),
+    ).toBeTruthy();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(closeIssueCalls).toEqual([
+      {
+        id: 'INT-157',
+        reason: 'Closed stale issue from Telegram supervisor command.',
+      },
+    ]);
+
+    db.close();
+  });
+
   test('keeps the original Telegram card when an edit fails with a hard error', async () => {
     const db = new Database(':memory:');
     initializeSchema(db);
@@ -2414,6 +2576,99 @@ describe('DefaultBotGateway', () => {
       conversation_id: '42',
       issue_id: 'unknown',
     })).toBeNull();
+
+    db.close();
+  });
+
+  test('does not let a stale legacy callback cancel a newer pending action from another card', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const followupMessageStates = new BotFollowupMessageStateRepository(db);
+    const pendingActions = new BotPendingActionRepository(db);
+    followupMessageStates.upsert({
+      transport: 'telegram',
+      conversation_id: '42',
+      issue_id: 'issue-150',
+      issue_identifier: 'INT-150',
+      message_id: '265',
+      card_kind: 'governance_blocked',
+      card_key: 'resolved|INT-150',
+      card_state: 'resolved',
+    });
+    pendingActions.upsert({
+      transport: 'telegram',
+      conversation_id: '42',
+      user_id: '9',
+      intent_kind: 'retry',
+      normalized_payload: {
+        command: 'retry',
+        issue_id: 'INT-157',
+      },
+      summary_message: 'Action: retry\nIssue: INT-157\nReply with: 确认 / 取消',
+      expires_at: new Date('2026-01-01T00:15:00.000Z'),
+      status: 'pending_confirm',
+      message_id: '267',
+    });
+
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body || '{}')),
+      });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 265 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        followupMessageStateRepository: followupMessageStates,
+        pendingActionRepository: pendingActions,
+      },
+    );
+
+    const result = await gateway.handleTelegramWebhook(
+      {
+        callback_query: {
+          id: 'callback-stale-cancel',
+          data: 'pending|cancel',
+          message: {
+            chat: { id: 42 },
+            message_id: 265,
+          },
+          from: { id: 9, username: 'alice' },
+        },
+      } as any,
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(result.status).toBe(200);
+    expect(requests.find((request) => request.url.includes('answerCallbackQuery'))?.body.text).toBe('这张卡已失效');
+    expect(String(requests.find((request) => request.url.includes('editMessageText'))?.body.text)).toContain('这张治理卡已经失效');
+    expect(
+      pendingActions.findByConversation({
+        transport: 'telegram',
+        conversation_id: '42',
+      })?.status,
+    ).toBe('pending_confirm');
 
     db.close();
   });

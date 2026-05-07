@@ -40,6 +40,7 @@ import type {
   RuntimeActionResult,
   CreateIssueResult,
   CreateIssueRequest,
+  CloseIssueRequest,
 } from '../runtime/types';
 import { LinearClient } from '../tracker/linear-client';
 import { TrackerProjectResolutionService } from '../tracker/projectResolution';
@@ -927,6 +928,122 @@ export class Orchestrator extends EventEmitter {
     };
   }
 
+  async closeIssue(issueId: string, request: CloseIssueRequest = {}): Promise<RuntimeActionResult> {
+    const workItem = this.resolveWorkItemRef(issueId);
+    if (!workItem) {
+      return {
+        accepted: false,
+        status: 'not_found',
+        message: `Issue ${issueId} was not found`,
+        issue_id: null,
+        issue_identifier: null,
+      };
+    }
+
+    const runningEntry = this.state.running.get(workItem.linear_issue_id);
+    if (runningEntry) {
+      await this.terminateRunningIssue(runningEntry, false);
+    }
+
+    const retryEntry = this.state.retry_attempts.get(workItem.linear_issue_id);
+    if (retryEntry?.timer_handle) {
+      clearTimeout(retryEntry.timer_handle);
+    }
+    this.state.retry_attempts.delete(workItem.linear_issue_id);
+    this.state.claimed.delete(workItem.linear_issue_id);
+    this.state.completed.add(workItem.linear_issue_id);
+
+    const successor = request.successor_issue_id ? this.resolveWorkItemRef(request.successor_issue_id) : null;
+    const successorIdentifier =
+      successor?.linear_identifier ?? request.successor_issue_id?.trim() ?? null;
+    const cancellationState = this.resolveCancellationStateName();
+    const issue = this.buildSyntheticIssueFromWorkItem(workItem);
+    const deliveryCode = successorIdentifier ? 'superseded' : 'manual_close';
+    const deliverySummary = successorIdentifier
+      ? `这张单已关闭；后续由 ${successorIdentifier} 承接。`
+      : '这张单已按用户要求关闭，不会继续自动推进。';
+
+    const trackerSync = await this.syncLinearState(issue, cancellationState);
+    this.recordSyncEvent({
+      workItemId: workItem.id,
+      targetSystem: 'linear',
+      action: 'update_state',
+      payload: {
+        issue_identifier: workItem.linear_identifier,
+        from_state: workItem.linear_state,
+        to_state: trackerSync.currentState ?? cancellationState,
+        successor_issue_identifier: successorIdentifier,
+      },
+      success: trackerSync.success,
+      error: trackerSync.error,
+    });
+
+    const commentResult = await this.tracker.postComment(
+      workItem.linear_issue_id,
+      this.buildManualCloseComment({
+        workItem,
+        successorIdentifier,
+        reason: request.reason ?? null,
+        deliverySummary,
+      }),
+    );
+    this.recordSyncEvent({
+      workItemId: workItem.id,
+      targetSystem: 'linear',
+      action: 'post_comment',
+      payload: {
+        issue_identifier: workItem.linear_identifier,
+        successor_issue_identifier: successorIdentifier,
+      },
+      success: commentResult.success,
+      error: commentResult.error ?? null,
+    });
+
+    const updatedWorkItem = this.workItemRepository.update({
+      id: workItem.id,
+      linear_state: trackerSync.currentState ?? cancellationState,
+      orchestrator_state: 'cancelled',
+      delivery_code: deliveryCode,
+      delivery_summary: deliverySummary,
+      cancelled_at: new Date(),
+    }) ?? workItem;
+
+    const githubClose = await this.closeMappedGitHubIssueWithResult(
+      updatedWorkItem,
+      successorIdentifier
+        ? `${workItem.linear_identifier} superseded by ${successorIdentifier}`
+        : `${workItem.linear_identifier} manual close`,
+    );
+    if (githubClose.attempted) {
+      this.recordSyncEvent({
+        workItemId: workItem.id,
+        targetSystem: 'github',
+        action: 'close_issue',
+        payload: {
+          repo: workItem.github_repo,
+          github_issue_number: workItem.github_issue_number,
+          successor_issue_identifier: successorIdentifier,
+        },
+        success: githubClose.success,
+        error: githubClose.error,
+      });
+    }
+
+    this.emit('issue:completed', issue, false);
+    this.emit('state:changed', this.getStateSnapshot());
+
+    return {
+      accepted: true,
+      status: 'completed',
+      message: successorIdentifier
+        ? `Closed ${workItem.linear_identifier}; successor ${successorIdentifier}`
+        : `Closed ${workItem.linear_identifier}`,
+      issue_id: workItem.linear_issue_id,
+      issue_identifier: workItem.linear_identifier,
+      delivery_code: deliveryCode,
+    };
+  }
+
   async retryIssue(issueId: string): Promise<RuntimeActionResult> {
     if (this.state.running.has(issueId)) {
       const runningEntry = this.state.running.get(issueId)!;
@@ -972,6 +1089,29 @@ export class Orchestrator extends EventEmitter {
       };
     }
 
+    const workItem = this.workItemRepository.findByLinearIssueId(issue.id);
+    if (this.isTerminalTrackerState(issue.state) && !this.isCancelledTrackerState(issue.state)) {
+      if (!workItem) {
+        return {
+          accepted: true,
+          status: 'completed',
+          message: `${issue.identifier} is already ${issue.state}; no retry is needed`,
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          delivery_code: 'tracker_terminal_reconciled',
+        };
+      }
+      await this.reconcileTerminalCompletedWorkItem(issue, workItem, 'manual retry');
+      return {
+        accepted: true,
+        status: 'completed',
+        message: `${issue.identifier} is already ${issue.state}; reconciled local runtime state instead of retrying DEV`,
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        delivery_code: 'tracker_terminal_reconciled',
+      };
+    }
+
     if (!this.isActiveTrackerState(issue.state)) {
       return {
         accepted: false,
@@ -983,7 +1123,6 @@ export class Orchestrator extends EventEmitter {
     }
 
     this.state.completed.delete(issue.id);
-    const workItem = this.workItemRepository.findByLinearIssueId(issue.id);
     const route = this.tryResolveRepositoryRoute(issue);
     if (!route) {
       return {
@@ -2244,6 +2383,59 @@ export class Orchestrator extends EventEmitter {
   private findTrackedWorkItem(issue: Issue): WorkItem | null {
     return this.workItemRepository.findByLinearIssueId(issue.id)
       ?? this.workItemRepository.findByIdentifier(issue.identifier);
+  }
+
+  private resolveWorkItemRef(issueRef: string): WorkItem | null {
+    const normalized = issueRef.trim();
+    if (!normalized) {
+      return null;
+    }
+    return this.workItemRepository.findById(normalized)
+      ?? this.workItemRepository.findByLinearIssueId(normalized)
+      ?? this.workItemRepository.findByIdentifier(normalized);
+  }
+
+  private resolveCancellationStateName(): string {
+    const terminalStates = this.config.terminalStates;
+    return terminalStates.find((state) => /^canceled$/i.test(state))
+      ?? terminalStates.find((state) => /^cancelled$/i.test(state))
+      ?? terminalStates.find((state) => /cancell?ed/i.test(state))
+      ?? 'Canceled';
+  }
+
+  private buildManualCloseComment(params: {
+    workItem: WorkItem;
+    successorIdentifier: string | null;
+    reason: string | null;
+    deliverySummary: string;
+  }): string {
+    return [
+      params.successorIdentifier ? '## Superseded by another issue' : '## Issue closed by supervisor',
+      `Issue: ${params.workItem.linear_identifier}`,
+      params.successorIdentifier ? `Successor: ${params.successorIdentifier}` : null,
+      params.reason ? `Reason: ${params.reason}` : null,
+      '',
+      params.deliverySummary,
+    ].filter((line): line is string => line !== null).join('\n');
+  }
+
+  private recordSyncEvent(params: {
+    workItemId: string;
+    targetSystem: 'linear' | 'github';
+    action: string;
+    payload: Record<string, unknown>;
+    success: boolean;
+    error?: string | null;
+  }): void {
+    this.syncEventRepository.create({
+      id: crypto.randomUUID(),
+      work_item_id: params.workItemId,
+      target_system: params.targetSystem,
+      action: params.action,
+      payload_json: params.payload,
+      result: params.success ? 'success' : 'failed',
+      error: params.success ? null : params.error ?? 'Unknown sync error',
+    });
   }
 
   private usesGovernanceDispatchBlock(workItem: WorkItem | null, issue: Issue): boolean {
@@ -5113,20 +5305,31 @@ export class Orchestrator extends EventEmitter {
     }
   }
 
-  private async closeMappedGitHubIssue(workItem: WorkItem | null, context: string): Promise<void> {
+  private async closeMappedGitHubIssue(workItem: WorkItem | null, context: string): Promise<boolean> {
+    const result = await this.closeMappedGitHubIssueWithResult(workItem, context);
+    return result.success;
+  }
+
+  private async closeMappedGitHubIssueWithResult(
+    workItem: WorkItem | null,
+    context: string,
+  ): Promise<{ attempted: boolean; success: boolean; error: string | null }> {
     if (!workItem?.github_issue_number) {
-      return;
+      return { attempted: false, success: false, error: null };
     }
 
     try {
       const client = this.githubIssueClientFactory(workItem.github_repo);
       await client.closeIssue(workItem.github_issue_number);
       console.log(`[orchestrator] Closed GitHub issue #${workItem.github_issue_number} for ${context}`);
+      return { attempted: true, success: true, error: null };
     } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
       console.warn(
         `[orchestrator] Failed to close GitHub issue #${workItem.github_issue_number} for ${context}:`,
         err,
       );
+      return { attempted: true, success: false, error };
     }
   }
 
@@ -6884,10 +7087,7 @@ export class Orchestrator extends EventEmitter {
       }
 
       if (!this.isCancelledTrackerState(issue.state)) {
-        this.workItemRepository.update({
-          id: workItem.id,
-          linear_state: issue.state,
-        });
+        await this.reconcileTerminalCompletedWorkItem(issue, workItem, 'tracked-state reconciliation');
         continue;
       }
 
@@ -6917,6 +7117,45 @@ export class Orchestrator extends EventEmitter {
       this.emit('issue:completed', issue, false);
       this.emit('state:changed', this.getStateSnapshot());
     }
+  }
+
+  private async reconcileTerminalCompletedWorkItem(
+    issue: Issue,
+    workItem: WorkItem,
+    reason: string,
+  ): Promise<WorkItem> {
+    const updatedWorkItem = this.workItemRepository.update({
+      id: workItem.id,
+      linear_state: issue.state,
+      orchestrator_state: 'completed',
+      delivery_code: 'tracker_terminal_reconciled',
+      delivery_summary: `${issue.identifier} 已在 tracker 中处于 ${issue.state}，本地运行态已对齐完成。`,
+    }) ?? workItem;
+
+    const retryEntry = this.state.retry_attempts.get(issue.id);
+    if (retryEntry?.timer_handle) {
+      clearTimeout(retryEntry.timer_handle);
+    }
+    this.state.running.delete(issue.id);
+    this.state.claimed.delete(issue.id);
+    this.state.retry_attempts.delete(issue.id);
+    this.state.completed.add(issue.id);
+
+    await this.closeMappedGitHubIssue(updatedWorkItem, `${issue.identifier} ${reason}`);
+
+    const workspacePath = updatedWorkItem.workspace_path ?? workItem.workspace_path;
+    if (workspacePath) {
+      try {
+        await this.workspaceManager.removeWorkspace(workspacePath);
+        console.log(`[orchestrator] Workspace cleaned for terminal completed issue: ${issue.identifier}`);
+      } catch (err) {
+        console.warn(`[orchestrator] Failed to clean workspace for ${issue.identifier}:`, err);
+      }
+    }
+
+    this.emit('issue:completed', issue, true);
+    this.emit('state:changed', this.getStateSnapshot());
+    return updatedWorkItem;
   }
 
   /**

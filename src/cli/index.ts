@@ -27,11 +27,12 @@ import { RuntimeHub } from '../runtime/hub';
 import { BotFollowupRepairService } from '../bots/followupRepair';
 import { GlobalRepairService } from '../maintenance/globalRepair';
 import {
-  BotFollowupDeliveryStateRepository,
-  BotFollowupMessageStateRepository,
-  BotIssueFollowupRepository,
-  BotPendingActionRepository,
-  WorkItemRepository,
+	BotFollowupDeliveryStateRepository,
+	BotFollowupMessageStateRepository,
+	BotIssueFollowupRepository,
+	BotPendingActionRepository,
+	BotConversationFocusRepository,
+	WorkItemRepository,
 } from '../database';
 import { LinearClient } from '../tracker/linear-client';
 import { createGitHubIssueClient } from '../github/issue-client';
@@ -184,6 +185,9 @@ function createMaintenanceRuntimeHub(db: ReturnType<typeof createDatabase>): Run
       return { accepted: false as const, status: 'rejected' as const, message: 'maintenance runtime is read-only', issue_id: null, issue_identifier: null };
     },
     async retryIssue() {
+      return { accepted: false as const, status: 'rejected' as const, message: 'maintenance runtime is read-only', issue_id: null, issue_identifier: null };
+    },
+    async closeIssue() {
       return { accepted: false as const, status: 'rejected' as const, message: 'maintenance runtime is read-only', issue_id: null, issue_identifier: null };
     },
     async overrideGovernance() {
@@ -525,6 +529,7 @@ async function main(): Promise<void> {
       new BotFollowupMessageStateRepository(db),
       new BotFollowupDeliveryStateRepository(db),
       new BotPendingActionRepository(db),
+      new BotConversationFocusRepository(db),
     ).repair();
     runtimeHub.dispose();
 
@@ -535,6 +540,9 @@ async function main(): Promise<void> {
     console.log(`[repair] Deleted orphan card states: ${summary.orphan_message_states_deleted}`);
     console.log(`[repair] Deleted orphan delivery states: ${summary.orphan_delivery_states_deleted}`);
     console.log(`[repair] Deleted expired pending actions: ${summary.expired_pending_actions_deleted}`);
+    console.log(`[repair] Resolved terminal legacy cards: ${summary.terminal_message_states_resolved}`);
+    console.log(`[repair] Cancelled terminal pending actions: ${summary.terminal_pending_actions_cancelled}`);
+    console.log(`[repair] Cleared terminal conversation focuses: ${summary.terminal_conversation_focuses_cleared}`);
     console.log(`[repair] Seeded delivery baselines: ${summary.delivery_baselines_seeded}`);
     process.exit(0);
   }
@@ -548,6 +556,7 @@ async function main(): Promise<void> {
       new BotFollowupMessageStateRepository(db),
       new BotFollowupDeliveryStateRepository(db),
       new BotPendingActionRepository(db),
+      new BotConversationFocusRepository(db),
     ).repair();
     runtimeHub.dispose();
 
@@ -572,6 +581,9 @@ async function main(): Promise<void> {
     console.log(`[repair] Deleted descendant card states: ${botSummary.descendant_message_states_deleted}`);
     console.log(`[repair] Deleted descendant pending actions: ${botSummary.descendant_pending_actions_deleted}`);
     console.log(`[repair] Deleted expired pending actions: ${botSummary.expired_pending_actions_deleted}`);
+    console.log(`[repair] Resolved terminal legacy cards: ${botSummary.terminal_message_states_resolved}`);
+    console.log(`[repair] Cancelled terminal pending actions: ${botSummary.terminal_pending_actions_cancelled}`);
+    console.log(`[repair] Cleared terminal conversation focuses: ${botSummary.terminal_conversation_focuses_cleared}`);
     console.log(`[repair] Seeded delivery baselines: ${botSummary.delivery_baselines_seeded}`);
     console.log(`[repair] Terminal issues scanned: ${githubSummary.terminal_issues_scanned}`);
     console.log(`[repair] Repos scanned: ${githubSummary.repos_scanned}`);

@@ -91,7 +91,11 @@ export type RuntimeDeliveryCode =
   | 'review_submit_failed'
   | 'dirty_workspace_no_commit'
   | 'tracker_state_conflict'
-  | 'no_actionable_diff';
+  | 'no_actionable_diff'
+  | 'manual_stop'
+  | 'manual_close'
+  | 'superseded'
+  | 'tracker_terminal_reconciled';
 
 export interface RuntimeGovernanceActionView {
   outcome_kind: 'unblocked' | 'waiting_on_child' | 'child_still_blocked' | 'failed';
@@ -313,6 +317,11 @@ export interface CreateIssueResult extends RuntimeActionResult {
   issue: RuntimeIssueView | null;
 }
 
+export interface CloseIssueRequest {
+  successor_issue_id?: string | null;
+  reason?: string | null;
+}
+
 export type RuntimeStreamEvent =
   | {
       type: 'snapshot' | 'overview';
@@ -335,6 +344,7 @@ export interface RuntimeControlPlane {
   createIssue(input: CreateIssueRequest): Promise<CreateIssueResult>;
   stopIssue(id: string): Promise<RuntimeActionResult>;
   retryIssue(id: string): Promise<RuntimeActionResult>;
+  closeIssue(id: string, request?: CloseIssueRequest): Promise<RuntimeActionResult>;
   overrideGovernance(id: string): Promise<RuntimeActionResult>;
   rewriteGovernance(id: string): Promise<RuntimeActionResult>;
   splitGovernance(id: string): Promise<RuntimeActionResult>;
