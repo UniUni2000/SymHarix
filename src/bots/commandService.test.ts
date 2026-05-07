@@ -263,6 +263,11 @@ describe('BotCommandService', () => {
       raw_text: '/project test2',
     });
 
+    expect(parseTextCommand('/clear')).toEqual({
+      command: 'clear',
+      raw_text: '/clear',
+    });
+
     expect(parseTextCommand('/watch off INT-1').command).toBe('unwatch');
     expect(parseTextCommand('/watch verbose INT-1')).toEqual({
       command: 'watch',
@@ -386,6 +391,35 @@ describe('BotCommandService', () => {
 
     subscriptions.dispose();
     db.close();
+  });
+
+  test('keeps slash-command text on the explicit machine-mode path', async () => {
+    const runtime = createRuntimeControlPlane();
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const service = new BotCommandService(runtime, subscriptions);
+    const context = {
+      transport: 'telegram' as const,
+      recipient: {
+        transport: 'telegram' as const,
+        conversation_id: 'chat-machine-path',
+      },
+      identity: {
+        user_id: 'user-1',
+        display_name: 'Alice',
+      },
+    };
+
+    const viaText = await service.executeText(context, '/status INT-1');
+    const viaParsedRequest = await service.execute(context, {
+      command: 'status',
+      issue_id: 'INT-1',
+      raw_text: '/status INT-1',
+    });
+
+    expect(viaText).toEqual(viaParsedRequest);
+    expect(viaText.message).toContain('INT-1');
+
+    subscriptions.dispose();
   });
 
   test('returns a clear watch error when outbound notifications are not configured', async () => {

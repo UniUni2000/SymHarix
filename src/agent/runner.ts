@@ -687,8 +687,8 @@ export class AgentRunner extends EventEmitter {
               id: threadStartId,
               method: 'thread/start',
               params: {
-                approvalPolicy: 'on-request',
-                sandbox: 'workspace-write',
+                approvalPolicy: this.options.approvalPolicy || 'on-request',
+                sandbox: this.options.threadSandbox || 'workspace-write',
                 cwd: String(workspacePath || '')
               }
             };

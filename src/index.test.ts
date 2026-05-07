@@ -140,6 +140,37 @@ describe('Config Layer', () => {
       });
     });
 
+    it('should keep local_path null when omitted', () => {
+      const workflow = {
+        config: {
+          tracker: {
+            kind: 'linear',
+            api_key: 'test',
+            project_slug: 'TEST'
+          },
+          repositories: {
+            routing: {
+              test: {
+                github_owner: 'acme',
+                github_repo: 'repo-a',
+              },
+            },
+          },
+        },
+        prompt_template: 'test'
+      };
+
+      const config = buildServiceConfig(workflow);
+      expect(config.repositories.routing).toEqual({
+        test: {
+          github_owner: 'acme',
+          github_repo: 'repo-a',
+          local_path: null,
+          require_repo_harness: false,
+        },
+      });
+    });
+
     it('should parse verification.lifecycle project scenarios keyed by project_slug', () => {
       const workflow = {
         config: {

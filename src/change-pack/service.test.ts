@@ -94,6 +94,82 @@ describe('changePackService', () => {
     expect(state.missing_requirements.some((item) => item.key === 'handover')).toBe(false);
   });
 
+  test('treats agent-written PASS evidence as satisfied and tolerates legacy command fields', async () => {
+    workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-change-pack-pass-evidence-'));
+    fs.mkdirSync(path.join(workspacePath, '.symphony', 'change-pack'), { recursive: true });
+
+    fs.writeFileSync(
+      path.join(workspacePath, '.symphony', 'change-pack', 'evidence.json'),
+      JSON.stringify(
+        {
+          issue_identifier: 'INT-157',
+          profile: 'coding',
+          complexity: 'medium',
+          requirements: [
+            {
+              key: 'handover',
+              label: 'Write .symphony/HANDOVER.md',
+              reason: 'Completion requires a handover artifact.',
+              kind: 'artifact',
+              result: 'PASS',
+            },
+            {
+              key: 'command:test',
+              label: 'Record successful test verification',
+              reason: 'Completion requires evidence that test succeeded.',
+              kind: 'verification',
+              result: 'PASS',
+            },
+            {
+              key: 'readme_content',
+              label: 'README.md contains project intro, dependencies, running instructions, physical background',
+              reason: 'Acceptance criteria',
+              kind: 'artifact',
+              result: 'PASS',
+              sections_confirmed: ['project intro', 'dependencies', 'running instructions', 'physical background'],
+            },
+          ],
+          command_runs: [
+            {
+              command: 'python -m pytest test_stellar_mass_luminosity.py -v',
+              result: 'PASS',
+              output: '13 passed',
+            },
+            {
+              command: { malformed: true },
+              command_key: { malformed: true },
+              status: 'satisfied',
+            },
+          ],
+          artifact_observations: [
+            {
+              file: 'README.md',
+              status: 'written',
+              size_lines: 58,
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+
+    const state = await evaluateChangePackState({
+      workspacePath,
+      issue: makeIssue({ identifier: 'INT-157', title: '补充 README.md 项目文档' }),
+      mode: 'dev',
+    });
+
+    expect(state.missing_requirements).toEqual([]);
+    expect(state.evidence_summary).toMatchObject({
+      total_requirements: 3,
+      satisfied: 3,
+      missing: 0,
+    });
+    expect(state.evidence_summary.successful_commands).toContain('test');
+  });
+
   test('tracks harness-required artifacts as evidence-based completion requirements', async () => {
     workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-change-pack-artifacts-'));
     fs.mkdirSync(path.join(workspacePath, '.symphony'), { recursive: true });

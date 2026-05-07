@@ -5,6 +5,7 @@ import { BotFollowupRepairService } from './followupRepair';
 import type { RuntimeControlPlane } from '../runtime/types';
 import {
   BotTransportEventRepository,
+  BotConversationPreferenceRepository,
   BotFollowupMessageStateRepository,
   BotPendingActionRepository,
   SupervisorSessionEventRepository,
@@ -310,7 +311,7 @@ describe('DefaultBotGateway', () => {
           inbound_path: '/api/v1/bots/discord/interactions',
         },
       },
-      commands: ['help', 'status', 'new', 'project', 'watch', 'unwatch', 'stop', 'retry', 'override', 'rewrite', 'split'],
+      commands: ['help', 'clear', 'status', 'new', 'project', 'watch', 'unwatch', 'stop', 'retry', 'override', 'rewrite', 'split'],
       watch_presets: ['default', 'verbose', 'failures', 'status'],
       assistant: {
         provider: null,
@@ -323,8 +324,116 @@ describe('DefaultBotGateway', () => {
       natural_language_enabled: true,
       supervisor: {
         active_sessions: [],
+        repo_sources: [],
+        repo_advisor_sessions: [],
       },
     });
+
+    gateway.dispose();
+  });
+
+  test('reports supervisor repo source diagnostics in the bot manifest', () => {
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: null,
+        webhookSecret: null,
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        startupRepairDelayMs: 10_000,
+        projectResolver: {
+          listConfiguredRoutes: () => [
+            {
+              project_slug: 'test2',
+              project_name: null,
+              github_owner: 'UniUni2000',
+              github_repo: 'test2',
+              github_repo_full: 'UniUni2000/test2',
+              local_path: null,
+              cache_key: 'uniuni2000__test2',
+              require_repo_harness: false,
+            },
+          ],
+        } as any,
+        supervisorRepoSourceResolver: {
+          resolve: async () => {
+            throw new Error('manifest should not sync repositories');
+          },
+          getDiagnostics: (routes) => routes.map((route: any) => ({
+            project_slug: route.project_slug,
+            repo_ref: route.github_repo_full,
+            configured_local_path: route.local_path,
+            analysis_path: '/tmp/workspaces/uniuni2000__test2/source',
+            source_path: '/tmp/workspaces/uniuni2000__test2/source',
+            commit_sha: 'abc123',
+            status: 'ready',
+            last_sync_error: null,
+            updated_at: '2026-05-07T00:00:00.000Z',
+          })),
+        },
+        supervisorAgentService: {
+          respond: async () => null,
+          getRepoConversationDiagnostics: () => [
+            {
+              transport: 'telegram',
+              conversation_id: 'chat-1',
+              repo_ref: 'UniUni2000/test2',
+              local_path: '/tmp/workspaces/uniuni2000__test2/source',
+              source_commit_sha: 'abc123',
+              started_at: '2026-05-07T00:00:00.000Z',
+              last_used_at: '2026-05-07T00:00:02.000Z',
+              turn_count: 2,
+            },
+          ],
+        },
+        assistantModel: {
+          decide: async () => null,
+          getDiagnostics: () => ({
+            provider: null,
+            model: null,
+            configured: false,
+            health: 'unconfigured',
+            fallback_available: true,
+            last_error_code: 'unconfigured',
+          }),
+        },
+      },
+    );
+
+    expect(gateway.getManifest().supervisor?.repo_sources).toEqual([
+      {
+        project_slug: 'test2',
+        repo_ref: 'UniUni2000/test2',
+        configured_local_path: null,
+        analysis_path: '/tmp/workspaces/uniuni2000__test2/source',
+        source_path: '/tmp/workspaces/uniuni2000__test2/source',
+        commit_sha: 'abc123',
+        status: 'ready',
+        last_sync_error: null,
+        updated_at: '2026-05-07T00:00:00.000Z',
+      },
+    ]);
+    expect(gateway.getManifest().supervisor?.repo_advisor_sessions).toEqual([
+      {
+        transport: 'telegram',
+        conversation_id: 'chat-1',
+        repo_ref: 'UniUni2000/test2',
+        local_path: '/tmp/workspaces/uniuni2000__test2/source',
+        source_commit_sha: 'abc123',
+        started_at: '2026-05-07T00:00:00.000Z',
+        last_used_at: '2026-05-07T00:00:02.000Z',
+        turn_count: 2,
+      },
+    ]);
 
     gateway.dispose();
   });
@@ -696,6 +805,115 @@ describe('DefaultBotGateway', () => {
     expect(String(requests[1]?.body.text)).toContain('INT-1 目前还在执行中');
   });
 
+  test('mentions latest repo reading in the slow acknowledgement for repo questions', async () => {
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const preferences = new BotConversationPreferenceRepository(db);
+    preferences.upsert({
+      transport: 'telegram',
+      conversation_id: '42',
+      default_project_slug: 'test2',
+    });
+    const projectResolver = {
+      listConfiguredRoutes: () => [
+        {
+          project_slug: 'test2',
+          project_name: null,
+          github_owner: 'UniUni2000',
+          github_repo: 'test2',
+          github_repo_full: 'UniUni2000/test2',
+          local_path: null,
+          cache_key: 'uniuni2000__test2',
+          require_repo_harness: false,
+        },
+      ],
+    } as any;
+    let resolveAgent: (() => void) | null = null;
+    const agentDone = new Promise<void>((resolve) => {
+      resolveAgent = resolve;
+    });
+
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body || '{}')),
+      });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        telegramTextProcessingAckDelayMs: 5,
+        preferencesRepository: preferences,
+        projectResolver,
+        supervisorAgentService: {
+          respond: async () => {
+            await agentDone;
+            return {
+              mode: 'repo_answer',
+              repoRef: 'UniUni2000/test2',
+              answer: '仓库当前只有 README.md。',
+            };
+          },
+        },
+        assistantModel: {
+          decide: async () => null,
+          getDiagnostics: () => ({
+            provider: 'test',
+            model: 'test-model',
+            configured: true,
+            health: 'healthy',
+            fallback_available: true,
+            last_error_code: null,
+          }),
+        },
+      },
+    );
+
+    const result = await gateway.handleTelegramWebhook(
+      {
+        message: {
+          text: '这个仓库有哪些文件？',
+          chat: { id: 42 },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(result.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(String(requests[0]?.body.text)).toContain('正在读取最新仓库信息');
+
+    resolveAgent?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(String(requests[1]?.body.text)).toContain('README.md');
+    gateway.dispose();
+    db.close();
+  });
+
   test('edits the slow-processing acknowledgement into the supervisor Plan Card instead of sending a second card', async () => {
     const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
     let nextMessageId = 700;
@@ -781,7 +999,7 @@ describe('DefaultBotGateway', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(requests).toHaveLength(1);
     expect(requests[0]?.url).toContain('sendMessage');
-    expect(String(requests[0]?.body.text)).toContain('收到您的消息了，我这边正在思考和处理，给我点时间');
+    expect(String(requests[0]?.body.text)).toContain('正在读取最新仓库信息');
 
     resolveAssistant?.();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -808,7 +1026,7 @@ describe('DefaultBotGateway', () => {
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body || '{}'));
       requests.push({ url: String(input), body });
-      if (String(input).includes('sendMessage') && String(body.text).includes('收到您的消息了，我这边正在思考和处理，给我点时间')) {
+      if (String(input).includes('sendMessage') && String(body.text).includes('正在读取最新仓库信息')) {
         await ackSendDone;
       }
       return new Response(JSON.stringify({ ok: true, result: { message_id: nextMessageId += 1 } }), {

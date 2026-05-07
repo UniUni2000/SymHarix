@@ -149,6 +149,23 @@ describe('session visual cards', () => {
     expect(card?.photo.filename).toBe('Plan-Card-supervisor-card.png');
   });
 
+  test('labels resumed existing issues as continued instead of newly created', () => {
+    const session = createSession({
+      last_material_outcome: {
+        outcome_kind: 'continued',
+        message: 'Queued INT-248 for retry',
+      },
+    });
+    const issue = createIssue({
+      orchestrator_state: 'retry_scheduled',
+    });
+
+    const card = buildSupervisorSessionVisualCard(session, issue, 'session|continued');
+
+    expect(card?.caption).toContain('已继续执行 · 执行中');
+    expect(card?.caption).not.toContain('已创建');
+  });
+
   test('promotes live delivery blockers into the Telegram card summary', () => {
     const session = createSession({
       state: 'awaiting_user_decision',

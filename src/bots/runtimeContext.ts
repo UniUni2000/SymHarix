@@ -1,6 +1,11 @@
 import { BotConversationPreferenceRepository, type BotFollowupMessageStateRepository } from '../database';
 import type { RuntimeControlPlane, RuntimeIssueView, RuntimeTimelineEvent } from '../runtime/types';
 import { TrackerProjectResolutionService } from '../tracker/projectResolution';
+import {
+  DefaultRepoProfileService,
+  type RepoProfileService,
+} from '../supervisor/repoProfileService';
+import type { SupervisorRepoUnderstandingService } from '../supervisor/repoUnderstanding';
 import type {
   BotAssistantDiagnostics,
   BotCommandContext,
@@ -26,6 +31,32 @@ function toIssueContextView(issue: RuntimeIssueView): BotIssueContextView {
     github_repo: issue.github_repo,
     branch_name: issue.branch_name,
     active_pr_number: issue.active_pr_number,
+    session: issue.session
+      ? {
+          session_id: issue.session.session_id,
+          turn_count: issue.session.turn_count,
+          stage: issue.session.stage,
+          last_event: issue.session.last_event,
+          last_message: issue.session.last_message,
+          started_at: issue.session.started_at,
+          last_event_at: issue.session.last_event_at,
+          tokens: issue.session.tokens,
+          recent_tools: issue.session.recent_tools.map((tool) => ({
+            tool_name: tool.tool_name,
+            status: tool.status,
+            message: tool.message,
+            summary: tool.summary,
+            path: tool.path,
+            timestamp: tool.timestamp,
+          })),
+          recent_files: issue.session.recent_files.map((file) => ({
+            path: file.path,
+            operation: file.operation,
+            status: file.status,
+            timestamp: file.timestamp,
+          })),
+        }
+      : null,
     session_stage: issue.session?.stage ?? null,
     session_message: issue.session?.last_message ?? null,
     supervisor_session_state: issue.supervisor_session_state ?? null,
@@ -138,18 +169,21 @@ export class BotRuntimeContextService {
     private readonly projectResolver: TrackerProjectResolutionService | null,
     private readonly subscriptions: Pick<BotSubscriptionService, 'listByConversation'> | null,
     private readonly followupMessageStates: BotFollowupMessageStateRepository | null = null,
+    private readonly repoProfileService: RepoProfileService = new DefaultRepoProfileService(),
+    private readonly repoUnderstandingService: SupervisorRepoUnderstandingService | null = null,
   ) {}
 
-  buildContext(
+  async buildContext(
     context: BotCommandContext,
     text: string,
     assistant: BotAssistantDiagnostics,
-  ): BotRuntimeCopilotContext {
+  ): Promise<BotRuntimeCopilotContext> {
     const overview = this.runtime.getOverview();
-    const availableProjects = this.projectResolver?.listConfiguredRoutes().map((route) => ({
+    const configuredRoutes = this.projectResolver?.listConfiguredRoutes() ?? [];
+    const availableProjects = configuredRoutes.map((route) => ({
       project_slug: route.project_slug,
       github_repo_full: route.github_repo_full,
-    })) ?? [];
+    }));
     const defaultProjectSlug = this.preferences?.findByConversation({
       transport: context.transport,
       conversation_id: context.recipient.conversation_id,
@@ -172,6 +206,26 @@ export class BotRuntimeContextService {
     const recentTimeline = focusIssue
       ? this.runtime.getTimeline(focusIssue.issue_id, 6).slice().sort(compareTimeline)
       : [];
+    const repoProfileRoute = (
+      (defaultProjectSlug
+        ? configuredRoutes.find((route) => route.project_slug === defaultProjectSlug) ?? null
+        : null)
+      || (focusIssue?.github_repo
+        ? configuredRoutes.find((route) => route.github_repo_full === focusIssue.github_repo) ?? null
+        : null)
+    );
+    const repoProfile = await this.repoProfileService.resolve({
+      repoRef: repoProfileRoute?.github_repo_full ?? defaultProjectSlug ?? 'unknown',
+      localPath: repoProfileRoute?.local_path ?? null,
+    });
+    const repoUnderstanding = repoProfileRoute && this.repoUnderstandingService
+      ? await this.repoUnderstandingService.understand({
+          repoRef: repoProfileRoute.github_repo_full,
+          localPath: repoProfileRoute.local_path ?? null,
+          forceRefresh: false,
+          cacheOnly: true,
+        }).catch(() => null)
+      : null;
 
     const focusedIssueContext: BotFocusedIssueContext | null = focusIssue
       ? {
@@ -211,6 +265,7 @@ export class BotRuntimeContextService {
             tool_name: event.tool_name,
             level: event.level,
             category: event.category,
+            detail: event.detail,
           })),
         }
       : null;
@@ -218,6 +273,8 @@ export class BotRuntimeContextService {
     return {
       default_project_slug: defaultProjectSlug,
       available_projects: availableProjects,
+      repo_profile: repoProfile,
+      repo_understanding: repoUnderstanding,
       watch_subscriptions: this.subscriptions?.listByConversation({
         transport: context.transport,
         conversation_id: context.recipient.conversation_id,
