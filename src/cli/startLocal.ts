@@ -1,21 +1,23 @@
 #!/usr/bin/env bun
 
 import { execSync, spawn, type ChildProcess } from 'child_process';
-import * as fs from 'fs';
+import * as net from 'net';
 import * as path from 'path';
 import { createCloudflaredTunnelProvider, type TelegramTunnelHandle } from '../bots/telegramBootstrap';
 import { loadWorkflow, resolveWorkflowPath } from '../workflow/loader';
 import { buildServiceConfig } from '../config/loader';
 import {
   buildTelegramStartupSummary,
+  applyProxyEnv,
+  disableProxyEnv,
+  ensureNoProxyForLocalhost,
+  hasHttpProxyEnv,
   resolveStartLocalPort,
   shouldEmitTelegramStartupSummary,
   shouldProvisionStartLocalTunnel,
-  upsertEnvAssignment,
 } from './startLocalTunnel';
 
 const projectRoot = path.resolve(__dirname, '../..');
-const envFilePath = path.join(projectRoot, '.env');
 
 function portHasListener(port: number): boolean {
   try {
@@ -45,13 +47,118 @@ function stopExistingSymphonynessIfNeeded(port: number): void {
   }
 }
 
+function detectMacosHttpProxy(): string | null {
+  try {
+    const output = execSync('scutil --proxy', {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).toString();
+    const enabled = output.match(/^\s*HTTPEnable\s*:\s*(\d+)/m)?.[1];
+    const host = output.match(/^\s*HTTPProxy\s*:\s*(.+)$/m)?.[1]?.trim();
+    const port = output.match(/^\s*HTTPPort\s*:\s*(\d+)/m)?.[1];
+    if (enabled === '1' && host && port) {
+      return `http://${host}:${port}`;
+    }
+  } catch {
+    // scutil is macOS-only and optional.
+  }
+  return null;
+}
+
+async function canConnectToLocalPort(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: '127.0.0.1', port });
+    const finish = (ok: boolean): void => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(250);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+  });
+}
+
+async function detectLocalHttpProxy(): Promise<string | null> {
+  const macosProxy = detectMacosHttpProxy();
+  if (macosProxy) {
+    return macosProxy;
+  }
+
+  for (const port of [1087, 7890, 7897, 8080, 6152]) {
+    if (await canConnectToLocalPort(port)) {
+      return `http://127.0.0.1:${port}`;
+    }
+  }
+
+  return null;
+}
+
+async function configureStartLocalProxyEnv(env: Record<string, string | undefined>): Promise<void> {
+  const proxyMode = env.SYMPHONY_PROXY_MODE?.trim().toLowerCase() || 'auto';
+  if (proxyMode === 'off') {
+    env.SYMPHONY_TELEGRAM_DISABLE_PROXY = '1';
+    console.log('[symphonyness] start:local Telegram proxy disabled by SYMPHONY_PROXY_MODE=off');
+    return;
+  }
+
+  delete env.SYMPHONY_TELEGRAM_DISABLE_PROXY;
+
+  const configuredProxy = env.SYMPHONY_PROXY_URL?.trim();
+  if (configuredProxy) {
+    applyProxyEnv(env, configuredProxy);
+    ensureNoProxyForLocalhost(env);
+    console.log(`[symphonyness] start:local using Telegram proxy from SYMPHONY_PROXY_URL: ${configuredProxy}`);
+    return;
+  }
+
+  if (hasHttpProxyEnv(env)) {
+    if (!env.HTTP_PROXY && env.HTTPS_PROXY) {
+      env.HTTP_PROXY = env.HTTPS_PROXY;
+    }
+    if (!env.HTTPS_PROXY && env.HTTP_PROXY) {
+      env.HTTPS_PROXY = env.HTTP_PROXY;
+    }
+    ensureNoProxyForLocalhost(env);
+    console.log('[symphonyness] start:local using existing HTTP_PROXY/HTTPS_PROXY for Telegram API calls');
+    return;
+  }
+
+  if (proxyMode !== 'auto') {
+    ensureNoProxyForLocalhost(env);
+    return;
+  }
+
+  const detectedProxy = await detectLocalHttpProxy();
+  if (detectedProxy) {
+    applyProxyEnv(env, detectedProxy);
+    ensureNoProxyForLocalhost(env);
+    console.log(`[symphonyness] start:local detected local Telegram proxy: ${detectedProxy}`);
+  } else {
+    ensureNoProxyForLocalhost(env);
+    console.log('[symphonyness] start:local no local Telegram proxy detected; continuing without proxy');
+  }
+}
+
+function configureStartLocalTelegramRetryEnv(env: Record<string, string | undefined>): void {
+  env.SYMPHONY_TELEGRAM_WEBHOOK_RETRY_ATTEMPTS ||= '6';
+  env.SYMPHONY_TELEGRAM_WEBHOOK_RETRY_DELAY_MS ||= '2000';
+  env.SYMPHONY_TELEGRAM_STARTUP_SUMMARY_ATTEMPTS ||= '60';
+}
+
+function resolveTelegramStartupSummaryAttempts(env: Record<string, string | undefined>): number {
+  const maxAttempts = Number.parseInt(env.SYMPHONY_TELEGRAM_STARTUP_SUMMARY_ATTEMPTS || '', 10);
+  return Number.isFinite(maxAttempts) && maxAttempts > 0 ? maxAttempts : 60;
+}
+
 async function printTelegramStartupSummary(
   port: number,
   expectedPublicBaseUrl: string | null,
+  attempts: number,
 ): Promise<void> {
   const manifestUrl = `http://127.0.0.1:${port}/api/v1/bots/manifest`;
 
-  for (let attempt = 0; attempt < 30; attempt += 1) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       const response = await fetch(manifestUrl);
       if (!response.ok) {
@@ -64,6 +171,7 @@ async function printTelegramStartupSummary(
               health?: string | null;
               webhook_url?: string | null;
               webhook_last_error_message?: string | null;
+              webhook_pending_update_count?: number | null;
               public_base_url?: string | null;
             };
           };
@@ -71,7 +179,7 @@ async function printTelegramStartupSummary(
       };
       const telegram = payload.data?.transports?.telegram;
       if (telegram && shouldEmitTelegramStartupSummary(telegram, expectedPublicBaseUrl)) {
-        console.log(`[symphonyness] ${buildTelegramStartupSummary(telegram)}`);
+        console.log(`[symphonyness] ${buildTelegramStartupSummary(telegram, expectedPublicBaseUrl)}`);
         return;
       }
     } catch {
@@ -95,8 +203,11 @@ async function main(): Promise<void> {
   const requestedPort = resolveStartLocalPort(args, childEnv, workflowServerPort);
 
   stopExistingSymphonynessIfNeeded(requestedPort);
+  if (childEnv.SYMPHONY_TELEGRAM_BOT_TOKEN?.trim()) {
+    await configureStartLocalProxyEnv(childEnv);
+    configureStartLocalTelegramRetryEnv(childEnv);
+  }
 
-  let originalEnvContent: string | null = null;
   let tunnelHandle: TelegramTunnelHandle | null = null;
   let child: ChildProcess | null = null;
   let cleanedUp = false;
@@ -107,10 +218,6 @@ async function main(): Promise<void> {
       return;
     }
     cleanedUp = true;
-
-    if (originalEnvContent !== null) {
-      fs.writeFileSync(envFilePath, originalEnvContent, 'utf8');
-    }
 
     if (tunnelHandle) {
       await tunnelHandle.dispose();
@@ -149,18 +256,10 @@ async function main(): Promise<void> {
       const tunnelProvider = createCloudflaredTunnelProvider();
       tunnelHandle = await tunnelProvider(localBaseUrl);
 
-      originalEnvContent = fs.existsSync(envFilePath)
-        ? fs.readFileSync(envFilePath, 'utf8')
-        : '';
-
       const publicBaseUrl = tunnelHandle.publicBaseUrl;
-      fs.writeFileSync(
-        envFilePath,
-        upsertEnvAssignment(originalEnvContent, 'SYMPHONY_PUBLIC_BASE_URL', publicBaseUrl),
-        'utf8',
-      );
       childEnv.SYMPHONY_PUBLIC_BASE_URL = publicBaseUrl;
       console.log(`[symphonyness] start:local tunnel ready: ${publicBaseUrl}`);
+      console.log('[symphonyness] start:local using temporary tunnel only for this process; .env was not modified.');
     } catch (error) {
       console.warn(
         '[symphonyness] start:local could not pre-provision Telegram tunnel; falling back to normal bootstrap.',
@@ -190,6 +289,7 @@ async function main(): Promise<void> {
   void printTelegramStartupSummary(
     requestedPort,
     childEnv.SYMPHONY_PUBLIC_BASE_URL?.trim() || null,
+    resolveTelegramStartupSummaryAttempts(childEnv),
   );
   child.once('exit', (code, signal) => {
     void finish(code, signal);

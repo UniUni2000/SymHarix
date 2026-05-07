@@ -29,6 +29,11 @@ interface CodexMessage {
   error?: { code: number; message: string };
 }
 
+interface ResolvedCommandSpec {
+  executable: string;
+  args: string[];
+}
+
 /**
  * Agent Runner options
  */
@@ -108,24 +113,72 @@ export class AgentRunner extends EventEmitter {
   }
 
   /**
-   * Resolve command path relative to project root
+   * Parse a command string into structured executable + args.
+   * Uses regex split so multi-space tokens don't accumulate empty strings.
    */
-  private resolveCommandPath(command: string): string {
-    // If command starts with node/python etc., extract the interpreter and script
-    const parts = command.split(' ');
-    if (parts.length > 0) {
-      const interpreter = parts[0];
-      const script = parts.slice(1).join(' ');
-      
-      // Check if it's a node/python command with a relative script path
-      if ((interpreter === 'node' || interpreter === 'python' || interpreter === 'python3') && script) {
-        const scriptPath = path.isAbsolute(script) ? script : path.resolve(this.options.projectRoot, script);
-        return `${interpreter} ${scriptPath}`;
-      }
+  private resolveCommandSpec(command: string): ResolvedCommandSpec {
+    const parts = command.trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) {
+      return { executable: command, args: [] };
     }
-    
-    // For absolute paths or other commands, return as is
-    return command;
+
+    const executable = parts[0];
+    const args = parts.slice(1);
+
+    // Resolve relative script paths against projectRoot for node / python commands
+    if ((executable === 'node' || executable === 'python' || executable === 'python3') && args.length > 0) {
+      const script = args[0];
+      const resolvedScript = path.isAbsolute(script)
+        ? script
+        : path.resolve(this.options.projectRoot, script);
+      return {
+        executable,
+        args: [resolvedScript, ...args.slice(1)],
+      };
+    }
+
+    return { executable, args };
+  }
+
+  /**
+   * Resolve the Bun executable, preferring the current runtime over a PATH lookup.
+   */
+  private resolveBunExecutable(): string {
+    const currentExec = typeof process.execPath === 'string' ? process.execPath.trim() : '';
+    if (currentExec && path.basename(currentExec).toLowerCase().includes('bun')) {
+      return currentExec;
+    }
+    return 'bun';
+  }
+
+  /**
+   * Build spawn argument array keeping the adapter script path intact
+   * even when the project root contains spaces.
+   */
+  private buildSpawnArgs(command: string): string[] {
+    const resolvedCommand = this.resolveCommandSpec(command);
+
+    // node / python / python3 with a script path
+    if (
+      resolvedCommand.args.length > 0 &&
+      (resolvedCommand.executable === 'node' ||
+        resolvedCommand.executable === 'python' ||
+        resolvedCommand.executable === 'python3')
+    ) {
+      return [resolvedCommand.executable, ...resolvedCommand.args];
+    }
+
+    // CLI command without path separators – invoke directly (e.g. "codex app-server")
+    if (
+      resolvedCommand.args.length > 0 &&
+      !resolvedCommand.executable.includes('/') &&
+      !resolvedCommand.executable.includes('\\')
+    ) {
+      return [resolvedCommand.executable, ...resolvedCommand.args];
+    }
+
+    // Other commands with path – wrap with bun run
+    return [this.resolveBunExecutable(), 'run', resolvedCommand.executable, ...resolvedCommand.args];
   }
 
   /**
@@ -402,28 +455,7 @@ export class AgentRunner extends EventEmitter {
    * Section 10.1: Launch Contract
    */
   launch(workspacePath: string): cp.ChildProcess {
-    // Resolve command path
-    const codexCommand = this.options.codexCommand;
-    const resolvedCommand = this.resolveCommandPath(codexCommand);
-
-    // Use Bun.spawn instead of cp.spawn - Bun's native spawn works in Bun runtime
-    // cp.spawn fails with ENOENT in Bun for external executables
-
-    // Parse resolved command into array for Bun.spawn
-    // resolvedCommand is like "node /path/to/adapter.cjs" or "codex app-server"
-    const cmdParts = resolvedCommand.split(' ');
-    let spawnArgs: string[];
-    if (cmdParts.length > 1 && (cmdParts[0] === 'node' || cmdParts[0] === 'python' || cmdParts[0] === 'python3')) {
-      // node/python script - use directly
-      spawnArgs = cmdParts;
-    } else if (cmdParts.length > 1 && !resolvedCommand.includes('/')) {
-      // CLI command with args (e.g., "codex app-server") - split and run directly
-      // No path separator means it's a command found via PATH
-      spawnArgs = cmdParts;
-    } else {
-      // Other commands with path - wrap in bun run
-      spawnArgs = ['/Users/liupenghui/.bun/bin/bun', 'run', resolvedCommand];
-    }
+    const spawnArgs = this.buildSpawnArgs(this.options.codexCommand);
 
     let child;
     try {

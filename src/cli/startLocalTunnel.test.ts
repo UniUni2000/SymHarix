@@ -116,16 +116,16 @@ describe('startLocalTunnel', () => {
       health: 'degraded',
       webhook_url: null,
       webhook_last_error_message: 'unknown certificate verification error',
-    })).toBe(false);
+    })).toBe(true);
   });
 
-  test('does not emit startup summary from a stale process bound to an older public base url', () => {
+  test('emits startup summary when webhook state is stale for the expected public base url', () => {
     expect(shouldEmitTelegramStartupSummary({
       health: 'healthy',
       webhook_url: 'https://old.trycloudflare.com/api/v1/bots/telegram/webhook',
       webhook_last_error_message: null,
       public_base_url: 'https://old.trycloudflare.com',
-    }, 'https://fresh.trycloudflare.com')).toBe(false);
+    }, 'https://fresh.trycloudflare.com')).toBe(true);
 
     expect(shouldEmitTelegramStartupSummary({
       health: 'healthy',
@@ -135,12 +135,23 @@ describe('startLocalTunnel', () => {
     }, 'https://fresh.trycloudflare.com')).toBe(true);
   });
 
-  test('does not emit startup summary when webhook_url still points at the previous public base url', () => {
+  test('emits startup summary when webhook_url still points at the previous public base url', () => {
     expect(shouldEmitTelegramStartupSummary({
       health: 'healthy',
       webhook_url: 'https://old.trycloudflare.com/api/v1/bots/telegram/webhook',
       webhook_last_error_message: null,
       public_base_url: 'https://fresh.trycloudflare.com',
-    }, 'https://fresh.trycloudflare.com')).toBe(false);
+    }, 'https://fresh.trycloudflare.com')).toBe(true);
+  });
+
+  test('labels stale webhook summaries with the expected public base url', () => {
+    expect(buildTelegramStartupSummary({
+      health: 'healthy',
+      webhook_url: 'https://old.trycloudflare.com/api/v1/bots/telegram/webhook',
+      webhook_last_error_message: null,
+      public_base_url: 'https://fresh.trycloudflare.com',
+    }, 'https://fresh.trycloudflare.com')).toBe(
+      'telegram: stale webhook_url=https://old.trycloudflare.com/api/v1/bots/telegram/webhook expected_base=https://fresh.trycloudflare.com',
+    );
   });
 });

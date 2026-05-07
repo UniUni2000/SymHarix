@@ -221,6 +221,46 @@ describe('TelegramWebhookBootstrapService', () => {
     expect(attempts).toBe(2);
   });
 
+  test('does not retry permanent setWebhook failures for tunnel-backed startup', async () => {
+    let attempts = 0;
+    const fetcher = mock(async (input: string) => {
+      if (input.endsWith('/setWebhook')) {
+        attempts += 1;
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error_code: 401,
+            description: 'Unauthorized',
+          }),
+          { status: 401 },
+        );
+      }
+      return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+    });
+    globalThis.fetch = fetcher as typeof globalThis.fetch;
+
+    const service = new TelegramWebhookBootstrapService({
+      botToken: 'telegram-token',
+      webhookSecret: 'secret',
+      publicBaseUrl: null,
+      retryDelayMs: 0,
+      retryAttempts: 2,
+      webhookRetryDelayMs: 0,
+      webhookRetryAttempts: 5,
+      tunnelProvider: mock(async () => ({
+        publicBaseUrl: 'https://autogen.trycloudflare.com',
+        dispose: async () => undefined,
+      })),
+    });
+
+    await expect(service.bootstrap({
+      localBaseUrl: 'http://127.0.0.1:8080',
+      inboundPath: '/api/v1/bots/telegram/webhook',
+    })).rejects.toThrow('Unauthorized');
+
+    expect(attempts).toBe(1);
+  });
+
   test('waits for the public tunnel URL to become reachable before calling setWebhook', async () => {
     const calls: string[] = [];
     let probeAttempts = 0;

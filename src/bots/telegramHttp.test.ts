@@ -1,7 +1,23 @@
-import { describe, expect, mock, test } from 'bun:test';
-import { createTelegramApiFetch } from './telegramHttp';
+import { afterEach, describe, expect, mock, test } from 'bun:test';
+import { createDefaultTelegramApiFetch, createTelegramApiFetch } from './telegramHttp';
 
 describe('createTelegramApiFetch', () => {
+  const originalEnv = {
+    HTTP_PROXY: process.env.HTTP_PROXY,
+    HTTPS_PROXY: process.env.HTTPS_PROXY,
+    http_proxy: process.env.http_proxy,
+    https_proxy: process.env.https_proxy,
+    SYMPHONY_TELEGRAM_DISABLE_PROXY: process.env.SYMPHONY_TELEGRAM_DISABLE_PROXY,
+  };
+
+  afterEach(() => {
+    process.env.HTTP_PROXY = originalEnv.HTTP_PROXY;
+    process.env.HTTPS_PROXY = originalEnv.HTTPS_PROXY;
+    process.env.http_proxy = originalEnv.http_proxy;
+    process.env.https_proxy = originalEnv.https_proxy;
+    process.env.SYMPHONY_TELEGRAM_DISABLE_PROXY = originalEnv.SYMPHONY_TELEGRAM_DISABLE_PROXY;
+  });
+
   test('falls back when Bun fetch hits a Telegram certificate verification error', async () => {
     const primaryFetch = mock(async () => {
       throw new Error('unknown certificate verification error');
@@ -39,7 +55,7 @@ describe('createTelegramApiFetch', () => {
     expect(fallbackFetch).toHaveBeenCalledTimes(0);
   });
 
-  test('does not fall back for unrelated fetch errors', async () => {
+  test('falls back for Telegram network errors', async () => {
     const primaryFetch = mock(async () => {
       throw new Error('connection reset by peer');
     });
@@ -52,7 +68,44 @@ describe('createTelegramApiFetch', () => {
       fallbackFetch as unknown as typeof fetch,
     );
 
-    await expect(telegramFetch('https://api.telegram.org/bottoken/getWebhookInfo')).rejects.toThrow('connection reset by peer');
+    const response = await telegramFetch('https://api.telegram.org/bottoken/getWebhookInfo');
+
+    expect(response.status).toBe(200);
+    expect(fallbackFetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not fall back for unrelated Telegram fetch errors', async () => {
+    const primaryFetch = mock(async () => {
+      throw new Error('request body is invalid');
+    });
+    const fallbackFetch = mock(async () =>
+      new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    );
+
+    const telegramFetch = createTelegramApiFetch(
+      primaryFetch as unknown as typeof fetch,
+      fallbackFetch as unknown as typeof fetch,
+    );
+
+    await expect(telegramFetch('https://api.telegram.org/bottoken/getWebhookInfo')).rejects.toThrow('request body is invalid');
     expect(fallbackFetch).toHaveBeenCalledTimes(0);
+  });
+
+  test('proxy disable flag still lets non-Telegram requests use the normal fetch chain', async () => {
+    process.env.HTTP_PROXY = 'http://127.0.0.1:7890';
+    process.env.SYMPHONY_TELEGRAM_DISABLE_PROXY = '1';
+
+    const originalFetch = globalThis.fetch;
+    const runtimeFetch = mock(async () =>
+      new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    );
+    globalThis.fetch = runtimeFetch as unknown as typeof fetch;
+
+    const fetcher = createDefaultTelegramApiFetch();
+    const response = await fetcher('https://example.com');
+
+    expect(response.status).toBe(200);
+    expect(runtimeFetch).toHaveBeenCalledTimes(1);
+    globalThis.fetch = originalFetch;
   });
 });
