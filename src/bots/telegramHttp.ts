@@ -17,6 +17,24 @@ function isTelegramTlsVerificationError(error: unknown): boolean {
   return /certificate verification error|ssl_error_syscall|ssl connect/i.test(message);
 }
 
+function isTelegramNetworkError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /unable to connect|failed to connect|connection timed out|timed out|connection reset|network error|fetch failed/i.test(message);
+}
+
+function hasProxyEnv(): boolean {
+  return Boolean(
+    process.env.HTTP_PROXY?.trim()
+      || process.env.HTTPS_PROXY?.trim()
+      || process.env.http_proxy?.trim()
+      || process.env.https_proxy?.trim(),
+  );
+}
+
+function telegramProxyDisabled(): boolean {
+  return /^(1|true|yes|on)$/i.test(process.env.SYMPHONY_TELEGRAM_DISABLE_PROXY?.trim() || '');
+}
+
 function normalizeUrl(input: RequestInfo | URL): string {
   if (typeof input === 'string') {
     return input;
@@ -28,6 +46,48 @@ function normalizeUrl(input: RequestInfo | URL): string {
     return input.url;
   }
   return String(input);
+}
+
+function multipartEscape(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r|\n/g, '_');
+}
+
+async function serializeMultipartFormData(form: FormData): Promise<{
+  body: Buffer;
+  contentType: string;
+}> {
+  const boundary = `----symphony-telegram-${crypto.randomUUID().replace(/-/g, '')}`;
+  const chunks: Buffer[] = [];
+  const write = (value: string | Buffer): void => {
+    chunks.push(typeof value === 'string' ? Buffer.from(value) : value);
+  };
+
+  for (const [key, value] of form.entries()) {
+    write(`--${boundary}\r\n`);
+    if (typeof value === 'string') {
+      write(`Content-Disposition: form-data; name="${multipartEscape(key)}"\r\n\r\n`);
+      write(value);
+      write('\r\n');
+      continue;
+    }
+
+    const filename = 'name' in value && typeof value.name === 'string' && value.name.trim()
+      ? value.name
+      : `${key}.bin`;
+    const contentType = value.type || 'application/octet-stream';
+    write(
+      `Content-Disposition: form-data; name="${multipartEscape(key)}"; filename="${multipartEscape(filename)}"\r\n` +
+      `Content-Type: ${contentType}\r\n\r\n`,
+    );
+    write(Buffer.from(await value.arrayBuffer()));
+    write('\r\n');
+  }
+  write(`--${boundary}--\r\n`);
+
+  return {
+    body: Buffer.concat(chunks),
+    contentType: `multipart/form-data; boundary=${boundary}`,
+  };
 }
 
 async function nodeHttpsFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
@@ -64,10 +124,13 @@ async function curlFetch(input: RequestInfo | URL, init?: RequestInit): Promise<
   const url = normalizeUrl(input);
   const method = init?.method ?? 'GET';
   const headers = new Headers(init?.headers);
-  const bodyValue = init?.body == null ? '' : String(init.body);
+  let stdinValue: string | Buffer = '';
+  const timeoutSeconds = Number.parseInt(process.env.SYMPHONY_TELEGRAM_CURL_TIMEOUT_SECONDS || '', 10);
 
   const args = [
     '-sS',
+    '--max-time',
+    String(Number.isFinite(timeoutSeconds) && timeoutSeconds > 0 ? timeoutSeconds : 15),
     '-X',
     method,
     url,
@@ -75,12 +138,19 @@ async function curlFetch(input: RequestInfo | URL, init?: RequestInit): Promise<
     '\n__HTTP_STATUS__:%{http_code}',
   ];
 
-  for (const [key, value] of headers.entries()) {
-    args.push('-H', `${key}: ${value}`);
+  if (init?.body instanceof FormData) {
+    const multipart = await serializeMultipartFormData(init.body);
+    headers.set('Content-Type', multipart.contentType);
+    headers.set('Content-Length', String(multipart.body.length));
+    stdinValue = multipart.body;
+    args.push('--data-binary', '@-');
+  } else if (init?.body != null) {
+    stdinValue = String(init.body);
+    args.push('--data-binary', '@-');
   }
 
-  if (bodyValue) {
-    args.push('--data-binary', '@-');
+  for (const [key, value] of headers.entries()) {
+    args.push('-H', `${key}: ${value}`);
   }
 
   return new Promise<Response>((resolve, reject) => {
@@ -115,7 +185,7 @@ async function curlFetch(input: RequestInfo | URL, init?: RequestInit): Promise<
     });
 
     child.stdin.on('error', () => undefined);
-    child.stdin.end(bodyValue);
+    child.stdin.end(stdinValue);
   });
 }
 
@@ -128,7 +198,10 @@ export function createTelegramApiFetch(
     try {
       return await primaryFetch(input, init);
     } catch (error) {
-      if (!isTelegramApiUrl(input) || !isTelegramTlsVerificationError(error)) {
+      if (
+        !isTelegramApiUrl(input)
+        || (!isTelegramTlsVerificationError(error) && !isTelegramNetworkError(error))
+      ) {
         throw error;
       }
       return effectiveFallback(input, init);
@@ -138,13 +211,22 @@ export function createTelegramApiFetch(
 
 export function createDefaultTelegramApiFetch(): typeof fetch {
   const runtimeFetch = ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init)) as typeof fetch;
-  return createTelegramApiFetch(
+  const fallbackChain = createTelegramApiFetch(
     runtimeFetch,
     createTelegramApiFetch(
       telegramNodeHttpsFetch,
       curlFetch as typeof fetch,
     ),
   );
+  if (!hasProxyEnv() || telegramProxyDisabled()) {
+    return fallbackChain;
+  }
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (isTelegramApiUrl(input)) {
+      return curlFetch(input, init);
+    }
+    return fallbackChain(input, init);
+  }) as typeof fetch;
 }
 
 export const telegramNodeHttpsFetch = nodeHttpsFetch as typeof fetch;
