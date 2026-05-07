@@ -4,6 +4,7 @@ export type BotTransport = 'telegram' | 'discord';
 export type BotWatchPreset = 'default' | 'verbose' | 'failures' | 'status';
 export type BotCommandName =
   | 'help'
+  | 'clear'
   | 'status'
   | 'new'
   | 'project'
@@ -168,6 +169,27 @@ export interface BotManifest {
       root_issue_id: string | null;
       updated_at: string;
     }>;
+    repo_sources?: Array<{
+      project_slug: string;
+      repo_ref: string;
+      configured_local_path: string | null;
+      analysis_path: string | null;
+      source_path: string | null;
+      commit_sha: string | null;
+      status: 'unknown' | 'ready' | 'failed';
+      last_sync_error: string | null;
+      updated_at: string | null;
+    }>;
+    repo_advisor_sessions?: Array<{
+      transport: string;
+      conversation_id: string;
+      repo_ref: string | null;
+      local_path: string;
+      source_commit_sha: string | null;
+      started_at: string;
+      last_used_at: string;
+      turn_count: number;
+    }>;
   };
 }
 
@@ -223,6 +245,11 @@ export interface TelegramCallbackAuditRecord {
 }
 
 export type RuntimeEventListener = (event: RuntimeStreamEvent) => void;
+
+export type SupervisorIntakeSource =
+  | 'telegram_chat'
+  | 'slash_command'
+  | 'inline_action';
 
 export type BotAssistantIntentKind =
   | 'create_issue'
@@ -306,6 +333,44 @@ export interface BotWatchStateView {
   preset: BotWatchPreset;
 }
 
+export interface BotRepoProfileView {
+  repo_ref: string;
+  summary: string;
+  project_type: string;
+  tech_stack: string[];
+  key_paths: string[];
+  signals: {
+    readme_title: string | null;
+    package_name: string | null;
+    package_scripts: string[];
+    top_level_directories: string[];
+    top_level_files?: string[];
+    sample_paths?: string[];
+    key_file_summaries?: Array<{
+      path: string;
+      summary: string;
+    }>;
+  };
+  last_indexed_at: string;
+}
+
+export interface BotRepoUnderstandingView {
+  repo_ref: string;
+  commit_sha: string;
+  summary: string;
+  understanding: {
+    project_purpose: string;
+    tech_stack: string[];
+    key_paths: string[];
+    architecture_notes: string[];
+    artifact_opportunities: string[];
+    test_commands: string[];
+    risks: string[];
+  };
+  evidence_paths: string[];
+  source: 'cache' | 'claude_code' | 'fallback';
+}
+
 export interface BotIssueContextView {
   issue_id: string;
   identifier: string;
@@ -316,6 +381,34 @@ export interface BotIssueContextView {
   github_repo: string | null;
   branch_name: string | null;
   active_pr_number: number | null;
+  session: {
+    session_id: string | null;
+    turn_count: number;
+    stage: string | null;
+    last_event: string | null;
+    last_message: string | null;
+    started_at: string | null;
+    last_event_at: string | null;
+    tokens: {
+      input_tokens: number;
+      output_tokens: number;
+      total_tokens: number;
+    };
+    recent_tools: Array<{
+      tool_name: string;
+      status: string;
+      message: string;
+      summary: string | null;
+      path: string | null;
+      timestamp: string;
+    }>;
+    recent_files: Array<{
+      path: string;
+      operation: string;
+      status: string;
+      timestamp: string;
+    }>;
+  } | null;
   session_stage: string | null;
   session_message: string | null;
   supervisor_session_state?: string | null;
@@ -396,12 +489,15 @@ export interface BotFocusedIssueContext {
     tool_name: string | null;
     level: string;
     category: string;
+    detail?: Record<string, unknown> | null;
   }>;
 }
 
 export interface BotRuntimeCopilotContext {
   default_project_slug: string | null;
   available_projects: BotProjectRouteView[];
+  repo_profile: BotRepoProfileView | null;
+  repo_understanding: BotRepoUnderstandingView | null;
   watch_subscriptions: BotWatchStateView[];
   overview: {
     running: number;

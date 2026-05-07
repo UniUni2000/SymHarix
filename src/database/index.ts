@@ -135,3 +135,4 @@ export { SupervisorSessionRepository } from './repositories/supervisorSessionRep
 export { SupervisorSessionEventRepository } from './repositories/supervisorSessionEventRepository';
 export { SupervisorJobRepository } from './repositories/supervisorJobRepository';
 export { SupervisorMemoryRepository } from './repositories/supervisorMemoryRepository';
+export { SupervisorRepoUnderstandingRepository } from './repositories/supervisorRepoUnderstandingRepository';

@@ -680,6 +680,44 @@ export interface UpsertSupervisorMemoryRecord {
   updated_at?: Date;
 }
 
+export interface SupervisorRepoUnderstandingJson {
+  project_purpose: string;
+  tech_stack: string[];
+  key_paths: string[];
+  architecture_notes: string[];
+  artifact_opportunities: string[];
+  test_commands: string[];
+  risks: string[];
+}
+
+export interface SupervisorRepoUnderstanding {
+  id: string;
+  repo_ref: string;
+  local_path: string | null;
+  commit_sha: string;
+  status: 'pending' | 'ready' | 'failed';
+  summary: string | null;
+  understanding_json: SupervisorRepoUnderstandingJson;
+  evidence_paths_json: string[];
+  generated_by: 'claude_code' | 'fallback';
+  error: string | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface CreateSupervisorRepoUnderstanding {
+  id: string;
+  repo_ref: string;
+  local_path?: string | null;
+  commit_sha: string;
+  status: SupervisorRepoUnderstanding['status'];
+  summary?: string | null;
+  understanding_json: SupervisorRepoUnderstandingJson;
+  evidence_paths_json?: string[];
+  generated_by: SupervisorRepoUnderstanding['generated_by'];
+  error?: string | null;
+}
+
 export interface FindSupervisorSessionConversationKey {
   transport: BotWatchTransport;
   conversation_id: string;
