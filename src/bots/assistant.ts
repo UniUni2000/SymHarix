@@ -17,12 +17,23 @@ import type {
   BotCommandResponse,
   BotFocusedIssueContext,
   BotRuntimeCopilotContext,
+  SupervisorIntakeSource,
 } from './types';
-import { BotCommandService } from './commandService';
+import { BotCommandService, parseTextCommand } from './commandService';
 import { buildGovernanceQuickActions, toGovernanceQuickActionIntent } from './governanceQuickActions';
 import type { BotSubscriptionService } from './subscriptions';
 import { BotRuntimeContextService } from './runtimeContext';
 import { createBotAssistantModelFromEnv, type BotAssistantModel } from './model';
+import type { SupervisorCcAdvisor, SupervisorCcAdvisorResult } from '../supervisor/ccAdvisor';
+import type { ResolvedRepositoryRoute } from '../types';
+import {
+  shouldUseReadOnlyClaudeForText,
+  type SupervisorAgentResult,
+  type SupervisorAgentService,
+  type SupervisorControlPlaneSnapshot,
+} from '../supervisor/supervisorAgent';
+import type { SupervisorRepoSourceResolver } from '../supervisor/repoSourceResolver';
+import type { SupervisorRepoUnderstandingService } from '../supervisor/repoUnderstanding';
 import { SupervisorSessionService } from '../supervisor/sessionService';
 
 const CONFIRM_WORDS = new Set(['确认', 'yes', 'y', 'ok', 'okay', '好', '执行', '继续', 'confirm']);
@@ -81,6 +92,251 @@ function isConfirmation(text: string): boolean {
 
 function isCancellation(text: string): boolean {
   return CANCEL_WORDS.has(text.trim().toLowerCase());
+}
+
+function isSupervisorSessionControlText(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  return /^(新开线程|开启新线程|新建线程|另开线程)[:：\s]+/.test(text.trim())
+    || [
+      '确认',
+      'yes',
+      'y',
+      'ok',
+      'okay',
+      '好',
+      '执行',
+      '继续',
+      'confirm',
+      '批准',
+      '批准并开始',
+      '开始执行',
+      '按推荐继续',
+      '改一下计划',
+      '修改计划',
+      '先别执行',
+      '不要开始',
+      '换用备选方案',
+      '换方案',
+      '备选方案',
+      '取消当前计划',
+      '取消这条计划',
+      '结束当前计划',
+      '放弃当前计划',
+    ].some((word) => normalized.includes(word.toLowerCase()));
+}
+
+function isGreetingLikeText(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  return /^(你好|您好|hello|hi|hey|yo|在吗|在么|在不在)[!！,.，。?？\s]*$/i.test(normalized);
+}
+
+function buildGreetingReply(context: BotRuntimeCopilotContext): string {
+  const defaultProject = context.default_project_slug
+    ? `当前默认项目是 ${context.default_project_slug}。`
+    : null;
+  return [
+    '你好，我可以帮你梳理需求、起草 issue、查状态，或者一起把当前计划改顺。',
+    defaultProject,
+  ].filter(Boolean).join('\n');
+}
+
+function isSlashCommandText(text: string): boolean {
+  const trimmed = text.trim();
+  return /^\/[a-z0-9_]+(?:@[\w_]+)?(?:\s|$)/i.test(trimmed);
+}
+
+function isClearRepoConversationCommand(text: string): boolean {
+  const trimmed = text.trim();
+  return /^\/clear(?:@[\w_]+)?(?:\s|$)/i.test(trimmed);
+}
+
+function shouldClearAllRepoConversations(text: string): boolean {
+  const trimmed = text.trim();
+  const commandToken = trimmed.split(/\s+/)[0] || '';
+  const args = trimmed.slice(commandToken.length).trim().toLowerCase();
+  return ['all', '全部', '所有'].includes(args);
+}
+
+interface AdvisorRouteOptions {
+  preferFocusIssue?: boolean;
+}
+
+function buildAdvisorRepoRef(
+  context: BotRuntimeCopilotContext,
+  options: AdvisorRouteOptions = {},
+): string | null {
+  if (options.preferFocusIssue && context.focus_issue?.issue.github_repo) {
+    return context.focus_issue.issue.github_repo;
+  }
+  if (context.repo_profile?.repo_ref) {
+    return context.repo_profile.repo_ref;
+  }
+  if (context.default_project_slug) {
+    const route = context.available_projects.find((item) => item.project_slug === context.default_project_slug);
+    if (route?.github_repo_full) {
+      return route.github_repo_full;
+    }
+  }
+  return context.focus_issue?.issue.github_repo ?? null;
+}
+
+function buildAdvisorLocalPath(
+  context: BotRuntimeCopilotContext,
+  projectResolver: TrackerProjectResolutionService | null,
+  options: AdvisorRouteOptions = {},
+): string | null {
+  const routes = projectResolver?.listConfiguredRoutes() ?? [];
+  if (options.preferFocusIssue && context.focus_issue?.issue.github_repo) {
+    const focusRoute = routes.find((item) => item.github_repo_full === context.focus_issue?.issue.github_repo) ?? null;
+    if (focusRoute) {
+      return focusRoute.local_path ?? null;
+    }
+  }
+  const defaultProject = context.default_project_slug;
+  if (defaultProject) {
+    return routes.find((item) => item.project_slug === defaultProject)?.local_path ?? null;
+  }
+  const repoRef = context.repo_profile?.repo_ref ?? context.focus_issue?.issue.github_repo ?? null;
+  if (!repoRef) {
+    return null;
+  }
+  const route = routes.find((item) => item.github_repo_full === repoRef) ?? null;
+  return route?.local_path ?? null;
+}
+
+function buildAdvisorRoute(
+  context: BotRuntimeCopilotContext,
+  projectResolver: TrackerProjectResolutionService | null,
+  options: AdvisorRouteOptions = {},
+): ResolvedRepositoryRoute | null {
+  const routes = projectResolver?.listConfiguredRoutes() ?? [];
+  if (options.preferFocusIssue && context.focus_issue?.issue.github_repo) {
+    const focusRoute = routes.find((item) => item.github_repo_full === context.focus_issue?.issue.github_repo) ?? null;
+    if (focusRoute) {
+      return focusRoute;
+    }
+  }
+  const defaultProject = context.default_project_slug;
+  if (defaultProject) {
+    return routes.find((item) => item.project_slug === defaultProject) ?? null;
+  }
+  const repoRef = context.repo_profile?.repo_ref ?? context.focus_issue?.issue.github_repo ?? null;
+  if (!repoRef) {
+    return null;
+  }
+  return routes.find((item) => item.github_repo_full === repoRef) ?? null;
+}
+
+function toAdvisorProjectContext(context: BotRuntimeCopilotContext): string | null {
+  if (context.default_project_slug) {
+    return `default_project=${context.default_project_slug}`;
+  }
+  if (context.focus_issue) {
+    return [
+      `${context.focus_issue.issue.identifier} · ${context.focus_issue.issue.title}`,
+      context.focus_issue.digest?.detail ?? null,
+    ].filter(Boolean).join('\n');
+  }
+  return null;
+}
+
+function toAdvisorIssueDraftIntent(
+  result: Extract<SupervisorCcAdvisorResult, { mode: 'issue_draft' }>,
+  context: BotRuntimeCopilotContext,
+): BotAssistantIntent {
+  return {
+    kind: 'create_issue',
+    title: result.title,
+    description: result.body,
+    project_slug: context.default_project_slug,
+  };
+}
+
+function formatArtifactIdeationDescription(
+  result: Extract<SupervisorAgentResult, { mode: 'artifact_ideation' }>,
+): string {
+  return [
+    `Artifact recommendation: ${result.recommendation.trim()}`,
+    `Rationale: ${result.rationale.trim()}`,
+    `Next step: ${result.nextStep.trim()}`,
+  ].join('\n');
+}
+
+function formatArtifactIdeationReply(
+  result: Extract<SupervisorAgentResult, { mode: 'artifact_ideation' }>,
+): string {
+  return [
+    `Title: ${result.title.trim()}`,
+    '',
+    `Recommendation: ${result.recommendation.trim()}`,
+    `Rationale: ${result.rationale.trim()}`,
+    `Next step: ${result.nextStep.trim()}`,
+  ].join('\n');
+}
+
+function resolveSupervisorAgentProjectSlug(
+  repoRef: string | null,
+  context: BotRuntimeCopilotContext,
+): string | null {
+  if (context.default_project_slug) {
+    return context.default_project_slug;
+  }
+  const normalizedRepoRef = repoRef?.trim();
+  if (!normalizedRepoRef) {
+    return null;
+  }
+  const matchingProject = context.available_projects.find((item) => (
+    item.project_slug === normalizedRepoRef ||
+    item.github_repo_full === normalizedRepoRef
+  ));
+  return matchingProject?.project_slug ?? null;
+}
+
+function toSupervisorAgentIssueIntent(
+  result: Extract<SupervisorAgentResult, {
+    mode: 'artifact_ideation' | 'handoff_to_session' | 'issue_recommendation';
+  }>,
+  context: BotRuntimeCopilotContext,
+): BotAssistantIntent | null {
+  if (result.mode === 'handoff_to_session') {
+    const title = result.suggestedTitle?.trim();
+    if (!title) {
+      return null;
+    }
+    return {
+      kind: 'create_issue',
+      title,
+      description: result.suggestedBody?.trim() || null,
+      project_slug: result.projectSlug?.trim() || context.default_project_slug,
+    };
+  }
+
+  if (result.mode === 'artifact_ideation') {
+    return {
+      kind: 'create_issue',
+      title: result.title,
+      description: formatArtifactIdeationDescription(result),
+      project_slug: resolveSupervisorAgentProjectSlug(result.repoRef, context),
+    };
+  }
+
+  return {
+    kind: 'create_issue',
+    title: result.title,
+    description: [result.summary, result.nextStep].filter(Boolean).join('\n\n'),
+    project_slug: context.default_project_slug,
+  };
+}
+
+function shouldProbeActiveSupervisorSession(params: {
+  context: BotCommandContext;
+  hasActiveSupervisorSession: boolean;
+  supervisorSessionService: SupervisorSessionService | null;
+}): boolean {
+  if (params.context.transport !== 'telegram' || !params.supervisorSessionService) {
+    return false;
+  }
+  return params.hasActiveSupervisorSession;
 }
 
 function buildConfirmActions() {
@@ -320,6 +576,182 @@ function summarizeActiveIssues(context: BotRuntimeCopilotContext): string {
 
 function isIssueListQuestion(text: string): boolean {
   return /当前有哪些活跃 issue|当前有哪些 issue|有哪些\s*issue|有什么\s*issue|issue\s*有哪些|what.?s running|active issues|现在在跑什么/i.test(text.trim());
+}
+
+function buildRuntimeDiagnosis(
+  issue: BotFocusedIssueContext['issue'],
+  recentTimeline: BotFocusedIssueContext['recent_timeline'] = [],
+): Record<string, unknown> {
+  const latestTimeline = recentTimeline[recentTimeline.length - 1] ?? null;
+  const latestTool = issue.session?.recent_tools[issue.session.recent_tools.length - 1] ?? null;
+  const latestFile = issue.session?.recent_files[issue.session.recent_files.length - 1] ?? null;
+  const currentActivity = issue.session?.last_message
+    || latestTimeline?.message
+    || latestTool?.message
+    || latestTool?.summary
+    || null;
+  const appearsBlocked = Boolean(
+    issue.orchestrator_state &&
+    /failed|halted|blocked|awaiting_user_decision/i.test(issue.orchestrator_state),
+  ) || Boolean(issue.delivery_state === 'delivery_failed');
+  const completionEstimate = issue.session?.stage
+    ? `启发式估计：当前处于 ${issue.session.stage}，只能根据最近工具、文件和状态判断；没有可靠完成时间承诺。`
+    : '启发式估计：当前没有活跃 agent session，无法给出可靠完成时间。';
+
+  return {
+    current_activity: currentActivity,
+    latest_tool: latestTool
+      ? {
+          tool_name: latestTool.tool_name,
+          status: latestTool.status,
+          summary: latestTool.summary ?? latestTool.message,
+          path: latestTool.path,
+          timestamp: latestTool.timestamp,
+        }
+      : null,
+    latest_file: latestFile,
+    appears_blocked: appearsBlocked,
+    likely_blocker: appearsBlocked
+      ? issue.delivery_summary
+        || issue.governance_pause_reason
+        || issue.session?.last_message
+        || issue.orchestrator_state
+      : null,
+    completion_estimate: completionEstimate,
+  };
+}
+
+function buildControlPlaneIssueSnapshot(
+  issue: BotFocusedIssueContext['issue'],
+  recentTimeline: BotFocusedIssueContext['recent_timeline'] = [],
+): Record<string, unknown> {
+  return {
+    issue_id: issue.issue_id,
+    identifier: issue.identifier,
+    title: issue.title,
+    phase: issue.phase,
+    tracker_state: issue.tracker_state,
+    orchestrator_state: issue.orchestrator_state,
+    github_repo: issue.github_repo,
+    branch_name: issue.branch_name,
+    active_pr_number: issue.active_pr_number,
+    session: issue.session
+      ? {
+          session_id: issue.session.session_id,
+          turn_count: issue.session.turn_count,
+          stage: issue.session.stage,
+          last_event: issue.session.last_event,
+          last_message: issue.session.last_message,
+          started_at: issue.session.started_at,
+          last_event_at: issue.session.last_event_at,
+          tokens: issue.session.tokens,
+          recent_tools: issue.session.recent_tools.slice(-5),
+          recent_files: issue.session.recent_files.slice(-5),
+        }
+      : null,
+    supervisor_session_state: issue.supervisor_session_state ?? null,
+    supervisor_plan_summary: issue.supervisor_plan_summary ?? null,
+    governance_thread_state: issue.governance_thread_state,
+    governance_pause_reason: issue.governance_pause_reason ?? null,
+    governance_expected_handoff: issue.governance_expected_handoff ?? null,
+    governance_queued_child_identifiers: issue.governance_queued_child_identifiers ?? [],
+    delivery_state: issue.delivery_state ?? null,
+    delivery_code: issue.delivery_code ?? null,
+    delivery_summary: issue.delivery_summary ?? null,
+    next_recommended_action: issue.next_recommended_action,
+    actions: {
+      can_stop: Boolean(issue.session) || /dev_running|review_running/i.test(issue.orchestrator_state ?? ''),
+      can_retry: /failed|halted/i.test(issue.orchestrator_state ?? ''),
+    },
+    runtime_diagnosis: buildRuntimeDiagnosis(issue, recentTimeline),
+  };
+}
+
+function buildControlPlaneSnapshot(context: BotRuntimeCopilotContext): SupervisorControlPlaneSnapshot {
+  return {
+    default_project_slug: context.default_project_slug,
+    available_projects: context.available_projects.map((project) => ({
+      project_slug: project.project_slug,
+      github_repo_full: project.github_repo_full,
+    })),
+    overview: {
+      running: context.overview.running,
+      retrying: context.overview.retrying,
+      total: context.overview.total,
+      active_issues: context.overview.active_issues.map((issue) => buildControlPlaneIssueSnapshot(issue)),
+    },
+    focus_issue: context.focus_issue
+      ? {
+          issue: buildControlPlaneIssueSnapshot(
+            context.focus_issue.issue,
+            context.focus_issue.recent_timeline,
+          ),
+          digest: context.focus_issue.digest,
+          governance: context.focus_issue.governance,
+          recent_timeline: context.focus_issue.recent_timeline.map((event) => ({
+            timestamp: event.timestamp,
+            message: event.message,
+            code: event.code,
+            tool_name: event.tool_name,
+            level: event.level,
+            category: event.category,
+            detail: event.detail ?? null,
+          })),
+        }
+      : null,
+    watch_subscriptions: context.watch_subscriptions.map((subscription) => ({ ...subscription })),
+  };
+}
+
+function isRepoPurposeQuestion(text: string): boolean {
+  return /这个(?:默认)?项目.*(主要干啥|干什么|是干嘛的|内容是啥|内容是什么|里面有啥|里边有啥|有哪些代码|有啥代码)|这个仓.*(主要干啥|干什么|是干嘛的|内容是啥|内容是什么|里面有啥|里边有啥|有哪些代码|有啥代码)|默认项目.*(里面有啥|里边有啥|有哪些代码|有啥代码|内容是啥|内容是什么)|项目主要干啥|repo.*what|what.*repo/i.test(text.trim());
+}
+
+function isRepoDownsideQuestion(text: string): boolean {
+  return /这个(?:默认)?项目.*(有哪些弊端|有啥弊端|有什么弊端|有哪些问题|有啥问题|有什么问题|有哪些短板|有啥短板)|这个仓.*(有哪些弊端|有啥弊端|有什么弊端|有哪些问题|有啥问题|有什么问题|有哪些短板|有啥短板)|项目.*(弊端|短板|问题)是什么/i.test(text.trim());
+}
+
+function summarizeRepoProfile(context: BotRuntimeCopilotContext): string | null {
+  const profile = context.repo_profile;
+  if (!profile) {
+    return null;
+  }
+
+  return [
+    `${profile.repo_ref}${profile.signals.readme_title ? ` · ${profile.signals.readme_title}` : ''}`,
+    profile.summary,
+    profile.project_type !== 'unknown' ? `类型：${profile.project_type}` : null,
+    profile.tech_stack.length > 0 ? `技术栈：${profile.tech_stack.join('、')}` : null,
+    profile.key_paths.length > 0 ? `关键目录/文件：${profile.key_paths.join('、')}` : null,
+  ].filter(Boolean).join('\n');
+}
+
+function summarizeRepoDownsides(context: BotRuntimeCopilotContext): string | null {
+  const profile = context.repo_profile;
+  if (!profile) {
+    return null;
+  }
+
+  const concerns: string[] = [];
+  if (!profile.signals.readme_title || profile.summary.length < 80) {
+    concerns.push('公开文档信号还比较薄，单看 README 很难快速看懂目标、边界和主要模块。');
+  }
+  if (profile.key_paths.filter((item) => item !== 'README.md' && item !== 'package.json').length <= 1) {
+    concerns.push('能直接看出来的关键目录偏少，仓库结构信息不足，外部读者不容易一眼定位核心代码。');
+  }
+  if (profile.tech_stack.length <= 2) {
+    concerns.push('当前可见技术栈信息比较少，说明仓库对运行方式、测试方式和模块职责的自解释还不够。');
+  }
+  if (concerns.length === 0) {
+    concerns.push('从仓库表层信号看不出特别明显的结构性硬伤，但还缺更细的源码扫描，暂时不能下更重的结论。');
+  }
+
+  return [
+    `${profile.repo_ref}${profile.signals.readme_title ? ` · ${profile.signals.readme_title}` : ''}`,
+    '基于当前仓库代码/结构信号，比较像下面这些短板：',
+    ...concerns.map((item, index) => `${index + 1}. ${item}`),
+    profile.key_paths.length > 0 ? `我当前主要看到的入口/目录：${profile.key_paths.join('、')}` : null,
+  ].filter(Boolean).join('\n');
 }
 
 function summarizeIssueActivity(focusIssue: BotFocusedIssueContext): string {
@@ -574,6 +1006,24 @@ function buildHeuristicDecision(
       intent: {
         kind: 'answer_question',
         answer: summarizeActiveIssues(context),
+      },
+    };
+  }
+
+  if (isRepoPurposeQuestion(trimmed) && context.repo_profile) {
+    return {
+      intent: {
+        kind: 'answer_question',
+        answer: summarizeRepoProfile(context)!,
+      },
+    };
+  }
+
+  if (isRepoDownsideQuestion(trimmed) && context.repo_profile) {
+    return {
+      intent: {
+        kind: 'answer_question',
+        answer: summarizeRepoDownsides(context)!,
       },
     };
   }
@@ -868,6 +1318,10 @@ export class BotAssistantService {
     subscriptions: Pick<BotSubscriptionService, 'listByConversation'> | null = null,
     followupMessageStates: BotFollowupMessageStateRepository | null = null,
     private readonly supervisorSessionService: SupervisorSessionService | null = null,
+    private readonly supervisorCcAdvisor: SupervisorCcAdvisor | null = null,
+    private readonly supervisorAgentService: SupervisorAgentService | null = null,
+    private readonly repoUnderstandingService: SupervisorRepoUnderstandingService | null = null,
+    private readonly supervisorRepoSourceResolver: SupervisorRepoSourceResolver | null = null,
   ) {
     this.model = normalizeModel(model);
     this.runtimeContext = new BotRuntimeContextService(
@@ -876,6 +1330,8 @@ export class BotAssistantService {
       projectResolver,
       subscriptions,
       followupMessageStates,
+      undefined,
+      this.repoUnderstandingService,
     );
   }
 
@@ -883,8 +1339,229 @@ export class BotAssistantService {
     return this.model.getDiagnostics?.() ?? defaultDiagnostics();
   }
 
+  private async adviseTelegramConversation(
+    context: BotCommandContext,
+    text: string,
+    runtimeContext: BotRuntimeCopilotContext,
+  ): Promise<SupervisorCcAdvisorResult | null> {
+    if (context.transport !== 'telegram' || !this.supervisorCcAdvisor) {
+      return null;
+    }
+
+    const repoRef = buildAdvisorRepoRef(runtimeContext);
+    if (!repoRef) {
+      return null;
+    }
+
+    try {
+      return await this.supervisorCcAdvisor.advise({
+        repoRef,
+        localPath: buildAdvisorLocalPath(runtimeContext, this.projectResolver),
+        userText: text,
+        repoProfile: runtimeContext.repo_profile,
+        projectContext: toAdvisorProjectContext(runtimeContext),
+      });
+    } catch (error) {
+      logger.warn('Supervisor CC advisor failed', {
+        transport: context.transport,
+        conversation_id: context.recipient.conversation_id,
+        repo_ref: repoRef,
+      }, error instanceof Error ? error : undefined);
+      return null;
+    }
+  }
+
+  private async respondFromAdvisorResult(params: {
+    context: BotCommandContext;
+    text: string;
+    runtimeContext: BotRuntimeCopilotContext;
+    advisorResult: SupervisorCcAdvisorResult;
+  }): Promise<BotCommandResponse | null> {
+    switch (params.advisorResult.mode) {
+      case 'repo_answer':
+        return {
+          message: params.advisorResult.answer,
+        };
+      case 'clarify':
+        return {
+          message: params.advisorResult.question,
+        };
+      case 'issue_draft':
+        if (!this.supervisorSessionService) {
+          return null;
+        }
+        return this.supervisorSessionService.respond({
+          context: params.context,
+          text: params.text,
+          intent: toAdvisorIssueDraftIntent(params.advisorResult, params.runtimeContext),
+          runtimeContext: params.runtimeContext,
+          canWrite: this.canWrite(params.context),
+          source: 'telegram_chat',
+        });
+      default:
+        return null;
+    }
+  }
+
+  private async askSupervisorAgent(
+    context: BotCommandContext,
+    text: string,
+    runtimeContext: BotRuntimeCopilotContext,
+  ): Promise<SupervisorAgentResult | null> {
+    if (context.transport !== 'telegram' || !this.supervisorAgentService) {
+      return null;
+    }
+
+    const focusedRepoRef = buildAdvisorRepoRef(runtimeContext, { preferFocusIssue: true });
+    const defaultRepoRef = buildAdvisorRepoRef(runtimeContext);
+    const route = buildAdvisorRoute(runtimeContext, this.projectResolver, { preferFocusIssue: true });
+    const localPath = route?.local_path
+      ?? buildAdvisorLocalPath(runtimeContext, this.projectResolver, { preferFocusIssue: true });
+    const hasActiveRepoConversation = Boolean(
+      focusedRepoRef &&
+      this.supervisorAgentService.hasActiveRepoConversation?.({
+        transport: context.transport,
+        conversationId: context.recipient.conversation_id,
+        repoRef: focusedRepoRef,
+      }),
+    );
+    const forceReadOnlyClaude = hasActiveRepoConversation || shouldUseReadOnlyClaudeForText(text);
+
+    if (!focusedRepoRef && forceReadOnlyClaude) {
+      const available = runtimeContext.available_projects.map((item) => item.project_slug);
+      return {
+        mode: 'clarify',
+        repoRef: null,
+        question: available.length > 0
+          ? `这个聊天还没有默认项目。请先发送 /project <slug>，可用项目：${available.join(', ')}。`
+          : '这个聊天还没有默认项目，也没有配置可用仓库。请先配置 repositories.routing 或设置默认项目。',
+      };
+    }
+
+    try {
+      return await this.supervisorAgentService.respond({
+        localPath,
+        repoRef: focusedRepoRef,
+        defaultRepoRef,
+        userText: text,
+        forceReadOnlyClaude,
+        projectContext: toAdvisorProjectContext(runtimeContext),
+        controlPlaneSnapshot: buildControlPlaneSnapshot(runtimeContext),
+        route,
+        runtimeContext: {
+          source: 'telegram_chat',
+          transport: context.transport,
+          conversationId: context.recipient.conversation_id,
+          defaultProjectSlug: runtimeContext.default_project_slug,
+          activeIssueId: runtimeContext.focus_issue?.issue.identifier ?? null,
+        },
+      });
+    } catch (error) {
+      logger.warn('Supervisor agent failed', {
+        transport: context.transport,
+        conversation_id: context.recipient.conversation_id,
+        repo_ref: focusedRepoRef,
+      }, error instanceof Error ? error : undefined);
+      return null;
+    }
+  }
+
+  private async clearSupervisorRepoConversation(
+    context: BotCommandContext,
+    text: string,
+  ): Promise<BotCommandResponse> {
+    if (context.transport !== 'telegram' || !this.supervisorAgentService?.clearRepoConversation) {
+      return {
+        message: '当前没有可清空的仓库 Claude 会话。',
+      };
+    }
+
+    const runtimeContext = await this.runtimeContext.buildContext(
+      context,
+      text,
+      this.getDiagnostics(),
+    );
+    const repoRef = shouldClearAllRepoConversations(text)
+      ? null
+      : buildAdvisorRepoRef(runtimeContext, { preferFocusIssue: true });
+    const cleared = await this.supervisorAgentService.clearRepoConversation({
+      transport: context.transport,
+      conversationId: context.recipient.conversation_id,
+      repoRef,
+    });
+
+    if (cleared === 0) {
+      return {
+        message: repoRef
+          ? `当前没有 ${repoRef} 的连续仓库 Claude 会话可清空。`
+          : '当前聊天没有连续仓库 Claude 会话可清空。',
+      };
+    }
+
+    return {
+      message: repoRef
+        ? `已清空 ${repoRef} 的连续仓库 Claude 会话。下一次仓库问题会重新读取最新 source cache。`
+        : `已清空当前聊天的 ${cleared} 个连续仓库 Claude 会话。下一次仓库问题会重新读取最新 source cache。`,
+    };
+  }
+
+  private async respondFromSupervisorAgentResult(params: {
+    context: BotCommandContext;
+    text: string;
+    runtimeContext: BotRuntimeCopilotContext;
+    agentResult: SupervisorAgentResult;
+  }): Promise<BotCommandResponse | null> {
+    switch (params.agentResult.mode) {
+      case 'chat_reply':
+        return {
+          message: params.agentResult.message,
+        };
+      case 'repo_answer':
+        return {
+          message: params.agentResult.answer,
+        };
+      case 'clarify':
+        return {
+          message: params.agentResult.question,
+        };
+      case 'issue_recommendation':
+      case 'artifact_ideation':
+      case 'handoff_to_session': {
+        if (!this.supervisorSessionService) {
+          if (params.agentResult.mode === 'artifact_ideation') {
+            return {
+              message: formatArtifactIdeationReply(params.agentResult),
+            };
+          }
+          return null;
+        }
+        const intent = toSupervisorAgentIssueIntent(params.agentResult, params.runtimeContext);
+        if (!intent) {
+          if (params.agentResult.mode === 'handoff_to_session') {
+            return { message: params.agentResult.handoffMessage };
+          }
+          if (params.agentResult.mode === 'artifact_ideation') {
+            return { message: formatArtifactIdeationReply(params.agentResult) };
+          }
+          return null;
+        }
+        return this.supervisorSessionService.respond({
+          context: params.context,
+          text: params.text,
+          intent,
+          runtimeContext: params.runtimeContext,
+          canWrite: this.canWrite(params.context),
+          source: 'telegram_chat',
+        });
+      }
+      default:
+        return null;
+    }
+  }
+
   async respondToText(context: BotCommandContext, text: string): Promise<BotCommandResponse> {
     const normalized = text.trim();
+
     const pending = this.pendingActions
       ?.findLatestByConversation({
         transport: context.transport,
@@ -930,27 +1607,89 @@ export class BotAssistantService {
       };
     }
 
-    const runtimeContext = this.runtimeContext.buildContext(
+    if (isClearRepoConversationCommand(text)) {
+      return this.clearSupervisorRepoConversation(context, text);
+    }
+
+    if (isSlashCommandText(text)) {
+      return this.commandService.execute(context, parseTextCommand(text));
+    }
+
+    const runtimeContext = await this.runtimeContext.buildContext(
       context,
       text,
       this.getDiagnostics(),
     );
 
+    if (isGreetingLikeText(text)) {
+      return {
+        message: buildGreetingReply(runtimeContext),
+      };
+    }
+
+    if (isIssueListQuestion(text)) {
+      return {
+        message: summarizeActiveIssues(runtimeContext),
+      };
+    }
+
     const fastHeuristic = buildHeuristicDecision(text, runtimeContext);
+    const hasActiveSupervisorSession = Boolean(
+      context.transport === 'telegram'
+      && this.supervisorSessionService?.hasActiveSession(context),
+    );
+    let supervisorAttempted = false;
+
     if (
-      context.transport === 'telegram' &&
-      this.supervisorSessionService &&
-      (
-        fastHeuristic.intent.kind === 'create_issue' ||
-        this.supervisorSessionService.hasActiveSession(context)
-      )
+      hasActiveSupervisorSession &&
+      isSupervisorSessionControlText(text) &&
+      this.supervisorSessionService
     ) {
+      supervisorAttempted = true;
       const supervisorResponse = await this.supervisorSessionService.respond({
         context,
         text,
         intent: fastHeuristic.intent.kind === 'help' ? null : fastHeuristic.intent,
         runtimeContext,
         canWrite: this.canWrite(context),
+        source: 'telegram_chat',
+      });
+      if (supervisorResponse) {
+        return supervisorResponse;
+      }
+    }
+
+    const supervisorAgentResult = await this.askSupervisorAgent(
+      context,
+      text,
+      runtimeContext,
+    );
+    if (supervisorAgentResult) {
+      const supervisorAgentResponse = await this.respondFromSupervisorAgentResult({
+        context,
+        text,
+        runtimeContext,
+        agentResult: supervisorAgentResult,
+      });
+      if (supervisorAgentResponse) {
+        return supervisorAgentResponse;
+      }
+    }
+
+    if (shouldProbeActiveSupervisorSession({
+      context,
+      hasActiveSupervisorSession,
+      supervisorSessionService: this.supervisorSessionService,
+    })) {
+      supervisorAttempted = true;
+      const source: SupervisorIntakeSource = 'telegram_chat';
+      const supervisorResponse = await this.supervisorSessionService.respond({
+        context,
+        text,
+        intent: fastHeuristic.intent.kind === 'help' ? null : fastHeuristic.intent,
+        runtimeContext,
+        canWrite: this.canWrite(context),
+        source,
       });
       if (supervisorResponse) {
         return supervisorResponse;
@@ -961,6 +1700,53 @@ export class BotAssistantService {
       return {
         message: fastHeuristic.intent.answer,
       };
+    }
+
+    const advisorResult = await this.adviseTelegramConversation(
+      context,
+      text,
+      runtimeContext,
+    );
+    if (advisorResult) {
+      const advisorResponse = await this.respondFromAdvisorResult({
+        context,
+        text,
+        runtimeContext,
+        advisorResult,
+      });
+      if (advisorResponse) {
+        return advisorResponse;
+      }
+    }
+
+    if (
+      fastHeuristic.intent.kind === 'answer_question' &&
+      (isRepoPurposeQuestion(text) || isRepoDownsideQuestion(text))
+    ) {
+      return {
+        message: fastHeuristic.intent.answer,
+      };
+    }
+
+    if (
+      context.transport === 'telegram' &&
+      this.supervisorSessionService &&
+      !supervisorAttempted &&
+      fastHeuristic.intent.kind === 'create_issue'
+    ) {
+      supervisorAttempted = true;
+      const source: SupervisorIntakeSource = 'telegram_chat';
+      const supervisorResponse = await this.supervisorSessionService.respond({
+        context,
+        text,
+        intent: fastHeuristic.intent.kind === 'help' ? null : fastHeuristic.intent,
+        runtimeContext,
+        canWrite: this.canWrite(context),
+        source,
+      });
+      if (supervisorResponse) {
+        return supervisorResponse;
+      }
     }
 
     let decision: BotAssistantDecision | null = null;
@@ -1029,17 +1815,16 @@ export class BotAssistantService {
     if (
       context.transport === 'telegram' &&
       this.supervisorSessionService &&
-      (
-        decision.intent.kind === 'create_issue' ||
-        this.supervisorSessionService.hasActiveSession(context)
-      )
+      !supervisorAttempted
     ) {
+      const source: SupervisorIntakeSource = 'telegram_chat';
       const supervisorResponse = await this.supervisorSessionService.respond({
         context,
         text,
         intent: decision.intent,
         runtimeContext,
         canWrite: this.canWrite(context),
+        source,
       });
       if (supervisorResponse) {
         return supervisorResponse;

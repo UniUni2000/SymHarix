@@ -78,6 +78,7 @@ interface ChangePackEvidenceFile {
   complexity?: 'small' | 'medium' | 'large';
   requirements?: Array<CompletionRequirement & {
     status?: 'missing' | 'satisfied';
+    result?: unknown;
     evidence?: unknown;
   }>;
   notes?: string[];
@@ -137,8 +138,31 @@ async function readJson<T>(filePath: string, fallback: T): Promise<T> {
   }
 }
 
-function normalizeCommand(value: string): string {
-  return value.trim().replace(/\s+/g, ' ').toLowerCase();
+function normalizeEvidenceText(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function normalizeCommand(value: unknown): string {
+  return normalizeEvidenceText(value)?.replace(/\s+/g, ' ').toLowerCase() ?? '';
+}
+
+function evidenceStatusFromValue(value: unknown): EvidenceCommandStatus | null {
+  const normalized = normalizeEvidenceText(value)?.toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (['satisfied', 'pass', 'passed', 'success', 'successful', 'ok', 'true'].includes(normalized)) {
+    return 'satisfied';
+  }
+  if (['failed', 'fail', 'failure', 'error', 'false'].includes(normalized)) {
+    return 'failed';
+  }
+  return null;
+}
+
+function isSatisfiedEvidenceRecord(record: Record<string, unknown>): boolean {
+  return evidenceStatusFromValue(record.status) === 'satisfied' ||
+    evidenceStatusFromValue(record.result) === 'satisfied';
 }
 
 function hasStructuredRequirementEvidence(value: unknown): boolean {
@@ -162,15 +186,15 @@ function hasStructuredRequirementEvidence(value: unknown): boolean {
   });
 }
 
-function mergeUniqueStrings(values: Array<string | null | undefined>): string[] {
+function mergeUniqueStrings(values: unknown[]): string[] {
   const merged: string[] = [];
   const seen = new Set<string>();
   for (const value of values) {
-    if (!value) {
+    const normalized = normalizeEvidenceText(value);
+    if (!normalized) {
       continue;
     }
-    const normalized = value.trim();
-    if (!normalized || seen.has(normalized)) {
+    if (seen.has(normalized)) {
       continue;
     }
     seen.add(normalized);
@@ -187,6 +211,14 @@ function inferPhase(commandKey: EvidenceCommandKey | null): EvidencePhase {
     return 'review';
   }
   return 'dev';
+}
+
+function normalizeCommandKey(value: unknown, command: string, harness?: RepositoryHarnessConfig | null): EvidenceCommandKey | null {
+  const normalized = normalizeEvidenceText(value);
+  if (normalized && ['setup', 'dev', 'test', 'lint', 'build', 'review_checks'].includes(normalized)) {
+    return normalized as EvidenceCommandKey;
+  }
+  return command ? inferCommandKey(command, harness) : null;
 }
 
 function inferArtifactKind(candidatePath: string, isDirectory: boolean): EvidenceArtifactKind {
@@ -270,11 +302,22 @@ function asHintValue(value: string | string[] | undefined, key: RuntimeHintKey):
 }
 
 function normalizeArtifactObservationPath(value: unknown): string | null {
-  return typeof value === 'string' && value.trim() ? value.trim() : null;
+  if (typeof value === 'string' && value.trim()) {
+    return value.trim();
+  }
+  const record = normalizeEvidenceRecord(value);
+  return normalizeEvidenceText(record?.path) ?? normalizeEvidenceText(record?.file);
 }
 
 function normalizeRuntimeObservationValue(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function normalizeEvidenceRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
 }
 
 function inferCommandKey(
@@ -350,6 +393,45 @@ function dedupeCommandRuns(runs: ChangePackCommandRun[]): ChangePackCommandRun[]
   return deduped;
 }
 
+function normalizeEvidenceCommandRuns(
+  value: unknown,
+  harness?: RepositoryHarnessConfig | null,
+): ChangePackCommandRun[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((item) => {
+    const record = normalizeEvidenceRecord(item);
+    const command = normalizeEvidenceText(record?.command);
+    if (!record || !command) {
+      return [];
+    }
+
+    const status = evidenceStatusFromValue(record.status) ?? evidenceStatusFromValue(record.result);
+    if (!status) {
+      return [];
+    }
+
+    const commandKey = normalizeCommandKey(record.command_key, command, harness);
+    return [{
+      phase: (
+        record.phase === 'setup' || record.phase === 'dev' || record.phase === 'review'
+          ? record.phase
+          : inferPhase(commandKey)
+      ) as EvidencePhase,
+      command,
+      command_key: commandKey,
+      status,
+      source: normalizeEvidenceText(record.source) ?? 'legacy_evidence',
+      turn: typeof record.turn === 'number' ? record.turn : null,
+      exit_code: typeof record.exit_code === 'number' ? record.exit_code : null,
+      summary: normalizeEvidenceText(record.summary) ?? normalizeEvidenceText(record.output),
+      recorded_at: normalizeEvidenceText(record.recorded_at) ?? new Date().toISOString(),
+    }];
+  });
+}
+
 function dedupeArtifactObservations(
   observations: ChangePackArtifactObservation[],
 ): ChangePackArtifactObservation[] {
@@ -378,6 +460,55 @@ function dedupeArtifactObservations(
     });
   }
   return deduped;
+}
+
+function normalizeEvidenceArtifactObservations(value: unknown): ChangePackArtifactObservation[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((item) => {
+    const record = normalizeEvidenceRecord(item);
+    const normalizedPath = normalizeArtifactObservationPath(record);
+    if (!record || !normalizedPath) {
+      return [];
+    }
+
+    const kind = (
+      record.kind === 'file' ||
+      record.kind === 'dir' ||
+      record.kind === 'report' ||
+      record.kind === 'screenshot' ||
+      record.kind === 'markdown' ||
+      record.kind === 'json' ||
+      record.kind === 'html' ||
+      record.kind === 'unknown'
+    )
+      ? record.kind
+      : inferArtifactKind(normalizedPath, false);
+    const exists = typeof record.exists === 'boolean'
+      ? record.exists
+      : Boolean(record.status && !/missing|failed|absent/i.test(String(record.status)));
+    const nonEmpty = typeof record.non_empty === 'boolean'
+      ? record.non_empty
+      : exists && (
+          typeof record.size === 'number' && record.size > 0 ||
+          typeof record.size_lines === 'number' && record.size_lines > 0 ||
+          evidenceStatusFromValue(record.result) === 'satisfied' ||
+          /written|present|created/i.test(String(record.status ?? ''))
+        );
+
+    return [{
+      path: normalizedPath,
+      kind,
+      exists,
+      non_empty: nonEmpty,
+      source: normalizeEvidenceText(record.source) ?? 'legacy_evidence',
+      turn: typeof record.turn === 'number' ? record.turn : null,
+      summary: normalizeEvidenceText(record.summary) ?? normalizeEvidenceText(record.status),
+      recorded_at: normalizeEvidenceText(record.recorded_at) ?? new Date().toISOString(),
+    }];
+  });
 }
 
 function dedupeRuntimeObservations(
@@ -615,11 +746,10 @@ export async function recordChangePackEvidence(params: {
   await fs.mkdir(changePackDir(params.workspacePath), { recursive: true });
   const evidencePath = path.join(changePackDir(params.workspacePath), 'evidence.json');
   const existing = await readJson<ChangePackEvidenceFile>(evidencePath, {});
-  const existingCommandRuns = (existing.command_runs ?? []).filter((run) => Boolean(run?.command?.trim()));
-  const existingArtifactObservations = (existing.artifact_observations ?? [])
-    .filter((observation) => Boolean(normalizeArtifactObservationPath(observation?.path)))
+  const existingCommandRuns = normalizeEvidenceCommandRuns(existing.command_runs, params.harness);
+  const existingArtifactObservations = normalizeEvidenceArtifactObservations(existing.artifact_observations)
     .map((observation) => {
-      const normalizedPath = normalizeArtifactObservationPath(observation.path)!;
+      const normalizedPath = normalizeArtifactObservationPath(observation)!;
       return {
         ...observation,
         path: normalizedPath,
@@ -635,7 +765,7 @@ export async function recordChangePackEvidence(params: {
     }));
 
   const normalizedCommandRuns = (params.commandRuns ?? [])
-    .filter((run) => Boolean(run.command?.trim()))
+    .filter((run) => Boolean(normalizeEvidenceText(run.command)))
     .map((run) => {
       const inferredCommandKey = (
         typeof run.command_key === 'string' && run.command_key.trim()
@@ -644,7 +774,7 @@ export async function recordChangePackEvidence(params: {
       ) as EvidenceCommandKey | null;
       return {
         phase: run.phase ?? inferPhase(inferredCommandKey),
-        command: run.command.trim(),
+        command: normalizeEvidenceText(run.command)!,
         command_key: inferredCommandKey,
         status: run.status,
         source: run.source,
@@ -970,13 +1100,15 @@ export async function evaluateChangePackState(params: {
   const handover = await readText(path.join(params.workspacePath, '.symphony', 'HANDOVER.md'));
   const developmentLog = await readText(path.join(params.workspacePath, '.symphony', 'DEVELOPMENT_LOG.md'));
   const reviewReport = await readText(path.join(params.workspacePath, '.symphony', 'REVIEW_REPORT.md'));
-  const successfulCommandRuns = (evidence.command_runs ?? []).filter((run) => run.status === 'satisfied');
-  const failedCommandRuns = (evidence.command_runs ?? []).filter((run) => run.status === 'failed');
+  const commandRuns = normalizeEvidenceCommandRuns(evidence.command_runs);
+  const successfulCommandRuns = commandRuns.filter((run) => run.status === 'satisfied');
+  const failedCommandRuns = commandRuns.filter((run) => run.status === 'failed');
+  const artifactObservations = normalizeEvidenceArtifactObservations(evidence.artifact_observations);
   const runtimeObservations = evidence.runtime_observations ?? [];
   const profile = evidence.profile ?? inferProfile(params.issue, params.mode);
   const requirements: Array<CompletionRequirement & { status: 'missing' | 'satisfied' }> = [];
   for (const item of evidence.requirements ?? []) {
-    let satisfied = item.status === 'satisfied';
+    let satisfied = item.status === 'satisfied' || isSatisfiedEvidenceRecord(item as Record<string, unknown>);
 
     if (item.kind === 'verification' && hasStructuredRequirementEvidence(item.evidence)) {
       satisfied = true;
@@ -996,18 +1128,18 @@ export async function evaluateChangePackState(params: {
     }
     if (item.key.startsWith('command:')) {
       const requiredKey = item.key.slice('command:'.length);
-      satisfied = successfulCommandRuns.some((run) => (
+      satisfied = satisfied || successfulCommandRuns.some((run) => (
         run.command_key === requiredKey ||
         normalizeCommand(run.command) === normalizeCommand(requiredKey)
       ));
     }
     if (item.key.startsWith('artifact:')) {
       const artifactPath = item.key.slice('artifact:'.length);
-      satisfied = await isArtifactRequirementSatisfied({
+      satisfied = satisfied || await isArtifactRequirementSatisfied({
         workspacePath: params.workspacePath,
         artifactPath,
         profile,
-        observations: evidence.artifact_observations ?? [],
+        observations: artifactObservations,
       });
     }
     if (item.key === 'runtime:url') {
@@ -1048,7 +1180,7 @@ export async function evaluateChangePackState(params: {
       successful_commands: mergeUniqueStrings(successfulCommandRuns.map(summarizeCommandForEvidence)),
       failed_commands: mergeUniqueStrings(failedCommandRuns.map(summarizeCommandForEvidence)),
       observed_artifacts: mergeUniqueStrings(
-        (evidence.artifact_observations ?? [])
+        artifactObservations
           .filter((observation) => observation.exists && observation.non_empty)
           .map((observation) => observation.path),
       ),
