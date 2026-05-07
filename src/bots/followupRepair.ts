@@ -1,4 +1,5 @@
 import type {
+  BotConversationFocusRepository,
   BotFollowupDeliveryStateRepository,
   BotFollowupMessageStateRepository,
   BotIssueFollowupRepository,
@@ -8,6 +9,7 @@ import type {
 import type { RuntimeControlPlane, RuntimeIssueView } from '../runtime/types';
 import { buildGovernanceCardKey, isGovernanceBlockedIssue } from './governanceCards';
 import { classifyLifecycleNotification } from './followups';
+import { isTerminalIssue, isTerminalTrackerState } from './issueVisibility';
 
 export interface BotFollowupRepairSummary {
   expired_pending_actions_deleted: number;
@@ -17,6 +19,9 @@ export interface BotFollowupRepairSummary {
   orphan_message_states_deleted: number;
   orphan_delivery_states_deleted: number;
   delivery_baselines_seeded: number;
+  terminal_message_states_resolved: number;
+  terminal_pending_actions_cancelled: number;
+  terminal_conversation_focuses_cleared: number;
 }
 
 function isGovernanceThreadActive(issue: RuntimeIssueView | null | undefined): boolean {
@@ -24,7 +29,8 @@ function isGovernanceThreadActive(issue: RuntimeIssueView | null | undefined): b
     return false;
   }
 
-  return ['waiting_on_child', 'child_failed'].includes(issue.governance_thread_state ?? '') || isGovernanceBlockedIssue(issue);
+  return !isTerminalIssue(issue) &&
+    (['waiting_on_child', 'child_failed'].includes(issue.governance_thread_state ?? '') || isGovernanceBlockedIssue(issue));
 }
 
 export class BotFollowupRepairService {
@@ -35,6 +41,7 @@ export class BotFollowupRepairService {
     private readonly messageStates: BotFollowupMessageStateRepository | null,
     private readonly deliveryStates: BotFollowupDeliveryStateRepository | null,
     private readonly pendingActions: BotPendingActionRepository | null,
+    private readonly conversationFocuses: BotConversationFocusRepository | null = null,
   ) {}
 
   repair(now: Date = new Date()): BotFollowupRepairSummary {
@@ -46,6 +53,9 @@ export class BotFollowupRepairService {
       descendant_pending_actions_deleted: this.deleteDescendantPendingActions(),
       orphan_delivery_states_deleted: this.deleteOrphanDeliveryStates(),
       delivery_baselines_seeded: this.seedDeliveryBaselines(),
+      terminal_message_states_resolved: this.resolveTerminalMessageStates(),
+      terminal_pending_actions_cancelled: this.cancelTerminalPendingActions(),
+      terminal_conversation_focuses_cleared: this.clearTerminalConversationFocuses(),
     };
   }
 
@@ -60,6 +70,38 @@ export class BotFollowupRepairService {
       this.workItems?.findByLinearIssueId(issueId)
         ?? (issueIdentifier ? this.workItems?.findByIdentifier(issueIdentifier) : null),
     );
+  }
+
+  private getRuntimeIssue(issueId: string | null | undefined, issueIdentifier?: string | null): RuntimeIssueView | null {
+    if (issueId) {
+      const issue = this.runtime.getIssue(issueId);
+      if (issue) {
+        return issue;
+      }
+    }
+    if (issueIdentifier) {
+      return this.runtime.getIssue(issueIdentifier);
+    }
+    return null;
+  }
+
+  private isTerminalKnownIssue(issueId: string | null | undefined, issueIdentifier?: string | null): boolean {
+    const runtimeIssue = this.getRuntimeIssue(issueId, issueIdentifier);
+    if (runtimeIssue) {
+      return isTerminalIssue(runtimeIssue);
+    }
+    const workItem = issueId
+      ? this.workItems?.findByLinearIssueId(issueId) ?? null
+      : null;
+    const identifierWorkItem = !workItem && issueIdentifier
+      ? this.workItems?.findByIdentifier(issueIdentifier) ?? null
+      : null;
+    const record = workItem ?? identifierWorkItem;
+    if (!record) {
+      return false;
+    }
+    return isTerminalTrackerState(record.linear_state) ||
+      /^(completed|cancelled|canceled)$/i.test(record.orchestrator_state || '');
   }
 
   private resolveRoot(issueId: string, issueIdentifier?: string | null): {
@@ -165,6 +207,70 @@ export class BotFollowupRepairService {
       deleted += 1;
     }
     return deleted;
+  }
+
+  private resolveTerminalMessageStates(): number {
+    let resolved = 0;
+    for (const record of this.messageStates?.findAll() ?? []) {
+      if (record.card_state === 'resolved') {
+        continue;
+      }
+      if (!this.isTerminalKnownIssue(record.issue_id, record.issue_identifier)) {
+        continue;
+      }
+      this.messageStates?.updateState({
+        transport: record.transport,
+        conversation_id: record.conversation_id,
+        issue_id: record.issue_id,
+        card_state: 'resolved',
+        card_key: record.card_key.startsWith('resolved|') ? record.card_key : `resolved|${record.card_key}`,
+      });
+      resolved += 1;
+    }
+    return resolved;
+  }
+
+  private cancelTerminalPendingActions(): number {
+    let cancelled = 0;
+    for (const record of this.pendingActions?.findAll() ?? []) {
+      if (!record.issue_id || !['pending_confirm', 'executing'].includes(record.status)) {
+        continue;
+      }
+      if (!this.isTerminalKnownIssue(record.issue_id)) {
+        continue;
+      }
+      this.pendingActions?.upsert({
+        transport: record.transport,
+        conversation_id: record.conversation_id,
+        issue_id: record.issue_id,
+        user_id: record.user_id,
+        intent_kind: record.intent_kind,
+        normalized_payload: record.normalized_payload,
+        summary_message: record.summary_message,
+        expires_at: record.expires_at,
+        status: 'cancelled',
+        message_id: record.message_id,
+        card_key: record.card_key,
+      });
+      cancelled += 1;
+    }
+    return cancelled;
+  }
+
+  private clearTerminalConversationFocuses(): number {
+    let cleared = 0;
+    for (const record of this.conversationFocuses?.findAll() ?? []) {
+      if (!this.isTerminalKnownIssue(record.issue_id, record.issue_identifier)) {
+        continue;
+      }
+      if (this.conversationFocuses?.delete({
+        transport: record.transport,
+        conversation_id: record.conversation_id,
+      })) {
+        cleared += 1;
+      }
+    }
+    return cleared;
   }
 
   private seedDeliveryBaselines(): number {

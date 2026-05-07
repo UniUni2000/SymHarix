@@ -37,6 +37,8 @@ function listCommands(): string {
     'unwatch <ISSUE-ID>',
     'stop <ISSUE-ID>',
     'retry <ISSUE-ID>',
+    'close <ISSUE-ID>',
+    'supersede <OLD-ISSUE-ID> <NEW-ISSUE-ID>',
     'override <ISSUE-ID>',
     'rewrite <ISSUE-ID>',
     'split <ISSUE-ID>',
@@ -181,6 +183,13 @@ export function parseTextCommand(text: string): BotCommandRequest {
   const description = restLines.join('\n').trim() || null;
 
   const readIssueArg = () => inlineArgs || null;
+  const readTwoIssueArgs = (): { issue_id: string | null; successor_issue_id: string | null } => {
+    const [issueId, successorIssueId] = inlineArgs.split(/\s+/).filter(Boolean);
+    return {
+      issue_id: issueId ?? null,
+      successor_issue_id: successorIssueId ?? null,
+    };
+  };
 
   switch (normalizedCommand) {
     case 'clear':
@@ -191,6 +200,10 @@ export function parseTextCommand(text: string): BotCommandRequest {
       return { command: 'stop', issue_id: readIssueArg(), raw_text: text };
     case 'retry':
       return { command: 'retry', issue_id: readIssueArg(), raw_text: text };
+    case 'close':
+      return { command: 'close_issue', issue_id: readIssueArg(), raw_text: text };
+    case 'supersede':
+      return { command: 'supersede_issue', ...readTwoIssueArgs(), raw_text: text };
     case 'override':
       return { command: 'override', issue_id: readIssueArg(), raw_text: text };
     case 'rewrite':
@@ -269,6 +282,16 @@ export class BotCommandService {
         return this.handleStop(context, request.issue_id);
       case 'retry':
         return this.handleRetry(context, request.issue_id);
+      case 'close_issue':
+        return this.handleCloseIssue(context, request.issue_id, request.reason);
+      case 'supersede_issue':
+        return this.handleSupersedeIssue(
+          context,
+          request.issue_id,
+          request.successor_issue_id,
+          request.reason,
+          request.retry_successor,
+        );
       case 'override':
         return this.handleOverride(context, request.issue_id);
       case 'rewrite':
@@ -570,6 +593,71 @@ export class BotCommandService {
 
     const result = await this.runtime.retryIssue(issueId);
     this.registerOriginFollowup(context, result);
+    return {
+      message: result.message,
+      issue_id: result.issue_id,
+    };
+  }
+
+  private async handleCloseIssue(
+    context: BotCommandContext,
+    issueId?: string | null,
+    reason?: string | null,
+  ): Promise<BotCommandResponse> {
+    if (!this.canWrite(context)) {
+      return {
+        message: `${context.transport} is configured as read-only for this user. Allowed commands: help, status, watch, unwatch.`,
+      };
+    }
+
+    if (!issueId) {
+      return {
+        message: `Issue id is required.\n${listCommands()}`,
+      };
+    }
+
+    const result = await this.runtime.closeIssue(issueId, {
+      reason: reason ?? 'Closed from bot command.',
+    });
+    this.registerOriginFollowup(context, result);
+    return {
+      message: result.message,
+      issue_id: result.issue_id,
+    };
+  }
+
+  private async handleSupersedeIssue(
+    context: BotCommandContext,
+    issueId?: string | null,
+    successorIssueId?: string | null,
+    reason?: string | null,
+    retrySuccessor?: boolean | null,
+  ): Promise<BotCommandResponse> {
+    if (!this.canWrite(context)) {
+      return {
+        message: `${context.transport} is configured as read-only for this user. Allowed commands: help, status, watch, unwatch.`,
+      };
+    }
+
+    if (!issueId || !successorIssueId) {
+      return {
+        message: `Old and successor issue ids are required.\n${listCommands()}`,
+      };
+    }
+
+    const result = await this.runtime.closeIssue(issueId, {
+      successor_issue_id: successorIssueId,
+      reason: reason ?? 'Superseded from bot command.',
+    });
+    this.registerOriginFollowup(context, result);
+    if (retrySuccessor) {
+      const retryResult = await this.runtime.retryIssue(successorIssueId);
+      this.registerOriginFollowup(context, retryResult);
+      return {
+        message: `${result.message}\n${retryResult.message}`,
+        issue_id: retryResult.issue_id,
+      };
+    }
     return {
       message: result.message,
       issue_id: result.issue_id,

@@ -17,6 +17,7 @@ import type { AgentEvent, AgentTimelinePayload, Issue } from '../types';
 import type {
   CreateIssueRequest,
   CreateIssueResult,
+  CloseIssueRequest,
   RuntimeActionResult,
   RuntimeAgentProgressItem,
   RuntimeComplexityLevel,
@@ -43,6 +44,7 @@ interface RuntimeHubController {
   createIssue(input: CreateIssueRequest): Promise<CreateIssueResult>;
   stopIssue(issueId: string): Promise<RuntimeActionResult>;
   retryIssue(issueId: string): Promise<RuntimeActionResult>;
+  closeIssue(issueId: string, request?: CloseIssueRequest): Promise<RuntimeActionResult>;
   overrideGovernance(issueId: string): Promise<RuntimeActionResult>;
   rewriteGovernance(issueId: string): Promise<RuntimeActionResult>;
   splitGovernance(issueId: string): Promise<RuntimeActionResult>;
@@ -265,6 +267,26 @@ export class RuntimeHub implements RuntimeControlPlane {
     this.publishOverview();
     if (result.issue_id) {
       this.publishIssue(result.issue_id);
+    }
+    return result;
+  }
+
+  async closeIssue(id: string, request: CloseIssueRequest = {}): Promise<RuntimeActionResult> {
+    const workItem = this.resolveWorkItem(id);
+    const issueId = workItem?.linear_issue_id ?? id;
+    const successorWorkItem = request.successor_issue_id
+      ? this.resolveWorkItem(request.successor_issue_id)
+      : null;
+    const result = await this.controller.closeIssue(issueId, {
+      ...request,
+      successor_issue_id: successorWorkItem?.linear_issue_id ?? request.successor_issue_id ?? null,
+    });
+    this.publishOverview();
+    if (result.issue_id) {
+      this.publishIssue(result.issue_id);
+    }
+    if (successorWorkItem?.linear_issue_id) {
+      this.publishIssue(successorWorkItem.linear_issue_id);
     }
     return result;
   }

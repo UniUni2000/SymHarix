@@ -51,6 +51,12 @@ export type BotIssueFollowupRole = 'origin';
 export type BotFollowupCardKind = 'governance_blocked';
 export type BotFollowupDeliveryKind = 'governance_card' | 'lifecycle_digest';
 export type BotLifecycleNotificationClass = 'retrying' | 'failed' | 'done' | 'cancelled';
+export type BotConversationFocusSource =
+  | 'explicit_issue'
+  | 'runtime_issue'
+  | 'supervisor_session'
+  | 'repo_advisor'
+  | 'callback';
 export type BotFollowupCardState =
   | 'open'
   | 'confirming'
@@ -77,6 +83,8 @@ export type BotPendingIntentKind =
   | 'unwatch'
   | 'stop'
   | 'retry'
+  | 'close_issue'
+  | 'supersede_issue'
   | 'override'
   | 'rewrite'
   | 'split'
@@ -129,6 +137,35 @@ export type SupervisorJobStatus =
   | 'succeeded'
   | 'failed'
   | 'deferred';
+export type SupervisorRunState =
+  | 'running'
+  | 'waiting_confirmation'
+  | 'completed'
+  | 'cancelled'
+  | 'failed'
+  | 'summarized_early';
+export type SupervisorRunEventKind =
+  | 'user_message'
+  | 'model_turn'
+  | 'tool_call_started'
+  | 'tool_call_completed'
+  | 'tool_call_failed'
+  | 'progress_message'
+  | 'confirmation_requested'
+  | 'confirmation_accepted'
+  | 'confirmation_cancelled'
+  | 'final_answer'
+  | 'run_recovered';
+export type SupervisorToolRisk = 'read' | 'low_write' | 'high_write';
+export type SupervisorToolCallStatus = 'started' | 'completed' | 'failed' | 'skipped';
+export type SupervisorPendingActionStatus =
+  | 'pending_confirm'
+  | 'executing'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'expired';
+export type RepoClaudeConversationStatus = 'active' | 'cleared' | 'failed';
 
 export interface ServiceLease {
   lease_key: string;
@@ -411,6 +448,33 @@ export interface CreateBotConversationPreferenceRecord {
 }
 
 export interface DeleteBotConversationPreferenceRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+}
+
+export interface BotConversationFocusRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  issue_id: string | null;
+  issue_identifier: string | null;
+  repo_ref: string | null;
+  supervisor_session_id: string | null;
+  source: BotConversationFocusSource;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface CreateBotConversationFocusRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  issue_id?: string | null;
+  issue_identifier?: string | null;
+  repo_ref?: string | null;
+  supervisor_session_id?: string | null;
+  source: BotConversationFocusSource;
+}
+
+export interface DeleteBotConversationFocusRecord {
   transport: BotWatchTransport;
   conversation_id: string;
 }
@@ -721,6 +785,164 @@ export interface CreateSupervisorRepoUnderstanding {
 export interface FindSupervisorSessionConversationKey {
   transport: BotWatchTransport;
   conversation_id: string;
+}
+
+export interface SupervisorRunRecord {
+  id: string;
+  transport: BotWatchTransport;
+  conversation_id: string;
+  user_id: string | null;
+  state: SupervisorRunState;
+  repo_ref: string | null;
+  active_issue_id: string | null;
+  user_message: string;
+  final_message: string | null;
+  step_count: number;
+  last_progress_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface CreateSupervisorRunRecord {
+  id: string;
+  transport: BotWatchTransport;
+  conversation_id: string;
+  user_id?: string | null;
+  state?: SupervisorRunState;
+  repo_ref?: string | null;
+  active_issue_id?: string | null;
+  user_message: string;
+  final_message?: string | null;
+  step_count?: number;
+  last_progress_at?: Date | null;
+}
+
+export interface UpdateSupervisorRunRecord extends Partial<Omit<SupervisorRunRecord, 'transport' | 'conversation_id' | 'created_at' | 'updated_at'>> {
+  id: string;
+}
+
+export interface SupervisorRunConversationKey {
+  transport: BotWatchTransport;
+  conversation_id: string;
+}
+
+export interface SupervisorRunEventRecord {
+  id: string;
+  run_id: string;
+  event_kind: SupervisorRunEventKind;
+  message: string | null;
+  payload: Record<string, unknown> | null;
+  created_at: Date;
+}
+
+export interface CreateSupervisorRunEventRecord {
+  id?: string;
+  run_id: string;
+  event_kind: SupervisorRunEventKind;
+  message?: string | null;
+  payload?: Record<string, unknown> | null;
+  created_at?: Date;
+}
+
+export interface SupervisorToolCallRecord {
+  id: string;
+  run_id: string;
+  tool_name: string;
+  args_hash: string;
+  args: Record<string, unknown>;
+  result_summary: string | null;
+  risk: SupervisorToolRisk;
+  duration_ms: number | null;
+  status: SupervisorToolCallStatus;
+  idempotency_key: string | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface CreateSupervisorToolCallRecord {
+  id?: string;
+  run_id: string;
+  tool_name: string;
+  args_hash: string;
+  args: Record<string, unknown>;
+  result_summary?: string | null;
+  risk: SupervisorToolRisk;
+  duration_ms?: number | null;
+  status?: SupervisorToolCallStatus;
+  idempotency_key?: string | null;
+}
+
+export interface UpdateSupervisorToolCallRecord {
+  id: string;
+  result_summary?: string | null;
+  duration_ms?: number | null;
+  status?: SupervisorToolCallStatus;
+}
+
+export interface SupervisorPendingActionRecord {
+  id: string;
+  run_id: string;
+  transport: BotWatchTransport;
+  conversation_id: string;
+  user_id: string | null;
+  tool_name: string;
+  tool_args: Record<string, unknown>;
+  policy_decision: Record<string, unknown>;
+  reason: string;
+  summary_message: string;
+  telegram_message_id: string | null;
+  status: SupervisorPendingActionStatus;
+  expires_at: Date;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface CreateSupervisorPendingActionRecord {
+  id?: string;
+  run_id: string;
+  transport: BotWatchTransport;
+  conversation_id: string;
+  user_id?: string | null;
+  tool_name: string;
+  tool_args: Record<string, unknown>;
+  policy_decision: Record<string, unknown>;
+  reason: string;
+  summary_message: string;
+  telegram_message_id?: string | null;
+  status?: SupervisorPendingActionStatus;
+  expires_at: Date;
+}
+
+export interface UpdateSupervisorPendingActionRecord {
+  id: string;
+  telegram_message_id?: string | null;
+  status?: SupervisorPendingActionStatus;
+}
+
+export interface RepoClaudeConversationRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  repo_ref: string;
+  backend_session_id: string | null;
+  status: RepoClaudeConversationStatus;
+  clear_generation: number;
+  created_at: Date;
+  last_used_at: Date;
+}
+
+export interface UpsertRepoClaudeConversationRecord {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  repo_ref: string;
+  backend_session_id?: string | null;
+  status?: RepoClaudeConversationStatus;
+  clear_generation?: number;
+}
+
+export interface RepoClaudeConversationKey {
+  transport: BotWatchTransport;
+  conversation_id: string;
+  repo_ref: string;
 }
 
 export interface SupervisorSessionEventRecord {

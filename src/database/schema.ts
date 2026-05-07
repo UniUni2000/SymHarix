@@ -172,6 +172,25 @@ export const BOT_CONVERSATION_PREFERENCES_TABLE_SCHEMA = `
 `;
 
 /**
+ * SQL schema for bot_conversation_focuses table
+ * Persists the supervisor-owned focus for a chat so legacy cards cannot guess it.
+ */
+export const BOT_CONVERSATION_FOCUSES_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS bot_conversation_focuses (
+    transport TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    issue_id TEXT,
+    issue_identifier TEXT,
+    repo_ref TEXT,
+    supervisor_session_id TEXT,
+    source TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (transport, conversation_id)
+  );
+`;
+
+/**
  * SQL schema for bot_pending_actions table
  * Persists confirmation-gated bot actions so they survive restarts
  */
@@ -191,6 +210,109 @@ export const BOT_PENDING_ACTIONS_TABLE_SCHEMA = `
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (transport, conversation_id, issue_id)
+  );
+`;
+
+/**
+ * SQL schema for supervisor_runs table
+ * Persists Telegram supervisor agent runtime runs and final state.
+ */
+export const SUPERVISOR_RUNS_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS supervisor_runs (
+    id TEXT PRIMARY KEY,
+    transport TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    user_id TEXT,
+    state TEXT NOT NULL,
+    repo_ref TEXT,
+    active_issue_id TEXT,
+    user_message TEXT NOT NULL,
+    final_message TEXT,
+    step_count INTEGER NOT NULL DEFAULT 0,
+    last_progress_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+`;
+
+/**
+ * SQL schema for supervisor_run_events table
+ * Records user messages, model turns, tool transitions, confirmations, and final answers.
+ */
+export const SUPERVISOR_RUN_EVENTS_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS supervisor_run_events (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    event_kind TEXT NOT NULL,
+    message TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES supervisor_runs(id) ON DELETE CASCADE
+  );
+`;
+
+/**
+ * SQL schema for supervisor_tool_calls table
+ * Stores structured tool transcripts and duplicate-call idempotency keys.
+ */
+export const SUPERVISOR_TOOL_CALLS_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS supervisor_tool_calls (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    args_hash TEXT NOT NULL,
+    args_json TEXT NOT NULL,
+    result_summary TEXT,
+    risk TEXT NOT NULL,
+    duration_ms INTEGER,
+    status TEXT NOT NULL,
+    idempotency_key TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES supervisor_runs(id) ON DELETE CASCADE
+  );
+`;
+
+/**
+ * SQL schema for supervisor_pending_actions table
+ * Confirmation-gated supervisor runtime actions that survive restarts.
+ */
+export const SUPERVISOR_PENDING_ACTIONS_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS supervisor_pending_actions (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    transport TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    user_id TEXT,
+    tool_name TEXT NOT NULL,
+    tool_args_json TEXT NOT NULL,
+    policy_decision_json TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    summary_message TEXT NOT NULL,
+    telegram_message_id TEXT,
+    status TEXT NOT NULL DEFAULT 'pending_confirm',
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES supervisor_runs(id) ON DELETE CASCADE
+  );
+`;
+
+/**
+ * SQL schema for repo_claude_conversations table
+ * Tracks read-only Claude Code continuity per transport, conversation, and repository.
+ */
+export const REPO_CLAUDE_CONVERSATIONS_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS repo_claude_conversations (
+    transport TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    repo_ref TEXT NOT NULL,
+    backend_session_id TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    clear_generation INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT NOT NULL,
+    PRIMARY KEY (transport, conversation_id, repo_ref)
   );
 `;
 
@@ -484,9 +606,22 @@ export const CONTROL_PLANE_INDEXES_SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_bot_watch_subscriptions_issue_id ON bot_watch_subscriptions(issue_id);
   CREATE INDEX IF NOT EXISTS idx_bot_watch_subscriptions_transport_conversation ON bot_watch_subscriptions(transport, conversation_id);
   CREATE INDEX IF NOT EXISTS idx_bot_conversation_preferences_transport_conversation ON bot_conversation_preferences(transport, conversation_id);
+  CREATE INDEX IF NOT EXISTS idx_bot_conversation_focuses_transport_conversation ON bot_conversation_focuses(transport, conversation_id);
+  CREATE INDEX IF NOT EXISTS idx_bot_conversation_focuses_issue_id ON bot_conversation_focuses(issue_id);
+  CREATE INDEX IF NOT EXISTS idx_bot_conversation_focuses_repo_ref ON bot_conversation_focuses(repo_ref);
   CREATE INDEX IF NOT EXISTS idx_bot_pending_actions_expires_at ON bot_pending_actions(expires_at);
   CREATE INDEX IF NOT EXISTS idx_bot_pending_actions_transport_conversation ON bot_pending_actions(transport, conversation_id);
   CREATE INDEX IF NOT EXISTS idx_bot_pending_actions_transport_conversation_issue ON bot_pending_actions(transport, conversation_id, issue_id);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_runs_transport_conversation ON supervisor_runs(transport, conversation_id, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_runs_state ON supervisor_runs(state, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_runs_active_issue ON supervisor_runs(active_issue_id);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_run_events_run ON supervisor_run_events(run_id, created_at ASC);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_tool_calls_run ON supervisor_tool_calls(run_id, created_at ASC);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_tool_calls_idempotency ON supervisor_tool_calls(idempotency_key);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_pending_actions_conversation ON supervisor_pending_actions(transport, conversation_id, status, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_pending_actions_run ON supervisor_pending_actions(run_id);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_pending_actions_expiry ON supervisor_pending_actions(expires_at);
+  CREATE INDEX IF NOT EXISTS idx_repo_claude_conversations_last_used ON repo_claude_conversations(last_used_at DESC);
   CREATE INDEX IF NOT EXISTS idx_bot_issue_followups_issue_id ON bot_issue_followups(issue_id);
   CREATE INDEX IF NOT EXISTS idx_bot_issue_followups_transport_conversation ON bot_issue_followups(transport, conversation_id);
   CREATE INDEX IF NOT EXISTS idx_bot_followup_message_states_transport_conversation ON bot_followup_message_states(transport, conversation_id);
@@ -620,8 +755,14 @@ export function initializeSchema(db: Database): void {
   db.exec(SYNC_EVENTS_TABLE_SCHEMA);
   db.exec(BOT_WATCH_SUBSCRIPTIONS_TABLE_SCHEMA);
   db.exec(BOT_CONVERSATION_PREFERENCES_TABLE_SCHEMA);
+  db.exec(BOT_CONVERSATION_FOCUSES_TABLE_SCHEMA);
   db.exec(BOT_PENDING_ACTIONS_TABLE_SCHEMA);
   migrateBotPendingActionsTable(db);
+  db.exec(SUPERVISOR_RUNS_TABLE_SCHEMA);
+  db.exec(SUPERVISOR_RUN_EVENTS_TABLE_SCHEMA);
+  db.exec(SUPERVISOR_TOOL_CALLS_TABLE_SCHEMA);
+  db.exec(SUPERVISOR_PENDING_ACTIONS_TABLE_SCHEMA);
+  db.exec(REPO_CLAUDE_CONVERSATIONS_TABLE_SCHEMA);
   db.exec(BOT_ISSUE_FOLLOWUPS_TABLE_SCHEMA);
   db.exec(BOT_FOLLOWUP_MESSAGE_STATES_TABLE_SCHEMA);
   db.exec(BOT_FOLLOWUP_DELIVERY_STATES_TABLE_SCHEMA);
@@ -686,6 +827,11 @@ export function dropAllTables(db: Database): void {
   db.exec('DROP TABLE IF EXISTS shadow_harnesses;');
   db.exec('DROP TABLE IF EXISTS service_leases;');
   db.exec('DROP TABLE IF EXISTS bot_transport_events;');
+  db.exec('DROP TABLE IF EXISTS repo_claude_conversations;');
+  db.exec('DROP TABLE IF EXISTS supervisor_pending_actions;');
+  db.exec('DROP TABLE IF EXISTS supervisor_tool_calls;');
+  db.exec('DROP TABLE IF EXISTS supervisor_run_events;');
+  db.exec('DROP TABLE IF EXISTS supervisor_runs;');
   db.exec('DROP TABLE IF EXISTS supervisor_repo_understandings;');
   db.exec('DROP TABLE IF EXISTS supervisor_memories;');
   db.exec('DROP TABLE IF EXISTS supervisor_jobs;');
@@ -694,6 +840,7 @@ export function dropAllTables(db: Database): void {
   db.exec('DROP TABLE IF EXISTS bot_followup_delivery_states;');
   db.exec('DROP TABLE IF EXISTS bot_followup_message_states;');
   db.exec('DROP TABLE IF EXISTS bot_pending_actions;');
+  db.exec('DROP TABLE IF EXISTS bot_conversation_focuses;');
   db.exec('DROP TABLE IF EXISTS bot_issue_followups;');
   db.exec('DROP TABLE IF EXISTS bot_conversation_preferences;');
   db.exec('DROP TABLE IF EXISTS bot_watch_subscriptions;');

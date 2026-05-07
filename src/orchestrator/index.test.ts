@@ -4223,6 +4223,39 @@ describe('Orchestrator Stability', () => {
     expect(updatedWorkItem?.orchestrator_state).toBe('retry_scheduled');
   });
 
+  it('retryIssue reconciles a failed work item when the tracker issue is already terminal Done', async () => {
+    const issue = makeIssue({ state: 'Done' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    const workItem = ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: 'In Progress',
+      github_repo: 'owner/repo',
+      github_issue_number: 100,
+      workspace_path: '/tmp/symphony-tests/repo/INT-1',
+      orchestrator_state: 'failed',
+      delivery_summary: 'Issue not in valid state for dev, current: State.DONE',
+    });
+
+    const result = await orchestrator.retryIssue(issue.id);
+    const updatedWorkItem = ctx.workItemRepository.findById(workItem.id);
+
+    expect(result.accepted).toBe(true);
+    expect(result.status).toBe('completed');
+    expect(result.message).toContain('already Done');
+    expect(updatedWorkItem?.linear_state).toBe('Done');
+    expect(updatedWorkItem?.orchestrator_state).toBe('completed');
+    expect(updatedWorkItem?.delivery_code).toBe('tracker_terminal_reconciled');
+    expect((orchestrator as any).state.retry_attempts.has(issue.id)).toBe(false);
+    expect((orchestrator as any).state.completed.has(issue.id)).toBe(true);
+    expect(ctx.githubIssueClient.closeIssue).toHaveBeenCalledWith(100);
+    expect(ctx.workspaceManager.removeWorkspace).toHaveBeenCalledWith('/tmp/symphony-tests/repo/INT-1');
+  });
+
   it('stopIssue cancels a queued retry without leaving the claim reserved', async () => {
     const issue = makeIssue({ state: 'Todo' });
     const ctx = createOrchestrator(issue);
@@ -4262,6 +4295,68 @@ describe('Orchestrator Stability', () => {
     expect(updatedWorkItem?.orchestrator_state).toBe('halted');
     expect(updatedWorkItem?.delivery_code).toBe('manual_stop');
     expect((orchestrator as any).shouldDispatch(issue)).toBe(false);
+  });
+
+  it('closeIssue marks an idle active work item as superseded and closes external tracker surfaces', async () => {
+    const issue = makeIssue({ state: 'In Progress', updated_at: new Date('2025-01-01T00:00:00Z') });
+    const successor = makeIssue({
+      id: 'issue-158',
+      identifier: 'INT-158',
+      title: 'Successor issue',
+      state: 'In Progress',
+    });
+    const ctx = createOrchestrator(issue, {
+      terminalStates: ['Done', 'Canceled'],
+    });
+    orchestrator = ctx.orchestrator;
+
+    ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: issue.state,
+      github_repo: 'owner/repo',
+      github_issue_number: 100,
+      orchestrator_state: 'halted',
+    });
+    ctx.workItemRepository.create({
+      id: successor.id,
+      linear_issue_id: successor.id,
+      linear_identifier: successor.identifier,
+      linear_title: successor.title,
+      linear_state: successor.state,
+      github_repo: 'owner/repo',
+      github_issue_number: 101,
+      orchestrator_state: 'dev_running',
+    });
+
+    const result = await orchestrator.closeIssue(issue.id, {
+      successor_issue_id: successor.id,
+      reason: '用户决定让 INT-158 承接。',
+    });
+    const updatedWorkItem = ctx.workItemRepository.findByLinearIssueId(issue.id);
+    const syncEvents = ctx.syncEventRepository.findByWorkItemId(issue.id);
+
+    expect(result.accepted).toBe(true);
+    expect(result.status).toBe('completed');
+    expect(result.issue_identifier).toBe(issue.identifier);
+    expect(updatedWorkItem?.linear_state).toBe('Canceled');
+    expect(updatedWorkItem?.orchestrator_state).toBe('cancelled');
+    expect(updatedWorkItem?.delivery_code).toBe('superseded');
+    expect(updatedWorkItem?.delivery_summary).toContain('INT-158');
+    expect(updatedWorkItem?.cancelled_at).toBeInstanceOf(Date);
+    expect(ctx.tracker.updateIssueState).toHaveBeenCalledWith(issue.id, 'Canceled');
+    expect(ctx.tracker.postComment).toHaveBeenCalledWith(
+      issue.id,
+      expect.stringContaining('INT-158'),
+    );
+    expect(ctx.githubIssueClient.closeIssue).toHaveBeenCalledWith(100);
+    expect(syncEvents.map((event) => `${event.target_system}:${event.action}`).sort()).toEqual([
+      'github:close_issue',
+      'linear:post_comment',
+      'linear:update_state',
+    ]);
   });
 
   it('does not dispatch work items whose supervisor session has already been cancelled', () => {

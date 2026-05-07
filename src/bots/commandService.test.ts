@@ -10,8 +10,12 @@ import {
 import type { RuntimeControlPlane, RuntimeIssueView, RuntimeStreamEvent } from '../runtime/types';
 import type { BotRecipient, BotTransportMessage, BotTransportNotifier } from './types';
 
-function createRuntimeControlPlane(): RuntimeControlPlane & { emit: (event: RuntimeStreamEvent) => void } {
+function createRuntimeControlPlane(): RuntimeControlPlane & {
+  emit: (event: RuntimeStreamEvent) => void;
+  closeIssueCalls: Array<{ id: string; successorIssueId: string | null; reason: string | null }>;
+} {
   const listeners = new Set<(event: RuntimeStreamEvent) => void>();
+  const closeIssueCalls: Array<{ id: string; successorIssueId: string | null; reason: string | null }> = [];
   const createdIssue: RuntimeIssueView = {
     issue_id: 'issue-2',
     work_item_id: 'issue-2',
@@ -51,7 +55,10 @@ function createRuntimeControlPlane(): RuntimeControlPlane & { emit: (event: Runt
     created_at: '2026-01-01T00:02:00.000Z',
     updated_at: '2026-01-01T00:02:00.000Z',
   };
-  const runtime: RuntimeControlPlane & { emit: (event: RuntimeStreamEvent) => void } = {
+  const runtime: RuntimeControlPlane & {
+    emit: (event: RuntimeStreamEvent) => void;
+    closeIssueCalls: Array<{ id: string; successorIssueId: string | null; reason: string | null }>;
+  } = {
     getOverview: () => ({
       generated_at: '2026-01-01T00:00:00.000Z',
       counts: {
@@ -185,6 +192,22 @@ function createRuntimeControlPlane(): RuntimeControlPlane & { emit: (event: Runt
       issue_id: id,
       issue_identifier: 'INT-1',
     }),
+    closeIssue: async (id: string, request = {}) => {
+      closeIssueCalls.push({
+        id,
+        successorIssueId: request.successor_issue_id ?? null,
+        reason: request.reason ?? null,
+      });
+      return {
+        accepted: true,
+        status: 'completed',
+        message: request.successor_issue_id
+          ? `Closed ${id}; successor ${request.successor_issue_id}`
+          : `Closed ${id}`,
+        issue_id: id,
+        issue_identifier: 'INT-1',
+      };
+    },
     overrideGovernance: async (id: string) => ({
       accepted: true,
       status: 'accepted',
@@ -216,6 +239,7 @@ function createRuntimeControlPlane(): RuntimeControlPlane & { emit: (event: Runt
         listener(event);
       }
     },
+    closeIssueCalls,
   };
   return runtime;
 }
@@ -292,6 +316,19 @@ describe('BotCommandService', () => {
       command: 'split',
       issue_id: 'INT-1',
       raw_text: '/split INT-1',
+    });
+
+    expect(parseTextCommand('/close INT-1')).toEqual({
+      command: 'close_issue',
+      issue_id: 'INT-1',
+      raw_text: '/close INT-1',
+    });
+
+    expect(parseTextCommand('/supersede INT-1 INT-2')).toEqual({
+      command: 'supersede_issue',
+      issue_id: 'INT-1',
+      successor_issue_id: 'INT-2',
+      raw_text: '/supersede INT-1 INT-2',
     });
   });
 
@@ -376,6 +413,16 @@ describe('BotCommandService', () => {
 
     const retry = await service.executeText(context, '/retry INT-1');
     expect(retry.message).toBe('Queued INT-1');
+
+    const supersede = await service.executeText(context, '/supersede INT-1 INT-2');
+    expect(supersede.message).toBe('Closed INT-1; successor INT-2');
+    expect(runtime.closeIssueCalls).toEqual([
+      {
+        id: 'INT-1',
+        successorIssueId: 'INT-2',
+        reason: 'Superseded from bot command.',
+      },
+    ]);
 
     const override = await service.executeText(context, '/override INT-1');
     expect(override.message).toContain('override approved');

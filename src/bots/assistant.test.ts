@@ -26,6 +26,7 @@ function createRuntimeControlPlane(): RuntimeControlPlane & {
   overrideGovernanceCalls: string[];
   rewriteGovernanceCalls: string[];
   splitGovernanceCalls: string[];
+  closeIssueCalls: Array<{ id: string; successorIssueId: string | null; reason: string | null }>;
   executeGovernanceSuggestionCalls: Array<{ issueId: string; suggestionId: string }>;
   dismissGovernanceSuggestionCalls: Array<{ issueId: string; suggestionId: string }>;
 } {
@@ -34,6 +35,7 @@ function createRuntimeControlPlane(): RuntimeControlPlane & {
   const overrideGovernanceCalls: string[] = [];
   const rewriteGovernanceCalls: string[] = [];
   const splitGovernanceCalls: string[] = [];
+  const closeIssueCalls: Array<{ id: string; successorIssueId: string | null; reason: string | null }> = [];
   const executeGovernanceSuggestionCalls: Array<{ issueId: string; suggestionId: string }> = [];
   const dismissGovernanceSuggestionCalls: Array<{ issueId: string; suggestionId: string }> = [];
   const runtime: RuntimeControlPlane & {
@@ -42,6 +44,7 @@ function createRuntimeControlPlane(): RuntimeControlPlane & {
     overrideGovernanceCalls: string[];
     rewriteGovernanceCalls: string[];
     splitGovernanceCalls: string[];
+    closeIssueCalls: Array<{ id: string; successorIssueId: string | null; reason: string | null }>;
     executeGovernanceSuggestionCalls: Array<{ issueId: string; suggestionId: string }>;
     dismissGovernanceSuggestionCalls: Array<{ issueId: string; suggestionId: string }>;
   } = {
@@ -120,6 +123,22 @@ function createRuntimeControlPlane(): RuntimeControlPlane & {
       issue_id: id,
       issue_identifier: 'INT-31',
     }),
+    closeIssue: async (id: string, request = {}) => {
+      closeIssueCalls.push({
+        id,
+        successorIssueId: request.successor_issue_id ?? null,
+        reason: request.reason ?? null,
+      });
+      return {
+        accepted: true,
+        status: 'completed',
+        message: request.successor_issue_id
+          ? `Closed ${id}; successor ${request.successor_issue_id}`
+          : `Closed ${id}`,
+        issue_id: id,
+        issue_identifier: id,
+      };
+    },
     overrideGovernance: async (id: string) => {
       overrideGovernanceCalls.push(id);
       return {
@@ -184,6 +203,7 @@ function createRuntimeControlPlane(): RuntimeControlPlane & {
     overrideGovernanceCalls,
     rewriteGovernanceCalls,
     splitGovernanceCalls,
+    closeIssueCalls,
     executeGovernanceSuggestionCalls,
     dismissGovernanceSuggestionCalls,
   };
@@ -1769,6 +1789,861 @@ describe('BotAssistantService', () => {
     subscriptions.dispose();
   });
 
+  test('routes natural-language retry commands before an active read-only repo Claude conversation', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const retryIssueCalls: string[] = [];
+    runtime.retryIssue = async (id: string) => {
+      retryIssueCalls.push(id);
+      return {
+        accepted: true,
+        status: 'queued',
+        message: `Queued ${id}`,
+        issue_id: id,
+        issue_identifier: id,
+      };
+    };
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const projectResolver = new TrackerProjectResolutionService(
+      {
+        listProjects: async () => ({
+          projects: [
+            { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' },
+          ],
+        }),
+        findProjectBySlug: async (projectSlug: string) => ({
+          project: projectSlug === 'test2'
+            ? { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' }
+            : null,
+        }),
+      } as any,
+      {
+        test2: {
+          github_owner: 'UniUni2000',
+          github_repo: 'test2',
+          local_path: null,
+        },
+      },
+    );
+    preferences.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-agent-retry',
+      default_project_slug: 'test2',
+    });
+
+    let agentRespondCalls = 0;
+    const agent: SupervisorAgentService & {
+      hasActiveRepoConversation: (params: {
+        transport: string;
+        conversationId: string;
+        repoRef: string | null;
+      }) => boolean;
+    } = {
+      hasActiveRepoConversation: () => true,
+      respond: async () => {
+        agentRespondCalls += 1;
+        return {
+          mode: 'repo_answer',
+          repoRef: 'UniUni2000/test2',
+          answer: '我是只读 brain，无法直接重新执行 INT-157。',
+        };
+      },
+    };
+
+    const assistant = new BotAssistantService(
+      runtime,
+      new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver),
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => {
+          throw new Error('retry should be handled before the generic model');
+        },
+      },
+      undefined,
+      subscriptions,
+      null,
+      null,
+      null,
+      agent,
+    );
+
+    const context = {
+      transport: 'telegram' as const,
+      recipient: { transport: 'telegram' as const, conversation_id: 'chat-agent-retry' },
+      identity: { user_id: 'user-1', display_name: 'Alice' },
+    };
+
+    const first = await assistant.respondToText(context, '重新执行下 int 157');
+    expect(first.message).toContain('Action: retry');
+    expect(first.message).toContain('Issue: INT-157');
+    expect(first.message).not.toContain('只读 brain');
+    expect(agentRespondCalls).toBe(0);
+    expect(retryIssueCalls).toEqual([]);
+
+    const confirmed = await assistant.respondToText(context, '确认');
+    expect(confirmed.message).toContain('Queued INT-157');
+    expect(retryIssueCalls).toEqual(['INT-157']);
+
+    subscriptions.dispose();
+  });
+
+  test('routes natural-language supersede commands through confirmation before read-only repo Claude', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const projectResolver = new TrackerProjectResolutionService(
+      {
+        listProjects: async () => ({
+          projects: [
+            { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' },
+          ],
+        }),
+        findProjectBySlug: async (projectSlug: string) => ({
+          project: projectSlug === 'test2'
+            ? { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' }
+            : null,
+        }),
+      } as any,
+      {
+        test2: {
+          github_owner: 'UniUni2000',
+          github_repo: 'test2',
+          local_path: null,
+        },
+      },
+    );
+    preferences.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-agent-supersede',
+      default_project_slug: 'test2',
+    });
+
+    let agentRespondCalls = 0;
+    const agent: SupervisorAgentService & {
+      hasActiveRepoConversation: (params: {
+        transport: string;
+        conversationId: string;
+        repoRef: string | null;
+      }) => boolean;
+    } = {
+      hasActiveRepoConversation: () => true,
+      respond: async () => {
+        agentRespondCalls += 1;
+        return {
+          mode: 'repo_answer',
+          repoRef: 'UniUni2000/test2',
+          answer: '我是只读 brain，无法直接关闭 INT-157。',
+        };
+      },
+    };
+
+    const assistant = new BotAssistantService(
+      runtime,
+      new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver),
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => {
+          throw new Error('supersede should be handled before the generic model');
+        },
+      },
+      undefined,
+      subscriptions,
+      null,
+      null,
+      null,
+      agent,
+    );
+
+    const context = {
+      transport: 'telegram' as const,
+      recipient: { transport: 'telegram' as const, conversation_id: 'chat-agent-supersede' },
+      identity: { user_id: 'user-1', display_name: 'Alice' },
+    };
+
+    const first = await assistant.respondToText(context, '关闭 157 这个 issue 吧，就开发 158 即可');
+    expect(first.message).toContain('Action: supersede issue');
+    expect(first.message).toContain('Issue: INT-157');
+    expect(first.message).toContain('Successor: INT-158');
+    expect(first.message).not.toContain('只读 brain');
+    expect(agentRespondCalls).toBe(0);
+    expect(runtime.closeIssueCalls).toEqual([]);
+
+    const confirmed = await assistant.respondToText(context, '确认');
+    expect(confirmed.message).toContain('Closed INT-157; successor INT-158');
+    expect(runtime.closeIssueCalls).toEqual([
+      {
+        id: 'INT-157',
+        successorIssueId: 'INT-158',
+        reason: 'Superseded from Telegram supervisor command.',
+      },
+    ]);
+
+    subscriptions.dispose();
+  });
+
+  test('routes natural-language cleanup of an issue to close instead of retry before read-only repo Claude', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const projectResolver = new TrackerProjectResolutionService(
+      {
+        listProjects: async () => ({
+          projects: [
+            { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' },
+          ],
+        }),
+        findProjectBySlug: async (projectSlug: string) => ({
+          project: projectSlug === 'test2'
+            ? { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' }
+            : null,
+        }),
+      } as any,
+      {
+        test2: {
+          github_owner: 'UniUni2000',
+          github_repo: 'test2',
+          local_path: null,
+        },
+      },
+    );
+    preferences.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-agent-clean-close',
+      default_project_slug: 'test2',
+    });
+
+    let agentRespondCalls = 0;
+    const agent: SupervisorAgentService & {
+      hasActiveRepoConversation: (params: {
+        transport: string;
+        conversationId: string;
+        repoRef: string | null;
+      }) => boolean;
+    } = {
+      hasActiveRepoConversation: () => true,
+      respond: async () => {
+        agentRespondCalls += 1;
+        return {
+          mode: 'repo_answer',
+          repoRef: 'UniUni2000/test2',
+          answer: '我是只读 brain，无法直接清理 INT-157。',
+        };
+      },
+    };
+
+    const assistant = new BotAssistantService(
+      runtime,
+      new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver),
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => {
+          throw new Error('cleanup close should be handled before the generic model');
+        },
+      },
+      undefined,
+      subscriptions,
+      null,
+      null,
+      null,
+      agent,
+    );
+
+    const context = {
+      transport: 'telegram' as const,
+      recipient: { transport: 'telegram' as const, conversation_id: 'chat-agent-clean-close' },
+      identity: { user_id: 'user-1', display_name: 'Alice' },
+    };
+
+    const first = await assistant.respondToText(context, '吧 157 这个 issue 清理了');
+    expect(first.message).toContain('Action: close issue');
+    expect(first.message).toContain('Issue: INT-157');
+    expect(first.message).not.toContain('Action: retry');
+    expect(first.message).not.toContain('只读 brain');
+    expect(agentRespondCalls).toBe(0);
+    expect(runtime.closeIssueCalls).toEqual([]);
+
+    const confirmed = await assistant.respondToText(context, '确认');
+    expect(confirmed.message).toContain('Closed INT-157');
+    expect(runtime.closeIssueCalls).toEqual([
+      {
+        id: 'INT-157',
+        successorIssueId: null,
+        reason: 'Closed stale issue from Telegram supervisor command.',
+      },
+    ]);
+
+    subscriptions.dispose();
+  });
+
+  test('routes colloquial close text to a confirmed close operation before read-only repo Claude', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const projectResolver = new TrackerProjectResolutionService(
+      {
+        listProjects: async () => ({
+          projects: [
+            { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' },
+          ],
+        }),
+        findProjectBySlug: async (projectSlug: string) => ({
+          project: projectSlug === 'test2'
+            ? { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' }
+            : null,
+        }),
+      } as any,
+      {
+        test2: {
+          github_owner: 'UniUni2000',
+          github_repo: 'test2',
+          local_path: null,
+        },
+      },
+    );
+    preferences.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-agent-colloquial-close',
+      default_project_slug: 'test2',
+    });
+
+    let agentRespondCalls = 0;
+    const agent: SupervisorAgentService & {
+      hasActiveRepoConversation: (params: {
+        transport: string;
+        conversationId: string;
+        repoRef: string | null;
+      }) => boolean;
+    } = {
+      hasActiveRepoConversation: () => true,
+      respond: async () => {
+        agentRespondCalls += 1;
+        return {
+          mode: 'repo_answer',
+          repoRef: 'UniUni2000/test2',
+          answer: '我是只读 brain，无法直接关闭 INT-157。',
+        };
+      },
+    };
+
+    const assistant = new BotAssistantService(
+      runtime,
+      new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver),
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => {
+          throw new Error('colloquial close should be handled before the generic model');
+        },
+      },
+      undefined,
+      subscriptions,
+      null,
+      null,
+      null,
+      agent,
+    );
+
+    const context = {
+      transport: 'telegram' as const,
+      recipient: { transport: 'telegram' as const, conversation_id: 'chat-agent-colloquial-close' },
+      identity: { user_id: 'user-1', display_name: 'Alice' },
+    };
+
+    const first = await assistant.respondToText(context, '吧 157 给我关了吧');
+    expect(first.message).toContain('Action: close issue');
+    expect(first.message).toContain('Issue: INT-157');
+    expect(first.message).not.toContain('只读 brain');
+    expect(agentRespondCalls).toBe(0);
+    expect(runtime.closeIssueCalls).toEqual([]);
+
+    subscriptions.dispose();
+  });
+
+  test('routes natural-language cleanup plus retry to a confirmed supersede-and-retry operation', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const retryIssueCalls: string[] = [];
+    runtime.retryIssue = async (id: string) => {
+      retryIssueCalls.push(id);
+      return {
+        accepted: true,
+        status: 'queued',
+        message: `Queued ${id}`,
+        issue_id: id,
+        issue_identifier: id,
+      };
+    };
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const projectResolver = new TrackerProjectResolutionService(
+      {
+        listProjects: async () => ({
+          projects: [
+            { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' },
+          ],
+        }),
+        findProjectBySlug: async (projectSlug: string) => ({
+          project: projectSlug === 'test2'
+            ? { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' }
+            : null,
+        }),
+      } as any,
+      {
+        test2: {
+          github_owner: 'UniUni2000',
+          github_repo: 'test2',
+          local_path: null,
+        },
+      },
+    );
+    preferences.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-agent-clean-retry',
+      default_project_slug: 'test2',
+    });
+
+    const assistant = new BotAssistantService(
+      runtime,
+      new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver),
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => {
+          throw new Error('cleanup plus retry should be handled before the generic model');
+        },
+      },
+      undefined,
+      subscriptions,
+    );
+
+    const context = {
+      transport: 'telegram' as const,
+      recipient: { transport: 'telegram' as const, conversation_id: 'chat-agent-clean-retry' },
+      identity: { user_id: 'user-1', display_name: 'Alice' },
+    };
+
+    const first = await assistant.respondToText(context, '清理 157，重试 158');
+    expect(first.message).toContain('Action: supersede issue');
+    expect(first.message).toContain('Issue: INT-157');
+    expect(first.message).toContain('Successor: INT-158');
+    expect(first.message).toContain('Retry successor: yes');
+    expect(first.message).not.toContain('Action: retry');
+    expect(runtime.closeIssueCalls).toEqual([]);
+    expect(retryIssueCalls).toEqual([]);
+
+    const confirmed = await assistant.respondToText(context, '确认');
+    expect(confirmed.message).toContain('Closed INT-157; successor INT-158');
+    expect(confirmed.message).toContain('Queued INT-158');
+    expect(runtime.closeIssueCalls).toEqual([
+      {
+        id: 'INT-157',
+        successorIssueId: 'INT-158',
+        reason: 'Superseded from Telegram supervisor command.',
+      },
+    ]);
+    expect(retryIssueCalls).toEqual(['INT-158']);
+
+    subscriptions.dispose();
+  });
+
+  test('explicit cleanup control text replaces a stale pending retry confirmation', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const retryIssueCalls: string[] = [];
+    runtime.retryIssue = async (id: string) => {
+      retryIssueCalls.push(id);
+      return {
+        accepted: true,
+        status: 'queued',
+        message: `Queued ${id}`,
+        issue_id: id,
+        issue_identifier: id,
+      };
+    };
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const projectResolver = new TrackerProjectResolutionService(
+      {
+        listProjects: async () => ({
+          projects: [
+            { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' },
+          ],
+        }),
+        findProjectBySlug: async (projectSlug: string) => ({
+          project: projectSlug === 'test2'
+            ? { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' }
+            : null,
+        }),
+      } as any,
+      {
+        test2: {
+          github_owner: 'UniUni2000',
+          github_repo: 'test2',
+          local_path: null,
+        },
+      },
+    );
+    pending.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-agent-replace-pending',
+      user_id: 'user-1',
+      intent_kind: 'retry',
+      normalized_payload: {
+        command: 'retry',
+        issue_id: 'INT-157',
+      },
+      summary_message: 'Action: retry\nIssue: INT-157\nReply with: 确认 / 取消',
+      expires_at: new Date(Date.now() + 15 * 60 * 1000),
+    });
+
+    const assistant = new BotAssistantService(
+      runtime,
+      new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver),
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => {
+          throw new Error('replacement cleanup should be handled before the generic model');
+        },
+      },
+      undefined,
+      subscriptions,
+    );
+
+    const context = {
+      transport: 'telegram' as const,
+      recipient: { transport: 'telegram' as const, conversation_id: 'chat-agent-replace-pending' },
+      identity: { user_id: 'user-1', display_name: 'Alice' },
+    };
+
+    const first = await assistant.respondToText(context, '清理 157，重试 158');
+    expect(first.message).toContain('Action: supersede issue');
+    expect(first.message).toContain('Issue: INT-157');
+    expect(first.message).toContain('Successor: INT-158');
+    expect(first.message).not.toContain('Action: retry\nIssue: INT-157');
+    expect(
+      pending.findByConversation({
+        transport: 'telegram',
+        conversation_id: 'chat-agent-replace-pending',
+      })?.intent_kind,
+    ).toBe('supersede_issue');
+
+    const confirmed = await assistant.respondToText(context, '确认');
+    expect(confirmed.message).toContain('Closed INT-157; successor INT-158');
+    expect(confirmed.message).toContain('Queued INT-158');
+    expect(runtime.closeIssueCalls).toEqual([
+      {
+        id: 'INT-157',
+        successorIssueId: 'INT-158',
+        reason: 'Superseded from Telegram supervisor command.',
+      },
+    ]);
+    expect(retryIssueCalls).toEqual(['INT-158']);
+
+    subscriptions.dispose();
+  });
+
+  test('answers an explicit issue status question instead of repeating an unrelated pending confirmation', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const issue158 = {
+      issue_id: 'issue-158',
+      work_item_id: 'issue-158',
+      identifier: 'INT-158',
+      title: '补充 README.md 项目文档',
+      phase: 'DEV',
+      tracker_state: 'In Progress',
+      orchestrator_state: 'failed',
+      workspace_path: '/tmp/INT-158',
+      branch_name: 'feature/int-158',
+      github_repo: 'UniUni2000/test2',
+      github_issue_number: 102,
+      active_pr_number: null,
+      session: null,
+      actions: {
+        can_stop: false,
+        can_retry: true,
+        can_open_pr: false,
+      },
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+    };
+    runtime.getOverview = () => ({
+      generated_at: '2026-01-01T00:00:00.000Z',
+      counts: { running: 0, retrying: 0, total: 1 },
+      issues: [issue158],
+    });
+    runtime.getIssue = (id: string) => ['issue-158', 'INT-158'].includes(id) ? issue158 : null;
+    runtime.getTimeline = () => [];
+    runtime.getHistoryView = () => null;
+
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    pending.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-agent-status-bypass',
+      user_id: 'user-1',
+      intent_kind: 'close_issue',
+      normalized_payload: {
+        command: 'close_issue',
+        issue_id: 'INT-157',
+      },
+      summary_message: 'Action: close issue\nIssue: INT-157\nReply with: 确认 / 取消',
+      expires_at: new Date(Date.now() + 15 * 60 * 1000),
+    });
+
+    const assistant = new BotAssistantService(
+      runtime,
+      new BotCommandService(runtime, subscriptions, () => true, preferences),
+      preferences,
+      pending,
+      null,
+      {
+        decide: async () => {
+          throw new Error('explicit status question should bypass pending without using the model');
+        },
+      },
+      undefined,
+      subscriptions,
+    );
+
+    const response = await assistant.respondToText({
+      transport: 'telegram',
+      recipient: { transport: 'telegram', conversation_id: 'chat-agent-status-bypass' },
+      identity: { user_id: 'user-1', display_name: 'Alice' },
+    }, '158 这个 issue 怎么样了');
+
+    expect(response.message).toContain('INT-158');
+    expect(response.message).toContain('failed');
+    expect(response.message).not.toContain('Action: close issue');
+    expect(
+      pending.findByConversation({
+        transport: 'telegram',
+        conversation_id: 'chat-agent-status-bypass',
+      })?.intent_kind,
+    ).toBe('close_issue');
+
+    subscriptions.dispose();
+  });
+
+  test('ignores cancelled generic pending actions for later Telegram text', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    pending.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-agent-cancelled-pending',
+      user_id: 'user-1',
+      intent_kind: 'close_issue',
+      normalized_payload: {
+        command: 'close_issue',
+        issue_id: 'INT-157',
+      },
+      summary_message: 'Action: close issue\nIssue: INT-157\nReply with: 确认 / 取消',
+      expires_at: new Date(Date.now() + 15 * 60 * 1000),
+      status: 'cancelled',
+    });
+
+    const assistant = new BotAssistantService(
+      runtime,
+      new BotCommandService(runtime, subscriptions, () => true, preferences),
+      preferences,
+      pending,
+      null,
+      {
+        decide: async () => ({
+          intent: {
+            kind: 'answer_question',
+            answer: '你好，我在。',
+          },
+        }),
+        getDiagnostics: () => ({
+          provider: 'test',
+          model: 'test-model',
+          configured: true,
+          health: 'healthy',
+          fallback_available: true,
+          last_error_code: null,
+        }),
+      },
+      undefined,
+      subscriptions,
+    );
+
+    const response = await assistant.respondToText({
+      transport: 'telegram',
+      recipient: { transport: 'telegram', conversation_id: 'chat-agent-cancelled-pending' },
+      identity: { user_id: 'user-1', display_name: 'Alice' },
+    }, 'hello');
+
+    expect(response.message).toContain('可以帮你');
+    expect(response.message).not.toContain('Action: close issue');
+
+    subscriptions.dispose();
+  });
+
+  test('resends the active supervisor card before an active read-only repo Claude conversation', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const projectResolver = new TrackerProjectResolutionService(
+      {
+        listProjects: async () => ({
+          projects: [
+            { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' },
+          ],
+        }),
+        findProjectBySlug: async (projectSlug: string) => ({
+          project: projectSlug === 'test2'
+            ? { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' }
+            : null,
+        }),
+      } as any,
+      {
+        test2: {
+          github_owner: 'UniUni2000',
+          github_repo: 'test2',
+          local_path: null,
+        },
+      },
+    );
+    preferences.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-agent-card-focus',
+      default_project_slug: 'test2',
+    });
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const supervisorService = new SupervisorSessionService(runtime, projectResolver, sessions, events);
+    sessions.create({
+      id: 'session-card-focus',
+      transport: 'telegram',
+      conversation_id: 'chat-agent-card-focus',
+      user_id: 'user-1',
+      state: 'awaiting_user_approval',
+      repo_ref: 'UniUni2000/test2',
+      intake_mode: 'plan_then_approve',
+      approval_mode: 'explicit_user_approval',
+      plan_version: 1,
+      plan_card: {
+        title: '补充 README.md 项目文档',
+        user_goal: '补充 README.md 项目文档',
+        in_scope: ['写清项目用途', '补充运行和测试说明'],
+        out_of_scope: ['不改 Python 计算逻辑'],
+        acceptance: ['README.md 能说明项目用途和运行方式'],
+        known_risks: [],
+        execution_strategy: '批准后创建并推进现有文档任务。',
+        needs_user_approval: true,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '批准并开始',
+          summary: '补齐 README 文档。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    let agentRespondCalls = 0;
+    const agent: SupervisorAgentService & {
+      hasActiveRepoConversation: (params: {
+        transport: string;
+        conversationId: string;
+        repoRef: string | null;
+      }) => boolean;
+    } = {
+      hasActiveRepoConversation: () => true,
+      respond: async () => {
+        agentRespondCalls += 1;
+        return {
+          mode: 'repo_answer',
+          repoRef: 'UniUni2000/test2',
+          answer: 'wrong read-only path',
+        };
+      },
+    };
+
+    const assistant = new BotAssistantService(
+      runtime,
+      new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver),
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => {
+          throw new Error('card focus should be handled before the generic model');
+        },
+      },
+      undefined,
+      subscriptions,
+      null,
+      supervisorService,
+      null,
+      agent,
+    );
+
+    const response = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-agent-card-focus' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      '卡片给我',
+    );
+
+    expect(response.caption).toContain('补充 README.md 项目文档');
+    expect(response.media_key).toContain('visual|session');
+    expect(response.action_rows?.[0]?.[0]?.label).toBe('批准并开始');
+    expect(agentRespondCalls).toBe(0);
+
+    subscriptions.dispose();
+  });
+
   test('passes detailed issue runtime context to repo Claude for stuck and ETA diagnosis', async () => {
     db = new Database(':memory:');
     initializeSchema(db);
@@ -2155,6 +3030,106 @@ describe('BotAssistantService', () => {
     });
     expect(response.message).toContain('已清空');
     expect(response.message).toContain('UniUni2000/test2');
+
+    subscriptions.dispose();
+  });
+
+  test('/clear cancels a pending confirmation instead of repeating the pending action', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const projectResolver = new TrackerProjectResolutionService(
+      {
+        listProjects: async () => ({
+          projects: [
+            { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' },
+          ],
+        }),
+        findProjectBySlug: async (projectSlug: string) => ({
+          project: projectSlug === 'test2'
+            ? { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' }
+            : null,
+        }),
+      } as any,
+      {
+        test2: {
+          github_owner: 'UniUni2000',
+          github_repo: 'test2',
+          local_path: null,
+        },
+      },
+    );
+    preferences.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-clear-pending',
+      default_project_slug: 'test2',
+    });
+    pending.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-clear-pending',
+      user_id: 'user-1',
+      intent_kind: 'retry',
+      normalized_payload: {
+        command: 'retry',
+        issue_id: 'INT-157',
+      },
+      summary_message: 'Action: retry\nIssue: INT-157\nReply with: 确认 / 取消',
+      expires_at: new Date(Date.now() + 15 * 60 * 1000),
+    });
+
+    const agent: SupervisorAgentService & {
+      clearRepoConversation: (params: {
+        transport: string;
+        conversationId: string;
+        repoRef: string | null;
+      }) => Promise<number>;
+    } = {
+      clearRepoConversation: async () => 1,
+      respond: async () => {
+        throw new Error('clear should not call respond');
+      },
+    };
+    const assistant = new BotAssistantService(
+      runtime,
+      new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver),
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => {
+          throw new Error('clear should not call model');
+        },
+      },
+      undefined,
+      subscriptions,
+      null,
+      null,
+      null,
+      agent,
+    );
+
+    const response = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-clear-pending' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      '/clear',
+    );
+
+    expect(response.message).toContain('已取消待确认操作');
+    expect(response.message).toContain('已清空');
+    expect(response.message).not.toContain('Action: retry');
+    expect(
+      pending.findByConversation({
+        transport: 'telegram',
+        conversation_id: 'chat-clear-pending',
+      }),
+    ).toBeNull();
 
     subscriptions.dispose();
   });
@@ -4638,6 +5613,74 @@ describe('BotAssistantService', () => {
     ).toBeNull();
 
     subscriptions.dispose();
+  });
+
+  test('routes Telegram natural-language text through the supervisor agent runtime when configured', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const commandService = new BotCommandService(runtime, subscriptions, () => true, preferences);
+    const runtimeCalls: string[] = [];
+    const supervisorAgentRuntime = {
+      respond: async ({ text }: { text: string }) => {
+        runtimeCalls.push(text);
+        return {
+          message: `runtime handled: ${text}`,
+        };
+      },
+    };
+    const assistant = new BotAssistantService(
+      runtime,
+      commandService,
+      preferences,
+      pending,
+      null,
+      {
+        decide: async () => {
+          throw new Error('generic bot model should not run');
+        },
+      },
+      () => true,
+      subscriptions,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      supervisorAgentRuntime as any,
+    );
+
+    const response = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-runtime' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      'hello',
+    );
+
+    expect(response.message).toBe('runtime handled: hello');
+    expect(runtimeCalls).toEqual(['hello']);
+
+    const slash = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-runtime' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      '/status INT-31',
+    );
+
+    expect(slash.message).toContain('INT-31');
+    expect(runtimeCalls).toEqual(['hello']);
+
+    subscriptions.dispose();
+    db.close();
   });
 
 });

@@ -1,4 +1,5 @@
 import {
+  type BotConversationFocusRepository,
   BotConversationPreferenceRepository,
   type BotFollowupMessageStateRepository,
   BotPendingActionRepository,
@@ -16,6 +17,7 @@ import type {
   BotCommandRequest,
   BotCommandResponse,
   BotFocusedIssueContext,
+  BotIssueContextView,
   BotRuntimeCopilotContext,
   SupervisorIntakeSource,
 } from './types';
@@ -35,6 +37,8 @@ import {
 import type { SupervisorRepoSourceResolver } from '../supervisor/repoSourceResolver';
 import type { SupervisorRepoUnderstandingService } from '../supervisor/repoUnderstanding';
 import { SupervisorSessionService } from '../supervisor/sessionService';
+import type { SupervisorAgentRuntimeService } from '../supervisor/agentRuntime';
+import { extractIssueIdentifier } from './issueIdentifier';
 
 const CONFIRM_WORDS = new Set(['确认', 'yes', 'y', 'ok', 'okay', '好', '执行', '继续', 'confirm']);
 const CANCEL_WORDS = new Set(['取消', 'cancel', 'no', 'n', '停止']);
@@ -56,11 +60,6 @@ function compact(value: string, maxLength = 300): string {
     return value;
   }
   return `${value.slice(0, maxLength - 3)}...`;
-}
-
-function extractIssueIdentifier(text: string): string | null {
-  const match = text.match(/\b[A-Z][A-Z0-9]+-\d+\b/i);
-  return match ? match[0].toUpperCase() : null;
 }
 
 function extractJsonObject(text: string): Record<string, unknown> | null {
@@ -94,9 +93,16 @@ function isCancellation(text: string): boolean {
   return CANCEL_WORDS.has(text.trim().toLowerCase());
 }
 
+function isOpenPendingAction(
+  pending: ReturnType<BotPendingActionRepository['findLatestByConversation']>,
+): pending is NonNullable<typeof pending> {
+  return Boolean(pending && ['pending_confirm', 'executing'].includes(pending.status));
+}
+
 function isSupervisorSessionControlText(text: string): boolean {
   const normalized = text.trim().toLowerCase();
-  return /^(新开线程|开启新线程|新建线程|另开线程)[:：\s]+/.test(text.trim())
+  return isSupervisorSessionFocusText(text)
+    || /^(新开线程|开启新线程|新建线程|另开线程)[:：\s]+/.test(text.trim())
     || [
       '确认',
       'yes',
@@ -123,6 +129,13 @@ function isSupervisorSessionControlText(text: string): boolean {
       '结束当前计划',
       '放弃当前计划',
     ].some((word) => normalized.includes(word.toLowerCase()));
+}
+
+function isSupervisorSessionFocusText(text: string): boolean {
+  const normalized = text.trim().replace(/\s+/g, ' ');
+  return /^(?:卡片给我|把卡片发我|把当前卡片发我|发我卡片|发一下卡片|当前卡片|查看当前计划|看当前计划|当前计划|查看计划卡|看计划卡|计划卡给我)$/i.test(normalized)
+    || /^(?:发|给|看看|看一下).{0,8}(?:当前|这张|这个|现有).{0,8}(?:卡片|计划卡|计划)$/i.test(normalized)
+    || /^(?:当前|这张|这个|现有).{0,8}(?:卡片|计划卡).{0,8}(?:发我|给我|看看|看一下)$/i.test(normalized);
 }
 
 function isGreetingLikeText(text: string): boolean {
@@ -385,6 +398,7 @@ function coerceIntent(value: Record<string, unknown> | null): BotAssistantIntent
     case 'unwatch':
     case 'stop':
     case 'retry':
+    case 'close_issue':
     case 'override':
     case 'rewrite':
     case 'split':
@@ -397,6 +411,26 @@ function coerceIntent(value: Record<string, unknown> | null): BotAssistantIntent
         ...(kind === 'watch' && typeof intent.watch_preset === 'string'
           ? { watch_preset: intent.watch_preset as 'default' | 'verbose' | 'failures' | 'status' }
           : {}),
+        ...(typeof intent.reason === 'string' && intent.reason.trim()
+          ? { reason: intent.reason.trim() }
+          : {}),
+      };
+    case 'supersede_issue':
+      return {
+        kind,
+        issue_id:
+          typeof intent.issue_id === 'string' && intent.issue_id.trim()
+            ? intent.issue_id.trim()
+            : null,
+        successor_issue_id:
+          typeof intent.successor_issue_id === 'string' && intent.successor_issue_id.trim()
+            ? intent.successor_issue_id.trim()
+            : null,
+        reason:
+          typeof intent.reason === 'string' && intent.reason.trim()
+            ? intent.reason.trim()
+            : null,
+        retry_successor: intent.retry_successor === true,
       };
     case 'set_default_project':
       return {
@@ -498,12 +532,22 @@ function toPendingRequest(intent: BotAssistantIntent): BotCommandRequest | null 
     case 'unwatch':
     case 'stop':
     case 'retry':
+    case 'close_issue':
     case 'override':
     case 'rewrite':
     case 'split':
       return {
         command: intent.kind,
         issue_id: intent.issue_id,
+        reason: 'reason' in intent ? intent.reason ?? null : null,
+      };
+    case 'supersede_issue':
+      return {
+        command: 'supersede_issue',
+        issue_id: intent.issue_id,
+        successor_issue_id: intent.successor_issue_id,
+        reason: intent.reason,
+        retry_successor: intent.retry_successor ?? false,
       };
     case 'set_default_project':
       return {
@@ -878,6 +922,87 @@ function extractBareOrdinal(text: string): number | null {
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
+function extractControlIssueIdentifiers(text: string): string[] {
+  const identifiers: string[] = [];
+  const seen = new Set<string>();
+  const add = (value: string | null | undefined) => {
+    const normalized = value?.trim().toUpperCase();
+    if (!normalized || seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    identifiers.push(normalized);
+  };
+
+  for (const match of text.matchAll(/\b([A-Z][A-Z0-9]+-\d+)\b/gi)) {
+    add(match[1]);
+  }
+  for (const match of text.matchAll(/\b([A-Z][A-Z0-9]{1,9})\s+#?\s*(\d+)\b/gi)) {
+    const rawPrefix = match[1]!;
+    const prefix = rawPrefix.toUpperCase();
+    if ((rawPrefix === prefix || prefix === 'INT') && !['ISSUE', 'TICKET', 'TASK', 'PR'].includes(prefix)) {
+      add(`${prefix}-${match[2]}`);
+    }
+  }
+
+  if (/(?:issue|单|任务|int|关闭|关掉|关了|关上|关停|取消|作废|废弃|不要了|不用了|不需要|不再需要|清理|清掉|清除|收掉|处理掉|承接|开发|重试|重新执行|重新跑|继续执行|继续跑|supersede|duplicate|retry|rerun)/i.test(text)) {
+    for (const match of text.matchAll(/(?<![A-Z0-9-])#?(\d{1,6})(?![A-Z0-9-])/gi)) {
+      add(`INT-${match[1]}`);
+    }
+  }
+
+  return identifiers;
+}
+
+function detectIssueCloseIntent(text: string): BotAssistantIntent | null {
+  const normalized = text.trim();
+  const issueIds = extractControlIssueIdentifiers(normalized);
+  const hasCloseVerb = /关闭|关掉|关了|关上|关停|取消|作废|废弃|不要了|不用了|不需要|不再需要|清理|清掉|清除|收掉|处理掉|close|supersede|duplicate|标记.*重复|重复/i.test(normalized);
+  if (!hasCloseVerb || issueIds.length === 0) {
+    return null;
+  }
+
+  const shouldRetrySuccessor = /重试|重新执行|重新跑|重跑|再跑|再执行|继续执行|继续跑|retry|rerun|re-run|restart/i.test(normalized);
+  const hasSuccessorSignal = shouldRetrySuccessor ||
+    /承接|继续.*(?:开发|做|跑)|就.*(?:开发|做|跑)|开发|由|换成|改成|duplicate|supersede|替代/i.test(normalized);
+  if (issueIds.length >= 2 && hasSuccessorSignal) {
+    return {
+      kind: 'supersede_issue',
+      issue_id: issueIds[0]!,
+      successor_issue_id: issueIds[1]!,
+      reason: 'Superseded from Telegram supervisor command.',
+      retry_successor: shouldRetrySuccessor,
+    };
+  }
+
+  return {
+    kind: 'close_issue',
+    issue_id: issueIds[0]!,
+    reason: /清理|清掉|清除|收掉|处理掉|不要了|不用了|不需要|不再需要/i.test(normalized)
+      ? 'Closed stale issue from Telegram supervisor command.'
+      : 'Closed from Telegram supervisor command.',
+  };
+}
+
+function isIssueStatusQuestion(text: string): boolean {
+  return /现在怎么样|怎么样了|怎么样|状态|status|进度|哪个仓库|分配到哪个仓库|卡在哪|卡住|stuck|blocked|why .*run/i.test(text.trim());
+}
+
+function extractStatusIssueIdentifier(text: string): string | null {
+  const explicit = extractIssueIdentifier(text);
+  if (explicit) {
+    return explicit;
+  }
+  if (!isIssueStatusQuestion(text)) {
+    return null;
+  }
+  return extractControlIssueIdentifiers(text)[0] ?? null;
+}
+
+function shouldBypassPendingForReadOnlyIssueQuestion(text: string): boolean {
+  return isIssueListQuestion(text) || Boolean(extractStatusIssueIdentifier(text));
+}
+
 function detectSuggestionType(text: string): string | null {
   const normalized = text.toLowerCase();
   for (const [type, aliases] of Object.entries(SUGGESTION_TYPE_ALIASES)) {
@@ -902,10 +1027,18 @@ function buildHeuristicDecision(
   const lines = trimmed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const rest = lines.slice(1).join('\n').trim() || null;
   const issueId = extractIssueIdentifier(trimmed);
+  const statusIssueId = extractStatusIssueIdentifier(trimmed);
   const availableProjectSlugs = context.available_projects.map((item) => item.project_slug);
   const explicitProject = resolveProjectAlias(trimmed, context.available_projects);
   const focusIssue = context.focus_issue;
   const bareOrdinal = extractBareOrdinal(trimmed);
+  const controlTargetIssue = issueId
+    || focusIssue?.issue.identifier
+    || (
+      context.overview.active_issues.length === 1
+        ? context.overview.active_issues[0]!.identifier
+        : null
+    );
 
   if (bareOrdinal && focusIssue) {
     const runtimeLikeIssue = {
@@ -1132,8 +1265,24 @@ function buildHeuristicDecision(
     };
   }
 
-  if (issueId && /现在怎么样|状态|status|进度|哪个仓库|分配到哪个仓库/i.test(trimmed)) {
-    if (/哪个仓库|分配到哪个仓库/i.test(trimmed) && focusIssue) {
+  const closeIntent = detectIssueCloseIntent(trimmed);
+  if (closeIntent) {
+    return {
+      intent: closeIntent,
+    };
+  }
+
+  if (controlTargetIssue && isNaturalRetryRequest(trimmed)) {
+    return {
+      intent: {
+        kind: 'retry',
+        issue_id: controlTargetIssue,
+      },
+    };
+  }
+
+  if (statusIssueId && isIssueStatusQuestion(trimmed)) {
+    if (/哪个仓库|分配到哪个仓库/i.test(trimmed) && focusIssue?.issue.identifier === statusIssueId) {
       return {
         intent: {
           kind: 'answer_question',
@@ -1147,7 +1296,7 @@ function buildHeuristicDecision(
     return {
       intent: {
         kind: 'status',
-        issue_id: issueId,
+        issue_id: statusIssueId,
       },
     };
   }
@@ -1322,6 +1471,8 @@ export class BotAssistantService {
     private readonly supervisorAgentService: SupervisorAgentService | null = null,
     private readonly repoUnderstandingService: SupervisorRepoUnderstandingService | null = null,
     private readonly supervisorRepoSourceResolver: SupervisorRepoSourceResolver | null = null,
+    private readonly conversationFocuses: BotConversationFocusRepository | null = null,
+    private readonly supervisorAgentRuntime: Pick<SupervisorAgentRuntimeService, 'respond'> | null = null,
   ) {
     this.model = normalizeModel(model);
     this.runtimeContext = new BotRuntimeContextService(
@@ -1332,6 +1483,7 @@ export class BotAssistantService {
       followupMessageStates,
       undefined,
       this.repoUnderstandingService,
+      this.conversationFocuses,
     );
   }
 
@@ -1505,6 +1657,24 @@ export class BotAssistantService {
     };
   }
 
+  private rememberIssueFocus(
+    context: BotCommandContext,
+    issue: BotIssueContextView | null | undefined,
+    source: 'explicit_issue' | 'runtime_issue' | 'repo_advisor' | 'callback' = 'runtime_issue',
+  ): void {
+    if (!issue || !this.conversationFocuses) {
+      return;
+    }
+    this.conversationFocuses.upsert({
+      transport: context.transport,
+      conversation_id: context.recipient.conversation_id,
+      issue_id: issue.issue_id,
+      issue_identifier: issue.identifier,
+      repo_ref: issue.github_repo,
+      source,
+    });
+  }
+
   private async respondFromSupervisorAgentResult(params: {
     context: BotCommandContext;
     text: string;
@@ -1562,11 +1732,28 @@ export class BotAssistantService {
   async respondToText(context: BotCommandContext, text: string): Promise<BotCommandResponse> {
     const normalized = text.trim();
 
-    const pending = this.pendingActions
+    const pendingCandidate = this.pendingActions
       ?.findLatestByConversation({
         transport: context.transport,
         conversation_id: context.recipient.conversation_id,
       }) ?? null;
+    const pending = isOpenPendingAction(pendingCandidate) ? pendingCandidate : null;
+
+    if (isClearRepoConversationCommand(text)) {
+      const response = await this.clearSupervisorRepoConversation(context, text);
+      if (pending) {
+        this.pendingActions?.delete({
+          transport: context.transport,
+          conversation_id: context.recipient.conversation_id,
+          issue_id: pending.issue_id,
+        });
+        return {
+          ...response,
+          message: `已取消待确认操作。\n${response.message}`,
+        };
+      }
+      return response;
+    }
 
     if (pending) {
       if (pending.expires_at.getTime() <= Date.now()) {
@@ -1578,6 +1765,33 @@ export class BotAssistantService {
         return {
           message: 'The pending action expired. Please send the request again.',
         };
+      }
+
+      const replacementControlIntent = detectPendingReplacementControlIntent(normalized);
+      if (replacementControlIntent) {
+        this.pendingActions?.delete({
+          transport: context.transport,
+          conversation_id: context.recipient.conversation_id,
+          issue_id: pending.issue_id,
+        });
+        const runtimeContext = await this.runtimeContext.buildContext(
+          context,
+          text,
+          this.getDiagnostics(),
+        );
+        return this.handleIntent(context, replacementControlIntent, text, runtimeContext);
+      }
+
+      if (!isSlashCommandText(normalized) && shouldBypassPendingForReadOnlyIssueQuestion(normalized)) {
+        const runtimeContext = await this.runtimeContext.buildContext(
+          context,
+          text,
+          this.getDiagnostics(),
+        );
+        const decision = buildHeuristicDecision(text, runtimeContext);
+        if (decision.intent.kind === 'status' || decision.intent.kind === 'answer_question') {
+          return this.handleIntent(context, decision.intent, text, runtimeContext);
+        }
       }
 
       if (isConfirmation(normalized)) {
@@ -1607,12 +1821,16 @@ export class BotAssistantService {
       };
     }
 
-    if (isClearRepoConversationCommand(text)) {
-      return this.clearSupervisorRepoConversation(context, text);
-    }
-
     if (isSlashCommandText(text)) {
       return this.commandService.execute(context, parseTextCommand(text));
+    }
+
+    if (context.transport === 'telegram' && this.supervisorAgentRuntime) {
+      return this.supervisorAgentRuntime.respond({
+        context,
+        text,
+        canWrite: this.canWrite(context),
+      });
     }
 
     const runtimeContext = await this.runtimeContext.buildContext(
@@ -1620,6 +1838,14 @@ export class BotAssistantService {
       text,
       this.getDiagnostics(),
     );
+    const explicitIssueId = extractIssueIdentifier(text);
+    if (runtimeContext.focus_issue) {
+      this.rememberIssueFocus(
+        context,
+        runtimeContext.focus_issue.issue,
+        explicitIssueId ? 'explicit_issue' : 'runtime_issue',
+      );
+    }
 
     if (isGreetingLikeText(text)) {
       return {
@@ -1657,6 +1883,16 @@ export class BotAssistantService {
       if (supervisorResponse) {
         return supervisorResponse;
       }
+    }
+
+    if (
+      this.supervisorAgentService &&
+      isDeterministicControlIntent(fastHeuristic.intent) &&
+      fastHeuristic.intent.kind !== 'set_default_project'
+      && 'issue_id' in fastHeuristic.intent
+      && fastHeuristic.intent.issue_id
+    ) {
+      return this.handleIntent(context, fastHeuristic.intent, text, runtimeContext);
     }
 
     const supervisorAgentResult = await this.askSupervisorAgent(
@@ -2057,6 +2293,8 @@ export class BotAssistantService {
       case 'unwatch':
       case 'stop':
       case 'retry':
+      case 'close_issue':
+      case 'supersede_issue':
       case 'override':
       case 'rewrite':
       case 'split':
@@ -2088,8 +2326,10 @@ export class BotAssistantService {
         }
 
         const summary = [
-          `Action: ${request.command}`,
+          `Action: ${request.command === 'supersede_issue' ? 'supersede issue' : request.command === 'close_issue' ? 'close issue' : request.command}`,
           request.issue_id ? `Issue: ${request.issue_id}` : null,
+          request.successor_issue_id ? `Successor: ${request.successor_issue_id}` : null,
+          request.retry_successor ? 'Retry successor: yes' : null,
           request.project_slug ? `Project: ${request.project_slug}` : null,
           request.project_slug === 'clear' ? 'Project: clear default project' : null,
           'Reply with: 确认 / 取消',
@@ -2119,4 +2359,46 @@ export class BotAssistantService {
         };
     }
   }
+}
+
+function isNaturalRetryRequest(text: string): boolean {
+  const normalized = text.trim();
+  if (/^(?:为什么|为啥|原因|怎么|如何)/.test(normalized)) {
+    return false;
+  }
+  return /(?:重新执行|重新跑|重跑|重试|再跑|再执行|继续执行|继续跑|retry|rerun|re-run|restart)/i.test(normalized);
+}
+
+function detectPendingReplacementControlIntent(text: string): BotAssistantIntent | null {
+  const closeIntent = detectIssueCloseIntent(text);
+  if (closeIntent) {
+    return closeIntent;
+  }
+
+  const issueIds = extractControlIssueIdentifiers(text);
+  if (issueIds.length > 0 && isNaturalRetryRequest(text)) {
+    return {
+      kind: 'retry',
+      issue_id: issueIds[issueIds.length - 1]!,
+    };
+  }
+
+  return null;
+}
+
+function isDeterministicControlIntent(intent: BotAssistantIntent): boolean {
+  return [
+    'watch',
+    'unwatch',
+    'stop',
+    'retry',
+    'close_issue',
+    'supersede_issue',
+    'override',
+    'rewrite',
+    'split',
+    'set_default_project',
+    'execute_governance_suggestion',
+    'dismiss_governance_suggestion',
+  ].includes(intent.kind);
 }

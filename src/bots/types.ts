@@ -12,6 +12,8 @@ export type BotCommandName =
   | 'unwatch'
   | 'stop'
   | 'retry'
+  | 'close_issue'
+  | 'supersede_issue'
   | 'override'
   | 'rewrite'
   | 'split'
@@ -94,10 +96,13 @@ export interface BotCommandContext {
 export interface BotCommandRequest {
   command: BotCommandName;
   issue_id?: string | null;
+  successor_issue_id?: string | null;
+  retry_successor?: boolean | null;
   suggestion_id?: string | null;
   project_slug?: string | null;
   watch_preset?: BotWatchPreset | null;
   create_issue?: CreateIssueRequest | null;
+  reason?: string | null;
   raw_text?: string | null;
 }
 
@@ -169,6 +174,24 @@ export interface BotManifest {
       root_issue_id: string | null;
       updated_at: string;
     }>;
+    agent_runtime?: {
+      active_runs: Array<{
+        run_id: string;
+        transport: BotTransport;
+        conversation_id: string;
+        state: string;
+        repo_ref: string | null;
+        active_issue_id: string | null;
+        step_count: number;
+        updated_at: string;
+      }>;
+      pending_actions: Array<{
+        run_id: string;
+        tool_name: string;
+        status: string;
+        expires_at: string;
+      }>;
+    };
     repo_sources?: Array<{
       project_slug: string;
       repo_ref: string;
@@ -258,6 +281,8 @@ export type BotAssistantIntentKind =
   | 'unwatch'
   | 'stop'
   | 'retry'
+  | 'close_issue'
+  | 'supersede_issue'
   | 'override'
   | 'rewrite'
   | 'split'
@@ -277,10 +302,18 @@ export type BotAssistantIntent =
       project_slug: string | null;
     }
   | {
-    kind: 'status' | 'watch' | 'unwatch' | 'stop' | 'retry' | 'override' | 'rewrite' | 'split';
+    kind: 'status' | 'watch' | 'unwatch' | 'stop' | 'retry' | 'close_issue' | 'override' | 'rewrite' | 'split';
     issue_id: string | null;
     watch_preset?: BotWatchPreset | null;
+    reason?: string | null;
   }
+  | {
+      kind: 'supersede_issue';
+      issue_id: string | null;
+      successor_issue_id: string | null;
+      reason: string | null;
+      retry_successor?: boolean | null;
+    }
   | {
       kind: 'execute_governance_suggestion' | 'dismiss_governance_suggestion';
       issue_id: string | null;
