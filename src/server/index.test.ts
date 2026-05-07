@@ -251,7 +251,7 @@ describe('SymphonyServer', () => {
             inbound_path: '/api/v1/bots/discord/interactions',
           },
         },
-        commands: ['help', 'status', 'new', 'watch', 'unwatch', 'stop', 'retry', 'override', 'rewrite', 'split'],
+        commands: ['help', 'status', 'new', 'watch', 'unwatch', 'stop', 'retry', 'close', 'supersede', 'override', 'rewrite', 'split'],
         watch_presets: ['default', 'verbose', 'failures', 'status'],
         assistant: {
           provider: null,

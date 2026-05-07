@@ -124,6 +124,8 @@ function buildPromptText(params: BotAssistantModelRequest): string {
     '{"intent":{"kind":"unwatch","issue_id":"INT-31"}}',
     '{"intent":{"kind":"stop","issue_id":"INT-31"}}',
     '{"intent":{"kind":"retry","issue_id":"INT-31"}}',
+    '{"intent":{"kind":"close_issue","issue_id":"INT-31"}}',
+    '{"intent":{"kind":"supersede_issue","issue_id":"INT-31","successor_issue_id":"INT-32","reason":"..."}}',
     '{"intent":{"kind":"override","issue_id":"INT-31"}}',
     '{"intent":{"kind":"rewrite","issue_id":"INT-31"}}',
     '{"intent":{"kind":"split","issue_id":"INT-31"}}',

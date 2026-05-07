@@ -1,4 +1,8 @@
-import { BotConversationPreferenceRepository, type BotFollowupMessageStateRepository } from '../database';
+import {
+  BotConversationPreferenceRepository,
+  type BotConversationFocusRepository,
+  type BotFollowupMessageStateRepository,
+} from '../database';
 import type { RuntimeControlPlane, RuntimeIssueView, RuntimeTimelineEvent } from '../runtime/types';
 import { TrackerProjectResolutionService } from '../tracker/projectResolution';
 import {
@@ -14,11 +18,8 @@ import type {
   BotRuntimeCopilotContext,
 } from './types';
 import type { BotSubscriptionService } from './subscriptions';
-
-function extractIssueIdentifier(text: string): string | null {
-  const match = text.match(/\b[A-Z][A-Z0-9]+-\d+\b/i);
-  return match ? match[0].toUpperCase() : null;
-}
+import { extractIssueIdentifier } from './issueIdentifier';
+import { isTerminalIssue, isUserVisibleActiveIssue } from './issueVisibility';
 
 function toIssueContextView(issue: RuntimeIssueView): BotIssueContextView {
   return {
@@ -102,39 +103,23 @@ function compareTimeline(left: RuntimeTimelineEvent, right: RuntimeTimelineEvent
   return left.timestamp.localeCompare(right.timestamp);
 }
 
-function isTerminalTrackerState(state: string | null | undefined): boolean {
-  return /^(done|completed|cancelled|canceled|duplicate|closed)$/i.test(state || '');
-}
-
-function isActiveSupervisorState(state: string | null | undefined): boolean {
-  return Boolean(state && !/^(completed|cancelled|canceled)$/i.test(state));
-}
-
-function isUserVisibleActiveIssue(issue: RuntimeIssueView): boolean {
-  if (isTerminalTrackerState(issue.tracker_state)) {
-    return false;
-  }
-  if (issue.actions.can_stop) {
-    return true;
-  }
-  if (isActiveSupervisorState(issue.supervisor_session_state)) {
-    return true;
-  }
-  if (issue.delivery_state === 'delivery_failed' && issue.delivery_code !== 'manual_stop') {
-    return true;
-  }
-  return false;
-}
-
 function resolveFocusIssue(
   runtime: RuntimeControlPlane,
   overviewIssues: RuntimeIssueView[],
+  conversationFocusIssueId: string | null,
   openFollowupIssueId: string | null,
   text: string,
 ): RuntimeIssueView | null {
   const identifier = extractIssueIdentifier(text);
   if (identifier) {
     return runtime.getIssue(identifier);
+  }
+
+  if (conversationFocusIssueId) {
+    const focusedIssue = runtime.getIssue(conversationFocusIssueId);
+    if (focusedIssue && !isTerminalIssue(focusedIssue)) {
+      return focusedIssue;
+    }
   }
 
   if (openFollowupIssueId) {
@@ -162,6 +147,25 @@ function resolveFocusIssue(
   return null;
 }
 
+function resolveOpenFollowupIssueId(
+  runtime: RuntimeControlPlane,
+  issueIds: string[],
+): string | null {
+  const openIssues = issueIds
+    .map((issueId) => runtime.getIssue(issueId))
+    .filter((issue): issue is RuntimeIssueView => Boolean(issue))
+    .filter((issue) =>
+      isUserVisibleActiveIssue(issue) ||
+      issue.actions.can_override_governance ||
+      issue.actions.can_rewrite_governance ||
+      issue.actions.can_split_governance
+    );
+  if (openIssues.length !== 1) {
+    return null;
+  }
+  return openIssues[0]?.issue_id ?? null;
+}
+
 export class BotRuntimeContextService {
   constructor(
     private readonly runtime: RuntimeControlPlane,
@@ -171,6 +175,7 @@ export class BotRuntimeContextService {
     private readonly followupMessageStates: BotFollowupMessageStateRepository | null = null,
     private readonly repoProfileService: RepoProfileService = new DefaultRepoProfileService(),
     private readonly repoUnderstandingService: SupervisorRepoUnderstandingService | null = null,
+    private readonly conversationFocuses: BotConversationFocusRepository | null = null,
   ) {}
 
   async buildContext(
@@ -196,10 +201,19 @@ export class BotRuntimeContextService {
       transport: context.transport,
       conversation_id: context.recipient.conversation_id,
     }).filter((record) => record.card_kind === 'governance_blocked') ?? [];
+    const openFollowupIssueId = resolveOpenFollowupIssueId(
+      this.runtime,
+      openGovernanceCards.map((record) => record.issue_id),
+    );
+    const conversationFocus = this.conversationFocuses?.findByConversation({
+      transport: context.transport,
+      conversation_id: context.recipient.conversation_id,
+    }) ?? null;
     const focusIssue = resolveFocusIssue(
       this.runtime,
       overview.issues,
-      openGovernanceCards.length === 1 ? openGovernanceCards[0]?.issue_id ?? null : null,
+      conversationFocus?.issue_id ?? conversationFocus?.issue_identifier ?? null,
+      openFollowupIssueId,
       text,
     );
     const historyView = focusIssue ? this.runtime.getHistoryView(focusIssue.issue_id, 3) : null;

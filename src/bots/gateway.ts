@@ -14,7 +14,9 @@ import {
 } from './governanceCards';
 import { resolveGovernanceQuickActionByOrdinal, type GovernanceQuickActionSpec } from './governanceQuickActions';
 import { BotSubscriptionService } from './subscriptions';
+import { isTerminalIssue } from './issueVisibility';
 import {
+  BotConversationFocusRepository,
   BotFollowupDeliveryStateRepository,
   BotFollowupMessageStateRepository,
   BotConversationPreferenceRepository,
@@ -32,6 +34,11 @@ import {
   SupervisorJobRepository,
   SupervisorMemoryRepository,
   SupervisorRepoUnderstandingRepository,
+  RepoClaudeConversationRepository,
+  SupervisorPendingActionRepository,
+  SupervisorRunEventRepository,
+  SupervisorRunRepository,
+  SupervisorToolCallRepository,
   BotTransportEventRepository,
   BotWatchSubscriptionRepository,
   WorkItemRepository,
@@ -43,6 +50,7 @@ import type {
   BotManifest,
   BotCommandContext,
   BotCommandRequest,
+  BotCommandResponse,
   BotGateway,
   BotMessageEditFailureKind,
   BotRecipient,
@@ -97,6 +105,7 @@ import {
 } from '../supervisor/claudeRepoUnderstandingService';
 import { DefaultRepoProfileService } from '../supervisor/repoProfileService';
 import { GovernanceMemoryService } from '../governance/repoIntelligence';
+import { SupervisorAgentRuntimeService } from '../supervisor/agentRuntime';
 
 interface TelegramUpdate {
   message?: {
@@ -111,9 +120,29 @@ interface TelegramUpdate {
     message?: {
       chat?: { id: number | string };
       message_id?: number | string;
+      text?: string;
+      caption?: string;
     };
     from?: { id: number | string; username?: string; first_name?: string; last_name?: string };
   };
+}
+
+function getPendingActionRequestIssueId(
+  pendingAction: NonNullable<ReturnType<BotPendingActionRepository['findByConversationIssue']>>,
+): string | null {
+  const request = pendingAction.normalized_payload as BotCommandRequest;
+  return request.issue_id?.trim() || null;
+}
+
+function hasPendingConfirmationButtons(response: BotCommandResponse): boolean {
+  const actions = [
+    ...(response.actions ?? []),
+    ...((response.action_rows ?? []).flat()),
+  ];
+  return actions.some((action) => (
+    action.callback_data === 'pending|confirm' ||
+    action.callback_data === 'pending|cancel'
+  ));
 }
 
 interface DiscordInteractionOption {
@@ -828,6 +857,7 @@ export class DefaultBotGateway implements BotGateway {
   private readonly followupMessageStates: BotFollowupMessageStateRepository | null;
   private readonly followupDeliveryStates: BotFollowupDeliveryStateRepository | null;
   private readonly pendingActions: BotPendingActionRepository | null;
+  private readonly conversationFocuses: BotConversationFocusRepository | null;
   private readonly transportEvents: BotTransportEventRepository | null;
   private readonly telegramDiagnostics: TelegramWebhookDiagnosticsService;
   private readonly telegramBootstrap: TelegramWebhookBootstrapService | null;
@@ -839,6 +869,13 @@ export class DefaultBotGateway implements BotGateway {
   private readonly projectResolver: TrackerProjectResolutionService | null;
   private readonly supervisorRepoSourceResolver: SupervisorRepoSourceResolver | null;
   private readonly supervisorAgentService: SupervisorAgentService | null;
+  private readonly supervisorAgentRuntime: SupervisorAgentRuntimeService | null;
+  private readonly supervisorRuns: SupervisorRunRepository | null;
+  private readonly supervisorRunEvents: SupervisorRunEventRepository | null;
+  private readonly supervisorToolCalls: SupervisorToolCallRepository | null;
+  private readonly supervisorPendingActions: SupervisorPendingActionRepository | null;
+  private readonly repoClaudeConversations: RepoClaudeConversationRepository | null;
+  private readonly botWriteAuthorizer: (context: BotCommandContext) => boolean;
   private readonly telegramTextProcessingAckDelayMs: number;
   private telegramPublicBaseUrl: string | null = normalizePublicBaseUrl(process.env.SYMPHONY_PUBLIC_BASE_URL || null);
   private telegramWebhookUsedTunnel: boolean | null = null;
@@ -852,6 +889,7 @@ export class DefaultBotGateway implements BotGateway {
     subscriptionRepository: BotWatchSubscriptionRepository | null = null,
     options: {
       preferencesRepository?: BotConversationPreferenceRepository | null;
+      conversationFocusRepository?: BotConversationFocusRepository | null;
       pendingActionRepository?: BotPendingActionRepository | null;
       followupRepository?: BotIssueFollowupRepository | null;
       followupMessageStateRepository?: BotFollowupMessageStateRepository | null;
@@ -861,6 +899,12 @@ export class DefaultBotGateway implements BotGateway {
       supervisorSessionEventRepository?: SupervisorSessionEventRepository | null;
       supervisorJobRepository?: SupervisorJobRepository | null;
       supervisorMemoryRepository?: SupervisorMemoryRepository | null;
+      supervisorRunRepository?: SupervisorRunRepository | null;
+      supervisorRunEventRepository?: SupervisorRunEventRepository | null;
+      supervisorToolCallRepository?: SupervisorToolCallRepository | null;
+      supervisorPendingActionRepository?: SupervisorPendingActionRepository | null;
+      repoClaudeConversationRepository?: RepoClaudeConversationRepository | null;
+      supervisorAgentRuntimeService?: SupervisorAgentRuntimeService | null;
       supervisorSessionService?: SupervisorSessionService | null;
       supervisorPlanBrain?: SupervisorPlanBrain | null;
       supervisorExecutionOverseer?: SupervisorExecutionOverseer | null;
@@ -884,9 +928,15 @@ export class DefaultBotGateway implements BotGateway {
     this.followupMessageStates = options.followupMessageStateRepository ?? null;
     this.followupDeliveryStates = options.followupDeliveryStateRepository ?? null;
     this.pendingActions = options.pendingActionRepository ?? null;
+    this.conversationFocuses = options.conversationFocusRepository ?? null;
     this.transportEvents = options.transportEventRepository ?? null;
     this.supervisorSessions = options.supervisorSessionRepository ?? null;
     this.supervisorSessionEvents = options.supervisorSessionEventRepository ?? null;
+    this.supervisorRuns = options.supervisorRunRepository ?? null;
+    this.supervisorRunEvents = options.supervisorRunEventRepository ?? null;
+    this.supervisorToolCalls = options.supervisorToolCallRepository ?? null;
+    this.supervisorPendingActions = options.supervisorPendingActionRepository ?? null;
+    this.repoClaudeConversations = options.repoClaudeConversationRepository ?? null;
     this.telegramTextProcessingAckDelayMs = Math.max(
       1,
       options.telegramTextProcessingAckDelayMs
@@ -917,6 +967,7 @@ export class DefaultBotGateway implements BotGateway {
       telegramOperatorIds: telegramConfig.operatorIds,
       discordOperatorIds: discordConfig.operatorIds,
     });
+    this.botWriteAuthorizer = canWrite;
     this.commandService = new BotCommandService(
       runtime,
       this.subscriptions,
@@ -925,6 +976,27 @@ export class DefaultBotGateway implements BotGateway {
       options.projectResolver ?? null,
       options.followupRepository ?? null,
     );
+    this.supervisorAgentRuntime = options.supervisorAgentRuntimeService === undefined
+      ? (
+          this.supervisorRuns &&
+          this.supervisorRunEvents &&
+          this.supervisorToolCalls &&
+          this.supervisorPendingActions
+            ? new SupervisorAgentRuntimeService({
+                runtime,
+                commandService: this.commandService,
+                preferences: options.preferencesRepository ?? null,
+                projectResolver: options.projectResolver ?? null,
+                runs: this.supervisorRuns,
+                events: this.supervisorRunEvents,
+                toolCalls: this.supervisorToolCalls,
+                pendingActions: this.supervisorPendingActions,
+                repoConversations: this.repoClaudeConversations,
+                supervisorAgentService: this.supervisorAgentService,
+              })
+            : null
+        )
+      : options.supervisorAgentRuntimeService;
     this.supervisorSessionService = options.supervisorSessionService
       ?? ((this.supervisorSessions && this.supervisorSessionEvents)
         ? new SupervisorSessionService(
@@ -952,6 +1024,8 @@ export class DefaultBotGateway implements BotGateway {
       options.supervisorAgentService ?? null,
       options.repoUnderstandingService ?? null,
       this.supervisorRepoSourceResolver,
+      this.conversationFocuses,
+      this.supervisorAgentRuntime,
     );
     const runStartupRepair = () => {
       try {
@@ -962,6 +1036,7 @@ export class DefaultBotGateway implements BotGateway {
           options.followupMessageStateRepository ?? null,
           options.followupDeliveryStateRepository ?? null,
           options.pendingActionRepository ?? null,
+          options.conversationFocusRepository ?? null,
         ).repair();
         if (this.supervisorSessions) {
           new SupervisorSessionRepairService(
@@ -973,6 +1048,7 @@ export class DefaultBotGateway implements BotGateway {
             },
           ).repair();
         }
+        this.supervisorAgentRuntime?.recoverStartupState();
       } catch (error) {
         logger.warn('Bot follow-up repair failed during gateway startup', {}, error instanceof Error ? error : undefined);
       }
@@ -1093,12 +1169,34 @@ export class DefaultBotGateway implements BotGateway {
           inbound_path: '/api/v1/bots/discord/interactions',
         },
       },
-      commands: ['help', 'clear', 'status', 'new', 'project', 'watch', 'unwatch', 'stop', 'retry', 'override', 'rewrite', 'split'],
+      commands: ['help', 'clear', 'status', 'new', 'project', 'watch', 'unwatch', 'stop', 'retry', 'close', 'supersede', 'override', 'rewrite', 'split'],
       watch_presets: ['default', 'verbose', 'failures', 'status'],
       assistant: this.assistantService.getDiagnostics(),
       natural_language_enabled: true,
       supervisor: {
         active_sessions: activeSupervisorSessions,
+        agent_runtime: {
+          active_runs: this.supervisorRuns?.listActive().map((run) => ({
+            run_id: run.id,
+            transport: run.transport,
+            conversation_id: run.conversation_id,
+            state: run.state,
+            repo_ref: run.repo_ref,
+            active_issue_id: run.active_issue_id,
+            step_count: run.step_count,
+            updated_at: run.updated_at.toISOString(),
+          })) ?? [],
+          pending_actions: this.supervisorRuns?.listActive().flatMap((run) =>
+            this.supervisorPendingActions?.findByRun(run.id)
+              .filter((action) => action.status === 'pending_confirm')
+              .map((action) => ({
+                run_id: run.id,
+                tool_name: action.tool_name,
+                status: action.status,
+                expires_at: action.expires_at.toISOString(),
+              })) ?? []
+          ) ?? [],
+        },
         repo_sources: this.supervisorRepoSourceResolver?.getDiagnostics(
           this.projectResolver?.listConfiguredRoutes() ?? [],
         ) ?? [],
@@ -1289,6 +1387,7 @@ export class DefaultBotGateway implements BotGateway {
           callbackIssue,
           existingCardState,
           messageId !== undefined && messageId !== null ? String(messageId) : null,
+          callbackQuery.message?.text ?? callbackQuery.message?.caption ?? null,
         );
         const recipient = {
           transport: 'telegram' as const,
@@ -1445,6 +1544,7 @@ export class DefaultBotGateway implements BotGateway {
     issue: RuntimeIssueView | null,
     existingCardState: ReturnType<BotFollowupMessageStateRepository['findByConversationIssue']> | null,
     originalMessageId: string | null,
+    originalMessageText: string | null,
   ): Promise<{
     outbound: BotTransportMessage;
     toastText: string;
@@ -1530,8 +1630,13 @@ export class DefaultBotGateway implements BotGateway {
         issue,
         existingCardState,
         originalMessageId,
+        originalMessageText,
       );
-      if (!pendingAction || !pendingAction.issue_id || !this.pendingActions) {
+      if (!pendingAction || !this.pendingActions) {
+        const runtimeResult = await this.handleSupervisorRuntimePendingCallback(context, '确认');
+        if (runtimeResult) {
+          return runtimeResult;
+        }
         return {
           outbound: {
             text: '这张治理卡已经失效，请直接发送“现在是什么单子？”或重新查看当前待处理线程。',
@@ -1544,9 +1649,11 @@ export class DefaultBotGateway implements BotGateway {
         };
       }
 
+      const pendingRequestIssueId = getPendingActionRequestIssueId(pendingAction);
       const executingIssue = issue
-        ?? this.runtime.getIssue(pendingAction.issue_id)
-        ?? this.buildFallbackGovernanceIssue(null, parsed.issueIdentifier, existingCardState);
+        ?? (pendingAction.issue_id ? this.runtime.getIssue(pendingAction.issue_id) : null)
+        ?? this.runtime.getIssue(pendingRequestIssueId ?? '')
+        ?? this.buildFallbackGovernanceIssue(null, pendingRequestIssueId ?? parsed.issueIdentifier, existingCardState);
       const actionLabel = this.describePendingAction(pendingAction, executingIssue);
       this.persistPendingAction(pendingAction, {
         status: 'executing',
@@ -1581,8 +1688,13 @@ export class DefaultBotGateway implements BotGateway {
         issue,
         existingCardState,
         originalMessageId,
+        originalMessageText,
       );
       if (!pendingAction || !this.pendingActions) {
+        const runtimeResult = await this.handleSupervisorRuntimePendingCallback(context, '取消');
+        if (runtimeResult) {
+          return runtimeResult;
+        }
         return {
           outbound: {
             text: '这张治理卡已经失效，不需要再取消了。请直接发送“现在是什么单子？”查看当前线程。',
@@ -1600,7 +1712,11 @@ export class DefaultBotGateway implements BotGateway {
         });
       }
 
-      const fallbackIssue = this.buildFallbackGovernanceIssue(issue, parsed.issueIdentifier, existingCardState);
+      const pendingRequestIssueId = getPendingActionRequestIssueId(pendingAction);
+      const fallbackIssue = issue
+        ?? (pendingAction.issue_id ? this.runtime.getIssue(pendingAction.issue_id) : null)
+        ?? this.runtime.getIssue(pendingRequestIssueId ?? '')
+        ?? this.buildFallbackGovernanceIssue(issue, pendingRequestIssueId ?? parsed.issueIdentifier, existingCardState);
       if (fallbackIssue.governance_thread_state === 'waiting_on_child') {
         return {
           outbound: buildGovernanceWaitingOnChildMessage(fallbackIssue, {
@@ -1646,6 +1762,51 @@ export class DefaultBotGateway implements BotGateway {
       issue: fallbackIssue,
       cardState: fallbackIssue.governance_thread_state === 'waiting_on_child' ? 'waiting_on_child' : 'open',
       cardKey: buildGovernanceCardKey(fallbackIssue),
+      executeAfterAck: null,
+    };
+  }
+
+  private async handleSupervisorRuntimePendingCallback(
+    context: BotCommandContext,
+    text: '确认' | '取消',
+  ): Promise<{
+    outbound: BotTransportMessage;
+    toastText: string;
+    issue: RuntimeIssueView | null;
+    cardState: 'open' | 'confirming' | 'executing' | 'waiting_on_child' | 'resolved' | 'failed';
+    cardKey: string;
+    executeAfterAck: null;
+  } | null> {
+    const pending = this.supervisorPendingActions?.findOpenByConversation({
+      transport: context.transport,
+      conversation_id: context.recipient.conversation_id,
+    }) ?? null;
+    if (!pending || !this.supervisorAgentRuntime) {
+      return null;
+    }
+
+    const response = await this.supervisorAgentRuntime.respond({
+      context,
+      text,
+      canWrite: this.botWriteAuthorizer(context),
+    });
+    const issueId = response.issue_id ?? (typeof pending.tool_args.issue_id === 'string' ? pending.tool_args.issue_id : null);
+    const issue = issueId ? this.runtime.getIssue(issueId) : null;
+    return {
+      outbound: {
+        text: response.message,
+        caption: response.caption,
+        format: response.format,
+        media_key: response.media_key ?? null,
+        photo: response.photo ?? null,
+        show_caption_above_media: response.show_caption_above_media,
+        actions: response.actions,
+        action_rows: response.action_rows,
+      },
+      toastText: text === '确认' ? '已执行' : '已取消',
+      issue,
+      cardState: text === '确认' ? 'resolved' : 'open',
+      cardKey: `supervisor_runtime_${text === '确认' ? 'confirmed' : 'cancelled'}`,
       executeAfterAck: null,
     };
   }
@@ -1970,8 +2131,12 @@ export class DefaultBotGateway implements BotGateway {
     issue: RuntimeIssueView | null,
     existingCardState: ReturnType<BotFollowupMessageStateRepository['findByConversationIssue']> | null,
     originalMessageId: string | null,
+    originalMessageText: string | null,
   ): ReturnType<BotPendingActionRepository['findByConversationIssue']> | null {
     if (!this.pendingActions) {
+      return null;
+    }
+    if (existingCardState && ['resolved', 'failed'].includes(existingCardState.card_state)) {
       return null;
     }
 
@@ -1995,12 +2160,28 @@ export class DefaultBotGateway implements BotGateway {
       }
     }
 
+    const genericPending = this.pendingActions.findByConversation(key);
+    const genericPendingMatchesOriginalText = Boolean(
+      genericPending &&
+      !genericPending.message_id &&
+      originalMessageText &&
+      originalMessageText.includes(genericPending.summary_message),
+    );
+    if (
+      genericPending &&
+      ['pending_confirm', 'executing'].includes(genericPending.status) &&
+      (!originalMessageId || genericPending.message_id === originalMessageId || genericPendingMatchesOriginalText)
+    ) {
+      return genericPending;
+    }
+
     if (originalMessageId) {
       const sameMessagePending = this.pendingActions.findOpenByConversation(key)
         .filter((pending) => pending.message_id === originalMessageId);
       if (sameMessagePending.length === 1) {
         return sameMessagePending[0] ?? null;
       }
+      return null;
     }
 
     return this.pendingActions.findLatestByConversation(key);
@@ -2033,6 +2214,53 @@ export class DefaultBotGateway implements BotGateway {
     });
   }
 
+  private bindPendingConfirmationToTelegramMessage(
+    context: BotCommandContext,
+    response: BotCommandResponse,
+    messageRef: BotTransportMessageRef,
+  ): void {
+    if (!this.pendingActions || !hasPendingConfirmationButtons(response)) {
+      return;
+    }
+
+    const key = {
+      transport: context.transport,
+      conversation_id: context.recipient.conversation_id,
+    } as const;
+    const candidates = [
+      response.issue_id
+        ? this.pendingActions.findByConversationIssue({
+            ...key,
+            issue_id: response.issue_id,
+          })
+        : null,
+      this.pendingActions.findLatestByConversation(key),
+    ].filter((candidate, index, all): candidate is NonNullable<typeof candidate> => (
+      Boolean(candidate) && all.findIndex((other) => (
+        other?.transport === candidate?.transport &&
+        other?.conversation_id === candidate?.conversation_id &&
+        other?.issue_id === candidate?.issue_id
+      )) === index
+    ));
+
+    const pending = candidates.find((candidate) => (
+      candidate.status === 'pending_confirm' &&
+      (
+        candidate.summary_message === response.message ||
+        response.message.includes(candidate.summary_message)
+      )
+    ));
+    if (!pending) {
+      return;
+    }
+
+    this.persistPendingAction(pending, {
+      status: 'pending_confirm',
+      message_id: messageRef.provider_message_id,
+      card_key: pending.card_key,
+    });
+  }
+
   private persistFollowupMessageState(params: {
     conversationId: string;
     issue: RuntimeIssueView;
@@ -2058,10 +2286,30 @@ export class DefaultBotGateway implements BotGateway {
 
     if (params.existingCardState) {
       this.followupMessageStates.updateState(record);
+      this.rememberCallbackFocus(params.conversationId, params.issue, params.cardState);
       return;
     }
 
     this.followupMessageStates.upsert(record);
+    this.rememberCallbackFocus(params.conversationId, params.issue, params.cardState);
+  }
+
+  private rememberCallbackFocus(
+    conversationId: string,
+    issue: RuntimeIssueView,
+    cardState: 'open' | 'confirming' | 'executing' | 'waiting_on_child' | 'resolved' | 'failed',
+  ): void {
+    if (!this.conversationFocuses || cardState === 'resolved' || isTerminalIssue(issue)) {
+      return;
+    }
+    this.conversationFocuses.upsert({
+      transport: 'telegram',
+      conversation_id: conversationId,
+      issue_id: issue.issue_id,
+      issue_identifier: issue.identifier,
+      repo_ref: issue.github_repo,
+      source: 'callback',
+    });
   }
 
   private describePendingAction(
@@ -2454,6 +2702,7 @@ export class DefaultBotGateway implements BotGateway {
       } else {
         sent = await this.telegramNotifier!.sendMessage(recipient, outbound);
       }
+      this.bindPendingConfirmationToTelegramMessage(context, response, sent);
       if (response.session_id) {
         this.supervisorSessionService?.recordOutboundMessage(
           response.session_id,
@@ -2633,6 +2882,7 @@ export function createBotGatewayFromEnv(
     );
   const subscriptionRepository = db ? new BotWatchSubscriptionRepository(db) : null;
   const preferencesRepository = db ? new BotConversationPreferenceRepository(db) : null;
+  const conversationFocusRepository = db ? new BotConversationFocusRepository(db) : null;
   const pendingActionRepository = db ? new BotPendingActionRepository(db) : null;
   const followupRepository = db ? new BotIssueFollowupRepository(db) : null;
   const followupMessageStateRepository = db ? new BotFollowupMessageStateRepository(db) : null;
@@ -2642,6 +2892,11 @@ export function createBotGatewayFromEnv(
   const supervisorSessionEventRepository = db ? new SupervisorSessionEventRepository(db) : null;
   const supervisorJobRepository = db ? new SupervisorJobRepository(db) : null;
   const supervisorMemoryRepository = db ? new SupervisorMemoryRepository(db) : null;
+  const supervisorRunRepository = db ? new SupervisorRunRepository(db) : null;
+  const supervisorRunEventRepository = db ? new SupervisorRunEventRepository(db) : null;
+  const supervisorToolCallRepository = db ? new SupervisorToolCallRepository(db) : null;
+  const supervisorPendingActionRepository = db ? new SupervisorPendingActionRepository(db) : null;
+  const repoClaudeConversationRepository = db ? new RepoClaudeConversationRepository(db) : null;
   const workItemRepository = db ? new WorkItemRepository(db) : null;
   const reviewEventRepository = db ? new ReviewEventRepository(db) : null;
   const governanceAssessmentRepository = db ? new GovernanceAssessmentRepository(db) : null;
@@ -2712,6 +2967,7 @@ export function createBotGatewayFromEnv(
     operatorIds: parseOperatorIds(process.env.SYMPHONY_DISCORD_OPERATOR_IDS),
   }, undefined, subscriptionRepository, {
     preferencesRepository,
+    conversationFocusRepository,
     pendingActionRepository,
     followupRepository,
     followupMessageStateRepository,
@@ -2721,6 +2977,11 @@ export function createBotGatewayFromEnv(
     supervisorSessionEventRepository,
     supervisorJobRepository,
     supervisorMemoryRepository,
+    supervisorRunRepository,
+    supervisorRunEventRepository,
+    supervisorToolCallRepository,
+    supervisorPendingActionRepository,
+    repoClaudeConversationRepository,
     supervisorRepoIntelligenceResolver,
     supervisorPlanBrain: createSupervisorPlanBrainFromEnv(),
     supervisorExecutionOverseer: createSupervisorExecutionOverseerFromEnv(),
