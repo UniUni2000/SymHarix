@@ -31,12 +31,14 @@ import {
   SupervisorSessionRepository,
   SupervisorJobRepository,
   SupervisorMemoryRepository,
+  SupervisorRepoUnderstandingRepository,
   BotTransportEventRepository,
   BotWatchSubscriptionRepository,
   WorkItemRepository,
 } from '../database';
 import type { RuntimeActionResult, RuntimeControlPlane, RuntimeIssueView } from '../runtime/types';
 import type { Database } from 'bun:sqlite';
+import type { SupervisorRepoUnderstanding } from '../database/types';
 import type {
   BotManifest,
   BotCommandContext,
@@ -71,6 +73,29 @@ import {
   createSupervisorExecutionOverseerFromEnv,
   type SupervisorExecutionOverseer,
 } from '../supervisor/executionOverseer';
+import {
+  createSupervisorCcAdvisorFromEnv,
+  type SupervisorCcAdvisor,
+} from '../supervisor/ccAdvisor';
+import {
+  createSupervisorAgentFromEnv,
+  shouldUseReadOnlyClaudeForText,
+  type SupervisorAgentService,
+} from '../supervisor/supervisorAgent';
+import {
+  createSupervisorRepoSourceResolver,
+  type SupervisorRepoSourceResolver,
+} from '../supervisor/repoSourceResolver';
+import type {
+  SupervisorRepoUnderstandingService,
+  SupervisorRepoUnderstandingSnapshot,
+} from '../supervisor/repoUnderstanding';
+import {
+  createClaudeCodeRepoUnderstandingRunner,
+  DefaultClaudeRepoUnderstandingService,
+  resolveGitCommit,
+} from '../supervisor/claudeRepoUnderstandingService';
+import { DefaultRepoProfileService } from '../supervisor/repoProfileService';
 import { GovernanceMemoryService } from '../governance/repoIntelligence';
 
 interface TelegramUpdate {
@@ -185,6 +210,10 @@ function normalizePublicBaseUrl(value: string | null | undefined): string | null
     return null;
   }
   return trimmed.replace(/\/+$/, '');
+}
+
+function isTelegramClearRepoConversationCommand(text: string): boolean {
+  return /^\/clear(?:@[\w_]+)?(?:\s|$)/i.test(text.trim());
 }
 
 function resolveTelegramActionUrl(url: string, publicBaseUrl: string | null): string | null {
@@ -733,6 +762,62 @@ function parsePositiveInteger(value: string | null | undefined): number | null {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+function mapReadyRepoUnderstanding(
+  record: SupervisorRepoUnderstanding | null,
+): SupervisorRepoUnderstandingSnapshot | null {
+  if (!record || record.status !== 'ready' || !record.summary) {
+    return null;
+  }
+  return {
+    repo_ref: record.repo_ref,
+    commit_sha: record.commit_sha,
+    summary: record.summary,
+    understanding: record.understanding_json,
+    evidence_paths: record.evidence_paths_json,
+    source: 'cache',
+  };
+}
+
+function createRepoUnderstandingServiceFromEnv(
+  db: Database | null | undefined,
+): SupervisorRepoUnderstandingService | null {
+  if (!db) {
+    return null;
+  }
+
+  const repository = new SupervisorRepoUnderstandingRepository(db);
+  const timeoutMs = parsePositiveInteger(process.env.SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_TIMEOUT_MS)
+    ?? 120_000;
+  const command = process.env.SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_COMMAND
+    || 'node scripts/claude-adapter.cjs';
+
+  return new DefaultClaudeRepoUnderstandingService({
+    findCached: async ({ repoRef, commitSha }) => mapReadyRepoUnderstanding(
+      repository.findByRepoAndCommit(repoRef, commitSha),
+    ),
+    save: async (snapshot) => {
+      repository.upsert({
+        id: crypto.randomUUID(),
+        repo_ref: snapshot.repo_ref,
+        local_path: snapshot.localPath,
+        commit_sha: snapshot.commit_sha,
+        status: 'ready',
+        summary: snapshot.summary,
+        understanding_json: snapshot.understanding,
+        evidence_paths_json: snapshot.evidence_paths,
+        generated_by: snapshot.source === 'fallback' ? 'fallback' : 'claude_code',
+        error: null,
+      });
+    },
+    resolveCommit: resolveGitCommit,
+    runClaude: createClaudeCodeRepoUnderstandingRunner({
+      command,
+      timeoutMs,
+      projectRoot: process.cwd(),
+    }),
+  });
+}
+
 export class DefaultBotGateway implements BotGateway {
   private readonly commandService: BotCommandService;
   private readonly assistantService: BotAssistantService;
@@ -751,6 +836,9 @@ export class DefaultBotGateway implements BotGateway {
   private readonly supervisorSessionService: SupervisorSessionService | null;
   private readonly supervisorWorker: SupervisorWorker | null;
   private readonly supervisorJobLoop: SupervisorJobLoop | null;
+  private readonly projectResolver: TrackerProjectResolutionService | null;
+  private readonly supervisorRepoSourceResolver: SupervisorRepoSourceResolver | null;
+  private readonly supervisorAgentService: SupervisorAgentService | null;
   private readonly telegramTextProcessingAckDelayMs: number;
   private telegramPublicBaseUrl: string | null = normalizePublicBaseUrl(process.env.SYMPHONY_PUBLIC_BASE_URL || null);
   private telegramWebhookUsedTunnel: boolean | null = null;
@@ -779,13 +867,20 @@ export class DefaultBotGateway implements BotGateway {
       supervisorRepoIntelligenceResolver?: SupervisorRepoIntelligenceResolver | null;
       workItemRepository?: WorkItemRepository | null;
       projectResolver?: TrackerProjectResolutionService | null;
+      supervisorRepoSourceResolver?: SupervisorRepoSourceResolver | null;
       assistantModel?: BotAssistantModel;
+      supervisorCcAdvisor?: SupervisorCcAdvisor | null;
+      supervisorAgentService?: SupervisorAgentService | null;
+      repoUnderstandingService?: SupervisorRepoUnderstandingService | null;
       telegramDiagnostics?: TelegramWebhookDiagnosticsService;
       telegramBootstrapService?: TelegramWebhookBootstrapService | null;
       telegramTextProcessingAckDelayMs?: number | null;
       startupRepairDelayMs?: number | null;
     } = {},
   ) {
+    this.projectResolver = options.projectResolver ?? null;
+    this.supervisorRepoSourceResolver = options.supervisorRepoSourceResolver ?? null;
+    this.supervisorAgentService = options.supervisorAgentService ?? null;
     this.followupMessageStates = options.followupMessageStateRepository ?? null;
     this.followupDeliveryStates = options.followupDeliveryStateRepository ?? null;
     this.pendingActions = options.pendingActionRepository ?? null;
@@ -853,6 +948,10 @@ export class DefaultBotGateway implements BotGateway {
       this.subscriptions,
       options.followupMessageStateRepository ?? null,
       this.supervisorSessionService,
+      options.supervisorCcAdvisor ?? null,
+      options.supervisorAgentService ?? null,
+      options.repoUnderstandingService ?? null,
+      this.supervisorRepoSourceResolver,
     );
     const runStartupRepair = () => {
       try {
@@ -994,12 +1093,16 @@ export class DefaultBotGateway implements BotGateway {
           inbound_path: '/api/v1/bots/discord/interactions',
         },
       },
-      commands: ['help', 'status', 'new', 'project', 'watch', 'unwatch', 'stop', 'retry', 'override', 'rewrite', 'split'],
+      commands: ['help', 'clear', 'status', 'new', 'project', 'watch', 'unwatch', 'stop', 'retry', 'override', 'rewrite', 'split'],
       watch_presets: ['default', 'verbose', 'failures', 'status'],
       assistant: this.assistantService.getDiagnostics(),
       natural_language_enabled: true,
       supervisor: {
         active_sessions: activeSupervisorSessions,
+        repo_sources: this.supervisorRepoSourceResolver?.getDiagnostics(
+          this.projectResolver?.listConfiguredRoutes() ?? [],
+        ) ?? [],
+        repo_advisor_sessions: this.supervisorAgentService?.getRepoConversationDiagnostics?.() ?? [],
       },
     };
   }
@@ -1039,6 +1142,7 @@ export class DefaultBotGateway implements BotGateway {
     this.supervisorWorker?.dispose();
     this.supervisorJobLoop?.dispose();
     this.supervisorSessionService?.dispose();
+    void this.supervisorAgentService?.disposeRepoConversations?.();
     void this.telegramBootstrap?.dispose();
   }
 
@@ -2243,7 +2347,9 @@ export class DefaultBotGateway implements BotGateway {
         {
           text: text.startsWith('/')
             ? '已收到，正在处理命令。'
-            : '收到您的消息了，我这边正在思考和处理，给我点时间',
+            : shouldUseReadOnlyClaudeForText(text)
+              ? '收到，我正在读取最新仓库信息，整理好后马上回复。'
+              : '收到您的消息了，我这边正在思考和处理，给我点时间',
         },
       ).then((sent) => {
         processingAckRef = sent;
@@ -2270,7 +2376,7 @@ export class DefaultBotGateway implements BotGateway {
     }, this.telegramTextProcessingAckDelayMs);
 
     try {
-      const response = text.startsWith('/')
+      const response = text.startsWith('/') && !isTelegramClearRepoConversationCommand(text)
         ? await this.commandService.executeText(context, text)
         : await this.assistantService.respondToText(context, text);
       processingFinished = true;
@@ -2510,6 +2616,12 @@ export function createBotGatewayFromEnv(
   options: {
     projectResolver?: TrackerProjectResolutionService | null;
     assistantModel?: BotAssistantModel;
+    supervisorCcAdvisor?: SupervisorCcAdvisor | null;
+    supervisorAgentService?: SupervisorAgentService | null;
+    repoUnderstandingService?: SupervisorRepoUnderstandingService | null;
+    supervisorRepoSourceResolver?: SupervisorRepoSourceResolver | null;
+    workspaceRoot?: string | null;
+    githubToken?: string | null;
   } = {},
 ): BotGateway {
   const parseOperatorIds = (value: string | undefined): Set<string> =>
@@ -2538,9 +2650,33 @@ export function createBotGatewayFromEnv(
   const conflictMemoryRepository = db ? new ConflictMemoryRepository(db) : null;
   const debtSignalRepository = db ? new DebtSignalRepository(db) : null;
   const shadowHarnessRepository = db ? new ShadowHarnessRepository(db) : null;
+  const repoUnderstandingService = options.repoUnderstandingService === undefined
+    ? createRepoUnderstandingServiceFromEnv(db)
+    : options.repoUnderstandingService;
+  const supervisorRepoSourceResolver = options.supervisorRepoSourceResolver === undefined
+    ? (
+        options.projectResolver && options.workspaceRoot
+          ? createSupervisorRepoSourceResolver({
+              workspaceRoot: options.workspaceRoot,
+              githubToken: options.githubToken ?? '',
+            })
+          : null
+      )
+    : options.supervisorRepoSourceResolver;
   const telegramDiagnostics = new DefaultTelegramWebhookDiagnosticsService(
     process.env.SYMPHONY_TELEGRAM_BOT_TOKEN || null,
   );
+  const supervisorCcAdvisor = options.supervisorCcAdvisor === undefined
+    ? createSupervisorCcAdvisorFromEnv()
+    : options.supervisorCcAdvisor;
+  const supervisorAgentService = options.supervisorAgentService === undefined
+    ? createSupervisorAgentFromEnv(
+        new DefaultRepoProfileService(),
+        fetch,
+        repoUnderstandingService ?? null,
+        supervisorRepoSourceResolver ?? null,
+      )
+    : options.supervisorAgentService;
   telegramDiagnostics.maybeRefresh();
   const supervisorRepoIntelligenceResolver =
     workItemRepository &&
@@ -2590,7 +2726,11 @@ export function createBotGatewayFromEnv(
     supervisorExecutionOverseer: createSupervisorExecutionOverseerFromEnv(),
     workItemRepository,
     projectResolver: options.projectResolver ?? null,
+    supervisorRepoSourceResolver: supervisorRepoSourceResolver ?? null,
     assistantModel: options.assistantModel,
+    supervisorCcAdvisor: supervisorCcAdvisor ?? null,
+    supervisorAgentService: supervisorAgentService ?? null,
+    repoUnderstandingService: repoUnderstandingService ?? null,
     telegramDiagnostics,
   });
 }

@@ -25,3 +25,4 @@ export { SupervisorSessionRepository } from './supervisorSessionRepository';
 export { SupervisorSessionEventRepository } from './supervisorSessionEventRepository';
 export { SupervisorJobRepository } from './supervisorJobRepository';
 export { SupervisorMemoryRepository } from './supervisorMemoryRepository';
+export { SupervisorRepoUnderstandingRepository } from './supervisorRepoUnderstandingRepository';

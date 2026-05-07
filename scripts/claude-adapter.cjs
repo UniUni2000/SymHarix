@@ -21,6 +21,8 @@ const TOOL_NAME_GLOB = new Set(['Glob', 'glob']);
 const TOOL_NAME_GREP = new Set(['Grep', 'grep', 'GrepTool']);
 const TOOL_NAME_WEB_FETCH = new Set(['WebFetch', 'web_fetch', 'WebFetchTool']);
 const TOOL_NAME_WEB_SEARCH = new Set(['WebSearch', 'web_search', 'WebSearchTool']);
+const READ_ONLY_BLOCKED_TOOLS = new Set(['Bash', 'Write', 'Edit']);
+const READ_ONLY_EXTERNAL_TOOLS = new Set(['WebFetch', 'WebSearch']);
 
 function isAdapterDebugEnabled(env = process.env) {
   return env.SYMPHONY_ADAPTER_DEBUG === '1';
@@ -458,6 +460,8 @@ function createAdapterRuntime() {
     pendingToolUses: new Map(),
     nextRuntimeRequestId: 1,
     pendingControlRequests: new Map(),
+    readOnlyMode: false,
+    allowExternalWebTools: false,
   };
 }
 
@@ -650,6 +654,26 @@ function startAdapter({
 
   function forwardRuntimeRequest(ccMsg) {
     const subtype = ccMsg.request && ccMsg.request.subtype;
+    if (runtime.readOnlyMode && subtype === 'can_use_tool') {
+      const toolName = normalizeToolName(ccMsg.request && ccMsg.request.tool_name);
+      if (READ_ONLY_BLOCKED_TOOLS.has(toolName)) {
+        sendClaudeControlResponse(ccMsg.request_id, {
+          behavior: 'deny',
+          message: `${toolName} is disabled in read-only repo understanding mode.`,
+          ...(ccMsg.request?.tool_use_id ? { toolUseID: ccMsg.request.tool_use_id } : {}),
+        });
+        return;
+      }
+      if (READ_ONLY_EXTERNAL_TOOLS.has(toolName) && !runtime.allowExternalWebTools) {
+        sendClaudeControlResponse(ccMsg.request_id, {
+          behavior: 'deny',
+          message: `${toolName} is disabled unless the user explicitly asks for external research.`,
+          ...(ccMsg.request?.tool_use_id ? { toolUseID: ccMsg.request.tool_use_id } : {}),
+        });
+        return;
+      }
+    }
+
     const runnerRequestId = runtime.nextRuntimeRequestId++;
     runtime.pendingControlRequests.set(runnerRequestId, {
       claudeRequestId: ccMsg.request_id,
@@ -878,6 +902,9 @@ function startAdapter({
 
       if (msg.method === 'thread/start') {
         const cwd = msg.params?.cwd || process.cwd();
+        const sandbox = String(msg.params?.sandbox || '').toLowerCase();
+        runtime.readOnlyMode = sandbox === 'workspace-read' || sandbox === 'read-only';
+        runtime.allowExternalWebTools = false;
         runtime.childCwd = cwd;
         runtime.childStdoutBuffer = '';
         runtime.childStderrBuffer = '';
@@ -907,6 +934,7 @@ function startAdapter({
             CLAUDE_CODE_GLOB_HIDDEN: env.CLAUDE_CODE_GLOB_HIDDEN || 'false',
             CLAUDE_CODE_DISABLE_AUTO_MEMORY: env.CLAUDE_CODE_DISABLE_AUTO_MEMORY || '1',
             CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS || '1',
+            CLAUDE_CODE_READ_ONLY: runtime.readOnlyMode ? '1' : env.CLAUDE_CODE_READ_ONLY || '0',
           },
           stdio: ['pipe', 'pipe', 'pipe'],
         });
@@ -954,6 +982,15 @@ function startAdapter({
         runtime.turnCounter += 1;
         runtime.processingOrchTurns.add(runtime.turnCounter);
         runtime.pendingOrchTurn = runtime.turnCounter;
+        const sandboxPolicy = msg.params?.sandboxPolicy;
+        runtime.allowExternalWebTools = Boolean(
+          sandboxPolicy &&
+          typeof sandboxPolicy === 'object' &&
+          (
+            sandboxPolicy.allowExternalResearch === true ||
+            sandboxPolicy.allowExternalWebTools === true
+          )
+        );
         resetTurnState();
         emitDebugLog(`Received turn/start (orch=${runtime.pendingOrchTurn})`);
 

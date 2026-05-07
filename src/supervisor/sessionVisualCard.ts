@@ -146,6 +146,14 @@ function outcomeString(session: SupervisorSessionRecord, key: string): string | 
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+function materializationPrefix(session: SupervisorSessionRecord): string {
+  const outcomeKind = outcomeString(session, 'outcome_kind');
+  if (outcomeKind === 'continued' || outcomeKind === 'plan_revision_approved') {
+    return '已继续执行';
+  }
+  return '已创建';
+}
+
 function outcomeNumber(session: SupervisorSessionRecord, key: string): number | null {
   const value = session.last_material_outcome?.[key];
   if (typeof value === 'number' && Number.isFinite(value)) {
@@ -697,7 +705,7 @@ export function buildSupervisorSessionVisualCard(
   const title = issue?.title || session.plan_card.title;
   const status = statusLabel(session, issue);
   const captionStatus = issue && (session.state === 'materialized' || session.state === 'executing')
-    ? `已创建 · ${status}`
+    ? `${materializationPrefix(session)} · ${status}`
     : status;
   const repo = issue?.github_repo || session.plan_card.repo_ref || session.repo_ref || null;
   return {

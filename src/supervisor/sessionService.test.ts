@@ -338,6 +338,7 @@ function createRuntimeContext(overrides: Partial<BotRuntimeCopilotContext> = {})
         github_repo_full: 'UniUni2000/test2',
       },
     ],
+    repo_profile: null,
     watch_subscriptions: [],
     overview: {
       running: 0,
@@ -1913,7 +1914,7 @@ describe('SupervisorSessionService', () => {
     expect(events.listBySession(session.id).some((event) => event.event_kind === 'clarification_answer_recorded')).toBe(true);
   });
 
-  test('treats "你自己决定吧" as authorization to fill a default acceptance target and exit clarifying', async () => {
+  test('treats "你自己决定吧" as authorization to fill a default acceptance target and show a recommendation-first approval card for Telegram chat', async () => {
     db = new Database(':memory:');
     initializeSchema(db);
 
@@ -1964,20 +1965,214 @@ describe('SupervisorSessionService', () => {
       intent: null,
       runtimeContext: createRuntimeContext(),
       canWrite: true,
+      source: 'telegram_chat',
     });
 
     expect(second).not.toBeNull();
-    expect(second?.message).toContain('计划执行中');
+    expect(second?.format).toBe('telegram_html');
     expect(second?.message).not.toContain('一起补计划');
-    expect(runtime.createIssueCalls).toHaveLength(1);
-    expect(String(runtime.createIssueCalls[0]?.description)).toContain('给出至少一个可直接验证的用户结果');
+    expect(second?.action_rows?.flat().map((action) => action.callback_data ?? null)).toEqual(expect.arrayContaining([
+      expect.stringContaining('|approve'),
+    ]));
+    expect(runtime.createIssueCalls).toHaveLength(0);
     const updated = sessions.findById(session.id);
-    expect(updated?.state).toBe('executing');
+    expect(updated?.state).toBe('awaiting_user_approval');
+    expect(updated?.active_decision_kind).toBe('plan_approval');
+    expect(updated?.plan_card?.clarification_question).toBeNull();
+    expect(updated?.plan_card?.acceptance.join('\n')).toContain('给出至少一个可直接验证的用户结果');
+    expect(events.listBySession(session.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event_kind: 'clarification_answer_recorded',
+        payload_json: expect.objectContaining({
+          delegated_default_used: true,
+        }),
+      }),
+    ]));
+  });
+
+  test('treats "别再问我" as authorization to fill sensible defaults for Telegram chat instead of looping another clarification', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+
+    const session = sessions.create({
+      id: 'session-clarify-stop-asking',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'clarifying',
+      repo_ref: 'test2',
+      intake_mode: 'clarify_then_plan',
+      approval_mode: 'auto',
+      plan_version: 1,
+      plan_card: {
+        title: '改善用户体验',
+        user_goal: '改善用户体验',
+        in_scope: ['改善用户体验'],
+        out_of_scope: [],
+        acceptance: ['结果可验证。'],
+        known_risks: ['当前验收条件还不够稳，需要先补清楚。'],
+        execution_strategy: '保持单目标推进，避免顺手扩大范围。',
+        needs_user_approval: false,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: '这条需求完成以后，你最想看到的可验证结果是什么？',
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '按推荐继续',
+          summary: '按这张精简计划直接开跑。',
+        },
+        alternate_option: {
+          label: '改一下计划',
+          summary: '如果你不想按推荐路径走，我可以先把计划重写得更合适。',
+        },
+        governance_preview: null,
+      },
+    });
+
+    const response = await service.respond({
+      context: createContext(),
+      text: '别再问我',
+      intent: null,
+      runtimeContext: createRuntimeContext(),
+      canWrite: true,
+      source: 'telegram_chat',
+    });
+
+    expect(response).not.toBeNull();
+    expect(response?.format).toBe('telegram_html');
+    expect(response?.message).not.toContain('一起补计划');
+    expect(response?.message).not.toContain('最想看到的可验证结果是什么');
+    expect(runtime.createIssueCalls).toHaveLength(0);
+    const updated = sessions.findById(session.id);
+    expect(updated?.state).toBe('awaiting_user_approval');
     expect(updated?.plan_card?.clarification_question).toBeNull();
     expect(updated?.plan_card?.acceptance.join('\n')).toContain('给出至少一个可直接验证的用户结果');
   });
 
-  test('renders a recommended issue card directly for a low-risk create-issue request instead of forcing clarification', async () => {
+  test('treats "随便" as authorization to fill sensible defaults for Telegram chat instead of looping another clarification', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+
+    const session = sessions.create({
+      id: 'session-clarify-whatever',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'clarifying',
+      repo_ref: 'test2',
+      intake_mode: 'clarify_then_plan',
+      approval_mode: 'auto',
+      plan_version: 1,
+      plan_card: {
+        title: '改善用户体验',
+        user_goal: '改善用户体验',
+        in_scope: ['改善用户体验'],
+        out_of_scope: [],
+        acceptance: ['结果可验证。'],
+        known_risks: ['当前验收条件还不够稳，需要先补清楚。'],
+        execution_strategy: '保持单目标推进，避免顺手扩大范围。',
+        needs_user_approval: false,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: '这条需求完成以后，你最想看到的可验证结果是什么？',
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '按推荐继续',
+          summary: '按这张精简计划直接开跑。',
+        },
+        alternate_option: {
+          label: '改一下计划',
+          summary: '如果你不想按推荐路径走，我可以先把计划重写得更合适。',
+        },
+        governance_preview: null,
+      },
+    });
+
+    const response = await service.respond({
+      context: createContext(),
+      text: '随便',
+      intent: null,
+      runtimeContext: createRuntimeContext(),
+      canWrite: true,
+      source: 'telegram_chat',
+    });
+
+    expect(response).not.toBeNull();
+    expect(response?.format).toBe('telegram_html');
+    expect(response?.message).not.toContain('一起补计划');
+    expect(response?.message).not.toContain('最想看到的可验证结果是什么');
+    expect(runtime.createIssueCalls).toHaveLength(0);
+    const updated = sessions.findById(session.id);
+    expect(updated?.state).toBe('awaiting_user_approval');
+    expect(updated?.plan_card?.clarification_question).toBeNull();
+    expect(updated?.plan_card?.acceptance.join('\n')).toContain('给出至少一个可直接验证的用户结果');
+  });
+
+  test('answers ordinary supervisor-facing Telegram questions without creating a session', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+
+    const response = await service.respond({
+      context: createContext(),
+      text: '这个仓库现在有哪些活跃 issue？',
+      intent: {
+        kind: 'answer_question',
+        answer: '当前活跃 issue：INT-31 · Hello world',
+      },
+      runtimeContext: createRuntimeContext(),
+      canWrite: true,
+      source: 'telegram_chat',
+    });
+
+    expect(response).toEqual({
+      message: '当前活跃 issue：INT-31 · Hello world',
+    });
+    expect(sessions.findAll()).toHaveLength(0);
+  });
+
+  test('returns conversational clarification prompts directly for Telegram when no session exists', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+
+    const response = await service.respond({
+      context: createContext(),
+      text: '你说得再具体一点？',
+      intent: {
+        kind: 'clarify',
+        question: '你更想优化建单入口，还是推荐卡的展示方式？',
+      },
+      runtimeContext: createRuntimeContext(),
+      canWrite: true,
+      source: 'telegram_chat',
+    });
+
+    expect(response).toEqual({
+      message: '你更想优化建单入口，还是推荐卡的展示方式？',
+    });
+    expect(sessions.findAll()).toHaveLength(0);
+  });
+
+  test('renders a recommendation-first issue card for a low-risk conversational create-issue request', async () => {
     db = new Database(':memory:');
     initializeSchema(db);
 
@@ -1997,19 +2192,71 @@ describe('SupervisorSessionService', () => {
       },
       runtimeContext: createRuntimeContext(),
       canWrite: true,
+      source: 'telegram_chat',
     });
 
     expect(response).not.toBeNull();
     expect(response?.format).toBe('telegram_html');
-    expect(response?.message).toContain('计划执行中');
     expect(response?.message).not.toContain('一起补计划');
-    expect(runtime.createIssueCalls).toHaveLength(1);
+    expect(response?.action_rows?.length).toBeGreaterThan(0);
+    expect(response?.action_rows?.flat().map((action) => action.callback_data ?? null)).toEqual(expect.arrayContaining([
+      expect.stringContaining('|approve'),
+    ]));
+    expect(runtime.createIssueCalls).toHaveLength(0);
     const session = sessions.findActiveByConversation({
       transport: 'telegram',
       conversation_id: 'chat-1',
     });
-    expect(session?.state).toBe('executing');
+    expect(session?.state).toBe('awaiting_user_approval');
+    expect(session?.active_decision_kind).toBe('plan_approval');
     expect(session?.plan_card?.clarification_question).toBeNull();
+    expect(session?.plan_card?.title).toBe('分析不同质量恒星的光度等参数随质量 M 的变化');
+    expect(session?.plan_card?.acceptance.join('\n')).toContain('标明采用的主要标度律、假设条件或适用质量范围');
+  });
+
+  test('drafts repo-aware acceptance and advisor-style recommendation copy for conversational supervisor product requests', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+
+    const response = await service.respond({
+      context: createContext(),
+      text: '我希望 supervisor 能像人一样理解需求，然后帮我建一个更像样的 issue',
+      intent: {
+        kind: 'create_issue',
+        title: '创建 Issue：让 supervisor 自然语言建单',
+        description: '用户普通聊天时，先给推荐 issue 卡，再等用户点头',
+        project_slug: 'test2',
+      },
+      runtimeContext: createRuntimeContext(),
+      canWrite: true,
+      source: 'telegram_chat',
+    });
+
+    expect(response).not.toBeNull();
+    expect(response?.format).toBe('telegram_html');
+    expect(response?.message).toContain('计划待你批准');
+    expect(response?.message).toContain('Telegram');
+    expect(response?.message).toContain('slash');
+    expect(response?.message).not.toContain('按这张精简计划直接开跑');
+    expect(runtime.createIssueCalls).toHaveLength(0);
+
+    const session = sessions.findActiveByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(session?.plan_card?.title).toBe('让 supervisor 自然语言建单');
+    expect(session?.plan_card?.acceptance).toEqual(expect.arrayContaining([
+      expect.stringContaining('Telegram'),
+      expect.stringContaining('推荐 issue 卡'),
+      expect.stringContaining('slash 命令'),
+    ]));
+    expect(session?.plan_card?.recommended_option.summary).toContain('Telegram');
+    expect(session?.plan_card?.recommended_option.summary).toContain('slash');
   });
 
   test('does not repeat a stale typo clarification once the user provides a concrete cleanup target', async () => {
