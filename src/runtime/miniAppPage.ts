@@ -38,7 +38,7 @@ export type RuntimeMiniAppI18nKey =
   | 'label.running' | 'label.action' | 'label.live' | 'label.repo_pending'
   | 'label.offline' | 'label.closed' | 'label.delivery_done' | 'label.child_running'
   | 'label.root_issue' | 'label.supervisor_done' | 'label.claude_running'
-  | 'label.supervisor' | 'label.round_format' | 'label.root_format'
+  | 'label.supervisor' | 'label.round_format' | 'label.round_prefix' | 'label.root_format'
   // stage labels
   | 'stage.plan' | 'stage.dispatch' | 'stage.dev' | 'stage.review'
   // title
@@ -76,7 +76,15 @@ export type RuntimeMiniAppI18nKey =
   | 'error.no_history_log' | 'error.no_replayable_log'
   | 'error.cannot_load' | 'error.cannot_load_tip'
   | 'label.unavailable' | 'label.event' | 'label.milestone'
-  | 'label.recorded' | 'label.checkpoint' | 'label.log';
+  | 'label.recorded' | 'label.checkpoint' | 'label.log'
+  // orchestrator states — prevent raw internal strings leaking to UI
+  | 'state.orchestrator_discovering' | 'state.orchestrator_mapping'
+  | 'state.orchestrator_workspace_ready' | 'state.orchestrator_dev_running'
+  | 'state.orchestrator_dev_post_processing' | 'state.orchestrator_review_running'
+  | 'state.orchestrator_review_post_processing' | 'state.orchestrator_needs_rework'
+  | 'state.orchestrator_retry_scheduled' | 'state.orchestrator_halted'
+  | 'state.orchestrator_completed' | 'state.orchestrator_cancelled'
+  | 'state.orchestrator_failed';
 
 export const MINI_APP_I18N: Record<RuntimeMiniAppLocale, Record<RuntimeMiniAppI18nKey, string>> = {
   zh: {
@@ -174,6 +182,7 @@ export const MINI_APP_I18N: Record<RuntimeMiniAppLocale, Record<RuntimeMiniAppI1
     'label.claude_running': 'Claude 运行中',
     'label.supervisor': 'Supervisor',
     'label.round_format': '轮次 {index}/{total}',
+    'label.round_prefix': '轮次',
     'label.root_format': 'Root: {id}',
     // stage labels
     'stage.plan': '规划',
@@ -267,6 +276,20 @@ export const MINI_APP_I18N: Record<RuntimeMiniAppLocale, Record<RuntimeMiniAppI1
     'label.recorded': '已记录',
     'label.checkpoint': '检查点',
     'label.log': '日志',
+    // orchestrator states
+    'state.orchestrator_discovering': '探索中',
+    'state.orchestrator_mapping': '映射中',
+    'state.orchestrator_workspace_ready': '工作区就绪',
+    'state.orchestrator_dev_running': 'Dev 执行中',
+    'state.orchestrator_dev_post_processing': 'Dev 收尾中',
+    'state.orchestrator_review_running': 'Review 执行中',
+    'state.orchestrator_review_post_processing': 'Review 收尾中',
+    'state.orchestrator_needs_rework': '需要返工',
+    'state.orchestrator_retry_scheduled': '已安排重试',
+    'state.orchestrator_halted': '已暂停',
+    'state.orchestrator_completed': '已完成',
+    'state.orchestrator_cancelled': '已取消',
+    'state.orchestrator_failed': '已失败',
   },
   en: {
     'tab.overview': 'Overview',
@@ -325,7 +348,7 @@ export const MINI_APP_I18N: Record<RuntimeMiniAppLocale, Record<RuntimeMiniAppI1
     'state.completed': 'Done',
     'state.waiting': 'Waiting',
     'state.running': 'Running',
-    'state.awaiting_review': 'Awaiting review',
+    'state.awaiting_review': 'Pending',
     'state.approved': 'Approved',
     'state.pending': 'Pending',
     'state.done': 'Done',
@@ -363,6 +386,7 @@ export const MINI_APP_I18N: Record<RuntimeMiniAppLocale, Record<RuntimeMiniAppI1
     'label.claude_running': 'Claude running',
     'label.supervisor': 'Supervisor',
     'label.round_format': 'Round {index}/{total}',
+    'label.round_prefix': 'Round',
     'label.root_format': 'Root: {id}',
     // stage labels
     'stage.plan': 'Plan',
@@ -456,6 +480,20 @@ export const MINI_APP_I18N: Record<RuntimeMiniAppLocale, Record<RuntimeMiniAppI1
     'label.recorded': 'Recorded',
     'label.checkpoint': 'Checkpoint',
     'label.log': 'Log',
+    // orchestrator states
+    'state.orchestrator_discovering': 'Discovering',
+    'state.orchestrator_mapping': 'Mapping',
+    'state.orchestrator_workspace_ready': 'Workspace ready',
+    'state.orchestrator_dev_running': 'Dev running',
+    'state.orchestrator_dev_post_processing': 'Dev finishing',
+    'state.orchestrator_review_running': 'Review running',
+    'state.orchestrator_review_post_processing': 'Review finishing',
+    'state.orchestrator_needs_rework': 'Needs rework',
+    'state.orchestrator_retry_scheduled': 'Retry scheduled',
+    'state.orchestrator_halted': 'Halted',
+    'state.orchestrator_completed': 'Completed',
+    'state.orchestrator_cancelled': 'Cancelled',
+    'state.orchestrator_failed': 'Failed',
   },
 };
 
@@ -1044,6 +1082,26 @@ export function buildRuntimeMiniAppActivityFeed(issue: RuntimeIssueView): Runtim
   return compacted.slice(0, 6);
 }
 
+function orchStateToI18nKey(state: string | null | undefined): string | null {
+  if (!state) return null;
+  switch (state) {
+    case 'discovering': return 'state.orchestrator_discovering';
+    case 'mapping': return 'state.orchestrator_mapping';
+    case 'workspace_ready': return 'state.orchestrator_workspace_ready';
+    case 'dev_running': return 'state.orchestrator_dev_running';
+    case 'dev_post_processing': return 'state.orchestrator_dev_post_processing';
+    case 'review_running': return 'state.orchestrator_review_running';
+    case 'review_post_processing': return 'state.orchestrator_review_post_processing';
+    case 'needs_rework': return 'state.orchestrator_needs_rework';
+    case 'retry_scheduled': return 'state.orchestrator_retry_scheduled';
+    case 'halted': return 'state.orchestrator_halted';
+    case 'completed': return 'state.orchestrator_completed';
+    case 'cancelled': return 'state.orchestrator_cancelled';
+    case 'failed': return 'state.orchestrator_failed';
+    default: return state;
+  }
+}
+
 export function buildRuntimeMiniAppIssuePresentation(issue: RuntimeIssueView): RuntimeMiniAppIssuePresentation {
   const completed = isRuntimeMiniAppIssueCompleted(issue);
   const retryableFailure = isRetryableRuntimeMiniAppFailure(issue);
@@ -1089,7 +1147,7 @@ export function buildRuntimeMiniAppIssuePresentation(issue: RuntimeIssueView): R
       ? 'label.proof_satisfied'
       : retryableFailure
         ? 'label.needs_recovery'
-        : (issue.orchestrator_state || issue.tracker_state || 'label.running'),
+        : (orchStateToI18nKey(issue.orchestrator_state) || orchStateToI18nKey(issue.tracker_state) || 'label.running'),
     stateTone: issue.delivery_state === 'proof_satisfied'
       ? 'green'
       : retryableFailure
@@ -3109,6 +3167,25 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           if (issue.governance_thread_state === 'waiting_on_child') return 34;
           return 18;
         }
+        function tOrchState(state) {
+          if (!state) return null;
+          switch (state) {
+            case 'discovering': return 'state.orchestrator_discovering';
+            case 'mapping': return 'state.orchestrator_mapping';
+            case 'workspace_ready': return 'state.orchestrator_workspace_ready';
+            case 'dev_running': return 'state.orchestrator_dev_running';
+            case 'dev_post_processing': return 'state.orchestrator_dev_post_processing';
+            case 'review_running': return 'state.orchestrator_review_running';
+            case 'review_post_processing': return 'state.orchestrator_review_post_processing';
+            case 'needs_rework': return 'state.orchestrator_needs_rework';
+            case 'retry_scheduled': return 'state.orchestrator_retry_scheduled';
+            case 'halted': return 'state.orchestrator_halted';
+            case 'completed': return 'state.orchestrator_completed';
+            case 'cancelled': return 'state.orchestrator_cancelled';
+            case 'failed': return 'state.orchestrator_failed';
+            default: return state;
+          }
+        }
         function getPresentation(issue) {
           const completed = isCompletedIssue(issue);
           const retryableFailure = isRetryableDeliveryFailure(issue);
@@ -3129,7 +3206,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
                 ? t('copy.completed_pr', { n: issue.active_pr_number })
                 : t('copy.completed_no_pr'),
               roundGoal: t('copy.round_goal_done', { title: issue.title || issue.identifier || 'issue' }),
-              riskDelta: normalizeRuntimeSummary(issue.riskDelta || issue.risk_delta, '', 4000) || 'copy.risk_stable',
+              riskDelta: normalizeRuntimeSummary(issue.riskDelta || issue.risk_delta, '', 4000) || t('copy.risk_stable'),
               planStatus: 'state.completed',
               dispatchStatus: 'state.completed',
               devStatus: 'state.completed',
@@ -3149,7 +3226,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
               ? 'label.proof_satisfied'
               : retryableFailure
                 ? 'label.needs_recovery'
-                : (issue.orchestrator_state || issue.tracker_state || 'label.running'),
+                : tOrchState(issue.orchestrator_state) || tOrchState(issue.tracker_state) || 'label.running',
             stateTone: issue.delivery_state === 'proof_satisfied'
               ? 'green'
               : retryableFailure
@@ -3166,7 +3243,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
               ? t('copy.recovery_stuck')
               : normalizeRuntimeSummary(issue.next_recommended_action || issue.governance_expected_handoff, '', 4000) || t('copy.waiting_supervisor'),
             roundGoal: normalizeRuntimeSummary(issue.roundGoal || (issue.round && issue.round.goal) || issue.next_recommended_action, '', 4000) || t('copy.waiting_signal'),
-            riskDelta: normalizeRuntimeSummary(issue.riskDelta || issue.risk_delta, '', 4000) || 'copy.risk_stable',
+            riskDelta: normalizeRuntimeSummary(issue.riskDelta || issue.risk_delta, '', 4000) || t('copy.risk_stable'),
             planStatus: 'state.completed',
             dispatchStatus: progress >= 30 ? 'state.completed' : 'state.waiting',
             devStatus: progress >= 100 ? 'state.completed' : 'state.running',
@@ -3198,7 +3275,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           const chips = [chip(t(presentation.stateLabel), presentation.stateTone)];
           if (issue.complexity) chips.push(chip(issue.complexity, 'blue'));
           if (issue.round && issue.round.index != null && issue.round.total != null) {
-            chips.push(chip(t('label.round_format', { index: issue.round.index, total: issue.round.total }), 'green'));
+            chips.push(chip(t('label.round_prefix') + ' ' + issue.round.index + '/' + issue.round.total, 'green'));
           }
           chips.push(chip(isCompletedIssue(issue) ? t('label.delivery_done') : child ? t('label.child_running') : t('label.root_issue'), 'yellow'));
           chips.push(chip(isCompletedIssue(issue) ? t('label.supervisor_done') : issue.session ? t('label.claude_running') : t('label.supervisor'), 'blue'));
@@ -3216,7 +3293,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           // Build the chip label only from values we actually know — never show "L?" or "Round ?"
           const parts = [];
           if (issue.complexity) parts.push(issue.complexity);
-          if (round && round.index != null && round.total != null) parts.push(t('label.round_format', { index: round.index, total: round.total }));
+          if (round && round.index != null && round.total != null) parts.push(t('label.round_prefix') + ' ' + round.index + '/' + round.total);
           if (parts.length) {
             el.complexityChip.textContent = parts.join(' · ');
             el.complexityChip.removeAttribute('hidden');
@@ -3224,8 +3301,8 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             el.complexityChip.textContent = '';
             el.complexityChip.setAttribute('hidden', '');
           }
-          renderExpandableText(el.roundGoal, presentation.roundGoal, t('copy.round_goal_waiting'), 180);
-          renderExpandableText(el.riskDelta, presentation.riskDelta, t('copy.risk_stable'), 160);
+          renderExpandableText(el.roundGoal, typeof presentation.roundGoal === 'string' && presentation.roundGoal.startsWith('copy.') ? t(presentation.roundGoal) : presentation.roundGoal, t('copy.round_goal_waiting'), 180);
+          renderExpandableText(el.riskDelta, typeof presentation.riskDelta === 'string' && presentation.riskDelta.startsWith('copy.') ? t(presentation.riskDelta) : presentation.riskDelta, t('copy.risk_stable'), 160);
         }
         function renderStages(issue) {
           const presentation = getPresentation(issue);
