@@ -228,4 +228,46 @@ describe('SupervisorDevConversationService', () => {
     expect(directive.instruction).toContain('INT-62');
     expect(directive.instruction).toContain('排队');
   });
+
+  test('writes deterministic continue instructions in English for English supervisor sessions', () => {
+    const service = new SupervisorDevConversationService();
+
+    const directive = service.buildDirective({
+      session: {
+        ...createSession(),
+        supervisor_locale: 'en',
+        plan_card: {
+          ...createSession().plan_card!,
+          title: '[TES-51] smoke test: hello.py +1 char',
+          acceptance: [
+            'hello.py appends one character',
+            '`python3 -m compileall .` verifies',
+          ],
+        },
+      },
+      issue: createIssue({
+        title: '[TES-51] smoke test: hello.py +1 char',
+        next_recommended_action: null,
+      }),
+      timeline: [],
+      memories: [{
+        id: 'memory-1',
+        repo_ref: 'test2',
+        memory_kind: 'delivery',
+        subject_key: 'TES-50',
+        summary: '## Review Decision: APPROVE',
+        evidence: null,
+        confidence: 0.8,
+        created_at: new Date('2026-01-01T00:00:00.000Z'),
+        updated_at: new Date('2026-01-01T00:00:00.000Z'),
+      }],
+    });
+
+    expect(directive.directive_kind).toBe('continue_dev');
+    expect(directive.instruction).toContain('Continue advancing plan "[TES-51] smoke test: hello.py +1 char"');
+    expect(directive.instruction).toContain('Acceptance: hello.py appends one character; `python3 -m compileall .` verifies.');
+    expect(directive.instruction).toContain('History reminders: ## Review Decision: APPROVE.');
+    expect(directive.instruction).not.toContain('继续推进计划');
+    expect(directive.stop_conditions).toContain('scope change');
+  });
 });

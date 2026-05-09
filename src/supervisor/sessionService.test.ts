@@ -1634,6 +1634,7 @@ describe('SupervisorSessionService', () => {
     });
 
     expect(first?.message).toContain('计划待你批准');
+    expect(first?.action_rows?.[0]?.[0]?.label).toBe('批准并开始');
     expect(runtime.createIssueCalls).toHaveLength(0);
 
     await service.respond({
@@ -1677,13 +1678,22 @@ describe('SupervisorSessionService', () => {
       canWrite: true,
     });
 
-    expect(first?.message).toContain('计划待你批准');
+    expect(first?.message).toContain('Plan awaiting approval');
+    expect(first?.message).toContain('Scope');
+    expect(first?.message).not.toContain('计划待你批准');
+    expect(first?.message).not.toMatch(/[\u3400-\u9fff\uf900-\ufaff]/);
+    expect(first?.action_rows?.flat().map((action) => action.label)).toEqual([
+      'Approve and Start',
+      'Edit Plan',
+      'Open Runtime View',
+    ]);
     expect(runtime.createIssueCalls).toHaveLength(0);
     const session = sessions.findActiveByConversation({
       transport: 'telegram',
       conversation_id: 'chat-1',
     });
     expect(session?.plan_card?.materialization_mode).toBe('root_only');
+    expect(session?.supervisor_locale).toBe('en');
 
     await service.respond({
       context,
@@ -1694,6 +1704,7 @@ describe('SupervisorSessionService', () => {
     });
 
     expect(runtime.createIssueCalls).toHaveLength(1);
+    expect(runtime.createIssueCalls[0]?.supervisor_locale).toBe('en');
     expect(runtime.createIssueCalls[0]?.governance_lineage).toBeUndefined();
     expect(runtime.createIssueCalls[0]?.title).toContain('docs/supervisor-live-smoke-20260427-1305.md');
   });

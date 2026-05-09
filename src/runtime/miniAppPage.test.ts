@@ -290,6 +290,43 @@ describe('Telegram Mini App issue presentation', () => {
     expect(html).toContain('代码改动');
   });
 
+  test('renders the Mini App as four issue tabs under a fixed status header', () => {
+    const html = renderRuntimeMiniAppPage('INT-143');
+
+    expect(html).toContain('class="fixed-header"');
+    expect(html).toContain('data-tab="overview"');
+    expect(html).toContain('data-tab="activity"');
+    expect(html).toContain('data-tab="changes"');
+    expect(html).toContain('data-tab="delivery"');
+    expect(html).toContain('id="tab-overview"');
+    expect(html).toContain('id="tab-activity"');
+    expect(html).toContain('id="tab-changes"');
+    expect(html).toContain('id="tab-delivery"');
+    expect(html).toContain("chip(t('phase') + ' ' + (issue.phase || 'unknown'), 'blue')");
+    expect(html).toContain('id="theme-toggle"');
+    expect(html).toContain('id="language-toggle"');
+    expect(html).toContain('class="segmented-control"');
+    expect(html).toContain('data-theme-choice="light"');
+    expect(html).toContain('data-theme-choice="dark"');
+    expect(html).toContain('data-lang-choice="zh"');
+    expect(html).toContain('data-lang-choice="en"');
+    expect(html).toContain('html[data-theme="light"]');
+    expect(html).toContain("const storedLang = window.localStorage.getItem('symphony.miniapp.lang.' + issueId)");
+    expect(html).toContain('langInitialized: storedLang === \'en\' || storedLang === \'zh\'');
+    expect(html).toContain("state.lang = issue && issue.supervisor_locale === 'en' ? 'en' : 'zh'");
+  });
+
+  test('keeps delivery and changes details in their dedicated tab surfaces', () => {
+    const html = renderRuntimeMiniAppPage('INT-143');
+
+    expect(html).toContain('验收标准');
+    expect(html).toContain('id="acceptance-list"');
+    expect(html).toContain('id="delivery-summary"');
+    expect(html).toContain('完整 diff / 详情');
+    expect(html).toContain("escapeHtml(t('reason'))");
+    expect(html).toContain("[t('restore'), isRetryableDeliveryFailure(issue) ? t('restorable') : t('noRestore')]");
+  });
+
   test('renders Mini App event times down to seconds', () => {
     const html = renderRuntimeMiniAppPage('INT-143');
 
@@ -314,7 +351,7 @@ describe('Telegram Mini App issue presentation', () => {
     expect(presentation.stateLabel).toBe('Needs recovery');
     expect(presentation.nextRecommendation).toContain('一键重试');
     expect(html).toContain('修复交付并重试');
-    expect(html).toContain("setRuntimeAction(el.pauseButton, 'retry', '修复交付并重试'");
+    expect(html).toContain("setRuntimeAction(el.pauseButton, 'retry', t('retryDelivery')");
     expect(html).toContain('/api/v1/runtime/issues/');
   });
 
@@ -323,7 +360,7 @@ describe('Telegram Mini App issue presentation', () => {
 
     expect(html).toContain('id="history-panel"');
     expect(html).toContain('id="history-entry-list"');
-    expect(html).toContain("setRuntimeAction(el.pauseButton, 'history', '完整日志'");
+    expect(html).toContain("setRuntimeAction(el.pauseButton, 'history', t('fullLogButton')");
     expect(html).toContain("if (action === 'history')");
     expect(html).toContain('renderHistoryPanel()');
     expect(html).toContain('完整日志');
@@ -398,5 +435,50 @@ describe('Telegram Mini App issue presentation', () => {
     expect(html).toContain('.agent-row span,');
     expect(html).toContain('white-space: normal;');
     expect(html).toContain('overflow-wrap: anywhere;');
+  });
+
+  test('localizes known runtime-generated Chinese summaries for English mini app sessions', () => {
+    const issue = createIssue({
+      supervisor_locale: 'en',
+      title: '[TES-50] smoke test: hello.py single-char append',
+      tracker_state: 'Done',
+      orchestrator_state: 'completed',
+      delivery_state: 'completed',
+      delivery_summary: 'TES-50 烟雾测试已成功完成。 hello.py 中添加了一个字符，并通过了编译验证。 PR #66 已审查批准，无进一步行动。',
+      roundGoal: '当前计划「[TES-50] smoke test: hello.py single-char append」已经完成，不再向 dev agent 追加指令。',
+      milestones: [
+        {
+          kind: 'completed',
+          key: 'delivery:issue-143:completed',
+          summary: 'TES-50 烟雾测试已成功完成。 hello.py 中添加了一个字符，并通过了编译验证。 PR #66 已审查批准，无进一步行动。',
+          timestamp: '2026-05-04T04:24:01.817Z',
+        },
+      ],
+    });
+
+    const presentation = buildRuntimeMiniAppIssuePresentation(issue);
+    const milestones = visibleRuntimeMiniAppMilestones(issue);
+
+    expect(presentation.judgmentSummary).toContain('smoke test completed successfully');
+    expect(presentation.roundGoal).toContain('Plan "[TES-50] smoke test: hello.py single-char append" is complete');
+    expect(milestones[0]?.summary).toContain('PR #66 was approved');
+    expect(milestones[0]?.summary).not.toContain('烟雾测试');
+
+    const livePresentation = buildRuntimeMiniAppIssuePresentation(createIssue({
+      supervisor_locale: 'en',
+      phase: 'DEV',
+      tracker_state: 'In Progress',
+      orchestrator_state: 'dev_running',
+      delivery_state: null,
+      delivery_summary: null,
+      roundGoal: [
+        '继续推进计划「[TES-50] smoke test: hello.py single-char append」。',
+        '完成标准：hello.py 追加一个 character；`python3 -m compileall .` 验证。',
+        '历史提醒：## Review Decision: APPROVE。',
+      ].join('\n'),
+    }));
+    expect(livePresentation.roundGoal).toContain('Continue advancing plan "[TES-50] smoke test: hello.py single-char append"');
+    expect(livePresentation.roundGoal).toContain('Acceptance: hello.py appends one character; `python3 -m compileall .` verifies.');
+    expect(livePresentation.roundGoal).toContain('History reminders: ## Review Decision: APPROVE.');
   });
 });

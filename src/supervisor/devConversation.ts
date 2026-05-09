@@ -49,6 +49,10 @@ function memorySummaries(memories: SupervisorMemoryRecord[]): string[] {
     .filter(Boolean);
 }
 
+function isEnglishSession(session: SupervisorSessionRecord): boolean {
+  return session.supervisor_locale === 'en';
+}
+
 export class SupervisorDevConversationService {
   buildDirective(input: {
     session: SupervisorSessionRecord;
@@ -57,6 +61,7 @@ export class SupervisorDevConversationService {
     memories: SupervisorMemoryRecord[];
   }): SupervisorDevDirective {
     const { session, issue, timeline, memories } = input;
+    const englishOutput = isEnglishSession(session);
     const planTitle = session.plan_card?.title ?? issue.title;
     const memoryHints = memorySummaries(memories);
     const recentTimelineText = timelineText(timeline);
@@ -133,7 +138,9 @@ export class SupervisorDevConversationService {
     if (issue.orchestrator_state === 'completed' || issue.delivery_state === 'completed') {
       return {
         directive_kind: 'noop',
-        instruction: `当前计划「${planTitle}」已经完成，不再向 dev agent 追加指令。`,
+        instruction: englishOutput
+          ? `Plan "${planTitle}" is complete. No more dev-agent instructions are needed.`
+          : `当前计划「${planTitle}」已经完成，不再向 dev agent 追加指令。`,
         required_evidence: [],
         stop_conditions: [],
         source: 'deterministic',
@@ -148,18 +155,31 @@ export class SupervisorDevConversationService {
 
     return {
       directive_kind: 'continue_dev',
-      instruction: [
-        `继续推进计划「${planTitle}」。`,
-        session.plan_card?.acceptance?.length
-          ? `完成标准：${session.plan_card.acceptance.join('；')}。`
-          : '完成标准：交付物可验证。',
-        issue.governance_current_child
-          ? `当前只推进子单 ${issue.governance_current_child.issue_identifier}，${queuedChildren.length ? `后续 ${queuedChildren.join('、')} 保持排队。` : '其余子单保持排队。'}`
-          : null,
-        memoryHints.length ? `历史提醒：${memoryHints.join('；')}。` : null,
-      ].filter(Boolean).join('\n'),
+      instruction: englishOutput
+        ? [
+          `Continue advancing plan "${planTitle}".`,
+          session.plan_card?.acceptance?.length
+            ? `Acceptance: ${session.plan_card.acceptance.join('; ')}.`
+            : 'Acceptance: the deliverable is verifiable.',
+          issue.governance_current_child
+            ? `Only advance child issue ${issue.governance_current_child.issue_identifier}; ${queuedChildren.length ? `keep ${queuedChildren.join(', ')} queued.` : 'keep the remaining child issues queued.'}`
+            : null,
+          memoryHints.length ? `History reminders: ${memoryHints.join('; ')}.` : null,
+        ].filter(Boolean).join('\n')
+        : [
+          `继续推进计划「${planTitle}」。`,
+          session.plan_card?.acceptance?.length
+            ? `完成标准：${session.plan_card.acceptance.join('；')}。`
+            : '完成标准：交付物可验证。',
+          issue.governance_current_child
+            ? `当前只推进子单 ${issue.governance_current_child.issue_identifier}，${queuedChildren.length ? `后续 ${queuedChildren.join('、')} 保持排队。` : '其余子单保持排队。'}`
+            : null,
+          memoryHints.length ? `历史提醒：${memoryHints.join('；')}。` : null,
+        ].filter(Boolean).join('\n'),
       required_evidence: session.plan_card?.acceptance ?? [],
-      stop_conditions: ['范围变化', '破坏性清理风险', '交付失败'],
+      stop_conditions: englishOutput
+        ? ['scope change', 'destructive cleanup risk', 'delivery failure']
+        : ['范围变化', '破坏性清理风险', '交付失败'],
       source: 'deterministic',
       memory_summaries: memoryHints,
     };

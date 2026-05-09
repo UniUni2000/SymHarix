@@ -58,6 +58,7 @@ export function buildReviewPrompt(
   supervisorGuidance?: string,
 ): string {
   const liveVerifierFastPath = isSupervisorLiveVerifierText(`${issue.title}\n${issue.description || ''}`);
+  const englishOutput = /original user request is English/i.test(supervisorGuidance || '');
   const historySection = previousReviews && previousReviews.length > 0
     ? previousReviews.map(r =>
         `- Round ${r.round}: ${r.decision} - ${r.summary.slice(0, 100)}`
@@ -93,7 +94,7 @@ ${liveVerifierGuidance}
 3. Inspect the local worktree diff directly with git and file reads; do not rely only on prior reports
 4. ${reviewVerification}
 5. Assess code quality: logic, naming, performance, security
-6. **Give feedback in "现状+期望" format** — Do NOT give solutions
+6. **Give feedback in "${englishOutput ? 'Current+Expected' : '现状+期望'}" format** — Do NOT give solutions
 7. Put the final decision in \`.symphony/REVIEW_REPORT.md\` so the orchestrator and review executor can act on it
 8. For straightforward small diffs, prefer completing the review in a single focused pass and writing the report in the same turn
 9. Treat the review as incomplete until \`.symphony/REVIEW_REPORT.md\` exists with the final decision line and review summary section
@@ -113,9 +114,9 @@ Do not rely on only prose headings like “最终决定”; only the exact decis
 
 ## Feedback Format (MUST follow)
 For each issue found:
-**现状**: {现在的行为}
-**期望**: {期望的行为}
-**文件**: {文件:行号}
+**${englishOutput ? 'Current' : '现状'}**: {${englishOutput ? 'current behavior' : '现在的行为'}}
+**${englishOutput ? 'Expected' : '期望'}**: {${englishOutput ? 'expected behavior' : '期望的行为'}}
+**${englishOutput ? 'File' : '文件'}**: {${englishOutput ? 'file:line' : '文件:行号'}}
 
 ## Review Decision Options
 
