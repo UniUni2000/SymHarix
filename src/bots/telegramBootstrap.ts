@@ -275,7 +275,17 @@ export class TelegramWebhookBootstrapService {
   private async createReachableTunnel(localBaseUrl: string): Promise<string> {
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= this.retryAttempts; attempt += 1) {
-      const tunnelHandle = await this.tunnelProvider(localBaseUrl);
+      let tunnelHandle: TelegramTunnelHandle;
+      try {
+        tunnelHandle = await this.tunnelProvider(localBaseUrl);
+      } catch (error) {
+        lastError = error;
+        if (attempt >= this.retryAttempts) {
+          break;
+        }
+        await sleep(this.retryDelayMs);
+        continue;
+      }
       const publicBaseUrl = normalizeBaseUrl(tunnelHandle.publicBaseUrl);
       if (!publicBaseUrl) {
         await tunnelHandle.dispose();
