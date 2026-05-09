@@ -9,7 +9,7 @@ import type {
 import type { RuntimeControlPlane, RuntimeIssueView } from '../runtime/types';
 import type { SupervisorPendingActionRecord } from '../database/types';
 import type { TrackerProjectResolutionService } from '../tracker/projectResolution';
-import type { BotCommandContext, BotCommandResponse, BotTransportAction } from '../bots/types';
+import type { BotCommandContext, BotCommandResponse } from '../bots/types';
 import type {
   BotAssistantDecision,
   BotAssistantDiagnostics,
@@ -20,6 +20,7 @@ import type {
 import type { BotAssistantModel, BotAssistantModelOutput } from '../bots/model';
 import { BotCommandService } from '../bots/commandService';
 import { isTerminalIssue, isUserVisibleActiveIssue } from '../bots/issueVisibility';
+import { buildIssueCardActionRows } from '../bots/issueCardActions';
 import {
   classifySupervisorControlPlaneIntent,
   type IssueStateFilter,
@@ -41,6 +42,7 @@ import {
   formatUnsupportedToolRecovery,
 } from './assistantReliability';
 import { buildSupervisorIssueVisualCard } from './issueVisualCard';
+import { inferRuntimeLocaleFromText, type RuntimeLocale } from '../i18n/locale';
 
 export type CardSpec = Record<string, unknown>;
 
@@ -417,61 +419,21 @@ function formatIssueLine(issue: RuntimeIssueView, options: { includeExternal?: b
   ].filter(Boolean).join(' · ');
 }
 
-function runtimeIssueAppPath(issue: RuntimeIssueView): string {
-  return `/runtime/issues/${encodeURIComponent(issue.identifier || issue.issue_id)}/app`;
+function isEnglishLocale(locale: RuntimeLocale | null | undefined): boolean {
+  return locale === 'en';
 }
 
-function primaryIssueCardAction(issue: RuntimeIssueView): BotTransportAction {
-  const stateText = `${issue.tracker_state} ${issue.orchestrator_state ?? ''}`;
-  if (/cancelled|canceled/i.test(stateText)) {
-    return {
-      label: '已取消',
-      style: 'success',
-      callback_data: `rt|${issue.identifier}|refresh`,
-    };
-  }
-  if (isTerminalIssue(issue)) {
-    return {
-      label: '已完成',
-      style: 'success',
-      callback_data: `rt|${issue.identifier}|refresh`,
-    };
-  }
-  if (issue.actions.can_stop) {
-    return {
-      label: '停止',
-      style: 'danger',
-      callback_data: `rt|${issue.identifier}|stop`,
-    };
-  }
-  if (issue.actions.can_retry) {
-    return {
-      label: '重试',
-      style: 'success',
-      callback_data: `rt|${issue.identifier}|retry`,
-    };
-  }
-  return {
-    label: '刷新卡片',
-    callback_data: `rt|${issue.identifier}|refresh`,
-  };
+function textForLocale(locale: RuntimeLocale | null | undefined, zh: string, en: string): string {
+  return isEnglishLocale(locale) ? en : zh;
 }
 
-function buildIssueCardActionRows(issue: RuntimeIssueView): BotTransportAction[][] {
-  return [
-    [primaryIssueCardAction(issue)],
-    [
-      {
-        label: '刷新卡片',
-        callback_data: `rt|${issue.identifier}|refresh`,
-      },
-      {
-        label: '打开运行视图',
-        style: 'primary',
-        web_app: { url: runtimeIssueAppPath(issue) },
-      },
-    ],
-  ];
+function issueLocale(issue: RuntimeIssueView): RuntimeLocale {
+  return issue.supervisor_locale ?? inferRuntimeLocaleFromText([
+    issue.title,
+    issue.supervisor_plan_summary,
+    issue.delivery_summary,
+    issue.next_recommended_action,
+  ].filter(Boolean).join('\n'));
 }
 
 function issueMatchesStateFilter(issue: RuntimeIssueView, filter: IssueStateFilter | null): boolean {
@@ -551,15 +513,15 @@ function summarizeControlPlane(context: SupervisorToolContext): string {
   ].filter(Boolean).join('\n');
 }
 
-function buildConfirmActions(): BotTransportAction[] {
+function buildConfirmActions(locale: RuntimeLocale | null | undefined = null): BotTransportAction[] {
   return [
     {
-      label: '确认',
+      label: textForLocale(locale, '确认', 'Confirm'),
       style: 'danger',
       callback_data: 'pending|confirm',
     },
     {
-      label: '取消',
+      label: textForLocale(locale, '取消', 'Cancel'),
       style: 'default',
       callback_data: 'pending|cancel',
     },
@@ -898,7 +860,12 @@ export function createSupervisorToolRouterModel(model: BotAssistantModel): Super
   };
 }
 
-function buildConfirmationSummary(toolName: string, args: Record<string, unknown>, reason: string): string {
+function buildConfirmationSummary(
+  toolName: string,
+  args: Record<string, unknown>,
+  reason: string,
+  locale: RuntimeLocale | null | undefined = null,
+): string {
   const issueId = firstString(args.issue_id);
   const successorIssueId = firstString(args.successor_issue_id);
   const title = firstString(args.title);
@@ -910,7 +877,7 @@ function buildConfirmationSummary(toolName: string, args: Record<string, unknown
     project ? `Project: ${project}` : null,
     title ? `Title: ${title}` : null,
     `Reason: ${reason}`,
-    'Reply with: 确认 / 取消',
+    textForLocale(locale, 'Reply with: 确认 / 取消', 'Reply with: Confirm / Cancel'),
   ].filter(Boolean).join('\n');
 }
 
@@ -1214,9 +1181,10 @@ export class SupervisorAgentRuntimeService {
           'Superseded by a newer control action.',
         );
       } else if (!isReadOnlyText(request.text)) {
+        const locale = inferRuntimeLocaleFromText(request.text);
         return {
-          message: formatPendingActionReminder(existingPending.summary_message),
-          actions: buildConfirmActions(),
+          message: formatPendingActionReminder(existingPending.summary_message, locale),
+          actions: buildConfirmActions(locale),
         };
       }
     }
@@ -1382,6 +1350,7 @@ export class SupervisorAgentRuntimeService {
       }
 
       if (turn.type === 'confirm_action') {
+        const locale = inferRuntimeLocaleFromText(request.text);
         return this.requestConfirmation({
           runId: run.id,
           request,
@@ -1393,7 +1362,7 @@ export class SupervisorAgentRuntimeService {
             risk: this.tools.get(turn.action.tool)?.risk ?? 'high_write',
             reason: turn.action.reason ?? 'Confirmation requested by supervisor model.',
           },
-          summary: turn.summary,
+          summary: turn.summary || buildConfirmationSummary(turn.action.tool, turn.action.args, turn.action.reason ?? 'Confirmation requested by supervisor model.', locale),
         });
       }
 
@@ -1401,7 +1370,10 @@ export class SupervisorAgentRuntimeService {
       const previous = this.options.toolCalls.findLatestByRunToolArgs(run.id, turn.tool, hash);
       if (previous) {
         const previousResult = [...toolResults].reverse().find((result) => result.tool === turn.tool);
-        const message = formatDuplicateToolRecovery(previousResult?.message ?? previousResult?.summary ?? null);
+        const message = formatDuplicateToolRecovery(
+          previousResult?.message ?? previousResult?.summary ?? null,
+          inferRuntimeLocaleFromText(request.text),
+        );
         this.options.events.create({
           run_id: run.id,
           event_kind: 'final_answer',
@@ -1444,7 +1416,7 @@ export class SupervisorAgentRuntimeService {
     }
 
     return this.completeRun(run.id, {
-      message: formatStepLimitRecovery(),
+      message: formatStepLimitRecovery(inferRuntimeLocaleFromText(request.text)),
     }, 'failed');
   }
 
@@ -1490,12 +1462,13 @@ export class SupervisorAgentRuntimeService {
     skipConfirmation?: boolean;
   }): Promise<SupervisorToolResult> {
     const definition = this.tools.get(params.turn.tool);
+    const locale = inferRuntimeLocaleFromText(params.request.text);
     if (!definition) {
       return {
         tool: params.turn.tool,
         ok: false,
         summary: `Unsupported supervisor tool: ${params.turn.tool}`,
-        message: formatUnsupportedToolRecovery(),
+        message: formatUnsupportedToolRecovery(locale),
       };
     }
 
@@ -1514,7 +1487,7 @@ export class SupervisorAgentRuntimeService {
         tool: definition.name,
         ok: false,
         summary: validationError,
-        message: formatToolArgumentRejection(definition.name, validationError),
+        message: formatToolArgumentRejection(definition.name, validationError, locale),
       };
     }
 
@@ -1545,7 +1518,7 @@ export class SupervisorAgentRuntimeService {
           toolName: definition.name,
           args: params.turn.args,
           policy,
-          summary: buildConfirmationSummary(definition.name, params.turn.args, policy.reason),
+          summary: buildConfirmationSummary(definition.name, params.turn.args, policy.reason, inferRuntimeLocaleFromText(params.request.text)),
         }),
       };
     }
@@ -1606,7 +1579,7 @@ export class SupervisorAgentRuntimeService {
         tool: definition.name,
         ok: false,
         summary: message,
-        message: formatToolFailureRecovery(definition.name),
+        message: formatToolFailureRecovery(definition.name, locale),
       };
     }
   }
@@ -1648,7 +1621,7 @@ export class SupervisorAgentRuntimeService {
     });
     return {
       message: params.summary,
-      actions: buildConfirmActions(),
+      actions: buildConfirmActions(inferRuntimeLocaleFromText(params.request.text)),
     };
   }
 
