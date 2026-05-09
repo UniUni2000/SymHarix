@@ -571,11 +571,13 @@ describe('SupervisorAgentRuntimeService', () => {
 
     const response = await h.service.respond({
       context: h.context,
-      text: '就按你的建议建一个 issue',
+      text: 'create that suggested issue',
     });
 
     expect(response.message).toContain('Action: create issue');
     expect(response.message).toContain('Title: Add GitHub Actions CI for Python tests');
+    expect(response.message).toContain('Reply with: Confirm / Cancel');
+    expect(response.actions?.map((action) => action.label)).toEqual(['Confirm', 'Cancel']);
     expect(response.message).not.toContain('我是只读 brain');
     expect(response.message).not.toContain('无法在 Linear 中创建 issue');
     expectAssistantSafeMessage(response.message);
@@ -601,6 +603,29 @@ describe('SupervisorAgentRuntimeService', () => {
         conversation_id: 'chat-1',
       })).toBeNull();
     }
+  });
+
+  test('answers capability questions in the user message language', async () => {
+    const hEn = createHarness();
+    const english = await hEn.service.respond({
+      context: hEn.context,
+      text: 'What can you do',
+    });
+
+    expect(english.message).toContain("I'm your Symphony Runtime Operator Copilot");
+    expect(english.message).toContain('Create issues');
+    expect(english.message).not.toContain('我明白了');
+    expect(english.message).not.toContain('我接住了');
+    expect(english.message).not.toContain('创建新的 issue');
+
+    const h = createHarness();
+    const chinese = await h.service.respond({
+      context: h.context,
+      text: '你能干什么',
+    });
+
+    expect(chinese.message).toContain('我是你的 Symphony Runtime Operator Copilot');
+    expect(chinese.message).toContain('创建新的 issue');
   });
 
   test('answers conversational cleanup follow-ups from the control plane instead of showing no-action guidance', async () => {
@@ -993,12 +1018,12 @@ describe('SupervisorAgentRuntimeService', () => {
     expect(card.photo?.bytes?.length ?? 0).toBeGreaterThan(1000);
     expect(card.action_rows).toEqual([
       [
-        { label: '停止', style: 'danger', callback_data: 'rt|INT-158|stop' },
+        { label: 'Stop', style: 'danger', callback_data: 'rt|INT-158|stop' },
       ],
       [
-        { label: '刷新卡片', callback_data: 'rt|INT-158|refresh' },
+        { label: 'Refresh Card', callback_data: 'rt|INT-158|refresh' },
         {
-          label: '打开运行视图',
+          label: 'Open Runtime View',
           style: 'primary',
           web_app: { url: '/runtime/issues/INT-158/app' },
         },
@@ -1116,8 +1141,8 @@ describe('SupervisorAgentRuntimeService', () => {
       text: 'loop test',
     });
 
-    expect(response.message).toContain('我已经用同样条件查过一次');
-    expect(response.message).toContain('不会重复空转');
+    expect(response.message).toContain('I already checked with the same conditions');
+    expect(response.message).toContain('will not spin');
     expect(response.message).toContain('当前有 2 个 tracked issues');
     expectAssistantSafeMessage(response.message);
     const run = h.runs.findLatestByConversation({
@@ -1248,9 +1273,9 @@ describe('SupervisorAgentRuntimeService', () => {
       text: 'retry something',
     });
 
-    expect(response.message).toContain('这个动作还缺少 issue id');
-    expect(response.message).toContain('我没有执行任何写入');
-    expect(response.message).toContain('重试 INT-158');
+    expect(response.message).toContain('This action is missing an issue id');
+    expect(response.message).toContain('I did not perform any write');
+    expect(response.message).toContain('retry INT-158');
     expect(response.message).not.toContain('Invalid args');
     expectAssistantSafeMessage(response.message);
     expect(h.runtime.retryCalls).toEqual([]);
