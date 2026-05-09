@@ -54,4 +54,23 @@ describe('issue visual cards', () => {
     expect(svg).not.toContain('#F8FBFD');
     expect(svg).not.toContain('LATEST SIGNAL');
   });
+
+  test('renders English issue cards without Chinese labels when the issue locale is English', () => {
+    const svg = buildSupervisorIssueVisualCardSvg(issue({
+      supervisor_locale: 'en',
+      title: 'smoke test',
+      delivery_summary: null,
+      next_recommended_action: null,
+    }));
+
+    expect(svg).toContain('Supervisor Judgment');
+    expect(svg).toContain('Scope');
+    expect(svg).toContain('Acceptance');
+    expect(svg).toContain('Stage Progress');
+    expect(svg).toContain('Cancelled');
+    expect(svg).not.toContain('Supervisor 判断');
+    expect(svg).not.toContain('本次范围');
+    expect(svg).not.toContain('验收标准');
+    expect(svg).not.toContain('阶段进度');
+  });
 });

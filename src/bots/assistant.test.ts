@@ -5734,11 +5734,24 @@ describe('BotAssistantService', () => {
         recipient: { transport: 'telegram', conversation_id: 'chat-runtime' },
         identity: { user_id: 'user-1', display_name: 'Alice' },
       },
-      'hello',
+      'what can you do?',
     );
 
-    expect(response.message).toBe('runtime handled: hello');
-    expect(runtimeCalls).toEqual(['hello']);
+    expect(response.message).toBe('runtime handled: what can you do?');
+    expect(runtimeCalls).toEqual(['what can you do?']);
+
+    const greeting = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-runtime' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      'Hello',
+    );
+
+    expect(greeting.message).toContain('Hello.');
+    expect(greeting.message).not.toContain('你好');
+    expect(runtimeCalls).toEqual(['what can you do?']);
 
     const slash = await assistant.respondToText(
       {
@@ -5750,7 +5763,7 @@ describe('BotAssistantService', () => {
     );
 
     expect(slash.message).toContain('INT-31');
-    expect(runtimeCalls).toEqual(['hello']);
+    expect(runtimeCalls).toEqual(['what can you do?']);
 
     subscriptions.dispose();
     db.close();

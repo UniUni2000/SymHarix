@@ -1,4 +1,5 @@
 import type { RuntimeIssueView } from '../runtime/types';
+import type { RuntimeLocale } from '../i18n/locale';
 import type { BotAssistantIntent, BotTransportAction } from './types';
 
 export type GovernanceQuickActionSpec =
@@ -30,16 +31,25 @@ function compact(value: string, maxLength = 18): string {
   return `${normalized.slice(0, maxLength - 1)}…`;
 }
 
+function isEnglishLocale(locale: RuntimeLocale | null | undefined): boolean {
+  return locale === 'en';
+}
+
+function textForLocale(locale: RuntimeLocale | null | undefined, zh: string, en: string): string {
+  return isEnglishLocale(locale) ? en : zh;
+}
+
 export function buildGovernanceQuickActions(issue: RuntimeIssueView): GovernanceQuickActionSpec[] {
   const actions: GovernanceQuickActionSpec[] = [];
   const firstSuggestion = issue.active_governance_suggestions?.find((suggestion) => suggestion.can_execute);
+  const locale = issue.supervisor_locale;
 
   if (issue.governance_decision === 'split_before_implement' && issue.actions.can_split_governance) {
     actions.push({
       kind: 'split',
       issue_id: issue.issue_id,
       issue_identifier: issue.identifier,
-      label: '按方案拆成两个任务',
+      label: textForLocale(locale, '按方案拆成两个任务', 'Split into two tasks'),
       emphasis: 'primary',
     });
   }
@@ -49,7 +59,7 @@ export function buildGovernanceQuickActions(issue: RuntimeIssueView): Governance
       kind: 'rewrite',
       issue_id: issue.issue_id,
       issue_identifier: issue.identifier,
-      label: '按方案改写需求',
+      label: textForLocale(locale, '按方案改写需求', 'Rewrite requirement'),
       emphasis: 'primary',
     });
   }
@@ -62,7 +72,11 @@ export function buildGovernanceQuickActions(issue: RuntimeIssueView): Governance
       suggestion_id: firstSuggestion.id,
       suggestion_type: firstSuggestion.suggestion_type,
       ordinal: 1,
-      label: `执行建议：${compact(firstSuggestion.title || firstSuggestion.summary || firstSuggestion.suggestion_type)}`,
+      label: textForLocale(
+        locale,
+        `执行建议：${compact(firstSuggestion.title || firstSuggestion.summary || firstSuggestion.suggestion_type)}`,
+        `Run suggestion: ${compact(firstSuggestion.title || firstSuggestion.summary || firstSuggestion.suggestion_type)}`,
+      ),
       emphasis: 'primary',
     });
   }
@@ -75,7 +89,7 @@ export function buildGovernanceQuickActions(issue: RuntimeIssueView): Governance
       kind: 'rewrite',
       issue_id: issue.issue_id,
       issue_identifier: issue.identifier,
-      label: '我想先改写需求',
+      label: textForLocale(locale, '我想先改写需求', 'Rewrite first'),
       emphasis: 'secondary',
     });
   }
@@ -85,7 +99,7 @@ export function buildGovernanceQuickActions(issue: RuntimeIssueView): Governance
       kind: 'override',
       issue_id: issue.issue_id,
       issue_identifier: issue.identifier,
-      label: '强制继续开发',
+      label: textForLocale(locale, '强制继续开发', 'Force continue'),
       emphasis: 'danger',
       style: 'danger',
     });
