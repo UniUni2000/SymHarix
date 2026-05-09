@@ -39,8 +39,9 @@ import type { SupervisorRepoUnderstandingService } from '../supervisor/repoUnder
 import { SupervisorSessionService } from '../supervisor/sessionService';
 import type { SupervisorAgentRuntimeService } from '../supervisor/agentRuntime';
 import { extractIssueIdentifier } from './issueIdentifier';
+import { isIssueListQuestion } from './issueQueryIntent';
 
-const CONFIRM_WORDS = new Set(['确认', 'yes', 'y', 'ok', 'okay', '好', '执行', '继续', 'confirm']);
+const CONFIRM_WORDS = new Set(['确认', '是的', '是', '对', '对的', '没错', 'yes', 'y', 'ok', 'okay', '好', '执行', '继续', 'confirm']);
 const CANCEL_WORDS = new Set(['取消', 'cancel', 'no', 'n', '停止']);
 const TRANSPARENT_FALLBACK_NOTICE = '当前自然语言模型暂不可用，已切换到简化理解模式。';
 const SUGGESTION_TYPE_ALIASES: Record<string, string[]> = {
@@ -394,6 +395,7 @@ function coerceIntent(value: Record<string, unknown> | null): BotAssistantIntent
             : null,
       };
     case 'status':
+    case 'show_issue_card':
     case 'watch':
     case 'unwatch':
     case 'stop':
@@ -616,10 +618,6 @@ function summarizeActiveIssues(context: BotRuntimeCopilotContext): string {
         .join(' · '),
     ].join('\n')),
   ].join('\n');
-}
-
-function isIssueListQuestion(text: string): boolean {
-  return /当前有哪些活跃 issue|当前有哪些 issue|有哪些\s*issue|有什么\s*issue|issue\s*有哪些|what.?s running|active issues|现在在跑什么/i.test(text.trim());
 }
 
 function buildRuntimeDiagnosis(
@@ -934,8 +932,12 @@ function extractControlIssueIdentifiers(text: string): string[] {
     identifiers.push(normalized);
   };
 
-  for (const match of text.matchAll(/\b([A-Z][A-Z0-9]+-\d+)\b/gi)) {
-    add(match[1]);
+  for (const match of text.matchAll(/\b([A-Z][A-Z0-9]+)-(\d+)\b/gi)) {
+    const rawPrefix = match[1]!;
+    const prefix = rawPrefix.toUpperCase();
+    if (rawPrefix === prefix || prefix === 'INT') {
+      add(`${prefix}-${match[2]}`);
+    }
   }
   for (const match of text.matchAll(/\b([A-Z][A-Z0-9]{1,9})\s+#?\s*(\d+)\b/gi)) {
     const rawPrefix = match[1]!;
@@ -2102,6 +2104,11 @@ export class BotAssistantService {
   ): Promise<BotCommandResponse> {
     switch (intent.kind) {
       case 'status':
+        return this.commandService.execute(context, {
+          command: 'status',
+          issue_id: intent.issue_id,
+        });
+      case 'show_issue_card':
         return this.commandService.execute(context, {
           command: 'status',
           issue_id: intent.issue_id,

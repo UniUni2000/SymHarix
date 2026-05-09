@@ -63,6 +63,15 @@ def test_from_string_valid():
     assert State.from_string("in_review") == State.IN_REVIEW
     assert State.from_string("done") == State.DONE
 
+def test_from_string_accepts_tracker_display_names():
+    assert State.from_string("Todo") == State.TODO
+    assert State.from_string("In Progress") == State.IN_PROGRESS
+    assert State.from_string("In Review") == State.IN_REVIEW
+    assert State.from_string("Done") == State.DONE
+    assert State.from_string("Cancelled") == State.CANCELLED
+    assert State.from_string("Canceled") == State.CANCELLED
+    assert State.from_string("Error") == State.ERROR
+
 def test_from_string_invalid():
     with pytest.raises(ValueError):
         State.from_string("invalid")

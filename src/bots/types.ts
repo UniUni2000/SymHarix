@@ -277,6 +277,7 @@ export type SupervisorIntakeSource =
 export type BotAssistantIntentKind =
   | 'create_issue'
   | 'status'
+  | 'show_issue_card'
   | 'watch'
   | 'unwatch'
   | 'stop'
@@ -302,11 +303,15 @@ export type BotAssistantIntent =
       project_slug: string | null;
     }
   | {
-    kind: 'status' | 'watch' | 'unwatch' | 'stop' | 'retry' | 'close_issue' | 'override' | 'rewrite' | 'split';
-    issue_id: string | null;
-    watch_preset?: BotWatchPreset | null;
-    reason?: string | null;
-  }
+      kind: 'status' | 'watch' | 'unwatch' | 'stop' | 'retry' | 'close_issue' | 'override' | 'rewrite' | 'split';
+      issue_id: string | null;
+      watch_preset?: BotWatchPreset | null;
+      reason?: string | null;
+    }
+  | {
+      kind: 'show_issue_card';
+      issue_id: string | null;
+    }
   | {
       kind: 'supersede_issue';
       issue_id: string | null;

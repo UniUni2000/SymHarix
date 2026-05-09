@@ -209,6 +209,44 @@ describe('AnthropicSupervisorService', () => {
     expect(String(result.response.message || '')).toContain('orchestrator');
   });
 
+  test.each([
+    ['git commit -m "feat(INT-160): add CI"'],
+    ['git push -u origin feature/int-160'],
+    ['gh pr create --title "feat(INT-160): add CI" --body "test"'],
+  ])('denies orchestrator-owned delivery command %s with actionable guidance', async (command) => {
+    const service = new AnthropicSupervisorService('test-model');
+    const create = mock(async () => ({
+      content: [],
+    }));
+    (service as any).client = { messages: { create } };
+
+    const result = await service.respondToRuntimeRequest({
+      ...runtimeContext,
+      mode: 'dev',
+      request: {
+        ...runtimeContext.request,
+        raw: {
+          subtype: 'can_use_tool',
+          tool_name: 'Bash',
+          tool_use_id: 'tool-delivery',
+          input: { command },
+        },
+        summary: {
+          title: 'Permission request for Bash',
+          message: `Run ${command}`,
+          tool_name: 'Bash',
+          subtype: 'can_use_tool',
+        },
+      },
+    });
+
+    expect(create).not.toHaveBeenCalled();
+    expect(result.response.behavior).toBe('deny');
+    expect(String(result.response.message || '')).toContain('Do not retry');
+    expect(String(result.response.message || '')).toContain('orchestrator/state machine');
+    expect(String(result.response.message || '')).toContain('.symphony/HANDOVER.md');
+  });
+
   test('allows normal local tool usage when the provider call fails', async () => {
     const service = new AnthropicSupervisorService('test-model');
     const create = mock(async () => {

@@ -16,9 +16,24 @@ class State(Enum):
 
     @classmethod
     def from_string(cls, s: str) -> "State":
-        """Parse state from string, case-insensitive."""
+        """Parse internal or tracker display state names."""
+        normalized = " ".join(s.replace("_", " ").replace("-", " ").split()).lower()
+        aliases = {
+            "todo": cls.TODO,
+            "to do": cls.TODO,
+            "in progress": cls.IN_PROGRESS,
+            "in review": cls.IN_REVIEW,
+            "done": cls.DONE,
+            "cancelled": cls.CANCELLED,
+            "canceled": cls.CANCELLED,
+            "error": cls.ERROR,
+        }
+        alias = aliases.get(normalized)
+        if alias:
+            return alias
         for state in cls:
-            if state.value.lower() == s.lower():
+            state_name = " ".join(state.value.replace("_", " ").split()).lower()
+            if state_name == normalized:
                 return state
         raise ValueError(f"Unknown state: {s}")
 

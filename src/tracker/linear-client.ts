@@ -39,6 +39,17 @@ interface LinearStateNode {
   type: string;
 }
 
+const LINEAR_REQUEST_RETRY_DELAYS_MS = [250, 1000];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableLinearRequestError(error: Error): boolean {
+  return error.name === 'AbortError'
+    || /socket|connection|network|fetch failed|econn|etimedout|eai_again/i.test(error.message);
+}
+
 /**
  * Linear API client
  */
@@ -68,48 +79,60 @@ export class LinearClient {
    * Section 11.2: Network timeout 30000ms
    */
   private async graphqlQuery<T>(query: string, variables?: Record<string, unknown>): Promise<{ data?: T; error?: TrackerError; errorMessage?: string }> {
-    try {
-      const response = await fetch(this.endpoint, {
-        method: 'POST',
-        headers: this.getHeaders(),
-        body: JSON.stringify({ query, variables }),
-        signal: AbortSignal.timeout(30000)
-      });
+    for (let attempt = 0; attempt <= LINEAR_REQUEST_RETRY_DELAYS_MS.length; attempt += 1) {
+      try {
+        const response = await fetch(this.endpoint, {
+          method: 'POST',
+          headers: this.getHeaders(),
+          body: JSON.stringify({ query, variables }),
+          signal: AbortSignal.timeout(30000)
+        });
 
-      if (!response.ok) {
-        const responseBody = await response.text();
-        const detail = responseBody.trim().replace(/\s+/g, ' ').slice(0, 500);
-        return {
-          error: 'linear_api_status',
-          errorMessage: detail
-            ? `Linear API returned status ${response.status}: ${detail}`
-            : `Linear API returned status ${response.status}`
-        };
-      }
+        if (!response.ok) {
+          const responseBody = await response.text();
+          const detail = responseBody.trim().replace(/\s+/g, ' ').slice(0, 500);
+          return {
+            error: 'linear_api_status',
+            errorMessage: detail
+              ? `Linear API returned status ${response.status}: ${detail}`
+              : `Linear API returned status ${response.status}`
+          };
+        }
 
-      const result: LinearApiResponse = await response.json() as LinearApiResponse;
+        const result: LinearApiResponse = await response.json() as LinearApiResponse;
 
-      if (result.errors) {
-        return {
-          error: 'linear_graphql_errors',
-          errorMessage: result.errors.map(e => e.message).join(', ')
-        };
-      }
+        if (result.errors) {
+          return {
+            error: 'linear_graphql_errors',
+            errorMessage: result.errors.map(e => e.message).join(', ')
+          };
+        }
 
-      return { data: result.data as unknown as T };
-    } catch (err) {
-      const error = err as Error;
-      if (error.name === 'AbortError') {
+        return { data: result.data as unknown as T };
+      } catch (err) {
+        const error = err as Error;
+        const retryDelay = LINEAR_REQUEST_RETRY_DELAYS_MS[attempt];
+        if (retryDelay !== undefined && isRetryableLinearRequestError(error)) {
+          await sleep(retryDelay);
+          continue;
+        }
+        if (error.name === 'AbortError') {
+          return {
+            error: 'linear_api_request',
+            errorMessage: 'Linear API request timed out'
+          };
+        }
         return {
           error: 'linear_api_request',
-          errorMessage: 'Linear API request timed out'
+          errorMessage: `Linear API request failed: ${error.message}`
         };
       }
-      return {
-        error: 'linear_api_request',
-        errorMessage: `Linear API request failed: ${error.message}`
-      };
     }
+
+    return {
+      error: 'linear_api_request',
+      errorMessage: 'Linear API request failed'
+    };
   }
 
   /**

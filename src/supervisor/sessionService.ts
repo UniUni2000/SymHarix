@@ -1631,9 +1631,11 @@ export class SupervisorSessionService {
     if (!stopIssueId) {
       return;
     }
-    void this.runtime.stopIssue(stopIssueId).catch(() => {
+    void this.runtime.closeIssue(stopIssueId, {
+      reason: 'Supervisor session cancelled by user.',
+    }).catch(() => {
       // Cancellation should always update the session card even when the runtime
-      // stop path is already idle or the issue has disappeared.
+      // finalization path is already idle or the issue has disappeared.
     });
   }
 

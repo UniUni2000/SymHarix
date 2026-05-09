@@ -138,6 +138,28 @@ describe('LinearClient', () => {
     expect(result.error).toContain('issueCommentCreate');
   });
 
+  test('graphqlQuery retries transient fetch failures before returning success', async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      if (calls === 1) {
+        throw new Error('The socket connection was closed unexpectedly.');
+      }
+      return jsonResponse({ data: { commentCreate: { success: true } } });
+    }) as unknown as typeof fetch;
+
+    const client = new LinearClient({
+      endpoint: 'https://linear.test/graphql',
+      apiKey: 'token',
+      projectSlugs: [],
+    });
+
+    const result = await client.postComment('issue-123', 'hello');
+
+    expect(result).toEqual({ success: true });
+    expect(calls).toBe(2);
+  });
+
   test('createIssue uses issueCreate mutation with explicit team and project identifiers', async () => {
     const requests: Array<{ query: string; variables: Record<string, unknown> }> = [];
     globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {

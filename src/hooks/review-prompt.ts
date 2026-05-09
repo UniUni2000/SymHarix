@@ -111,6 +111,19 @@ Also include a non-empty canonical summary section:
 
 Do not rely on only prose headings like “最终决定”; only the exact decision line above plus \`## Review Summary\` count as a valid review artifact.
 
+## Safe Report Write Pattern
+Use the Write/Edit tool when available. If you use Bash, use this exact shape from the workspace root:
+\`\`\`bash
+cat > .symphony/REVIEW_REPORT.md <<'EOF'
+## Review Decision: APPROVE
+
+## Review Summary
+...
+EOF
+\`\`\`
+Do not run a bare path like \`.symphony/REVIEW_REPORT.md <<'EOF'\` or \`INT-123/.symphony/REVIEW_REPORT.md <<'EOF'\`; the shell treats that path as a command and fails.
+Do not commit \`.symphony/REVIEW_REPORT.md\`.
+
 ## Feedback Format (MUST follow)
 For each issue found:
 **现状**: {现在的行为}
