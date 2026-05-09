@@ -1308,6 +1308,10 @@ export class RuntimeHub implements RuntimeControlPlane {
     );
   }
 
+  private isCancelledState(state: string): boolean {
+    return ['cancelled', 'canceled', 'duplicate'].includes(state.toLowerCase());
+  }
+
   private buildDeliveryProjection(workItem: WorkItem): {
     state: RuntimeDeliveryState | null;
     code: RuntimeIssueView['delivery_code'];
@@ -1331,15 +1335,20 @@ export class RuntimeHub implements RuntimeControlPlane {
       : null;
 
     if (this.isTerminalState(workItem.linear_state)) {
+      const cancelled = this.isCancelledState(workItem.linear_state);
+      const fallback = cancelled
+        ? `${workItem.linear_identifier} 已取消，不会继续自动推进。`
+        : `${workItem.linear_identifier} 已完成最终交付。`;
       return {
         state: 'completed',
-        code: null,
+        code: workItem.delivery_code ?? null,
         summary: normalizeSummary(
-          workItem.last_review_summary
+          workItem.delivery_summary
+            ?? (cancelled ? null : workItem.last_review_summary)
             ?? latestRun?.output_summary
             ?? latestRun?.decision
-            ?? `${workItem.linear_identifier} 已完成最终交付。`,
-          `${workItem.linear_identifier} 已完成最终交付。`,
+            ?? fallback,
+          fallback,
           240,
         ),
       };

@@ -887,6 +887,36 @@ describe('RuntimeHub', () => {
     hub.dispose();
   });
 
+  test('preserves manual close delivery metadata for cancelled terminal issues', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workItemRepository = new WorkItemRepository(db);
+    workItemRepository.create({
+      id: 'issue-cancelled',
+      linear_issue_id: 'issue-cancelled',
+      linear_identifier: 'INT-90',
+      linear_title: 'Cancelled cleanup smoke',
+      linear_state: 'Canceled',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'cancelled',
+      delivery_code: 'manual_close',
+      delivery_summary: '这张单已按用户要求关闭，不会继续自动推进。',
+      cancelled_at: new Date('2026-05-08T13:16:50.000Z'),
+    });
+
+    const hub = new RuntimeHub(db, new FakeController());
+    const issue = hub.getIssue('INT-90');
+
+    expect(issue?.tracker_state).toBe('Canceled');
+    expect(issue?.orchestrator_state).toBe('cancelled');
+    expect(issue?.delivery_state).toBe('completed');
+    expect(issue?.delivery_code).toBe('manual_close');
+    expect(issue?.delivery_summary).toContain('按用户要求关闭');
+
+    hub.dispose();
+  });
+
   test('describes child delivery failures as a paused root thread that needs user attention', () => {
     db = new Database(':memory:');
     initializeSchema(db);

@@ -35,6 +35,20 @@ describe('agent prompts', () => {
     expect(prompt).not.toContain('Write and run tests (required for small complexity)');
   });
 
+  test('keeps git and PR publishing owned by the orchestrator instead of the dev agent', () => {
+    const prompt = buildDevPrompt(issue({
+      title: 'Add GitHub Actions CI',
+      description: 'Add .github/workflows/test.yml and verify pytest.',
+    }));
+
+    expect(prompt).toContain('Do not run `git commit`');
+    expect(prompt).toContain('Do not run `git push`');
+    expect(prompt).toContain('Do not run `gh pr create`');
+    expect(prompt).toContain('The orchestrator/state machine owns commit, push, PR creation, tracker updates, and final synchronization');
+    expect(prompt).not.toContain('Commit changes, push, and create PR');
+    expect(prompt).not.toContain('When complete: commit, push, create PR');
+  });
+
   test('compacts supervisor live verifier issue and injected context before the first dev turn', () => {
     const prompt = buildDevPrompt(
       issue({
@@ -68,5 +82,16 @@ describe('agent prompts', () => {
     expect(prompt).toContain('Supervisor Live Verifier Review Fast Path');
     expect(prompt).toContain('review only the requested marker file');
     expect(prompt).toContain('Do not run full repository test suites');
+  });
+
+  test('gives review agents an exact safe way to write the review report', () => {
+    const prompt = buildReviewPrompt(issue({
+      title: 'Review CI workflow',
+      description: 'Review the generated workflow.',
+    }), 'Created the workflow.');
+
+    expect(prompt).toContain("cat > .symphony/REVIEW_REPORT.md <<'EOF'");
+    expect(prompt).toContain('Do not run a bare path like `.symphony/REVIEW_REPORT.md <<');
+    expect(prompt).toContain('Do not commit `.symphony/REVIEW_REPORT.md`');
   });
 });

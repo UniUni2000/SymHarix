@@ -55,6 +55,7 @@ function createRuntime(): RuntimeControlPlane & {
   splitGovernanceCalls: string[];
   retryIssueCalls: string[];
   stopIssueCalls: string[];
+  closeIssueCalls: Array<{ id: string; reason: string | null }>;
   issues: Map<string, RuntimeIssueView>;
   emit: (event: RuntimeStreamEvent) => void;
 } {
@@ -63,6 +64,7 @@ function createRuntime(): RuntimeControlPlane & {
   const splitGovernanceCalls: string[] = [];
   const retryIssueCalls: string[] = [];
   const stopIssueCalls: string[] = [];
+  const closeIssueCalls: Array<{ id: string; reason: string | null }> = [];
   const issues = new Map<string, RuntimeIssueView>();
 
   const runtime: RuntimeControlPlane & {
@@ -70,6 +72,7 @@ function createRuntime(): RuntimeControlPlane & {
     splitGovernanceCalls: string[];
     retryIssueCalls: string[];
     stopIssueCalls: string[];
+    closeIssueCalls: Array<{ id: string; reason: string | null }>;
     issues: Map<string, RuntimeIssueView>;
     emit: (event: RuntimeStreamEvent) => void;
   } = {
@@ -173,6 +176,30 @@ function createRuntime(): RuntimeControlPlane & {
         accepted: true,
         status: 'queued',
         message: `Queued ${issue?.identifier ?? id} for retry`,
+        issue_id: issue?.issue_id ?? id,
+        issue_identifier: issue?.identifier ?? id,
+      };
+    },
+    closeIssue: async (id: string, request = {}) => {
+      closeIssueCalls.push({
+        id,
+        reason: request.reason ?? null,
+      });
+      const issue = issues.get(id) ?? [...issues.values()].find((candidate) => candidate.identifier === id) ?? null;
+      if (issue) {
+        issues.set(issue.issue_id, {
+          ...issue,
+          tracker_state: 'Canceled',
+          orchestrator_state: 'cancelled',
+          delivery_state: 'cancelled',
+          delivery_code: 'manual_close',
+          delivery_summary: '这张单已按用户要求关闭，不会继续自动推进。',
+        });
+      }
+      return {
+        accepted: true,
+        status: 'completed',
+        message: `Closed ${issue?.identifier ?? id}`,
         issue_id: issue?.issue_id ?? id,
         issue_identifier: issue?.identifier ?? id,
       };
@@ -285,6 +312,7 @@ function createRuntime(): RuntimeControlPlane & {
     splitGovernanceCalls,
     retryIssueCalls,
     stopIssueCalls,
+    closeIssueCalls,
     issues,
   };
 
@@ -3364,7 +3392,11 @@ describe('SupervisorSessionService', () => {
     expect(response?.message).toContain('计划已取消');
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(sessions.findById('session-cancel')?.state).toBe('cancelled');
-    expect(runtime.stopIssueCalls).toEqual(['issue-child']);
+    expect(runtime.stopIssueCalls).toEqual([]);
+    expect(runtime.closeIssueCalls).toEqual([{
+      id: 'issue-child',
+      reason: 'Supervisor session cancelled by user.',
+    }]);
   });
 
   test('allows a new thread prefix to bypass an unrelated active session', async () => {
@@ -3419,7 +3451,11 @@ describe('SupervisorSessionService', () => {
     expect(response?.message).toContain('新计划');
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(sessions.findById('session-old')?.state).toBe('cancelled');
-    expect(runtime.stopIssueCalls).toEqual(['old-root']);
+    expect(runtime.stopIssueCalls).toEqual([]);
+    expect(runtime.closeIssueCalls).toEqual([{
+      id: 'old-root',
+      reason: 'Supervisor session cancelled by user.',
+    }]);
     expect(sessions.findActiveByConversation({ transport: 'telegram', conversation_id: 'chat-1' })?.plan_card?.title).toBe('新计划');
   });
 
@@ -3481,7 +3517,11 @@ describe('SupervisorSessionService', () => {
 
     expect(cancelled).toBe(1);
     expect(sessions.findById('session-preempt-old')?.state).toBe('cancelled');
-    expect(runtime.stopIssueCalls).toEqual(['old-child']);
+    expect(runtime.stopIssueCalls).toEqual([]);
+    expect(runtime.closeIssueCalls).toEqual([{
+      id: 'old-child',
+      reason: 'Supervisor session cancelled by user.',
+    }]);
     expect(events.listBySession('session-preempt-old').map((event) => event.event_kind))
       .toContain('session_cancelled_for_new_thread_preemptive');
   });

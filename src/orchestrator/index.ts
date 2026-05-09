@@ -1008,26 +1008,14 @@ export class Orchestrator extends EventEmitter {
       cancelled_at: new Date(),
     }) ?? workItem;
 
-    const githubClose = await this.closeMappedGitHubIssueWithResult(
+    await this.cleanupTerminalWorkItemResidue(
       updatedWorkItem,
+      issue,
       successorIdentifier
         ? `${workItem.linear_identifier} superseded by ${successorIdentifier}`
         : `${workItem.linear_identifier} manual close`,
+      { successorIdentifier },
     );
-    if (githubClose.attempted) {
-      this.recordSyncEvent({
-        workItemId: workItem.id,
-        targetSystem: 'github',
-        action: 'close_issue',
-        payload: {
-          repo: workItem.github_repo,
-          github_issue_number: workItem.github_issue_number,
-          successor_issue_identifier: successorIdentifier,
-        },
-        success: githubClose.success,
-        error: githubClose.error,
-      });
-    }
 
     this.emit('issue:completed', issue, false);
     this.emit('state:changed', this.getStateSnapshot());
@@ -5333,6 +5321,196 @@ export class Orchestrator extends EventEmitter {
     }
   }
 
+  private recordGitHubIssueCloseSyncEvent(
+    workItem: WorkItem | null,
+    result: { attempted: boolean; success: boolean; error: string | null },
+    context: string,
+    options: { successorIdentifier?: string | null } = {},
+  ): void {
+    if (!workItem || !result.attempted) {
+      return;
+    }
+
+    this.recordSyncEvent({
+      workItemId: workItem.id,
+      targetSystem: 'github',
+      action: 'close_issue',
+      payload: {
+        repo: workItem.github_repo,
+        github_issue_number: workItem.github_issue_number,
+        cleanup_context: context,
+        successor_issue_identifier: options.successorIdentifier ?? null,
+      },
+      success: result.success,
+      error: result.error,
+    });
+  }
+
+  private async closeMappedGitHubIssueWithSyncEvent(
+    workItem: WorkItem | null,
+    context: string,
+    options: { successorIdentifier?: string | null } = {},
+  ): Promise<{ attempted: boolean; success: boolean; error: string | null }> {
+    const result = await this.closeMappedGitHubIssueWithResult(workItem, context);
+    this.recordGitHubIssueCloseSyncEvent(workItem, result, context, options);
+    return result;
+  }
+
+  private githubPullRequestMatchesWorkItem(
+    pullRequest: { title?: string | null; body?: string | null; head_branch?: string | null },
+    workItem: WorkItem,
+  ): boolean {
+    const identifier = workItem.linear_identifier?.trim().toUpperCase();
+    const branchName = workItem.branch_name?.trim();
+    if (branchName && pullRequest.head_branch === branchName) {
+      return true;
+    }
+    if (!identifier) {
+      return false;
+    }
+    return [
+      pullRequest.title,
+      pullRequest.body,
+      pullRequest.head_branch,
+    ].some((value) => value?.toUpperCase().includes(identifier));
+  }
+
+  private async closeMappedGitHubPullRequestsWithResult(
+    workItem: WorkItem | null,
+    context: string,
+  ): Promise<{ attempted: boolean; success: boolean; error: string | null; pr_numbers: number[] }> {
+    if (!workItem?.github_repo) {
+      return { attempted: false, success: false, error: null, pr_numbers: [] };
+    }
+
+    const client = this.githubIssueClientFactory(workItem.github_repo);
+    const prNumbers = new Set<number>();
+    if (workItem.active_pr_number) {
+      prNumbers.add(workItem.active_pr_number);
+    }
+
+    let listError: string | null = null;
+    if (workItem.branch_name || workItem.linear_identifier) {
+      try {
+        const openPullRequests = await client.listOpenPullRequests();
+        for (const pullRequest of openPullRequests) {
+          if (this.githubPullRequestMatchesWorkItem(pullRequest, workItem)) {
+            prNumbers.add(pullRequest.number);
+          }
+        }
+      } catch (err) {
+        listError = err instanceof Error ? err.message : String(err);
+        console.warn(`[orchestrator] Failed to list open GitHub pull requests for ${context}:`, err);
+      }
+    }
+
+    if (prNumbers.size === 0) {
+      return {
+        attempted: Boolean(listError),
+        success: !listError,
+        error: listError,
+        pr_numbers: [],
+      };
+    }
+
+    const errors: string[] = [];
+    const closed: number[] = [];
+    for (const prNumber of prNumbers) {
+      try {
+        await client.updatePullRequest(prNumber, { state: 'closed' });
+        closed.push(prNumber);
+        console.log(`[orchestrator] Closed GitHub pull request #${prNumber} for ${context}`);
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        errors.push(`#${prNumber}: ${error}`);
+        console.warn(`[orchestrator] Failed to close GitHub pull request #${prNumber} for ${context}:`, err);
+      }
+    }
+    if (listError) {
+      errors.push(`list_open_pull_requests: ${listError}`);
+    }
+
+    return {
+      attempted: true,
+      success: errors.length === 0,
+      error: errors.length > 0 ? errors.join('; ') : null,
+      pr_numbers: closed.length > 0 ? closed : Array.from(prNumbers),
+    };
+  }
+
+  private recordGitHubPullRequestCloseSyncEvent(
+    workItem: WorkItem | null,
+    result: { attempted: boolean; success: boolean; error: string | null; pr_numbers: number[] },
+    context: string,
+    options: { successorIdentifier?: string | null } = {},
+  ): void {
+    if (!workItem || !result.attempted) {
+      return;
+    }
+
+    this.recordSyncEvent({
+      workItemId: workItem.id,
+      targetSystem: 'github',
+      action: 'close_pull_request',
+      payload: {
+        repo: workItem.github_repo,
+        pr_numbers: result.pr_numbers,
+        branch_name: workItem.branch_name,
+        cleanup_context: context,
+        successor_issue_identifier: options.successorIdentifier ?? null,
+      },
+      success: result.success,
+      error: result.error,
+    });
+  }
+
+  private async closeMappedGitHubPullRequestsWithSyncEvent(
+    workItem: WorkItem | null,
+    context: string,
+    options: { successorIdentifier?: string | null } = {},
+  ): Promise<{ attempted: boolean; success: boolean; error: string | null; pr_numbers: number[] }> {
+    const result = await this.closeMappedGitHubPullRequestsWithResult(workItem, context);
+    this.recordGitHubPullRequestCloseSyncEvent(workItem, result, context, options);
+    return result;
+  }
+
+  private async cleanupTerminalWorkItemResidue(
+    workItem: WorkItem | null,
+    issue: Issue,
+    context: string,
+    options: { successorIdentifier?: string | null } = {},
+  ): Promise<void> {
+    if (!workItem) {
+      return;
+    }
+
+    await this.closeMappedGitHubIssueWithSyncEvent(workItem, context, options);
+    await this.closeMappedGitHubPullRequestsWithSyncEvent(workItem, context, options);
+    await this.cleanupClosedWorkItemWorkspace(workItem, issue);
+  }
+
+  private async cleanupClosedWorkItemWorkspace(workItem: WorkItem, issue: Issue): Promise<void> {
+    if (workItem.workspace_path) {
+      try {
+        await this.workspaceManager.removeWorkspace(workItem.workspace_path);
+        console.log(`[orchestrator] Workspace cleaned for closed issue: ${workItem.linear_identifier}`);
+      } catch (err) {
+        console.warn(`[orchestrator] Failed to clean workspace for closed issue ${workItem.linear_identifier}:`, err);
+      }
+    }
+
+    try {
+      await this.cleanupIssueBranch({
+        issue,
+        workItemId: workItem.id,
+        workspacePath: workItem.workspace_path ?? undefined,
+        explicitBranchName: workItem.branch_name,
+      });
+    } catch (err) {
+      console.warn(`[orchestrator] Failed to clean branches for closed issue ${workItem.linear_identifier}:`, err);
+    }
+  }
+
   private buildLinearReviewComment(
     issue: Issue,
     decision: ReviewDecision,
@@ -6989,6 +7167,7 @@ export class Orchestrator extends EventEmitter {
         // Immediate cleanup for cancelled issues
         console.log(`[orchestrator] Issue ${runningEntry.identifier} was CANCELLED - immediate cleanup`);
         const workItem = this.workItemRepository.findByLinearIssueId(issue.id);
+        await this.terminateRunningIssue(runningEntry, false);
         if (workItem) {
           const updatedWorkItem = this.workItemRepository.update({
             id: workItem.id,
@@ -6996,33 +7175,30 @@ export class Orchestrator extends EventEmitter {
             orchestrator_state: 'cancelled',
             cancelled_at: new Date(),
           });
-          await this.closeMappedGitHubIssue(updatedWorkItem ?? workItem, `${runningEntry.identifier} cancellation`);
-        }
-
-        // 1. Remove from running state
-        this.state.running.delete(issue.id);
-        this.state.claimed.delete(issue.id);
-        this.state.retry_attempts.delete(issue.id);
-
-        // 2. Mark as completed (don't retry)
-        this.state.completed.add(issue.id);
-
-        // 3. Clean up workspace
-        try {
+          const cleanupWorkItem = updatedWorkItem ?? workItem;
+          await this.cleanupTerminalWorkItemResidue(cleanupWorkItem, issue, `${runningEntry.identifier} cancellation`);
+        } else {
           const workspacePath = runningEntry.workspace_path ?? this.getRouteWorkspacePath(runningEntry.issue, runningEntry.identifier);
           if (workspacePath) {
             await this.workspaceManager.removeWorkspace(workspacePath);
-            console.log(`[orchestrator] Workspace cleaned for cancelled issue: ${runningEntry.identifier}`);
           }
-        } catch (err) {
-          console.warn(`[orchestrator] Failed to clean workspace for ${runningEntry.identifier}:`, err);
+          await this.cleanupIssueBranch({
+            issue: runningEntry.issue,
+            workspacePath: runningEntry.workspace_path ?? workspacePath ?? undefined,
+            explicitBranchName: runningEntry.branch_name,
+          });
         }
 
-        // 4. Emit event
+        const retryEntry = this.state.retry_attempts.get(issue.id);
+        if (retryEntry?.timer_handle) {
+          clearTimeout(retryEntry.timer_handle);
+        }
+        this.state.retry_attempts.delete(issue.id);
+        this.state.completed.add(issue.id);
+
         this.emit('issue:completed', runningEntry.issue, false);
         this.emit('state:changed', this.getStateSnapshot());
 
-        // 5. Skip further processing for this issue
         continue;
       }
 
@@ -7036,12 +7212,15 @@ export class Orchestrator extends EventEmitter {
             linear_state: issue.state,
             orchestrator_state: 'completed',
           });
-          await this.closeMappedGitHubIssue(
+          await this.terminateRunningIssue(runningEntry, false);
+          await this.cleanupTerminalWorkItemResidue(
             updatedWorkItem ?? workItem,
+            issue,
             `${runningEntry.identifier} terminal state ${issue.state}`,
           );
+        } else {
+          await this.terminateRunningIssue(runningEntry, true);
         }
-        await this.terminateRunningIssue(runningEntry, true);
       } else if (isActive) {
         // Still active - update in-memory state
         runningEntry.issue = issue;
@@ -7103,16 +7282,11 @@ export class Orchestrator extends EventEmitter {
       this.state.retry_attempts.delete(issue.id);
       this.state.completed.add(issue.id);
 
-      await this.closeMappedGitHubIssue(updatedWorkItem ?? workItem, `${workItem.linear_identifier} tracked-state reconciliation`);
-
-      if (workItem.workspace_path) {
-        try {
-          await this.workspaceManager.removeWorkspace(workItem.workspace_path);
-          console.log(`[orchestrator] Workspace cleaned for cancelled tracked issue: ${workItem.linear_identifier}`);
-        } catch (err) {
-          console.warn(`[orchestrator] Failed to clean workspace for ${workItem.linear_identifier}:`, err);
-        }
-      }
+      await this.cleanupTerminalWorkItemResidue(
+        updatedWorkItem ?? workItem,
+        issue,
+        `${workItem.linear_identifier} tracked-state reconciliation`,
+      );
 
       this.emit('issue:completed', issue, false);
       this.emit('state:changed', this.getStateSnapshot());
@@ -7141,17 +7315,7 @@ export class Orchestrator extends EventEmitter {
     this.state.retry_attempts.delete(issue.id);
     this.state.completed.add(issue.id);
 
-    await this.closeMappedGitHubIssue(updatedWorkItem, `${issue.identifier} ${reason}`);
-
-    const workspacePath = updatedWorkItem.workspace_path ?? workItem.workspace_path;
-    if (workspacePath) {
-      try {
-        await this.workspaceManager.removeWorkspace(workspacePath);
-        console.log(`[orchestrator] Workspace cleaned for terminal completed issue: ${issue.identifier}`);
-      } catch (err) {
-        console.warn(`[orchestrator] Failed to clean workspace for ${issue.identifier}:`, err);
-      }
-    }
+    await this.cleanupTerminalWorkItemResidue(updatedWorkItem, issue, `${issue.identifier} ${reason}`);
 
     this.emit('issue:completed', issue, true);
     this.emit('state:changed', this.getStateSnapshot());
@@ -7245,19 +7409,23 @@ export class Orchestrator extends EventEmitter {
       }
       const workItem = this.workItemRepository.findByLinearIssueId(issue.id);
       const workspacePath = workItem?.workspace_path ?? this.getRouteWorkspacePath(issue);
-      if (!workspacePath) {
-        continue;
-      }
       try {
-        await this.workspaceManager.removeWorkspace(workspacePath);
-        console.log('[orchestrator] Cleaned up terminal workspace:', issue.identifier);
         if (workItem) {
           const updatedWorkItem = this.workItemRepository.update({
             id: workItem.id,
             linear_state: issue.state,
-            orchestrator_state: this.isTerminalTrackerState(issue.state) ? 'completed' : 'halted',
+            orchestrator_state: this.isCancelledTrackerState(issue.state)
+              ? 'cancelled'
+              : this.isTerminalTrackerState(issue.state)
+                ? 'completed'
+                : 'halted',
+            cancelled_at: this.isCancelledTrackerState(issue.state) ? new Date() : undefined,
           });
-          await this.closeMappedGitHubIssue(updatedWorkItem ?? workItem, `${issue.identifier} during startup cleanup`);
+          const cleanupWorkItem = updatedWorkItem ?? workItem;
+          await this.cleanupTerminalWorkItemResidue(cleanupWorkItem, issue, `${issue.identifier} during startup cleanup`);
+        } else if (workspacePath) {
+          await this.workspaceManager.removeWorkspace(workspacePath);
+          console.log('[orchestrator] Cleaned up terminal workspace:', issue.identifier);
         }
       } catch (err) {
         console.warn('[orchestrator] Failed to clean workspace:', issue.identifier, err);

@@ -7,6 +7,10 @@ function isEphemeralTryCloudflareUrl(value: string | null): boolean {
   return Boolean(value && /^https:\/\/[a-z0-9.-]+trycloudflare\.com\/?$/i.test(value));
 }
 
+function isRecoverableTunnelWebhookError(value: string | null): boolean {
+  return Boolean(value && /530|wrong response from the webhook|cloudflare|tunnel|failed to resolve host|host.*not known|dns|timed out|connection reset|fetch failed|network error/i.test(value));
+}
+
 export function buildTelegramStartupSummary(telegram: {
   health?: string | null;
   webhook_url?: string | null;
@@ -62,6 +66,45 @@ export function shouldEmitTelegramStartupSummary(telegram: {
     return true;
   }
   return false;
+}
+
+export function getStartLocalTunnelRecoveryReason(telegram: {
+  health?: string | null;
+  webhook_url?: string | null;
+  webhook_last_error_message?: string | null;
+  public_base_url?: string | null;
+  webhook_pending_update_count?: number | null;
+}, expectedPublicBaseUrl?: string | null): string | null {
+  const expectedBaseUrl = normalizeEnvValue(expectedPublicBaseUrl ?? undefined);
+  if (!isEphemeralTryCloudflareUrl(expectedBaseUrl)) {
+    return null;
+  }
+
+  const webhookUrl = normalizeEnvValue(telegram.webhook_url ?? undefined);
+  if (webhookUrl && !webhookUrl.startsWith(`${expectedBaseUrl}/`)) {
+    return `stale webhook_url=${webhookUrl} expected_base=${expectedBaseUrl}`;
+  }
+
+  const currentBaseUrl = normalizeEnvValue(telegram.public_base_url ?? undefined);
+  if (currentBaseUrl && currentBaseUrl !== expectedBaseUrl) {
+    return `stale public_base=${currentBaseUrl} expected_base=${expectedBaseUrl}`;
+  }
+
+  const error = normalizeEnvValue(telegram.webhook_last_error_message ?? undefined);
+  if (isRecoverableTunnelWebhookError(error)) {
+    return `telegram webhook degraded: ${error}`;
+  }
+
+  if (
+    telegram.health === 'degraded' &&
+    typeof telegram.webhook_pending_update_count === 'number' &&
+    telegram.webhook_pending_update_count > 0 &&
+    error
+  ) {
+    return `telegram webhook degraded: ${error}`;
+  }
+
+  return null;
 }
 
 export function shouldProvisionStartLocalTunnel(

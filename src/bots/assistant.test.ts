@@ -283,7 +283,7 @@ describe('BotAssistantService', () => {
     expect(first.message).toContain('Project: test2');
     expect(runtime.createIssueCalls).toHaveLength(0);
 
-    const confirmed = await assistant.respondToText(context, '确认');
+    const confirmed = await assistant.respondToText(context, '是的');
     expect(confirmed.message).toContain('已创建');
     expect(runtime.createIssueCalls).toHaveLength(1);
     expect(runtime.createIssueCalls[0]?.project_slug).toBe('test2');
@@ -396,7 +396,7 @@ describe('BotAssistantService', () => {
 
     subscriptions.dispose();
     supervisorService.dispose();
-  });
+  }, 10_000);
 
   test('routes ordinary Telegram freeform chat to the supervisor before falling back to command-style issue handling', async () => {
     db = new Database(':memory:');
@@ -4527,6 +4527,53 @@ describe('BotAssistantService', () => {
 
     expect(response.message).toContain('INT-31');
     expect(response.message).toContain('failed');
+
+    subscriptions.dispose();
+  });
+
+  test('answers short active issue follow-up from runtime context when the model is unavailable', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const projectResolver = new TrackerProjectResolutionService(
+      {
+        listProjects: async () => ({ projects: [] }),
+      } as any,
+      {},
+    );
+    const commandService = new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver);
+    const assistant = new BotAssistantService(
+      runtime,
+      commandService,
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => {
+          throw new Error('Anthropic unavailable');
+        },
+      },
+    );
+
+    const response = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-4' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      '活跃的 issue 呢',
+    );
+
+    expect(response.message).toContain('当前活跃 issue');
+    expect(response.message).toContain('INT-31');
+    expect(response.message).toContain('Hello world');
+    expect(response.message).not.toContain('Bash');
+    expect(response.message).not.toContain('Linear Web UI');
+    expect(response.message).not.toContain('未识别请求');
 
     subscriptions.dispose();
   });

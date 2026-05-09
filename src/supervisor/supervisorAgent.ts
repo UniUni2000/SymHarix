@@ -13,6 +13,7 @@ import type {
   SupervisorRepoSourceResolver,
   SupervisorRepoSourceSnapshot,
 } from './repoSourceResolver';
+import { isSupervisorControlPlaneQuestion } from '../bots/controlPlaneIntent';
 
 export interface SupervisorAgentRuntimeContext {
   source: 'telegram_chat' | 'slash_command' | 'inline_action';
@@ -172,6 +173,9 @@ function normalizeUserText(value: string): string {
 }
 
 export function shouldUseReadOnlyClaudeForText(value: string): boolean {
+  if (isSupervisorControlPlaneQuestion(value)) {
+    return false;
+  }
   const normalized = value.toLowerCase();
   const englishTriggers = [
     /\b(repo|repository|codebase|files?|folders?|directory|directories)\b/,

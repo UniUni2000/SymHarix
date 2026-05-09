@@ -136,6 +136,7 @@ class ReviewHook:
         phase: str = "review",
         exit_code: Optional[int] = None,
         summary: Optional[str] = None,
+        turn: Optional[int] = None,
     ) -> None:
         evidence_path = self._workflow_file_path("change-pack/evidence.json")
         if not evidence_path.exists():

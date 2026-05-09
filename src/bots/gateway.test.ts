@@ -8,10 +8,17 @@ import {
   BotConversationPreferenceRepository,
   BotFollowupMessageStateRepository,
   BotPendingActionRepository,
+  SupervisorPendingActionRepository,
+  SupervisorRunEventRepository,
+  SupervisorRunRepository,
   SupervisorSessionEventRepository,
   SupervisorSessionRepository,
+  SupervisorToolCallRepository,
   initializeSchema,
 } from '../database';
+import { BotCommandService } from './commandService';
+import { BotSubscriptionService } from './subscriptions';
+import { SupervisorAgentRuntimeService, type SupervisorModelLoop } from '../supervisor/agentRuntime';
 import { SupervisorSessionService } from '../supervisor/sessionService';
 
 function createRuntimeControlPlane(): RuntimeControlPlane {
@@ -649,6 +656,199 @@ describe('DefaultBotGateway', () => {
     expect(String(requests[0]?.body.text)).toContain('INT-1');
   });
 
+  test('wires the configured assistant model into the supervisor runtime tool router', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const supervisorRuns = new SupervisorRunRepository(db);
+    const supervisorRunEvents = new SupervisorRunEventRepository(db);
+    const supervisorToolCalls = new SupervisorToolCallRepository(db);
+    const supervisorPendingActions = new SupervisorPendingActionRepository(db);
+    const requests: Array<{ url: string; body: BodyInit | null | undefined }> = [];
+    const modelInputs: Array<{ text: string; activeIssue: string | null }> = [];
+
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: init?.body,
+      });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 101 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(['9']),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        supervisorRunRepository: supervisorRuns,
+        supervisorRunEventRepository: supervisorRunEvents,
+        supervisorToolCallRepository: supervisorToolCalls,
+        supervisorPendingActionRepository: supervisorPendingActions,
+        assistantModel: {
+          decide: async (input) => {
+            modelInputs.push({
+              text: input.text,
+              activeIssue: input.context.overview.active_issues[0]?.identifier ?? null,
+            });
+            return JSON.stringify({
+              intent: {
+                kind: 'show_issue_card',
+                issue_id: input.context.overview.active_issues[0]?.identifier ?? null,
+              },
+            });
+          },
+          getDiagnostics: () => ({
+            provider: 'test',
+            model: 'test-router',
+            configured: true,
+            health: 'healthy',
+            fallback_available: true,
+            last_error_code: null,
+          }),
+        },
+      },
+    );
+
+    const result = await gateway.handleTelegramWebhook(
+      {
+        message: {
+          text: '这个单子卡片',
+          chat: { id: 42 },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(result.status).toBe(200);
+    expect(requests).toHaveLength(0);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(modelInputs).toEqual([{ text: '这个单子卡片', activeIssue: 'INT-1' }]);
+    expect(requests.some((request) => request.url.includes('sendPhoto'))).toBe(true);
+    const run = supervisorRuns.findLatestByConversation({
+      transport: 'telegram',
+      conversation_id: '42',
+    });
+    expect(run?.active_issue_id).toBe('issue-1');
+    expect(supervisorToolCalls.findByRun(run!.id).map((call) => call.tool_name)).toEqual(['show_issue_card']);
+
+    gateway.dispose();
+    db.close();
+  });
+
+  test('sends a safe recovery reply for non-command Telegram assistant failures without backend jargon', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const supervisorRuns = new SupervisorRunRepository(db);
+    const supervisorRunEvents = new SupervisorRunEventRepository(db);
+    const supervisorToolCalls = new SupervisorToolCallRepository(db);
+    const supervisorPendingActions = new SupervisorPendingActionRepository(db);
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body || '{}')),
+      });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    const runtime = createRuntimeControlPlane();
+    const commandService = new BotCommandService(
+      runtime,
+      new BotSubscriptionService(runtime, {}),
+      () => true,
+    );
+    const model: SupervisorModelLoop = async () => ({
+      type: 'tool_call',
+      tool: 'delete_everything',
+      args: {},
+      reason: 'ECONNRESET while selecting a supervisor tool.',
+    });
+    const supervisorRuntime = new SupervisorAgentRuntimeService({
+      runtime,
+      commandService,
+      runs: supervisorRuns,
+      events: supervisorRunEvents,
+      toolCalls: supervisorToolCalls,
+      pendingActions: supervisorPendingActions,
+      model,
+    });
+    const gateway = new DefaultBotGateway(
+      runtime,
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        supervisorAgentRuntimeService: supervisorRuntime,
+        supervisorRunRepository: supervisorRuns,
+        supervisorRunEventRepository: supervisorRunEvents,
+        supervisorToolCallRepository: supervisorToolCalls,
+        supervisorPendingActionRepository: supervisorPendingActions,
+      },
+    );
+
+    const result = await gateway.handleTelegramWebhook(
+      {
+        message: {
+          text: '帮我处理一下这个项目',
+          chat: { id: 42 },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(result.status).toBe(200);
+    expect(requests).toHaveLength(0);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toContain('sendMessage');
+    const outboundText = String(requests[0]?.body.text);
+    expect(outboundText).toContain('这个请求没有执行');
+    expect(outboundText).toContain('我没有改动任何东西');
+    expect(outboundText).not.toContain('Unsupported supervisor tool');
+    expect(outboundText).not.toContain('Invalid args');
+    expect(outboundText).not.toContain('ECONNRESET');
+
+    gateway.dispose();
+    db.close();
+  });
+
   test('returns Telegram webhook 200 before a slow assistant reply finishes', async () => {
     const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
     let resolveAssistant: (() => void) | null = null;
@@ -813,6 +1013,94 @@ describe('DefaultBotGateway', () => {
 
     expect(requests).toHaveLength(2);
     expect(String(requests[1]?.body.text)).toContain('INT-1 目前还在执行中');
+  });
+
+  test('deduplicates Telegram retried text updates before sending progress or final replies', async () => {
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    let resolveAssistant: (() => void) | null = null;
+    const assistantDone = new Promise<void>((resolve) => {
+      resolveAssistant = resolve;
+    });
+
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body || '{}')),
+      });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        telegramTextProcessingAckDelayMs: 5,
+        assistantModel: {
+          decide: async () => {
+            await assistantDone;
+            return {
+              intent: {
+                kind: 'answer_question',
+                answer: 'No active work right now.',
+              },
+            };
+          },
+          getDiagnostics: () => ({
+            provider: 'test',
+            model: 'test-model',
+            configured: true,
+            health: 'healthy',
+            fallback_available: true,
+            last_error_code: null,
+          }),
+        },
+      },
+    );
+
+    const update = {
+      update_id: 12345,
+      message: {
+        text: 'are things clean now?',
+        chat: { id: 42 },
+        from: { id: 9, username: 'alice' },
+      },
+    };
+    const headers = {
+      'x-telegram-bot-api-secret-token': 'secret',
+    };
+
+    const first = await gateway.handleTelegramWebhook(update, headers);
+    const retry = await gateway.handleTelegramWebhook(update, headers);
+
+    expect(first.status).toBe(200);
+    expect(retry.status).toBe(200);
+    expect(retry.body).toEqual({ ok: true, duplicate: true });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(requests).toHaveLength(1);
+    expect(String(requests[0]?.body.text)).toContain('收到您的消息了，我这边正在思考和处理，给我点时间');
+
+    resolveAssistant?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(requests).toHaveLength(2);
+    expect(String(requests[1]?.body.text)).toContain('No active work right now.');
   });
 
   test('mentions latest repo reading in the slow acknowledgement for repo questions', async () => {
@@ -1284,6 +1572,97 @@ describe('DefaultBotGateway', () => {
           { text: '改一下计划', callback_data: 'sup|session-1|edit' },
           { text: '打开运行视图', style: 'primary', web_app: { url: 'https://app.example.test/runtime/issues/INT-248/app' } },
         ],
+      ],
+    });
+
+    gateway.dispose();
+  });
+
+  test('handles runtime issue card buttons by refreshing the same Telegram card through supervisor runtime', async () => {
+    const requests: Array<{ url: string; body: FormData | Record<string, unknown> }> = [];
+    const runtimeTexts: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const rawBody = init?.body;
+      requests.push({
+        url: String(input),
+        body: rawBody instanceof FormData ? rawBody : JSON.parse(String(rawBody || '{}')),
+      });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 101 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(['9']),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        supervisorAgentRuntimeService: {
+          respond: async ({ text }) => {
+            runtimeTexts.push(text);
+            return {
+              message: 'Issue Card · INT-1',
+              caption: '<b>INT-1 · Gateway test</b>',
+              format: 'telegram_html',
+              media_key: 'issue-card|INT-1|refresh',
+              photo: {
+                bytes: new Uint8Array([137, 80, 78, 71]),
+                filename: 'INT-1-issue-card.png',
+                content_type: 'image/png',
+              },
+              show_caption_above_media: false,
+              issue_id: 'issue-1',
+              action_rows: [
+                [{ label: '打开运行视图', style: 'primary', web_app: { url: '/runtime/issues/INT-1/app' } }],
+                [{ label: '刷新卡片', callback_data: 'rt|INT-1|refresh' }],
+              ],
+            };
+          },
+        } as unknown as SupervisorAgentRuntimeService,
+      },
+    );
+    (gateway as any).telegramPublicBaseUrl = 'https://app.example.test';
+
+    const result = await gateway.handleTelegramWebhook(
+      {
+        callback_query: {
+          id: 'callback-runtime-refresh',
+          data: 'rt|INT-1|refresh',
+          message: {
+            chat: { id: 42 },
+            message_id: 101,
+            caption: 'old card',
+          },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(result.status).toBe(200);
+    expect(runtimeTexts).toEqual(['INT-1 卡片']);
+    expect(requests.some((request) => request.url.includes('answerCallbackQuery'))).toBe(true);
+    const edit = requests.find((request) => request.url.includes('editMessageMedia'));
+    expect(edit?.body).toBeInstanceOf(FormData);
+    expect((edit?.body as FormData).get('message_id')).toBe('101');
+    expect(JSON.parse(String((edit?.body as FormData).get('reply_markup')))).toEqual({
+      inline_keyboard: [
+        [{ text: '打开运行视图', style: 'primary', web_app: { url: 'https://app.example.test/runtime/issues/INT-1/app' } }],
+        [{ text: '刷新卡片', callback_data: 'rt|INT-1|refresh' }],
       ],
     });
 
@@ -2119,6 +2498,130 @@ describe('DefaultBotGateway', () => {
     db.close();
   });
 
+  test('binds a supervisor runtime pending confirmation to the sent Telegram message', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const supervisorRuns = new SupervisorRunRepository(db);
+    const supervisorRunEvents = new SupervisorRunEventRepository(db);
+    const supervisorToolCalls = new SupervisorToolCallRepository(db);
+    const supervisorPendingActions = new SupervisorPendingActionRepository(db);
+    const issue = {
+      issue_id: 'issue-157',
+      work_item_id: 'issue-157',
+      identifier: 'INT-157',
+      title: '补充 README.md 项目文档',
+      phase: 'DEV',
+      tracker_state: 'In Progress',
+      orchestrator_state: 'halted',
+      workspace_path: null,
+      branch_name: 'feature/int-157',
+      github_repo: 'UniUni2000/test2',
+      github_issue_number: 100,
+      active_pr_number: null,
+      session: null,
+      actions: {
+        can_stop: false,
+        can_retry: false,
+        can_open_pr: false,
+      },
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+    };
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body || '{}')),
+      });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 410 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const runtime = {
+      ...createRuntimeControlPlane(),
+      getOverview: () => ({
+        generated_at: '2026-01-01T00:00:00.000Z',
+        counts: { running: 0, retrying: 0, total: 1 },
+        issues: [issue],
+      }),
+      getIssue: (id: string) => ['issue-157', 'INT-157'].includes(id) ? issue : null,
+    } as RuntimeControlPlane;
+    const commandService = new BotCommandService(
+      runtime,
+      new BotSubscriptionService(runtime, {}),
+      () => true,
+    );
+    const supervisorRuntime = new SupervisorAgentRuntimeService({
+      runtime,
+      commandService,
+      runs: supervisorRuns,
+      events: supervisorRunEvents,
+      toolCalls: supervisorToolCalls,
+      pendingActions: supervisorPendingActions,
+    });
+    const gateway = new DefaultBotGateway(
+      runtime,
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        supervisorAgentRuntimeService: supervisorRuntime,
+        supervisorRunRepository: supervisorRuns,
+        supervisorRunEventRepository: supervisorRunEvents,
+        supervisorToolCallRepository: supervisorToolCalls,
+        supervisorPendingActionRepository: supervisorPendingActions,
+        assistantModel: {
+          decide: async () => null,
+          getDiagnostics: () => ({
+            provider: null,
+            model: null,
+            configured: false,
+            health: 'unconfigured',
+            fallback_available: true,
+            last_error_code: 'unconfigured',
+          }),
+        },
+      },
+    );
+
+    await gateway.handleTelegramWebhook(
+      {
+        message: {
+          text: '把 157 给我关了吧',
+          chat: { id: 42 },
+          from: { id: 9, username: 'alice' },
+        },
+      } as any,
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const pending = supervisorPendingActions.findOpenByConversation({
+      transport: 'telegram',
+      conversation_id: '42',
+    });
+    expect(pending?.tool_name).toBe('close_issue');
+    expect(pending?.telegram_message_id).toBe('410');
+    expect(requests.some((request) => request.url.includes('sendMessage'))).toBe(true);
+
+    db.close();
+  });
+
   test('keeps the original Telegram card when an edit fails with a hard error', async () => {
     const db = new Database(':memory:');
     initializeSchema(db);
@@ -2448,6 +2951,87 @@ describe('DefaultBotGateway', () => {
         action: 'send',
         result: 'success',
         conversation_id: '42',
+      }),
+    ]);
+
+    gateway.dispose();
+    db.close();
+  });
+
+  test('does not send a second Telegram error message after final outbound delivery fails', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const transportEvents = new BotTransportEventRepository(db);
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body || '{}')),
+      });
+      throw new Error('connection reset by peer');
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        transportEventRepository: transportEvents,
+        assistantModel: {
+          decide: async () => ({
+            intent: {
+              kind: 'answer_question',
+              answer: 'There are currently no active issues.',
+            },
+          }),
+          getDiagnostics: () => ({
+            provider: 'test',
+            model: 'test-model',
+            configured: true,
+            health: 'healthy',
+            fallback_available: true,
+            last_error_code: null,
+          }),
+        },
+      },
+    );
+
+    const result = await gateway.handleTelegramWebhook(
+      {
+        message: {
+          text: 'open issues',
+          chat: { id: 42 },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(result.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(requests.filter((request) => request.url.includes('sendMessage'))).toHaveLength(1);
+    expect(transportEvents.findAll()).toEqual([
+      expect.objectContaining({
+        source: 'sync_ack',
+        action: 'send',
+        result: 'failed',
+        conversation_id: '42',
+        error_message: 'connection reset by peer',
       }),
     ]);
 
