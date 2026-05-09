@@ -168,6 +168,10 @@ export function createRuntimeRoutes(
         typeof payload.state_id === 'string' && payload.state_id.trim()
           ? payload.state_id.trim()
           : null,
+      supervisor_locale:
+        payload.supervisor_locale === 'zh' || payload.supervisor_locale === 'en'
+          ? payload.supervisor_locale
+          : null,
     });
 
     return c.json(

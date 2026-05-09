@@ -4,6 +4,7 @@ import type { BotTransportPhoto } from '../bots/types';
 import type { RuntimeIssueView } from '../runtime/types';
 import type { SupervisorMilestone } from './types';
 import { isInternalSupervisorTurnBudgetFailure } from './milestoneVisibility';
+import { localizeKnownRuntimeText, type RuntimeLocale } from '../i18n/locale';
 
 export interface SupervisorSessionVisualCard {
   media_key: string;
@@ -122,13 +123,30 @@ function isCompletedIssue(session: SupervisorSessionRecord, issue: RuntimeIssueV
     /^(done|completed)$/i.test(issue?.tracker_state || '');
 }
 
+function isEnglishLocale(locale: RuntimeLocale | null | undefined): boolean {
+  return locale === 'en';
+}
+
+function textForLocale(locale: RuntimeLocale | null | undefined, zh: string, en: string): string {
+  return isEnglishLocale(locale) ? en : zh;
+}
+
+function localizedKnown(value: string, locale: RuntimeLocale | null | undefined): string {
+  return isEnglishLocale(locale) ? localizeKnownRuntimeText(value, locale) : value;
+}
+
 function statusLabel(session: SupervisorSessionRecord, issue: RuntimeIssueView | null): string {
-  if (isCompletedIssue(session, issue)) return '已完成';
-  if (session.state === 'awaiting_user_approval' || session.state === 'plan_ready') return '计划待批准';
-  if (session.state === 'awaiting_user_decision') return '需要决策';
-  if (session.state === 'cancelled') return '已取消';
-  if (issue?.orchestrator_state === 'failed' || issue?.delivery_state === 'delivery_failed') return '需要处理';
-  return '执行中';
+  const locale = session.supervisor_locale;
+  if (isCompletedIssue(session, issue)) return textForLocale(locale, '已完成', 'Completed');
+  if (session.state === 'awaiting_user_approval' || session.state === 'plan_ready') {
+    return textForLocale(locale, '计划待批准', 'Plan awaiting approval');
+  }
+  if (session.state === 'awaiting_user_decision') return textForLocale(locale, '需要决策', 'Needs decision');
+  if (session.state === 'cancelled') return textForLocale(locale, '已取消', 'Cancelled');
+  if (issue?.orchestrator_state === 'failed' || issue?.delivery_state === 'delivery_failed') {
+    return textForLocale(locale, '需要处理', 'Needs recovery');
+  }
+  return textForLocale(locale, '执行中', 'Running');
 }
 
 function confidenceLabel(session: SupervisorSessionRecord, issue: RuntimeIssueView | null): string {
@@ -149,9 +167,9 @@ function outcomeString(session: SupervisorSessionRecord, key: string): string | 
 function materializationPrefix(session: SupervisorSessionRecord): string {
   const outcomeKind = outcomeString(session, 'outcome_kind');
   if (outcomeKind === 'continued' || outcomeKind === 'plan_revision_approved') {
-    return '已继续执行';
+    return textForLocale(session.supervisor_locale, '已继续执行', 'Continued');
   }
-  return '已创建';
+  return textForLocale(session.supervisor_locale, '已创建', 'Created');
 }
 
 function outcomeNumber(session: SupervisorSessionRecord, key: string): number | null {
@@ -180,15 +198,15 @@ function complexityLabel(session: SupervisorSessionRecord, issue: RuntimeIssueVi
   return 'L2';
 }
 
-function riskSummary(value: string): string {
+function riskSummary(value: string, locale: RuntimeLocale | null | undefined): string {
   const normalized = value.toLowerCase();
   if (/误删|delete|destructive|清理|破坏/.test(normalized)) {
-    return '高 · 需确认范围';
+    return textForLocale(locale, '高 · 需确认范围', 'High · confirm scope');
   }
   if (/blocked|失败|failed|高风险|high/.test(normalized)) {
-    return '高 · 需要处理';
+    return textForLocale(locale, '高 · 需要处理', 'High · needs action');
   }
-  return '中等 · 需确认边界';
+  return textForLocale(locale, '中等 · 需确认边界', 'Medium · confirm boundary');
 }
 
 type RecentToolActivity = NonNullable<RuntimeIssueView['session']>['recent_tools'][number];
@@ -208,7 +226,7 @@ function fileNameFromPath(value: string | null | undefined): string {
     .replace(/\\/g, '/')
     .trim();
   if (!normalized) {
-    return '文件';
+    return 'file';
   }
   const parts = normalized.split('/').filter(Boolean);
   return parts.at(-1) || normalized;
@@ -233,37 +251,37 @@ function summarizeToolActivity(tool: RecentToolActivity): string {
   const lower = raw.toLowerCase();
   const prMatch = raw.match(/\bgh\s+pr\s+view\s+(\d+)/i);
   if (prMatch) {
-    return `查看 PR #${prMatch[1]}`;
+    return `View PR #${prMatch[1]}`;
   }
   if (/\bgit\s+status\b/.test(lower)) {
-    return '检查 Git 状态';
+    return 'Check Git status';
   }
   if (/\bgit\s+diff\b/.test(lower)) {
-    return '查看代码改动';
+    return 'Review code changes';
   }
   const writeMatch = raw.match(/\b(?:cat|tee)\s*>\s*["']?([^"'<\s]+)/i);
   if (writeMatch) {
-    return `写入 ${fileNameFromPath(writeMatch[1])}`;
+    return `Write ${fileNameFromPath(writeMatch[1])}`;
   }
   const readMatch = raw.match(/\b(?:cat|sed|nl|less)\s+["']?([^"'<\s]+)/i);
   if (readMatch) {
-    return `读取 ${fileNameFromPath(readMatch[1])}`;
+    return `Read ${fileNameFromPath(readMatch[1])}`;
   }
   const removeMatch = raw.match(/\brm\s+-[rf]+\s+["']?([^"'<\s]+)/i);
   if (removeMatch) {
-    return `删除 ${fileNameFromPath(removeMatch[1])}`;
+    return `Delete ${fileNameFromPath(removeMatch[1])}`;
   }
   return compact(raw, 44);
 }
 
 function summarizeFileActivity(file: RecentFileActivity): string {
   const verb = file.operation === 'read'
-    ? '读取'
+    ? 'Read'
     : file.operation === 'write'
-      ? '写入'
+      ? 'Write'
       : file.operation === 'edit'
-        ? '编辑'
-        : '查看';
+        ? 'Edit'
+        : 'View';
   const path = compactPath(file.path, 28) || fileNameFromPath(file.path);
   return `${verb} ${path}`;
 }
@@ -345,23 +363,29 @@ function roundLabel(session: SupervisorSessionRecord, issue: RuntimeIssueView | 
 }
 
 function roundGoal(session: SupervisorSessionRecord, issue: RuntimeIssueView | null): string {
+  const locale = session.supervisor_locale;
   if (isCompletedIssue(session, issue)) {
-    return issue?.delivery_summary ?? session.delivery_summary ?? '计划线程已完成，最终交付已闭环。';
+    return localizedKnown(
+      issue?.delivery_summary ?? session.delivery_summary ?? textForLocale(locale, '计划线程已完成，最终交付已闭环。', 'Plan thread completed and final delivery is closed.'),
+      locale,
+    );
   }
   const latestInstruction = session.last_material_outcome?.latest_dev_instruction;
-  return outcomeString(session, 'round_goal')
+  const goal = outcomeString(session, 'round_goal')
     ?? issue?.roundGoal
     ?? issue?.round?.goal
     ?? issue?.next_recommended_action
     ?? (typeof latestInstruction === 'string' && latestInstruction.trim() ? latestInstruction.trim() : null)
     ?? session.plan_card?.recommended_option.summary
-    ?? '继续推进当前计划线程。';
+    ?? textForLocale(locale, '继续推进当前计划线程。', 'Continue advancing the current plan thread.');
+  return localizedKnown(goal, locale);
 }
 
 export function buildSupervisorSessionVisualCardSvg(session: SupervisorSessionRecord, issue: RuntimeIssueView | null): string {
+  const locale = session.supervisor_locale;
   const plan = session.plan_card;
   const identifier = issue?.identifier || session.root_issue_id || 'Plan Card';
-  const title = issue?.title || plan?.title || '当前计划线程';
+  const title = issue?.title || plan?.title || textForLocale(locale, '当前计划线程', 'Current plan thread');
   const repo = issue?.github_repo || plan?.repo_ref || session.repo_ref || 'repo pending';
   const waitingForApproval = session.state === 'awaiting_user_approval' || session.state === 'plan_ready';
   const completed = isCompletedIssue(session, issue);
@@ -377,13 +401,13 @@ export function buildSupervisorSessionVisualCardSvg(session: SupervisorSessionRe
     ?? null;
   const latestTool = issue?.session?.recent_tools?.at(-1) ?? null;
   const latestFile = issue?.session?.recent_files?.at(-1) ?? null;
-  const judgment = isCompletedIssue(session, issue)
-    ? issue?.delivery_summary || session.delivery_summary || '计划线程已完成，最终交付已闭环。'
+  const rawJudgment = isCompletedIssue(session, issue)
+    ? issue?.delivery_summary || session.delivery_summary || textForLocale(locale, '计划线程已完成，最终交付已闭环。', 'Plan thread completed and final delivery is closed.')
     : deliveryBlocked
       ? notificationSummary
         || issue?.delivery_summary
         || session.delivery_summary
-        || '证据已满足，但交付动作需要处理。'
+        || textForLocale(locale, '证据已满足，但交付动作需要处理。', 'Evidence is satisfied, but delivery needs attention.')
     : notificationSummary
       || issue?.session?.last_message
       || issue?.next_recommended_action
@@ -391,21 +415,25 @@ export function buildSupervisorSessionVisualCardSvg(session: SupervisorSessionRe
       || issue?.delivery_summary
       || session.delivery_summary
       || plan?.execution_strategy
-      || '继续推进当前计划线程。';
-  const risk = (plan?.known_risks ?? [])[0] || issue?.governance_summary || '跨层改动，先锁定验收标准。';
+      || textForLocale(locale, '继续推进当前计划线程。', 'Continue advancing the current plan thread.');
+  const judgment = localizedKnown(rawJudgment, locale);
+  const risk = localizedKnown(
+    (plan?.known_risks ?? [])[0] || issue?.governance_summary || textForLocale(locale, '跨层改动，先锁定验收标准。', 'Cross-layer change; lock acceptance criteria first.'),
+    locale,
+  );
   const progressValue = stageProgress(session, issue);
   const childCount = Math.max(0, issue?.governance_child_queue?.length ?? 0);
   const splitCount = Math.max(3, childCount);
   const complexity = complexityLabel(session, issue);
   const complexityText = deliveryBlocked
-    ? '证据已满足，交付动作需要处理。'
+    ? textForLocale(locale, '证据已满足，交付动作需要处理。', 'Evidence is satisfied; delivery needs attention.')
     : liveMode
-      ? `${roundLabel(session, issue)} 运行中，主卡同步 Mini App 进展。`
+      ? `${roundLabel(session, issue)} ${textForLocale(locale, '运行中，主卡同步 Mini App 进展。', 'is running; the card mirrors Mini App progress.')}`
     : plan?.materialization_mode === 'root_with_split_queue' || childCount > 0
-    ? `复杂度 ${complexity}，拆成 ${splitCount} 个顺序子任务。`
-    : `复杂度 ${complexity}，按当前计划推进。`;
+    ? textForLocale(locale, `复杂度 ${complexity}，拆成 ${splitCount} 个顺序子任务。`, `Complexity ${complexity}; split into ${splitCount} ordered child tasks.`)
+    : textForLocale(locale, `复杂度 ${complexity}，按当前计划推进。`, `Complexity ${complexity}; proceed with the current plan.`);
   const goal = roundGoal(session, issue) || judgment;
-  const status = `${complexity} · ${statusLabel(session, issue).replace(/^计划/, '')}`;
+  const status = `${complexity} · ${statusLabel(session, issue).replace(/^计划/, '').replace(/^Plan /, '')}`;
   const statusWidth = Math.max(190, Math.min(330, status.length * 22 + 48));
   const confidence = confidenceLabel(session, issue);
   const confidenceWidth = Math.max(230, Math.min(330, confidence.length * 16 + 64));
@@ -438,29 +466,29 @@ export function buildSupervisorSessionVisualCardSvg(session: SupervisorSessionRe
   const liveNextItems = [
     issue?.next_recommended_action,
     latestInstruction,
-    deliveryBlocked ? '等待用户确认交付处理方式。' : null,
+    deliveryBlocked ? textForLocale(locale, '等待用户确认交付处理方式。', 'Waiting for the user to choose delivery recovery.') : null,
   ].filter((value): value is string => Boolean(value && value.trim()));
   const scopeItems = liveMode
-    ? splitPlanItems(liveProgressItems, judgment, 3, 46)
-    : splitPlanItems(plan?.in_scope, plan?.user_goal || title, 3, 46);
+    ? splitPlanItems(liveProgressItems.map((value) => localizedKnown(value, locale)), judgment, 3, 46)
+    : splitPlanItems(plan?.in_scope.map((value) => localizedKnown(value, locale)), localizedKnown(plan?.user_goal || title, locale), 3, 46);
   const acceptanceItems = liveMode
-    ? splitPlanItems(liveNextItems, plan?.recommended_option.summary || '继续推进当前计划线程。', 2, 32)
-    : splitPlanItems(plan?.acceptance, `完成 ${title}，结果可验证。`, 2, 32);
+    ? splitPlanItems(liveNextItems.map((value) => localizedKnown(value, locale)), localizedKnown(plan?.recommended_option.summary || textForLocale(locale, '继续推进当前计划线程。', 'Continue advancing the current plan thread.'), locale), 2, 32)
+    : splitPlanItems(plan?.acceptance.map((value) => localizedKnown(value, locale)), textForLocale(locale, `完成 ${title}，结果可验证。`, `Complete ${title}; make the result verifiable.`), 2, 32);
   const outOfScopeItems = liveMode
-    ? splitPlanItems([session.delivery_summary || issue?.delivery_summary || notificationSummary || risk], risk, 2, 42)
-    : splitPlanItems(plan?.out_of_scope, '不扩大到无关仓库、分支或历史记录。', 2, 42);
-  const riskItems = splitPlanItems(plan?.known_risks, risk, 2, 42);
-  const leftPanelTitle = liveMode ? '当前进展' : '本次范围';
-  const rightPanelTitle = liveMode ? (deliveryBlocked ? '需要决定' : '下一步') : '验收标准';
-  const riskPanelTitle = deliveryBlocked ? '交付阻塞' : liveMode ? '运行信号' : '边界与风险';
-  const middlePhaseLabel = liveMode ? '开发' : '调度';
+    ? splitPlanItems([session.delivery_summary || issue?.delivery_summary || notificationSummary || risk].map((value) => localizedKnown(value, locale)), risk, 2, 42)
+    : splitPlanItems(plan?.out_of_scope.map((value) => localizedKnown(value, locale)), textForLocale(locale, '不扩大到无关仓库、分支或历史记录。', 'Do not expand to unrelated repositories, branches, or history.'), 2, 42);
+  const riskItems = splitPlanItems(plan?.known_risks.map((value) => localizedKnown(value, locale)), risk, 2, 42);
+  const leftPanelTitle = liveMode ? textForLocale(locale, '当前进展', 'Current Progress') : textForLocale(locale, '本次范围', 'Scope');
+  const rightPanelTitle = liveMode ? (deliveryBlocked ? textForLocale(locale, '需要决定', 'Decision Needed') : textForLocale(locale, '下一步', 'Next Step')) : textForLocale(locale, '验收标准', 'Acceptance Criteria');
+  const riskPanelTitle = deliveryBlocked ? textForLocale(locale, '交付阻塞', 'Delivery Blocker') : liveMode ? textForLocale(locale, '运行信号', 'Runtime Signals') : textForLocale(locale, '边界与风险', 'Boundaries & Risks');
+  const middlePhaseLabel = liveMode ? textForLocale(locale, '开发', 'Dev') : textForLocale(locale, '调度', 'Dispatch');
   const finalPhaseLabel = completed
-    ? '交付'
+    ? textForLocale(locale, '交付', 'Delivery')
     : issue?.phase === 'REVIEW'
       ? 'Review'
       : deliveryBlocked
-        ? '交付'
-        : '执行';
+        ? textForLocale(locale, '交付', 'Delivery')
+        : textForLocale(locale, '执行', 'Execution');
   const progressRailLabel = liveMode ? 'Plan → Dev → Review/Delivery' : 'Plan → Dispatch → Execution';
   const titleLines = wrapText(title, 18, 2);
   const judgmentLines = wrapText(judgment, 34, 2);
@@ -521,11 +549,11 @@ export function buildSupervisorSessionVisualCardSvg(session: SupervisorSessionRe
     </g>
 
     <rect x="56" y="352" width="968" height="136" rx="21" fill="#0E1C28" stroke="#263D50"/>
-    <text x="88" y="397" fill="#73E8A7" font-size="25" font-weight="760">Supervisor 判断</text>
+    <text x="88" y="397" fill="#73E8A7" font-size="25" font-weight="760">${escapeSvg(textForLocale(locale, 'Supervisor 判断', 'Supervisor Judgment'))}</text>
     ${textLines({ x: 88, y: 440, lines: [complexityText], size: 23, fill: '#DDE8F1', weight: 540, lineHeight: 32 })}
     ${textLines({ x: 88, y: 471, lines: judgmentLines.slice(0, 1), size: 23, fill: '#DDE8F1', weight: 540, lineHeight: 32 })}
-    <text x="900" y="397" text-anchor="end" fill="#8EA0AF" font-size="20" font-weight="560">风险</text>
-    <text x="900" y="432" text-anchor="end" fill="#FFD464" font-size="25" font-weight="760">${escapeSvg(riskSummary(risk))}</text>
+    <text x="900" y="397" text-anchor="end" fill="#8EA0AF" font-size="20" font-weight="560">${escapeSvg(textForLocale(locale, '风险', 'Risk'))}</text>
+    <text x="900" y="432" text-anchor="end" fill="#FFD464" font-size="25" font-weight="760">${escapeSvg(riskSummary(risk, locale))}</text>
 
     <g transform="translate(56 520)">
       <rect x="0" y="0" width="470" height="176" rx="21" fill="#0C1822" stroke="#263D50"/>
@@ -547,14 +575,14 @@ export function buildSupervisorSessionVisualCardSvg(session: SupervisorSessionRe
 
     <g transform="translate(56 866)">
       <rect x="0" y="0" width="968" height="188" rx="23" fill="rgba(13, 27, 39, 0.50)" stroke="rgba(64, 95, 122, 0.48)"/>
-      <text x="30" y="42" fill="#EAF2FB" font-size="23" font-weight="760">阶段进度</text>
+      <text x="30" y="42" fill="#EAF2FB" font-size="23" font-weight="760">${escapeSvg(textForLocale(locale, '阶段进度', 'Stage Progress'))}</text>
       <text x="938" y="42" text-anchor="end" fill="#74899B" font-size="18" font-weight="620">${escapeSvg(progressRailLabel)}</text>
       <line x1="126" y1="102" x2="842" y2="102" stroke="#263B4F" stroke-width="8" stroke-linecap="round"/>
       ${railFillEnd > 0 ? `<line x1="126" y1="102" x2="${Math.min(842, Math.round(126 + (railFillEnd / 824) * 716))}" y2="102" stroke="url(#rail)" stroke-width="8" stroke-linecap="round"/>` : ''}
       <g transform="translate(126 0)">
         <circle cx="0" cy="102" r="24" fill="${planTone.fill}" stroke="${planTone.stroke}" stroke-width="4"/>
         <g transform="translate(-28 74)">${phaseGlyph(progressValue.plan >= 100, progressValue.plan > 0 && progressValue.plan < 100)}</g>
-        <text x="0" y="151" text-anchor="middle" fill="${planTone.text}" font-size="22" font-weight="650">计划</text>
+        <text x="0" y="151" text-anchor="middle" fill="${planTone.text}" font-size="22" font-weight="650">${escapeSvg(textForLocale(locale, '计划', 'Plan'))}</text>
         <text x="0" y="176" text-anchor="middle" fill="${planTone.text}" font-size="18" font-weight="620">${progressValue.plan}%</text>
       </g>
       <g transform="translate(484 0)">
