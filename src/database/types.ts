@@ -11,6 +11,7 @@ import type {
   RepositoryHarnessConfig,
   RepositoryHarnessStatus,
 } from '../types';
+import type { RuntimeLocale } from '../i18n/locale';
 
 /**
  * Database Types for Symphony Enterprise Agent Platform
@@ -180,6 +181,7 @@ export interface WorkItem {
   governance_override_at: Date | null;
   governance_override_reason: string | null;
   supervisor_root_session_id: string | null;
+  supervisor_locale?: RuntimeLocale | null;
   supervisor_plan_summary: string | null;
   supervisor_acceptance_summary: string | null;
   supervisor_execution_mode: SupervisorMaterializationMode | null;
@@ -232,6 +234,7 @@ export interface CreateWorkItem {
   governance_override_at?: Date | null;
   governance_override_reason?: string | null;
   supervisor_root_session_id?: string | null;
+  supervisor_locale?: RuntimeLocale | null;
   supervisor_plan_summary?: string | null;
   supervisor_acceptance_summary?: string | null;
   supervisor_execution_mode?: SupervisorMaterializationMode | null;
@@ -612,6 +615,7 @@ export interface SupervisorSessionRecord {
   transport: BotWatchTransport;
   conversation_id: string;
   user_id: string | null;
+  supervisor_locale: RuntimeLocale | null;
   state: SupervisorSessionState;
   repo_ref: string | null;
   intake_mode: SupervisorIntakeMode | null;
@@ -636,6 +640,7 @@ export interface CreateSupervisorSessionRecord {
   transport: BotWatchTransport;
   conversation_id: string;
   user_id?: string | null;
+  supervisor_locale?: RuntimeLocale | null;
   state: SupervisorSessionState;
   repo_ref?: string | null;
   intake_mode?: SupervisorIntakeMode | null;

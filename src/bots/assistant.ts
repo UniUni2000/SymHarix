@@ -35,6 +35,7 @@ import {
 import type { SupervisorRepoSourceResolver } from '../supervisor/repoSourceResolver';
 import type { SupervisorRepoUnderstandingService } from '../supervisor/repoUnderstanding';
 import { SupervisorSessionService } from '../supervisor/sessionService';
+import { inferRuntimeLocaleFromText } from '../i18n/locale';
 
 const CONFIRM_WORDS = new Set(['确认', 'yes', 'y', 'ok', 'okay', '好', '执行', '继续', 'confirm']);
 const CANCEL_WORDS = new Set(['取消', 'cancel', 'no', 'n', '停止']);
@@ -130,12 +131,17 @@ function isGreetingLikeText(text: string): boolean {
   return /^(你好|您好|hello|hi|hey|yo|在吗|在么|在不在)[!！,.，。?？\s]*$/i.test(normalized);
 }
 
-function buildGreetingReply(context: BotRuntimeCopilotContext): string {
+function buildGreetingReply(context: BotRuntimeCopilotContext, text: string): string {
+  const english = inferRuntimeLocaleFromText(text) === 'en';
   const defaultProject = context.default_project_slug
-    ? `当前默认项目是 ${context.default_project_slug}。`
+    ? english
+      ? `The current default project is ${context.default_project_slug}.`
+      : `当前默认项目是 ${context.default_project_slug}。`
     : null;
   return [
-    '你好，我可以帮你梳理需求、起草 issue、查状态，或者一起把当前计划改顺。',
+    english
+      ? 'Hello. I can help you shape requirements, draft issues, check status, or adjust the current plan.'
+      : '你好，我可以帮你梳理需求、起草 issue、查状态，或者一起把当前计划改顺。',
     defaultProject,
   ].filter(Boolean).join('\n');
 }
@@ -971,14 +977,21 @@ function buildHeuristicDecision(
   }
 
   if (/如何设置默认项目|default project|怎么设置项目/i.test(trimmed)) {
+    const english = inferRuntimeLocaleFromText(trimmed) === 'en';
     return {
       intent: {
         kind: 'answer_question',
-        answer: context.default_project_slug
-          ? `当前默认项目是 ${context.default_project_slug}。${availableProjectSlugs.length > 0 ? `可用项目：${availableProjectSlugs.join(', ')}。用 /project <slug> 可以切换。` : ''}`
-          : availableProjectSlugs.length > 0
-            ? `当前还没有默认项目。用 /project <slug> 设置，例如 /project ${availableProjectSlugs[0]}。可用项目：${availableProjectSlugs.join(', ')}。`
-            : '当前还没有默认项目。用 /project <slug> 设置默认项目。',
+        answer: english
+          ? context.default_project_slug
+            ? `The current default project is ${context.default_project_slug}.${availableProjectSlugs.length > 0 ? ` Available projects: ${availableProjectSlugs.join(', ')}. Use /project <slug> to switch.` : ''}`
+            : availableProjectSlugs.length > 0
+              ? `There is no default project yet. Use /project <slug>, for example /project ${availableProjectSlugs[0]}. Available projects: ${availableProjectSlugs.join(', ')}.`
+              : 'There is no default project yet. Use /project <slug> to set one.'
+          : context.default_project_slug
+            ? `当前默认项目是 ${context.default_project_slug}。${availableProjectSlugs.length > 0 ? `可用项目：${availableProjectSlugs.join(', ')}。用 /project <slug> 可以切换。` : ''}`
+            : availableProjectSlugs.length > 0
+              ? `当前还没有默认项目。用 /project <slug> 设置，例如 /project ${availableProjectSlugs[0]}。可用项目：${availableProjectSlugs.join(', ')}。`
+              : '当前还没有默认项目。用 /project <slug> 设置默认项目。',
       },
     };
   }
@@ -1623,7 +1636,7 @@ export class BotAssistantService {
 
     if (isGreetingLikeText(text)) {
       return {
-        message: buildGreetingReply(runtimeContext),
+        message: buildGreetingReply(runtimeContext, text),
       };
     }
 
@@ -1634,6 +1647,11 @@ export class BotAssistantService {
     }
 
     const fastHeuristic = buildHeuristicDecision(text, runtimeContext);
+    if (fastHeuristic.intent.kind === 'answer_question' && /如何设置默认项目|default project|怎么设置项目/i.test(text.trim())) {
+      return {
+        message: fastHeuristic.intent.answer,
+      };
+    }
     const hasActiveSupervisorSession = Boolean(
       context.transport === 'telegram'
       && this.supervisorSessionService?.hasActiveSession(context),
