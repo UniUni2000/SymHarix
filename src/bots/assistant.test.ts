@@ -809,6 +809,32 @@ describe('BotAssistantService', () => {
     expect(response.message).not.toContain('创建 Issue');
     expect(runtime.createIssueCalls).toHaveLength(0);
 
+    const englishGreeting = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-greeting-en' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      'hello',
+    );
+
+    expect(englishGreeting.message).toContain('Hello');
+    expect(englishGreeting.message).not.toContain('你好');
+    expect(englishGreeting.message).not.toContain('计划待你批准');
+    expect(runtime.createIssueCalls).toHaveLength(0);
+
+    const englishProjectAnswer = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-default-project-en' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      'what is the default project?',
+    );
+
+    expect(englishProjectAnswer.message).toContain('There is no default project yet');
+    expect(englishProjectAnswer.message).not.toContain('当前默认项目');
+
     subscriptions.dispose();
     supervisorService.dispose();
   });
@@ -2514,7 +2540,7 @@ describe('BotAssistantService', () => {
       identity: { user_id: 'user-1', display_name: 'Alice' },
     }, 'hello');
 
-    expect(response.message).toContain('可以帮你');
+    expect(response.message).toContain('I can help you');
     expect(response.message).not.toContain('Action: close issue');
 
     subscriptions.dispose();
@@ -4204,12 +4230,12 @@ describe('BotAssistantService', () => {
       'supervisor live E2E UniUni2000/test2 smoke docs/supervisor-telegram-e2e-20260426-1520.md nonce supervisor-telegram-e2e-20260426-1520 Plan Card',
     );
 
-    expect(response.message).toContain('计划待你批准');
+    expect(response.message).toContain('Plan awaiting approval');
     expect(response.message).toContain('smoke docs/supervisor-telegram-e2e-20260426-1520.md');
     expect(response.message).not.toContain('nonce');
     expect(response.message).not.toContain('当前自然语言模型暂不可用');
     expect(response.format).toBe('telegram_html');
-    expect(response.action_rows?.[0]?.[0]?.label).toBe('批准并开始');
+    expect(response.action_rows?.[0]?.[0]?.label).toBe('Approve and Start');
     expect(runtime.createIssueCalls).toHaveLength(0);
     expect(modelCalls).toBe(0);
 
