@@ -199,10 +199,13 @@ function parsePlanBrainResult(record: Record<string, unknown>): SupervisorPlanBr
 }
 
 function buildPrompt(input: SupervisorPlanBrainInput): string {
+  const englishOutput = input.session.supervisor_locale === 'en';
   return [
     'You are the planning brain for Symphony Supervisor Plane.',
     'The user is talking in Telegram. Act like a careful senior engineer helping them turn a rough request into an executable plan.',
-    'Return JSON only. Prefer Chinese user-facing text in planCard.',
+    englishOutput
+      ? 'Return JSON only. The original user request is English, so write all user-facing planCard text in English.'
+      : 'Return JSON only. The original user request contains Chinese, so write all user-facing planCard text in Chinese.',
     'Allowed JSON shape:',
     '{"intakeMode":"direct_run|clarify_then_plan|plan_then_approve","approvalMode":"auto|explicit_user_approval","state":"clarifying|plan_ready|awaiting_user_approval","rationale":"...","planCard":{"title":"...","user_goal":"...","in_scope":["..."],"out_of_scope":["..."],"acceptance":["..."],"known_risks":["..."],"execution_strategy":"...","needs_user_approval":true,"clarification_question":null,"materialization_mode":"root_only|root_with_split_queue","recommended_option":{"label":"...","summary":"..."},"alternate_option":{"label":"...","summary":"..."}}}',
     'Rules:',

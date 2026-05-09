@@ -41,6 +41,7 @@ export const WORK_ITEMS_TABLE_SCHEMA = `
     governance_override_at TEXT,
     governance_override_reason TEXT,
     supervisor_root_session_id TEXT,
+    supervisor_locale TEXT,
     supervisor_plan_summary TEXT,
     supervisor_acceptance_summary TEXT,
     supervisor_execution_mode TEXT,
@@ -279,6 +280,7 @@ export const SUPERVISOR_SESSIONS_TABLE_SCHEMA = `
     transport TEXT NOT NULL,
     conversation_id TEXT NOT NULL,
     user_id TEXT,
+    supervisor_locale TEXT,
     state TEXT NOT NULL,
     repo_ref TEXT,
     intake_mode TEXT,
@@ -652,9 +654,11 @@ export function initializeSchema(db: Database): void {
   ensureColumn(db, 'work_items', 'governance_override_at', 'TEXT');
   ensureColumn(db, 'work_items', 'governance_override_reason', 'TEXT');
   ensureColumn(db, 'work_items', 'supervisor_root_session_id', 'TEXT');
+  ensureColumn(db, 'work_items', 'supervisor_locale', 'TEXT');
   ensureColumn(db, 'work_items', 'supervisor_plan_summary', 'TEXT');
   ensureColumn(db, 'work_items', 'supervisor_acceptance_summary', 'TEXT');
   ensureColumn(db, 'work_items', 'supervisor_execution_mode', 'TEXT');
+  ensureColumn(db, 'supervisor_sessions', 'supervisor_locale', 'TEXT');
   ensureColumn(db, 'bot_pending_actions', 'issue_id', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'bot_pending_actions', 'status', "TEXT NOT NULL DEFAULT 'pending_confirm'");
   ensureColumn(db, 'bot_pending_actions', 'message_id', 'TEXT');

@@ -6,6 +6,7 @@ import type {
   SupervisorSessionRecord,
   UpdateSupervisorSessionRecord,
 } from '../types';
+import { normalizeRuntimeLocale } from '../../i18n/locale';
 
 const ACTIVE_SESSION_STATES = [
   'drafting',
@@ -36,11 +37,11 @@ export class SupervisorSessionRepository {
     const now = new Date().toISOString();
     const stmt = this.db.prepare(`
       INSERT INTO supervisor_sessions (
-        id, transport, conversation_id, user_id, state, repo_ref, intake_mode, approval_mode,
+        id, transport, conversation_id, user_id, supervisor_locale, state, repo_ref, intake_mode, approval_mode,
         plan_card_json, plan_version, root_issue_id, root_work_item_id, current_child_issue_id,
         active_decision_kind, delivery_state, delivery_summary, last_material_outcome_json,
         last_message_id, last_card_key, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -48,6 +49,7 @@ export class SupervisorSessionRepository {
       record.transport,
       record.conversation_id,
       record.user_id ?? null,
+      record.supervisor_locale ?? null,
       record.state,
       record.repo_ref ?? null,
       record.intake_mode ?? null,
@@ -129,6 +131,7 @@ export class SupervisorSessionRepository {
     };
 
     if (record.user_id !== undefined) assign('user_id', record.user_id ?? null);
+    if (record.supervisor_locale !== undefined) assign('supervisor_locale', record.supervisor_locale ?? null);
     if (record.state !== undefined) assign('state', record.state);
     if (record.repo_ref !== undefined) assign('repo_ref', record.repo_ref ?? null);
     if (record.intake_mode !== undefined) assign('intake_mode', record.intake_mode ?? null);
@@ -170,6 +173,7 @@ export class SupervisorSessionRepository {
       transport: row.transport as SupervisorSessionRecord['transport'],
       conversation_id: String(row.conversation_id),
       user_id: row.user_id as string | null,
+      supervisor_locale: normalizeRuntimeLocale(row.supervisor_locale as string | null),
       state: row.state as SupervisorSessionRecord['state'],
       repo_ref: row.repo_ref as string | null,
       intake_mode: (row.intake_mode as SupervisorSessionRecord['intake_mode']) ?? null,

@@ -109,6 +109,11 @@ import {
   initializeChangePack,
   recordChangePackEvidence,
 } from '../change-pack/service';
+import {
+  inferRuntimeLocaleFromText,
+  normalizeRuntimeLocale,
+  runtimeLocaleInstruction,
+} from '../i18n/locale';
 
 function splitGitHubRepoFull(
   githubRepoFull: string,
@@ -685,6 +690,12 @@ export class Orchestrator extends EventEmitter {
   ): Promise<CreateIssueResult> {
     const deferDispatch = options.defer_dispatch ?? false;
     const scheduleTickWhenRunning = options.schedule_tick ?? true;
+    const inheritedLocale = options.governance_lineage?.root_issue_id
+      ? this.workItemRepository.findByLinearIssueId(options.governance_lineage.root_issue_id)?.supervisor_locale ?? null
+      : null;
+    const supervisorLocale = normalizeRuntimeLocale(input.supervisor_locale)
+      ?? inheritedLocale
+      ?? inferRuntimeLocaleFromText(`${input.title}\n${input.description ?? ''}`);
     let resolvedProjectId = input.project_id ?? null;
     let resolvedRoute: ResolvedRepositoryRoute | null = null;
     if (input.project_slug?.trim()) {
@@ -734,6 +745,7 @@ export class Orchestrator extends EventEmitter {
         governance_parent_issue_id: lineage?.parent_issue_id ?? null,
         governance_generation: lineage?.generation ?? 0,
         supervisor_root_session_id: input.supervisor_execution_intent?.root_session_id ?? workItem.supervisor_root_session_id,
+        supervisor_locale: supervisorLocale,
         supervisor_plan_summary: input.supervisor_execution_intent?.plan_summary ?? workItem.supervisor_plan_summary,
         supervisor_acceptance_summary: input.supervisor_execution_intent?.acceptance_summary ?? workItem.supervisor_acceptance_summary,
         supervisor_execution_mode: input.supervisor_execution_intent?.approved_execution_mode ?? workItem.supervisor_execution_mode,
@@ -4148,6 +4160,7 @@ export class Orchestrator extends EventEmitter {
   private buildSupervisorPromptSection(workItem: WorkItem | null | undefined): string | undefined {
     const session = this.findSupervisorSessionForWorkItem(workItem);
     if (
+      !workItem?.supervisor_locale &&
       !workItem?.supervisor_plan_summary &&
       !workItem?.supervisor_acceptance_summary &&
       !session
@@ -4190,6 +4203,7 @@ export class Orchestrator extends EventEmitter {
       : [];
 
     const section = [
+      workItem?.supervisor_locale ? runtimeLocaleInstruction(workItem.supervisor_locale) : null,
       '## Supervisor-Approved Plan',
       session
         ? `- Session: ${session.id} (${session.state}, plan v${session.plan_version})`
@@ -4380,6 +4394,7 @@ export class Orchestrator extends EventEmitter {
   ): void {
     if (
       !sourceWorkItem.supervisor_root_session_id &&
+      !sourceWorkItem.supervisor_locale &&
       !sourceWorkItem.supervisor_plan_summary &&
       !sourceWorkItem.supervisor_acceptance_summary &&
       !sourceWorkItem.supervisor_execution_mode
@@ -4390,6 +4405,7 @@ export class Orchestrator extends EventEmitter {
     this.workItemRepository.update({
       id: targetWorkItemId,
       supervisor_root_session_id: sourceWorkItem.supervisor_root_session_id,
+      supervisor_locale: sourceWorkItem.supervisor_locale,
       supervisor_plan_summary: sourceWorkItem.supervisor_plan_summary,
       supervisor_acceptance_summary: sourceWorkItem.supervisor_acceptance_summary,
       supervisor_execution_mode: sourceWorkItem.supervisor_execution_mode,
