@@ -85,6 +85,7 @@ import {
   createSupervisorCcAdvisorFromEnv,
   type SupervisorCcAdvisor,
 } from '../supervisor/ccAdvisor';
+import { inferRuntimeLocaleFromText } from '../i18n/locale';
 import {
   createSupervisorAgentFromEnv,
   shouldUseReadOnlyClaudeForText,
@@ -2746,6 +2747,8 @@ export class DefaultBotGateway implements BotGateway {
     let processingFinished = false;
     let processingAckRef: BotTransportMessageRef | null = null;
     let processingAckPromise: Promise<BotTransportMessageRef | null> | null = null;
+    const runtimeLocale = inferRuntimeLocaleFromText(text);
+    const isEnglish = runtimeLocale === 'en';
     const processingAckTimer = setTimeout(() => {
       if (processingFinished || !this.telegramNotifier) {
         return;
@@ -2757,10 +2760,10 @@ export class DefaultBotGateway implements BotGateway {
         },
         {
           text: text.startsWith('/')
-            ? '已收到，正在处理命令。'
+            ? isEnglish ? 'Got it. I am processing the command.' : '已收到，正在处理命令。'
             : shouldUseReadOnlyClaudeForText(text)
-              ? '收到，我正在读取最新仓库信息，整理好后马上回复。'
-              : '收到您的消息了，我这边正在思考和处理，给我点时间',
+              ? isEnglish ? 'Got it. I am reading the latest repository context and will reply shortly.' : '收到，我正在读取最新仓库信息，整理好后马上回复。'
+              : isEnglish ? 'Got your message. I am thinking it through and will reply shortly.' : '收到您的消息了，我这边正在思考和处理，给我点时间',
         },
       ).then((sent) => {
         processingAckRef = sent;

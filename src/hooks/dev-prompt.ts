@@ -39,6 +39,14 @@ function buildSupervisorLiveVerifierDescription(issue: Issue): string {
   ].join(' ');
 }
 
+function extractOutputLanguageGuidance(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const match = value.match(/## Output Language[\s\S]*?(?=\n## |\n$)/);
+  return match?.[0]?.trim() || undefined;
+}
+
 /**
  * Judge issue complexity based on description and context
  */
@@ -154,7 +162,10 @@ export function buildDevPrompt(
     ? '## GitHub Context\n- Omitted for bounded live verifier. Use the compact Issue Information and exact requested marker path above.'
     : githubContext;
   const effectiveHarnessGuidance = liveVerifierFastPath ? undefined : harnessGuidance;
-  const effectiveSupervisorGuidance = liveVerifierFastPath ? undefined : supervisorGuidance;
+  const effectiveSupervisorGuidance = liveVerifierFastPath
+    ? extractOutputLanguageGuidance(supervisorGuidance)
+    : supervisorGuidance;
+  const englishOutput = /original user request is English/i.test(supervisorGuidance || '');
   const testResponsibility = liveVerifierFastPath
     ? 'Do not run full repository test suites. Use narrow file checks for the requested marker path, such as `test -f <path>`, `ls -la <path>`, `git diff --stat`, and `git status`.'
     : judgment.requiresTests
@@ -218,22 +229,22 @@ ${responsibilities}
 \`\`\`markdown
 # Handover: ${issue.identifier}
 
-## 开发摘要
-{一句话描述做了什么}
+## ${englishOutput ? 'Development Summary' : '开发摘要'}
+{${englishOutput ? 'one-sentence summary of what changed' : '一句话描述做了什么'}}
 
-## 变更范围
-- 文件列表
-- 新增/删除/修改
+## ${englishOutput ? 'Change Scope' : '变更范围'}
+- ${englishOutput ? 'file list' : '文件列表'}
+- ${englishOutput ? 'added/deleted/modified' : '新增/删除/修改'}
 
-## 测试情况
-- 单元测试: PASS/FAIL/N/A
-- 集成测试: PASS/FAIL/N/A
+## ${englishOutput ? 'Verification' : '测试情况'}
+- ${englishOutput ? 'Unit tests' : '单元测试'}: PASS/FAIL/N/A
+- ${englishOutput ? 'Integration tests' : '集成测试'}: PASS/FAIL/N/A
 
-## 已知问题
-{DEV 认为可能有问题的地方，Review 重点关注}
+## ${englishOutput ? 'Known Issues' : '已知问题'}
+{${englishOutput ? 'anything DEV thinks review should focus on' : 'DEV 认为可能有问题的地方，Review 重点关注'}}
 
-## 下次继续（如需打回）
-{空，DEV 不填写}
+## ${englishOutput ? 'Next Steps If Returned' : '下次继续（如需打回）'}
+{${englishOutput ? 'leave blank; DEV does not fill this in' : '空，DEV 不填写'}}
 \`\`\`
 
 ${existingLog ? `## Existing Progress\n${existingLog}\n---\nContinue from where the previous session left off.` : ''}
@@ -249,7 +260,7 @@ ${liveVerifierImportant ? `${liveVerifierImportant}\n` : ''}
 - Do NOT decide if code is ready for review — that is Review's job
 - For SMALL issues, avoid unnecessary multi-turn exploration. If the implementation and verification are already complete, finish the turn cleanly.
 - If review feedback already exists, address it in the same branch and same worktree unless the context explicitly says otherwise
-- If you discover the issue description is unclear, document it in \`.symphony/HANDOVER.md\` "已知问题" and continue with your best judgment
+- If you discover the issue description is unclear, document it in \`.symphony/HANDOVER.md\` "${englishOutput ? 'Known Issues' : '已知问题'}" and continue with your best judgment
 - Treat \`.symphony/change-pack/evidence.json\` as a proof-of-work checklist. Do not end the turn while required evidence is still missing.
 - Workflow/process artifacts are never product files. Never stage or commit \`DEVELOPMENT_LOG.md\`, \`HANDOVER.md\`, \`REVIEW_REPORT.md\`, anything under \`.symphony/\`, or similar review/dev process notes.
 - Do not delete \`.symphony/\` or \`.symphony/state.json\`. Symphony owns that private runtime directory; damaging it can break post-processing even when the product change is correct.

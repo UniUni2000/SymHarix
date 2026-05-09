@@ -149,6 +149,45 @@ describe('session visual cards', () => {
     expect(card?.photo.filename).toBe('Plan-Card-supervisor-card.png');
   });
 
+  test('renders English Telegram plan cards without Chinese chrome when the session locale is English', () => {
+    const session = createSession({
+      root_issue_id: null,
+      root_work_item_id: null,
+      state: 'cancelled',
+      supervisor_locale: 'en',
+      plan_card: {
+        ...createSession().plan_card!,
+        title: 'smoke test: hello.py +1 char',
+        user_goal: 'Create an issue and conduct a smoke test with as few tokens as possible.',
+        in_scope: ['smoke test: hello.py +1 char'],
+        out_of_scope: ['Do not expand into unrelated modules.'],
+        acceptance: ['hello.py appends one character', '`python3 -m compileall .` verifies'],
+        known_risks: ['不顺手扩展到无关模块。', 'No constitution blockers detected.'],
+        execution_strategy: '保持单目标推进，避免顺手扩大范围。',
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '按推荐继续',
+          summary: '按这张精简计划直接开跑。',
+        },
+      },
+    });
+
+    const svg = buildSupervisorSessionVisualCardSvg(session, null);
+    const card = buildSupervisorSessionVisualCard(session, null, 'session|english-card');
+
+    expect(svg).toContain('Supervisor Judgment');
+    expect(svg).toContain('Scope');
+    expect(svg).toContain('Acceptance Criteria');
+    expect(svg).toContain('Boundaries &amp; Risks');
+    expect(svg).toContain('Stage Progress');
+    expect(svg).toContain('Plan');
+    expect(svg).toContain('Dispatch');
+    expect(svg).toContain('Execution');
+    expect(svg).not.toMatch(/[\u3400-\u9fff\uf900-\ufaff]/);
+    expect(card?.caption).toContain('Cancelled');
+    expect(card?.caption).not.toContain('已取消');
+  });
+
   test('labels resumed existing issues as continued instead of newly created', () => {
     const session = createSession({
       last_material_outcome: {

@@ -13,6 +13,7 @@ import {
 import type { SupervisorSessionRecord, WorkItem } from '../database/types';
 import type { OrchestratorStateSnapshot } from '../orchestrator';
 import { describeSupervisorThread } from '../supervisor/threadSummary';
+import { localizeKnownRuntimeText } from '../i18n/locale';
 import type { AgentEvent, AgentTimelinePayload, Issue } from '../types';
 import type {
   CreateIssueRequest,
@@ -624,6 +625,7 @@ export class RuntimeHub implements RuntimeControlPlane {
       github_repo: workItem.github_repo,
       github_issue_number: workItem.github_issue_number,
       active_pr_number: workItem.active_pr_number,
+      supervisor_locale: workItem.supervisor_locale,
       session: runtimeSession,
       complexity,
       round,
@@ -747,6 +749,7 @@ export class RuntimeHub implements RuntimeControlPlane {
       github_repo: null,
       github_issue_number: null,
       active_pr_number: null,
+      supervisor_locale: null,
       session: running ? this.buildSessionView(running, timeline) : null,
       complexity: 'L1',
       round: {
@@ -903,7 +906,11 @@ export class RuntimeHub implements RuntimeControlPlane {
     return {
       index,
       total,
-      goal: normalizeSummary(goal, 'Advance the current issue to the next verified checkpoint.', 180),
+      goal: normalizeSummary(
+        localizeKnownRuntimeText(goal, workItem.supervisor_locale),
+        'Advance the current issue to the next verified checkpoint.',
+        180,
+      ),
     };
   }
 
@@ -964,11 +971,11 @@ export class RuntimeHub implements RuntimeControlPlane {
         kind: milestoneKind,
         key: milestoneKey,
         summary: normalizeSummary(
-          typeof outcome?.user_summary === 'string'
+          localizeKnownRuntimeText(typeof outcome?.user_summary === 'string'
             ? outcome.user_summary
             : typeof outcome?.next_recommended_action === 'string'
               ? outcome.next_recommended_action
-              : delivery.summary,
+              : delivery.summary, workItem.supervisor_locale),
           `${milestoneKind} milestone.`,
         ),
         timestamp: toIso(session?.updated_at ?? workItem.updated_at),
@@ -978,7 +985,10 @@ export class RuntimeHub implements RuntimeControlPlane {
       milestones.push({
         kind: delivery.state,
         key: `delivery:${workItem.linear_issue_id}:${delivery.state}:${delivery.code ?? ''}`,
-        summary: normalizeSummary(delivery.summary, `${workItem.linear_identifier} delivery state ${delivery.state}.`),
+        summary: normalizeSummary(
+          localizeKnownRuntimeText(delivery.summary, workItem.supervisor_locale),
+          `${workItem.linear_identifier} delivery state ${delivery.state}.`,
+        ),
         timestamp: toIso(workItem.updated_at),
       });
     }
@@ -986,7 +996,10 @@ export class RuntimeHub implements RuntimeControlPlane {
       milestones.push({
         kind: 'review_completed',
         key: `review:${review.id}`,
-        summary: normalizeSummary(review.summary_md, `Review ${review.decision}.`),
+        summary: normalizeSummary(
+          localizeKnownRuntimeText(review.summary_md, workItem.supervisor_locale),
+          `Review ${review.decision}.`,
+        ),
         timestamp: review.created_at.toISOString(),
       });
     }
@@ -1317,6 +1330,7 @@ export class RuntimeHub implements RuntimeControlPlane {
     code: RuntimeIssueView['delivery_code'];
     summary: string | null;
   } {
+    const englishOutput = workItem.supervisor_locale === 'en';
     const evidenceSummary = workItem.evidence_summary;
     const missingCount = evidenceSummary?.missing ?? workItem.missing_requirements.length;
     const proofSatisfied = Boolean(
@@ -1337,8 +1351,12 @@ export class RuntimeHub implements RuntimeControlPlane {
     if (this.isTerminalState(workItem.linear_state)) {
       const cancelled = this.isCancelledState(workItem.linear_state);
       const fallback = cancelled
-        ? `${workItem.linear_identifier} 已取消，不会继续自动推进。`
-        : `${workItem.linear_identifier} 已完成最终交付。`;
+        ? (englishOutput
+          ? `${workItem.linear_identifier} was cancelled and will not continue automatically.`
+          : `${workItem.linear_identifier} 已取消，不会继续自动推进。`)
+        : (englishOutput
+          ? `${workItem.linear_identifier} completed final delivery.`
+          : `${workItem.linear_identifier} 已完成最终交付。`);
       return {
         state: 'completed',
         code: workItem.delivery_code ?? null,
@@ -1359,8 +1377,12 @@ export class RuntimeHub implements RuntimeControlPlane {
         state: 'delivery_failed',
         code: workItem.delivery_code ?? null,
         summary: normalizeSummary(
-          workItem.delivery_summary ?? `证据已满足，但交付卡在 ${latestFailure ?? '最终交付动作失败'}。`,
-          '证据已满足，但最终交付失败。',
+          workItem.delivery_summary ?? (englishOutput
+            ? `Proof is satisfied, but delivery is blocked at ${latestFailure ?? 'the final delivery action failed'}.`
+            : `证据已满足，但交付卡在 ${latestFailure ?? '最终交付动作失败'}。`),
+          englishOutput
+            ? 'Proof is satisfied, but final delivery failed.'
+            : '证据已满足，但最终交付失败。',
           260,
         ),
       };
@@ -1370,7 +1392,9 @@ export class RuntimeHub implements RuntimeControlPlane {
       return {
         state: 'proof_satisfied',
         code: workItem.delivery_code ?? null,
-        summary: '证据已满足，正在等待最终交付动作完成。',
+        summary: englishOutput
+          ? 'Proof is satisfied and final delivery is pending.'
+          : '证据已满足，正在等待最终交付动作完成。',
       };
     }
 
@@ -1391,6 +1415,7 @@ export class RuntimeHub implements RuntimeControlPlane {
     expectedHandoff: string | null;
     queuedChildIdentifiers: string[];
   } | null {
+    const englishOutput = workItem.supervisor_locale === 'en';
     const children = this.workItemRepository
       .findByGovernanceParentIssueId(workItem.linear_issue_id)
       .filter((child) => child.linear_issue_id !== workItem.linear_issue_id)
@@ -1442,10 +1467,14 @@ export class RuntimeHub implements RuntimeControlPlane {
           currentChild: null,
           childQueue: childViews,
           children: childViews,
-          pauseReason: '所有顺序子任务已完成，等待 root 线程收尾；不会把 root 当作新的开发任务派发。',
+          pauseReason: englishOutput
+            ? 'All ordered child tasks are complete. Waiting for the root thread to finalize; the root will not be dispatched as a new dev task.'
+            : '所有顺序子任务已完成，等待 root 线程收尾；不会把 root 当作新的开发任务派发。',
           expectedHandoff: null,
           queuedChildIdentifiers: [],
-          nextRecommendedAction: '所有顺序子任务已完成，等待 root 线程收尾并同步最终交付状态。',
+          nextRecommendedAction: englishOutput
+            ? 'All ordered child tasks are complete. Waiting for the root thread to finalize and sync final delivery state.'
+            : '所有顺序子任务已完成，等待 root 线程收尾并同步最终交付状态。',
         };
       }
       return {
@@ -1456,20 +1485,32 @@ export class RuntimeHub implements RuntimeControlPlane {
         pauseReason: null,
         expectedHandoff: null,
         queuedChildIdentifiers: [],
-        nextRecommendedAction: '所有顺序子任务已完成，计划线程已完成。',
+        nextRecommendedAction: englishOutput
+          ? 'All ordered child tasks are complete. The plan thread is complete.'
+          : '所有顺序子任务已完成，计划线程已完成。',
       };
     }
     const pauseReason = currentChild
       ? (
         currentChild.delivery_state === 'delivery_failed' || currentChild.orchestrator_state === 'failed'
-          ? `源单当前暂停在 ${currentChild.issue_identifier}；需要先处理这张子任务的交付失败。`
-          : `源单当前暂停在 ${currentChild.issue_identifier}；完成这张子任务前不会放行后续 sibling。`
+          ? (englishOutput
+            ? `The root issue is paused at ${currentChild.issue_identifier}; resolve this child task's delivery failure first.`
+            : `源单当前暂停在 ${currentChild.issue_identifier}；需要先处理这张子任务的交付失败。`)
+          : (englishOutput
+            ? `The root issue is paused at ${currentChild.issue_identifier}; later siblings will not be released until this child task completes.`
+            : `源单当前暂停在 ${currentChild.issue_identifier}；完成这张子任务前不会放行后续 sibling。`)
       )
-      : '当前没有可推进的治理子任务，等待根线程重新评估。';
+      : (englishOutput
+        ? 'No governance child task is currently runnable. Waiting for the root thread to reassess.'
+        : '当前没有可推进的治理子任务，等待根线程重新评估。');
     const expectedHandoff = queuedChildIdentifiers.length > 0
-      ? `处理完 ${currentChild?.issue_identifier ?? '当前子任务'} 后，会自动接力 ${queuedChildIdentifiers.join('、')}。`
+      ? (englishOutput
+        ? `After ${currentChild?.issue_identifier ?? 'the current child task'} is handled, the queue will continue with ${queuedChildIdentifiers.join(', ')}.`
+        : `处理完 ${currentChild?.issue_identifier ?? '当前子任务'} 后，会自动接力 ${queuedChildIdentifiers.join('、')}。`)
       : currentChild
-        ? `处理完 ${currentChild.issue_identifier} 后，根线程会重新评估是否恢复源单。`
+        ? (englishOutput
+          ? `After ${currentChild.issue_identifier} is handled, the root thread will reassess whether to resume the source issue.`
+          : `处理完 ${currentChild.issue_identifier} 后，根线程会重新评估是否恢复源单。`)
         : null;
 
     return {
@@ -1485,12 +1526,18 @@ export class RuntimeHub implements RuntimeControlPlane {
       nextRecommendedAction: currentChild
         ? (
           currentChild.delivery_state === 'delivery_failed' || currentChild.orchestrator_state === 'failed'
-            ? `先处理治理子任务 ${currentChild.issue_identifier}；源单仍暂停，${queuedChildren.length > 0 ? `处理完后会自动接力 ${queuedChildren.map((child) => child.issue_identifier).join('、')}。` : '处理完后再继续源计划。'}`
+            ? (englishOutput
+              ? `Handle governance child task ${currentChild.issue_identifier} first; the root issue remains paused. ${queuedChildren.length > 0 ? `After it is handled, the queue will continue with ${queuedChildren.map((child) => child.issue_identifier).join(', ')}.` : 'After it is handled, continue the source plan.'}`
+              : `先处理治理子任务 ${currentChild.issue_identifier}；源单仍暂停，${queuedChildren.length > 0 ? `处理完后会自动接力 ${queuedChildren.map((child) => child.issue_identifier).join('、')}。` : '处理完后再继续源计划。'}`)
             : queuedChildren.length > 0
-              ? `先处理治理子任务 ${currentChild.issue_identifier}；完成后会自动接力 ${queuedChildren.map((child) => child.issue_identifier).join('、')}。`
-              : `先处理治理子任务 ${currentChild.issue_identifier}`
+              ? (englishOutput
+                ? `Handle governance child task ${currentChild.issue_identifier} first; after it completes, the queue will continue with ${queuedChildren.map((child) => child.issue_identifier).join(', ')}.`
+                : `先处理治理子任务 ${currentChild.issue_identifier}；完成后会自动接力 ${queuedChildren.map((child) => child.issue_identifier).join('、')}。`)
+              : (englishOutput
+                ? `Handle governance child task ${currentChild.issue_identifier} first.`
+                : `先处理治理子任务 ${currentChild.issue_identifier}`)
         )
-        : '等待根治理线程重新评估。',
+        : (englishOutput ? 'Waiting for the root governance thread to reassess.' : '等待根治理线程重新评估。'),
     };
   }
 
@@ -1508,17 +1555,26 @@ export class RuntimeHub implements RuntimeControlPlane {
     const session = this.supervisorSessionRepository.findByRootIssueId(rootIssueId);
     if (!session) {
       if (workItem.supervisor_root_session_id || workItem.supervisor_plan_summary || workItem.supervisor_acceptance_summary) {
+        const englishOutput = workItem.supervisor_locale === 'en';
         return {
           state: 'materialized',
           summary: [
-            workItem.supervisor_plan_summary ?? '当前计划线程正在推进。',
+            workItem.supervisor_plan_summary ?? (englishOutput
+              ? 'The current plan thread is in progress.'
+              : '当前计划线程正在推进。'),
             workItem.supervisor_acceptance_summary
-              ? `完成标准：${workItem.supervisor_acceptance_summary}`
+              ? (englishOutput
+                ? `Acceptance: ${workItem.supervisor_acceptance_summary}`
+                : `完成标准：${workItem.supervisor_acceptance_summary}`)
               : null,
             workItem.supervisor_execution_mode === 'root_with_split_queue'
-              ? '执行方式：root 保持主线程，child queue 顺序接力。'
+              ? (englishOutput
+                ? 'Execution mode: root stays as the main thread while the child queue runs in order.'
+                : '执行方式：root 保持主线程，child queue 顺序接力。')
               : workItem.supervisor_execution_mode === 'root_only'
-                ? '执行方式：单 root 线程直接推进。'
+                ? (englishOutput
+                  ? 'Execution mode: single root thread.'
+                  : '执行方式：单 root 线程直接推进。')
                 : null,
           ].filter(Boolean).join(' '),
           jobState: null,
@@ -1538,7 +1594,7 @@ export class RuntimeHub implements RuntimeControlPlane {
 
     return {
       state: session.state,
-      summary: this.describeSupervisorSession(session, governanceThread),
+      summary: this.describeSupervisorSession(session, governanceThread, workItem.supervisor_locale ?? session.supervisor_locale),
       jobState: this.describeSupervisorJobState(session),
       latestDirective: typeof session.last_material_outcome?.latest_dev_instruction === 'string'
         ? session.last_material_outcome.latest_dev_instruction
@@ -1561,11 +1617,13 @@ export class RuntimeHub implements RuntimeControlPlane {
   private describeSupervisorSession(
     session: SupervisorSessionRecord,
     governanceThread: ReturnType<RuntimeHub['buildGovernanceThreadProjection']>,
+    locale: WorkItem['supervisor_locale'],
   ): string {
     return describeSupervisorThread({
       session,
       currentChild: governanceThread?.currentChild ?? null,
       childQueue: governanceThread?.childQueue ?? [],
+      locale,
     });
   }
 }

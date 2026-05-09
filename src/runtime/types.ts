@@ -1,4 +1,5 @@
 import type { WorkItemOrchestratorState } from '../database/types';
+import type { RuntimeLocale } from '../i18n/locale';
 import type { SupervisorExecutionIntent } from '../supervisor/types';
 import type {
   AgentTimelinePayload,
@@ -177,6 +178,7 @@ export interface RuntimeIssueView {
   github_repo: string | null;
   github_issue_number: number | null;
   active_pr_number: number | null;
+  supervisor_locale?: RuntimeLocale | null;
   session: RuntimeSessionView | null;
   complexity?: RuntimeComplexityLevel;
   round?: RuntimeRoundView;
@@ -294,6 +296,7 @@ export interface CreateIssueRequest {
   project_slug?: string | null;
   project_id?: string | null;
   state_id?: string | null;
+  supervisor_locale?: RuntimeLocale | null;
   supervisor_execution_intent?: SupervisorExecutionIntent | null;
   defer_dispatch?: boolean | null;
   governance_lineage?: {

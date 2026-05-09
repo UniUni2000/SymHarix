@@ -2485,6 +2485,32 @@ describe('Orchestrator Stability', () => {
     expect(workItem?.orchestrator_state).toBe('discovering');
   });
 
+  it('infers supervisor locale from the original createIssue request language', async () => {
+    const englishIssue = makeIssue({ id: 'issue-created-en', identifier: 'INT-55E', title: 'Create smoke test' });
+    let ctx = createOrchestrator(englishIssue);
+    orchestrator = ctx.orchestrator;
+
+    await orchestrator.createIssue({
+      title: 'Create an issue and conduct a smoke test',
+      description: 'Require the consumption of as few tokens as possible.',
+      team_id: 'team-1',
+    });
+
+    expect(ctx.workItemRepository.findByLinearIssueId(englishIssue.id)?.supervisor_locale).toBe('en');
+
+    const chineseIssue = makeIssue({ id: 'issue-created-zh', identifier: 'INT-55Z', title: '建立 smoke test' });
+    ctx = createOrchestrator(chineseIssue);
+    orchestrator = ctx.orchestrator;
+
+    await orchestrator.createIssue({
+      title: '建立一个issue，进行一次smoke test',
+      description: '要求消耗尽可能少的token',
+      team_id: 'team-1',
+    });
+
+    expect(ctx.workItemRepository.findByLinearIssueId(chineseIssue.id)?.supervisor_locale).toBe('zh');
+  });
+
   it('createIssue persists supervisor execution intent onto the created work item', async () => {
     const issue = makeIssue({ id: 'issue-created', identifier: 'INT-57', title: 'Created from supervisor plan' });
     const ctx = createOrchestrator(issue);
@@ -2712,6 +2738,54 @@ describe('Orchestrator Stability', () => {
     expect(prompt).toContain('下一轮先确认 Telegram root card 不重复');
     expect(prompt).toContain('用户希望控制面不再刷屏');
     expect(prompt).toContain('child-1');
+  });
+
+  it('injects supervisor output language guidance into the dev prompt for English requests', async () => {
+    const issue = makeIssue({ state: 'Todo', title: 'Create smoke test' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: issue.state,
+      github_repo: 'owner/repo',
+      orchestrator_state: 'discovering',
+      supervisor_locale: 'en',
+    });
+
+    ctx.agentRunner.runTurn = mock(async (_child: unknown, _threadId: string, prompt: string) => ({
+      success: true,
+      completed: true,
+      cancelled: false,
+      tokens: { input: 10, output: 5, total: 15 },
+      claude_api_calls: 1,
+      timeline: [],
+      transcript: [{
+        role: 'assistant',
+        kind: 'message',
+        text: prompt,
+        turn: 1,
+        tool_name: null,
+      }],
+    }));
+    (orchestrator as any).agentRunner = ctx.agentRunner;
+    (orchestrator as any).runCliCommand = mock(async () => ({
+      success: true,
+      result: makeCliResult({ final_state: 'In Review' }),
+    }));
+
+    await (orchestrator as any).dispatchIssue(issue, null);
+    await awaitWorker(orchestrator, issue.id);
+
+    const prompt = ctx.agentRunner.runTurn.mock.calls[0]?.[2];
+    expect(prompt).toContain('## Output Language');
+    expect(prompt).toContain('The original user request is English');
+    expect(prompt).toContain('Write all user-facing summaries');
+    expect(prompt).toContain('## Development Summary');
+    expect(prompt).not.toContain('## 开发摘要');
   });
 
   it('keeps supervisor prompt guidance compact when session memory is noisy', async () => {
