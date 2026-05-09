@@ -1,7 +1,10 @@
 import type { CreateIssueRequest, RuntimeControlPlane, RuntimeIssueView } from '../runtime/types';
 import { BotConversationPreferenceRepository, type BotIssueFollowupRepository } from '../database';
 import { TrackerProjectResolutionService } from '../tracker/projectResolution';
+import { inferRuntimeLocaleFromText, type RuntimeLocale } from '../i18n/locale';
 import { BotSubscriptionService } from './subscriptions';
+import { buildIssueCardActionRows } from './issueCardActions';
+import { buildSupervisorIssueVisualCard } from '../supervisor/issueVisualCard';
 import type {
   BotCommandContext,
   BotCommandRequest,
@@ -113,6 +116,43 @@ function formatGovernanceSummary(issue: RuntimeIssueView): string {
     formatGovernanceSuggestions(issue),
   ].filter(Boolean);
   return parts.join('\n');
+}
+
+function inferCommandLocale(params: {
+  issue?: RuntimeIssueView | null;
+  input?: CreateIssueRequest | null;
+  rawText?: string | null;
+}): RuntimeLocale {
+  if (params.issue?.supervisor_locale === 'zh' || params.issue?.supervisor_locale === 'en') {
+    return params.issue.supervisor_locale;
+  }
+  return inferRuntimeLocaleFromText([
+    params.rawText,
+    params.input?.title,
+    params.input?.description,
+  ].filter(Boolean).join('\n'));
+}
+
+function formatIssueCreatedMessage(params: {
+  issue?: RuntimeIssueView | null;
+  issueIdentifier?: string | null;
+  input?: CreateIssueRequest | null;
+  rawText?: string | null;
+}): string {
+  const locale = inferCommandLocale({
+    issue: params.issue,
+    input: params.input,
+    rawText: params.rawText,
+  });
+  const identifier = params.issue?.identifier ?? params.issueIdentifier ?? (locale === 'en' ? 'the new issue' : '新任务');
+  if (params.issue) {
+    return locale === 'en'
+      ? `Got it, created ${params.issue.identifier} · ${params.issue.title}`
+      : `已收到，已创建 ${params.issue.identifier} · ${params.issue.title}`;
+  }
+  return locale === 'en'
+    ? `Got it, created ${identifier}`
+    : `已收到，已创建 ${identifier}`;
 }
 
 function parseWatchArgs(inlineArgs: string): {
@@ -271,7 +311,7 @@ export class BotCommandService {
       case 'status':
         return this.handleStatus(request.issue_id);
       case 'new':
-        return this.handleNew(context, request.create_issue);
+        return this.handleNew(context, request.create_issue, request.raw_text);
       case 'project':
         return this.handleProject(context, request.project_slug);
       case 'watch':
@@ -357,6 +397,7 @@ export class BotCommandService {
   private async handleNew(
     context: BotCommandContext,
     input?: CreateIssueRequest | null,
+    rawText?: string | null,
   ): Promise<BotCommandResponse> {
     if (!this.canWrite(context)) {
       return {
@@ -422,10 +463,28 @@ export class BotCommandService {
       });
     }
 
+    const message = formatIssueCreatedMessage({
+      issue,
+      issueIdentifier: result.issue_identifier,
+      input,
+      rawText,
+    });
+    if (issue) {
+      const visual = buildSupervisorIssueVisualCard(issue);
+      return {
+        message,
+        caption: visual.caption,
+        format: 'telegram_html',
+        media_key: visual.media_key,
+        photo: visual.photo,
+        show_caption_above_media: false,
+        action_rows: buildIssueCardActionRows(issue),
+        issue_id: result.issue_id,
+      };
+    }
+
     return {
-      message: issue
-        ? `已收到，已创建 ${issue.identifier} · ${issue.title}`
-        : `已收到，已创建 ${result.issue_identifier ?? '新任务'}`,
+      message,
       issue_id: result.issue_id,
     };
   }
