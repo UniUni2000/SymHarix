@@ -1290,9 +1290,29 @@ export class SupervisorAgentRuntimeService {
       id: pending.id,
       status: result.ok ? 'completed' : 'failed',
     });
-    return this.completeRun(run.id, result.response ?? {
+
+    let response = result.response ?? {
       message: result.message ?? result.summary,
-    }, result.ok ? 'completed' : 'failed');
+    };
+    if (result.ok && pending.tool_name === 'create_issue' && result.response?.issue_id) {
+      const cardResult = await this.executeTool({
+        runId: run.id,
+        turn: {
+          type: 'tool_call',
+          tool: 'show_issue_card',
+          args: { issue_id: result.response.issue_id },
+          reason: 'Show the runtime issue card after confirming issue creation.',
+        },
+        request,
+        canWrite: request.canWrite ?? true,
+        skipConfirmation: true,
+      });
+      if (cardResult.ok && cardResult.response) {
+        response = cardResult.response;
+      }
+    }
+
+    return this.completeRun(run.id, response, result.ok ? 'completed' : 'failed');
   }
 
   private async executeRun(request: SupervisorRuntimeRespondRequest): Promise<BotCommandResponse> {
