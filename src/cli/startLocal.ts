@@ -292,11 +292,42 @@ async function main(): Promise<void> {
   process.once('SIGTERM', () => forwardSignal('SIGTERM'));
 
   const provisionTemporaryTunnel = async (): Promise<TelegramTunnelHandle | null> => {
+    const maxAttempts = resolvePositiveIntegerEnv(
+      childEnv,
+      'SYMPHONY_TELEGRAM_TUNNEL_RETRY_ATTEMPTS',
+      3,
+    );
+    const retryDelayMs = resolvePositiveIntegerEnv(
+      childEnv,
+      'SYMPHONY_TELEGRAM_TUNNEL_RETRY_DELAY_MS',
+      1500,
+    );
+    let lastError: unknown = null;
     try {
       console.log('[symphonyness] start:local provisioning temporary Telegram tunnel...');
       const localBaseUrl = `http://127.0.0.1:${requestedPort}`;
       const tunnelProvider = createCloudflaredTunnelProvider();
-      const nextTunnelHandle = await tunnelProvider(localBaseUrl);
+      let nextTunnelHandle: TelegramTunnelHandle | null = null;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          nextTunnelHandle = await tunnelProvider(localBaseUrl);
+          break;
+        } catch (error) {
+          lastError = error;
+          if (attempt >= maxAttempts) {
+            throw error;
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn(
+            `[symphonyness] start:local tunnel attempt ${attempt}/${maxAttempts} failed; retrying: ${message}`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+        }
+      }
+
+      if (!nextTunnelHandle) {
+        throw lastError instanceof Error ? lastError : new Error('Telegram tunnel provider did not return a handle');
+      }
 
       console.log(`[symphonyness] start:local tunnel ready: ${nextTunnelHandle.publicBaseUrl}`);
       console.log('[symphonyness] start:local using temporary tunnel only for this process; .env was not modified.');
