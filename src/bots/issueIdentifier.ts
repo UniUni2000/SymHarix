@@ -1,7 +1,11 @@
 export function extractIssueIdentifier(text: string): string | null {
-  const match = text.match(/\b[A-Z][A-Z0-9]+-\d+\b/i);
+  const match = text.match(/\b([A-Z][A-Z0-9]+)-(\d+)\b/i);
   if (match) {
-    return match[0].toUpperCase();
+    const rawPrefix = match[1]!;
+    const prefix = rawPrefix.toUpperCase();
+    if (rawPrefix === prefix || prefix === 'INT') {
+      return `${prefix}-${match[2]}`;
+    }
   }
 
   const spaced = text.match(/\b([A-Z][A-Z0-9]{1,9})\s+#?\s*(\d+)\b/i);

@@ -35,7 +35,7 @@ function buildSupervisorLiveVerifierDescription(issue: Issue): string {
     'Bounded supervisor live verifier marker task.',
     `Create or update only: ${markerLine}.`,
     'Do not scan the whole repo, do not inspect unrelated historical supervisor-live files, and do not create child tasks.',
-    'Use narrow verification only, then commit, push, create PR, and write .symphony/HANDOVER.md.',
+    'Use narrow verification only, then write .symphony/HANDOVER.md and stop for orchestrator post-processing.',
   ].join(' ');
 }
 
@@ -174,7 +174,7 @@ export function buildDevPrompt(
         '1. Create or update only the requested supervisor-live marker file',
         `2. ${testResponsibility}`,
         '3. Create `.symphony/HANDOVER.md` with a concise development summary',
-        '4. Commit product changes, push, and create PR',
+        '4. Stop after handover; the orchestrator/state machine owns commit, push, PR creation, and tracker sync',
       ].join('\n')
     : [
         '1. Analyze the issue and implement the required changes',
@@ -183,7 +183,7 @@ export function buildDevPrompt(
         '4. Keep `.symphony/change-pack/tasks.md` and `.symphony/change-pack/evidence.json` aligned with the real state of the work',
         '5. Update `.symphony/DEVELOPMENT_LOG.md` after each significant step',
         '6. **When done: create `.symphony/HANDOVER.md` with development summary**',
-        '7. Commit changes, push, and create PR',
+        '7. Stop after handover; the orchestrator/state machine owns commit, push, PR creation, tracker updates, and final synchronization',
       ].join('\n');
   const liveVerifierImportant = liveVerifierFastPath
     ? `- Do not read or edit unrelated \`.symphony/change-pack/*\` files unless the narrow marker task cannot complete without them.
@@ -241,6 +241,11 @@ ${existingLog ? `## Existing Progress\n${existingLog}\n---\nContinue from where 
 ## Important
 ${liveVerifierImportant ? `${liveVerifierImportant}\n` : ''}
 - GitHub Issue and PR are the source of engineering context. Prefer them over stale tracker text if they conflict.
+- The orchestrator/state machine owns commit, push, PR creation, tracker updates, and final synchronization.
+- Do not run \`git commit\`.
+- Do not run \`git push\`.
+- Do not run \`gh pr create\`.
+- If you think delivery is ready, write the required \`.symphony/HANDOVER.md\` and stop. Do not retry orchestrator-owned Git/PR commands.
 - Do NOT decide if code is ready for review — that is Review's job
 - For SMALL issues, avoid unnecessary multi-turn exploration. If the implementation and verification are already complete, finish the turn cleanly.
 - If review feedback already exists, address it in the same branch and same worktree unless the context explicitly says otherwise
@@ -249,7 +254,7 @@ ${liveVerifierImportant ? `${liveVerifierImportant}\n` : ''}
 - Workflow/process artifacts are never product files. Never stage or commit \`DEVELOPMENT_LOG.md\`, \`HANDOVER.md\`, \`REVIEW_REPORT.md\`, anything under \`.symphony/\`, or similar review/dev process notes.
 - Do not delete \`.symphony/\` or \`.symphony/state.json\`. Symphony owns that private runtime directory; damaging it can break post-processing even when the product change is correct.
 - If you are doing cleanup work, only clean user/product files explicitly in scope. Never use \`.symphony/\` as the final deliverable location.
-- When complete: commit, push, create PR, create \`.symphony/HANDOVER.md\`
+- When complete: create \`.symphony/HANDOVER.md\`, make sure evidence is current, then stop for orchestrator post-processing.
 `;
 
   return prompt;

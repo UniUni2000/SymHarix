@@ -11,6 +11,7 @@ import {
   applyProxyEnv,
   disableProxyEnv,
   ensureNoProxyForLocalhost,
+  getStartLocalTunnelRecoveryReason,
   hasHttpProxyEnv,
   resolveStartLocalPort,
   shouldEmitTelegramStartupSummary,
@@ -151,33 +152,47 @@ function resolveTelegramStartupSummaryAttempts(env: Record<string, string | unde
   return Number.isFinite(maxAttempts) && maxAttempts > 0 ? maxAttempts : 60;
 }
 
+function resolvePositiveIntegerEnv(
+  env: Record<string, string | undefined>,
+  name: string,
+  fallback: number,
+): number {
+  const parsed = Number.parseInt(env[name] || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+type TelegramManifestSnapshot = {
+  health?: string | null;
+  webhook_url?: string | null;
+  webhook_last_error_message?: string | null;
+  webhook_pending_update_count?: number | null;
+  public_base_url?: string | null;
+};
+
+async function readTelegramManifestSnapshot(port: number): Promise<TelegramManifestSnapshot | null> {
+  const manifestUrl = `http://127.0.0.1:${port}/api/v1/bots/manifest`;
+  const response = await fetch(manifestUrl);
+  if (!response.ok) {
+    throw new Error(`manifest returned ${response.status}`);
+  }
+  const payload = await response.json() as {
+    data?: {
+      transports?: {
+        telegram?: TelegramManifestSnapshot;
+      };
+    };
+  };
+  return payload.data?.transports?.telegram ?? null;
+}
+
 async function printTelegramStartupSummary(
   port: number,
   expectedPublicBaseUrl: string | null,
   attempts: number,
 ): Promise<void> {
-  const manifestUrl = `http://127.0.0.1:${port}/api/v1/bots/manifest`;
-
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      const response = await fetch(manifestUrl);
-      if (!response.ok) {
-        throw new Error(`manifest returned ${response.status}`);
-      }
-      const payload = await response.json() as {
-        data?: {
-          transports?: {
-            telegram?: {
-              health?: string | null;
-              webhook_url?: string | null;
-              webhook_last_error_message?: string | null;
-              webhook_pending_update_count?: number | null;
-              public_base_url?: string | null;
-            };
-          };
-        };
-      };
-      const telegram = payload.data?.transports?.telegram;
+      const telegram = await readTelegramManifestSnapshot(port);
       if (telegram && shouldEmitTelegramStartupSummary(telegram, expectedPublicBaseUrl)) {
         console.log(`[symphonyness] ${buildTelegramStartupSummary(telegram, expectedPublicBaseUrl)}`);
         return;
@@ -190,6 +205,25 @@ async function printTelegramStartupSummary(
   }
 
   console.log('[symphonyness] telegram: unhealthy webhook_url=(none)');
+}
+
+async function stopChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.killed) {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    const timeout = setTimeout(() => {
+      child.kill('SIGKILL');
+    }, 3_000);
+
+    child.once('exit', () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+
+    child.kill('SIGTERM');
+  });
 }
 
 async function main(): Promise<void> {
@@ -212,12 +246,20 @@ async function main(): Promise<void> {
   let child: ChildProcess | null = null;
   let cleanedUp = false;
   let finished = false;
+  let tunnelWatchdog: NodeJS.Timeout | null = null;
+  let recoveryInFlight: Promise<void> | null = null;
+  const intentionalChildStops = new WeakSet<ChildProcess>();
 
   const cleanup = async (): Promise<void> => {
     if (cleanedUp) {
       return;
     }
     cleanedUp = true;
+
+    if (tunnelWatchdog) {
+      clearInterval(tunnelWatchdog);
+      tunnelWatchdog = null;
+    }
 
     if (tunnelHandle) {
       await tunnelHandle.dispose();
@@ -249,17 +291,16 @@ async function main(): Promise<void> {
   process.once('SIGINT', () => forwardSignal('SIGINT'));
   process.once('SIGTERM', () => forwardSignal('SIGTERM'));
 
-  if (shouldProvisionStartLocalTunnel(childEnv)) {
+  const provisionTemporaryTunnel = async (): Promise<TelegramTunnelHandle | null> => {
     try {
       console.log('[symphonyness] start:local provisioning temporary Telegram tunnel...');
       const localBaseUrl = `http://127.0.0.1:${requestedPort}`;
       const tunnelProvider = createCloudflaredTunnelProvider();
-      tunnelHandle = await tunnelProvider(localBaseUrl);
+      const nextTunnelHandle = await tunnelProvider(localBaseUrl);
 
-      const publicBaseUrl = tunnelHandle.publicBaseUrl;
-      childEnv.SYMPHONY_PUBLIC_BASE_URL = publicBaseUrl;
-      console.log(`[symphonyness] start:local tunnel ready: ${publicBaseUrl}`);
+      console.log(`[symphonyness] start:local tunnel ready: ${nextTunnelHandle.publicBaseUrl}`);
       console.log('[symphonyness] start:local using temporary tunnel only for this process; .env was not modified.');
+      return nextTunnelHandle;
     } catch (error) {
       console.warn(
         '[symphonyness] start:local could not pre-provision Telegram tunnel; falling back to normal bootstrap.',
@@ -267,33 +308,145 @@ async function main(): Promise<void> {
       if (error instanceof Error) {
         console.warn(`[symphonyness] ${error.message}`);
       }
-      await cleanup();
+      return null;
+    }
+  };
+
+  const spawnServiceChild = (): void => {
+    child = spawn(
+      process.execPath,
+      ['--env-file=.env', 'run', 'src/cli/index.ts', ...args],
+      {
+        cwd: projectRoot,
+        env: childEnv,
+        stdio: 'inherit',
+      },
+    );
+
+    const spawnedChild = child;
+    spawnedChild.once('error', (error) => {
+      console.error('[symphonyness] start:local failed to launch the service process.');
+      console.error(error);
+      void finish(1, null);
+    });
+    spawnedChild.once('exit', (code, signal) => {
+      if (intentionalChildStops.has(spawnedChild)) {
+        return;
+      }
+      void finish(code, signal);
+    });
+  };
+
+  const restartServiceWithFreshTunnel = async (reason: string): Promise<void> => {
+    if (finished) {
+      return;
+    }
+    if (recoveryInFlight) {
+      await recoveryInFlight;
+      return;
+    }
+
+    recoveryInFlight = (async () => {
+      console.warn(`[symphonyness] start:local detected unhealthy Telegram tunnel; recovering. reason=${reason}`);
+      const nextTunnelHandle = await provisionTemporaryTunnel();
+      if (!nextTunnelHandle) {
+        console.warn('[symphonyness] start:local tunnel recovery skipped; keeping the current service running.');
+        return;
+      }
+
+      const previousTunnelHandle = tunnelHandle;
+      const previousChild = child;
+      if (previousChild && previousChild.exitCode === null) {
+        intentionalChildStops.add(previousChild);
+        await stopChild(previousChild);
+      }
+
+      tunnelHandle = nextTunnelHandle;
+      childEnv.SYMPHONY_PUBLIC_BASE_URL = nextTunnelHandle.publicBaseUrl;
+      if (previousTunnelHandle) {
+        await previousTunnelHandle.dispose();
+      }
+      spawnServiceChild();
+      void printTelegramStartupSummary(
+        requestedPort,
+        childEnv.SYMPHONY_PUBLIC_BASE_URL?.trim() || null,
+        resolveTelegramStartupSummaryAttempts(childEnv),
+      );
+    })().catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[symphonyness] start:local tunnel recovery failed: ${message}`);
+    }).finally(() => {
+      recoveryInFlight = null;
+    });
+
+    await recoveryInFlight;
+  };
+
+  const startTelegramTunnelWatchdog = (): void => {
+    if (!shouldProvisionStartLocalTunnel(childEnv)) {
+      return;
+    }
+    const intervalMs = resolvePositiveIntegerEnv(
+      childEnv,
+      'SYMPHONY_TELEGRAM_TUNNEL_WATCHDOG_INTERVAL_MS',
+      10_000,
+    );
+    const degradedPollThreshold = resolvePositiveIntegerEnv(
+      childEnv,
+      'SYMPHONY_TELEGRAM_TUNNEL_WATCHDOG_DEGRADED_POLLS',
+      2,
+    );
+    let degradedPolls = 0;
+
+    tunnelWatchdog = setInterval(() => {
+      if (finished || recoveryInFlight) {
+        return;
+      }
+      void (async () => {
+        const expectedPublicBaseUrl = childEnv.SYMPHONY_PUBLIC_BASE_URL?.trim() || null;
+        if (!expectedPublicBaseUrl) {
+          degradedPolls = 0;
+          return;
+        }
+
+        const telegram = await readTelegramManifestSnapshot(requestedPort);
+        const recoveryReason = telegram
+          ? getStartLocalTunnelRecoveryReason(telegram, expectedPublicBaseUrl)
+          : null;
+        if (!recoveryReason) {
+          degradedPolls = 0;
+          return;
+        }
+
+        degradedPolls += 1;
+        if (degradedPolls < degradedPollThreshold) {
+          return;
+        }
+
+        degradedPolls = 0;
+        await restartServiceWithFreshTunnel(recoveryReason);
+      })().catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`[symphonyness] start:local tunnel watchdog check failed: ${message}`);
+      });
+    }, intervalMs);
+    tunnelWatchdog.unref?.();
+  };
+
+  if (shouldProvisionStartLocalTunnel(childEnv)) {
+    tunnelHandle = await provisionTemporaryTunnel();
+    if (tunnelHandle) {
+      childEnv.SYMPHONY_PUBLIC_BASE_URL = tunnelHandle.publicBaseUrl;
     }
   }
 
-  child = spawn(
-    process.execPath,
-    ['--env-file=.env', 'run', 'src/cli/index.ts', ...args],
-    {
-      cwd: projectRoot,
-      env: childEnv,
-      stdio: 'inherit',
-    },
-  );
-
-  child.once('error', (error) => {
-    console.error('[symphonyness] start:local failed to launch the service process.');
-    console.error(error);
-    void finish(1, null);
-  });
+  spawnServiceChild();
   void printTelegramStartupSummary(
     requestedPort,
     childEnv.SYMPHONY_PUBLIC_BASE_URL?.trim() || null,
     resolveTelegramStartupSummaryAttempts(childEnv),
   );
-  child.once('exit', (code, signal) => {
-    void finish(code, signal);
-  });
+  startTelegramTunnelWatchdog();
 }
 
 void main().catch((error) => {

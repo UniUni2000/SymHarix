@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   buildTelegramStartupSummary,
+  getStartLocalTunnelRecoveryReason,
   resolveStartLocalPort,
   shouldEmitTelegramStartupSummary,
   shouldProvisionStartLocalTunnel,
@@ -153,5 +154,27 @@ describe('startLocalTunnel', () => {
     }, 'https://fresh.trycloudflare.com')).toBe(
       'telegram: stale webhook_url=https://old.trycloudflare.com/api/v1/bots/telegram/webhook expected_base=https://fresh.trycloudflare.com',
     );
+  });
+
+  test('requests local tunnel recovery when Telegram reports a Cloudflare 530 webhook error', () => {
+    expect(getStartLocalTunnelRecoveryReason({
+      health: 'degraded',
+      webhook_url: 'https://fresh.trycloudflare.com/api/v1/bots/telegram/webhook',
+      webhook_last_error_message: 'Wrong response from the webhook: 530 <none>',
+      webhook_pending_update_count: 1,
+      public_base_url: 'https://fresh.trycloudflare.com',
+    }, 'https://fresh.trycloudflare.com')).toBe(
+      'telegram webhook degraded: Wrong response from the webhook: 530 <none>',
+    );
+  });
+
+  test('does not request local tunnel recovery for a stable non-tunnel public URL', () => {
+    expect(getStartLocalTunnelRecoveryReason({
+      health: 'degraded',
+      webhook_url: 'https://bot.example.test/api/v1/bots/telegram/webhook',
+      webhook_last_error_message: 'Wrong response from the webhook: 530 <none>',
+      webhook_pending_update_count: 1,
+      public_base_url: 'https://bot.example.test',
+    }, 'https://bot.example.test')).toBeNull();
   });
 });

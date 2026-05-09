@@ -105,9 +105,10 @@ import {
 } from '../supervisor/claudeRepoUnderstandingService';
 import { DefaultRepoProfileService } from '../supervisor/repoProfileService';
 import { GovernanceMemoryService } from '../governance/repoIntelligence';
-import { SupervisorAgentRuntimeService } from '../supervisor/agentRuntime';
+import { SupervisorAgentRuntimeService, createSupervisorToolRouterModel } from '../supervisor/agentRuntime';
 
 interface TelegramUpdate {
+  update_id?: number | string;
   message?: {
     text?: string;
     chat?: { id: number | string };
@@ -186,7 +187,14 @@ interface DiscordAdapterConfig {
   operatorIds: Set<string>;
 }
 
-type TelegramCallbackKind = 'select_governance_action' | 'confirm_pending' | 'cancel_pending' | 'supervisor_action' | 'unknown';
+type TelegramCallbackKind =
+  | 'select_governance_action'
+  | 'confirm_pending'
+  | 'cancel_pending'
+  | 'supervisor_action'
+  | 'runtime_action'
+  | 'unknown';
+type TelegramRuntimeAction = 'refresh' | 'retry' | 'stop' | 'close';
 type TelegramCallbackDeliveryMode = 'edited' | 'sent_fallback' | 'kept_original';
 
 function telegramCallbackDeliveryResult(mode: TelegramCallbackDeliveryMode): TelegramCallbackAuditRecord['result'] {
@@ -877,6 +885,8 @@ export class DefaultBotGateway implements BotGateway {
   private readonly repoClaudeConversations: RepoClaudeConversationRepository | null;
   private readonly botWriteAuthorizer: (context: BotCommandContext) => boolean;
   private readonly telegramTextProcessingAckDelayMs: number;
+  private readonly seenTelegramUpdateIds = new Set<string>();
+  private readonly seenTelegramUpdateOrder: string[] = [];
   private telegramPublicBaseUrl: string | null = normalizePublicBaseUrl(process.env.SYMPHONY_PUBLIC_BASE_URL || null);
   private telegramWebhookUsedTunnel: boolean | null = null;
   private startupRepairTimer: ReturnType<typeof setTimeout> | null = null;
@@ -976,6 +986,7 @@ export class DefaultBotGateway implements BotGateway {
       options.projectResolver ?? null,
       options.followupRepository ?? null,
     );
+    const assistantModel = options.assistantModel ?? createBotAssistantModelFromEnv();
     this.supervisorAgentRuntime = options.supervisorAgentRuntimeService === undefined
       ? (
           this.supervisorRuns &&
@@ -992,7 +1003,11 @@ export class DefaultBotGateway implements BotGateway {
                 toolCalls: this.supervisorToolCalls,
                 pendingActions: this.supervisorPendingActions,
                 repoConversations: this.repoClaudeConversations,
+                model: createSupervisorToolRouterModel(assistantModel),
                 supervisorAgentService: this.supervisorAgentService,
+                onProgress: async ({ context, message }) => {
+                  await this.sendSupervisorRuntimeProgress(context, message);
+                },
               })
             : null
         )
@@ -1015,7 +1030,7 @@ export class DefaultBotGateway implements BotGateway {
       options.preferencesRepository ?? null,
       options.pendingActionRepository ?? null,
       options.projectResolver ?? null,
-      options.assistantModel ?? createBotAssistantModelFromEnv(),
+      assistantModel,
       canWrite,
       this.subscriptions,
       options.followupMessageStateRepository ?? null,
@@ -1268,6 +1283,19 @@ export class DefaultBotGateway implements BotGateway {
     }
 
     const update = body as TelegramUpdate;
+    const updateId = update.update_id !== undefined && update.update_id !== null ? String(update.update_id) : null;
+    if (updateId && this.seenTelegramUpdateIds.has(updateId)) {
+      logger.info('Telegram duplicate update ignored', { update_id: updateId });
+      return {
+        ok: true,
+        status: 200,
+        body: { ok: true, duplicate: true },
+      };
+    }
+    if (updateId) {
+      this.rememberTelegramUpdateId(updateId);
+    }
+
     const callbackQuery = update.callback_query;
     if (callbackQuery?.data) {
       const chatId = callbackQuery.message?.chat?.id;
@@ -1538,9 +1566,57 @@ export class DefaultBotGateway implements BotGateway {
     };
   }
 
+  private rememberTelegramUpdateId(updateId: string): void {
+    this.seenTelegramUpdateIds.add(updateId);
+    this.seenTelegramUpdateOrder.push(updateId);
+    while (this.seenTelegramUpdateOrder.length > 1_000) {
+      const expired = this.seenTelegramUpdateOrder.shift();
+      if (expired) {
+        this.seenTelegramUpdateIds.delete(expired);
+      }
+    }
+  }
+
+  private async handleRuntimeIssueCardAction(
+    context: BotCommandContext,
+    parsed: {
+      issueIdentifier: string;
+      runtimeAction?: TelegramRuntimeAction | null;
+    },
+  ): Promise<BotCommandResponse> {
+    if (!this.supervisorAgentRuntime) {
+      return {
+        message: '这张运行卡暂时不能直接执行按钮动作。你可以直接回复“查看当前 issue”或“重试 INT-xxx”。',
+      };
+    }
+    const text = (() => {
+      switch (parsed.runtimeAction) {
+        case 'retry':
+          return `重试 ${parsed.issueIdentifier}`;
+        case 'stop':
+          return `停止 ${parsed.issueIdentifier}`;
+        case 'close':
+          return `清理 ${parsed.issueIdentifier} 的 GitHub 和 Linear 残留垃圾`;
+        case 'refresh':
+        default:
+          return `${parsed.issueIdentifier} 卡片`;
+      }
+    })();
+    return this.supervisorAgentRuntime.respond({
+      context,
+      text,
+      canWrite: this.botWriteAuthorizer(context),
+    });
+  }
+
   private async handleTelegramCallback(
     context: BotCommandContext,
-    parsed: { kind: TelegramCallbackKind; issueIdentifier: string | null; ordinal: number | null },
+    parsed: {
+      kind: TelegramCallbackKind;
+      issueIdentifier: string | null;
+      ordinal: number | null;
+      runtimeAction?: TelegramRuntimeAction | null;
+    },
     issue: RuntimeIssueView | null,
     existingCardState: ReturnType<BotFollowupMessageStateRepository['findByConversationIssue']> | null,
     originalMessageId: string | null,
@@ -1557,6 +1633,39 @@ export class DefaultBotGateway implements BotGateway {
       issue: RuntimeIssueView;
     } | null;
   }> {
+    if (parsed.kind === 'runtime_action' && parsed.issueIdentifier) {
+      const response = await this.handleRuntimeIssueCardAction(context, parsed);
+      const responseIssue = response.issue_id
+        ? this.runtime.getIssue(response.issue_id)
+        : issue;
+      const outbound = {
+        text: response.message,
+        caption: response.caption,
+        format: response.format,
+        media_key: response.media_key ?? null,
+        photo: response.photo ?? null,
+        show_caption_above_media: response.show_caption_above_media,
+        actions: response.actions,
+        action_rows: response.action_rows,
+      };
+      return {
+        outbound,
+        toastText: parsed.runtimeAction === 'refresh'
+          ? '已刷新'
+          : parsed.runtimeAction === 'close'
+            ? '已准备确认'
+            : '已收到，正在处理',
+        issue: responseIssue,
+        cardState: hasPendingConfirmationButtons(response)
+          ? 'confirming'
+          : responseIssue?.governance_thread_state === 'waiting_on_child'
+            ? 'waiting_on_child'
+            : 'open',
+        cardKey: response.media_key ?? `runtime_issue_card|${parsed.issueIdentifier}|${parsed.runtimeAction ?? 'action'}`,
+        executeAfterAck: null,
+      };
+    }
+
     if (parsed.kind === 'select_governance_action' && parsed.issueIdentifier && parsed.ordinal) {
       if (!issue || !this.pendingActions) {
         const response = await this.assistantService.respondToText(
@@ -1817,6 +1926,7 @@ export class DefaultBotGateway implements BotGateway {
     ordinal: number | null;
     sessionId?: string | null;
     supervisorAction?: 'approve' | 'edit' | 'alternate' | 'focus' | 'cancel' | null;
+    runtimeAction?: TelegramRuntimeAction | null;
   } {
     if (data === 'pending|confirm') {
       return {
@@ -1853,6 +1963,19 @@ export class DefaultBotGateway implements BotGateway {
         ordinal: null,
         sessionId: supervisorSelection[1],
         supervisorAction: supervisorSelection[2].toLowerCase() as 'approve' | 'edit' | 'alternate' | 'focus' | 'cancel',
+        runtimeAction: null,
+      };
+    }
+
+    const runtimeSelection = data.match(/^rt\|([A-Z][A-Z0-9]+-\d+)\|(refresh|retry|stop|close)$/i);
+    if (runtimeSelection?.[1] && runtimeSelection?.[2]) {
+      return {
+        kind: 'runtime_action',
+        issueIdentifier: runtimeSelection[1].toUpperCase(),
+        ordinal: null,
+        sessionId: null,
+        supervisorAction: null,
+        runtimeAction: runtimeSelection[2].toLowerCase() as TelegramRuntimeAction,
       };
     }
 
@@ -1862,6 +1985,7 @@ export class DefaultBotGateway implements BotGateway {
       ordinal: null,
       sessionId: null,
       supervisorAction: null,
+      runtimeAction: null,
     };
   }
 
@@ -2219,7 +2343,7 @@ export class DefaultBotGateway implements BotGateway {
     response: BotCommandResponse,
     messageRef: BotTransportMessageRef,
   ): void {
-    if (!this.pendingActions || !hasPendingConfirmationButtons(response)) {
+    if (!hasPendingConfirmationButtons(response)) {
       return;
     }
 
@@ -2227,37 +2351,76 @@ export class DefaultBotGateway implements BotGateway {
       transport: context.transport,
       conversation_id: context.recipient.conversation_id,
     } as const;
-    const candidates = [
-      response.issue_id
-        ? this.pendingActions.findByConversationIssue({
-            ...key,
-            issue_id: response.issue_id,
-          })
-        : null,
-      this.pendingActions.findLatestByConversation(key),
-    ].filter((candidate, index, all): candidate is NonNullable<typeof candidate> => (
-      Boolean(candidate) && all.findIndex((other) => (
-        other?.transport === candidate?.transport &&
-        other?.conversation_id === candidate?.conversation_id &&
-        other?.issue_id === candidate?.issue_id
-      )) === index
-    ));
+    if (this.pendingActions) {
+      const candidates = [
+        response.issue_id
+          ? this.pendingActions.findByConversationIssue({
+              ...key,
+              issue_id: response.issue_id,
+            })
+          : null,
+        this.pendingActions.findLatestByConversation(key),
+      ].filter((candidate, index, all): candidate is NonNullable<typeof candidate> => (
+        Boolean(candidate) && all.findIndex((other) => (
+          other?.transport === candidate?.transport &&
+          other?.conversation_id === candidate?.conversation_id &&
+          other?.issue_id === candidate?.issue_id
+        )) === index
+      ));
 
-    const pending = candidates.find((candidate) => (
-      candidate.status === 'pending_confirm' &&
-      (
-        candidate.summary_message === response.message ||
-        response.message.includes(candidate.summary_message)
-      )
-    ));
-    if (!pending) {
-      return;
+      const pending = candidates.find((candidate) => (
+        candidate.status === 'pending_confirm' &&
+        (
+          candidate.summary_message === response.message ||
+          response.message.includes(candidate.summary_message)
+        )
+      ));
+      if (pending) {
+        this.persistPendingAction(pending, {
+          status: 'pending_confirm',
+          message_id: messageRef.provider_message_id,
+          card_key: pending.card_key,
+        });
+      }
     }
 
-    this.persistPendingAction(pending, {
-      status: 'pending_confirm',
-      message_id: messageRef.provider_message_id,
-      card_key: pending.card_key,
+    const supervisorPending = this.supervisorPendingActions?.findOpenByConversation(key) ?? null;
+    if (
+      supervisorPending &&
+      (
+        supervisorPending.summary_message === response.message ||
+        response.message.includes(supervisorPending.summary_message)
+      )
+    ) {
+      this.supervisorPendingActions?.update({
+        id: supervisorPending.id,
+        telegram_message_id: messageRef.provider_message_id,
+      });
+    }
+  }
+
+  private async sendSupervisorRuntimeProgress(
+    context: BotCommandContext,
+    message: string,
+  ): Promise<void> {
+    if (context.transport !== 'telegram' || !this.telegramNotifier) {
+      return;
+    }
+    const recipient = {
+      transport: 'telegram' as const,
+      conversation_id: context.recipient.conversation_id,
+    };
+    const sent = await this.telegramNotifier.sendMessage(recipient, {
+      text: message,
+    });
+    this.recordTransportEvent({
+      recipient,
+      issue: null,
+      source: 'sync_ack',
+      action: 'send',
+      result: 'success',
+      messageId: sent.provider_message_id,
+      materialKey: 'supervisor_runtime_progress',
     });
   }
 
@@ -2729,39 +2892,25 @@ export class DefaultBotGateway implements BotGateway {
     } catch (error) {
       processingFinished = true;
       clearTimeout(processingAckTimer);
+      const recipient = {
+        transport: 'telegram' as const,
+        conversation_id: context.recipient.conversation_id,
+      };
+      const message = error instanceof Error ? error.message : 'unknown error';
       logger.error('Telegram text outbound failed', {
         chat_id: context.recipient.conversation_id,
         user_id: context.identity.user_id,
         is_command: text.startsWith('/'),
       }, error instanceof Error ? error : undefined);
 
-      try {
-        await this.telegramNotifier!.sendMessage(
-          {
-            transport: 'telegram',
-            conversation_id: context.recipient.conversation_id,
-          },
-          {
-            text: `处理 Telegram 消息时失败：${error instanceof Error ? error.message : 'unknown error'}`,
-          },
-        );
-        this.recordTransportEvent({
-          recipient: {
-            transport: 'telegram',
-            conversation_id: context.recipient.conversation_id,
-          },
-          issue: null,
-          source: 'sync_ack',
-          action: 'send',
-          result: 'failed',
-          errorMessage: error instanceof Error ? error.message : 'unknown error',
-        });
-      } catch (sendError) {
-        logger.error('Telegram text fallback send failed', {
-          chat_id: context.recipient.conversation_id,
-          user_id: context.identity.user_id,
-        }, sendError instanceof Error ? sendError : undefined);
-      }
+      this.recordTransportEvent({
+        recipient,
+        issue: null,
+        source: 'sync_ack',
+        action: 'send',
+        result: 'failed',
+        errorMessage: message,
+      });
     }
   }
 

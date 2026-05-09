@@ -17,6 +17,9 @@ const DEFAULT_SUPERVISOR_MODEL =
   'claude-sonnet-4-5';
 
 const EXTERNAL_WRITE_PATTERNS = [
+  /\bgit\s+commit\b/i,
+  /\bgit\s+push\b/i,
+  /\bgh\s+pr\s+create\b/i,
   /\bgh\s+pr\s+(review|comment|merge|close)\b/i,
   /\bgh\s+issue\s+(comment|close|edit)\b/i,
   /\bgh\s+api\b.*\/pulls\/.*\/reviews/i,
@@ -169,7 +172,7 @@ function getBlockedExternalWriteReason(request: PendingRuntimeRequest): string |
 
   for (const pattern of EXTERNAL_WRITE_PATTERNS) {
     if (pattern.test(haystack)) {
-      return 'External review/comment/merge/tracker actions remain owned by the orchestrator, so this action should be denied.';
+      return 'Do not retry this command. Delivery publishing remains owned by the orchestrator/state machine: it will commit, push, create/update the PR, merge, and sync tracker state after the agent has finished local work. Finish by updating .symphony/HANDOVER.md for dev work or .symphony/REVIEW_REPORT.md for review work, then stop.';
     }
   }
 

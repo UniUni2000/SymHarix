@@ -4318,6 +4318,9 @@ describe('Orchestrator Stability', () => {
       linear_state: issue.state,
       github_repo: 'owner/repo',
       github_issue_number: 100,
+      active_pr_number: 77,
+      branch_name: 'feature/int-1',
+      workspace_path: '/tmp/symphony-tests/repo/INT-1',
       orchestrator_state: 'halted',
     });
     ctx.workItemRepository.create({
@@ -4352,8 +4355,11 @@ describe('Orchestrator Stability', () => {
       expect.stringContaining('INT-158'),
     );
     expect(ctx.githubIssueClient.closeIssue).toHaveBeenCalledWith(100);
+    expect(ctx.githubIssueClient.updatePullRequest).toHaveBeenCalledWith(77, { state: 'closed' });
+    expect(ctx.workspaceManager.removeWorkspace).toHaveBeenCalledWith('/tmp/symphony-tests/repo/INT-1');
     expect(syncEvents.map((event) => `${event.target_system}:${event.action}`).sort()).toEqual([
       'github:close_issue',
+      'github:close_pull_request',
       'linear:post_comment',
       'linear:update_state',
     ]);
@@ -4390,7 +4396,7 @@ describe('Orchestrator Stability', () => {
     expect((orchestrator as any).shouldDispatch(issue)).toBe(false);
   });
 
-  it('startup terminal cleanup closes mapped GitHub issues for terminal tracker items', async () => {
+  it('startup terminal cleanup closes mapped GitHub issues and PRs for terminal tracker items', async () => {
     const terminalIssue = makeIssue({ state: 'Canceled' });
     const ctx = createOrchestrator(terminalIssue);
     orchestrator = ctx.orchestrator;
@@ -4404,6 +4410,7 @@ describe('Orchestrator Stability', () => {
       linear_state: 'In Progress',
       github_repo: 'owner/repo',
       github_issue_number: 501,
+      active_pr_number: 77,
       workspace_path: '/tmp/symphony-tests/repo/INT-1',
       orchestrator_state: 'failed',
     });
@@ -4412,6 +4419,9 @@ describe('Orchestrator Stability', () => {
 
     expect(ctx.workspaceManager.removeWorkspace).toHaveBeenCalledWith('/tmp/symphony-tests/repo/INT-1');
     expect(ctx.githubIssueClient.closeIssue).toHaveBeenCalledWith(501);
+    expect(ctx.githubIssueClient.updatePullRequest).toHaveBeenCalledWith(77, { state: 'closed' });
+    const syncEvents = new SyncEventRepository(ctx.db).findByWorkItemId(terminalIssue.id);
+    expect(syncEvents.map((event) => `${event.target_system}:${event.action}`)).toContain('github:close_pull_request');
   });
 
   it('startup terminal cleanup skips while active execution is in flight', async () => {
@@ -4518,7 +4528,7 @@ describe('Orchestrator Stability', () => {
     }
   });
 
-  it('reconcileRunningIssues closes mapped GitHub issues when a running issue becomes canceled', async () => {
+  it('reconcileRunningIssues closes mapped GitHub issues and PRs when a running issue becomes canceled', async () => {
     const cancelledIssue = makeIssue({ state: 'Canceled' });
     const ctx = createOrchestrator(cancelledIssue);
     orchestrator = ctx.orchestrator;
@@ -4531,9 +4541,12 @@ describe('Orchestrator Stability', () => {
       linear_state: 'In Progress',
       github_repo: 'owner/repo',
       github_issue_number: 501,
+      active_pr_number: 77,
+      branch_name: 'feature/int-1',
       workspace_path: '/tmp/symphony-tests/repo/INT-1',
       orchestrator_state: 'dev_running',
     });
+    (orchestrator as any).cleanupIssueBranch = mock(async () => undefined);
 
     (orchestrator as any).state.running.set(cancelledIssue.id, {
       issue: makeIssue({ id: cancelledIssue.id, identifier: cancelledIssue.identifier, state: 'In Progress' }),
@@ -4550,6 +4563,12 @@ describe('Orchestrator Stability', () => {
 
     expect(ctx.workspaceManager.removeWorkspace).toHaveBeenCalledWith('/tmp/symphony-tests/repo/INT-1');
     expect(ctx.githubIssueClient.closeIssue).toHaveBeenCalledWith(501);
+    expect(ctx.githubIssueClient.updatePullRequest).toHaveBeenCalledWith(77, { state: 'closed' });
+    expect((orchestrator as any).cleanupIssueBranch).toHaveBeenCalledWith(expect.objectContaining({
+      explicitBranchName: 'feature/int-1',
+    }));
+    const syncEvents = new SyncEventRepository(ctx.db).findByWorkItemId(cancelledIssue.id);
+    expect(syncEvents.map((event) => `${event.target_system}:${event.action}`)).toContain('github:close_pull_request');
   });
 
   it('reconcileTrackedTerminalStates cancels a failed non-running issue after Linear is cancelled externally', async () => {
@@ -4565,11 +4584,14 @@ describe('Orchestrator Stability', () => {
       linear_state: 'In Progress',
       github_repo: 'owner/repo',
       github_issue_number: 501,
+      active_pr_number: 77,
+      branch_name: 'feature/int-1',
       workspace_path: '/tmp/symphony-tests/repo/INT-1',
       orchestrator_state: 'failed',
       delivery_code: 'dirty_workspace_no_commit',
       delivery_summary: 'Needs user decision.',
     });
+    (orchestrator as any).cleanupIssueBranch = mock(async () => undefined);
 
     await (orchestrator as any).reconcileTrackedTerminalStates();
 
@@ -4579,5 +4601,11 @@ describe('Orchestrator Stability', () => {
     expect(updated?.cancelled_at).toBeInstanceOf(Date);
     expect(ctx.workspaceManager.removeWorkspace).toHaveBeenCalledWith('/tmp/symphony-tests/repo/INT-1');
     expect(ctx.githubIssueClient.closeIssue).toHaveBeenCalledWith(501);
+    expect(ctx.githubIssueClient.updatePullRequest).toHaveBeenCalledWith(77, { state: 'closed' });
+    expect((orchestrator as any).cleanupIssueBranch).toHaveBeenCalledWith(expect.objectContaining({
+      explicitBranchName: 'feature/int-1',
+    }));
+    const syncEvents = new SyncEventRepository(ctx.db).findByWorkItemId(cancelledIssue.id);
+    expect(syncEvents.map((event) => `${event.target_system}:${event.action}`)).toContain('github:close_pull_request');
   });
 });

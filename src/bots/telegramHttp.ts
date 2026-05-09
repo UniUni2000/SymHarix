@@ -22,6 +22,30 @@ function isTelegramNetworkError(error: unknown): boolean {
   return /unable to connect|failed to connect|connection timed out|timed out|connection reset|network error|fetch failed/i.test(message);
 }
 
+function telegramMethodName(input: RequestInfo | URL): string | null {
+  const url = normalizeUrl(input);
+  const match = url.match(/\/bot[^/]+\/([^/?#]+)/);
+  return match?.[1] ?? null;
+}
+
+function requestMethod(input: RequestInfo | URL, init?: RequestInit): string {
+  if (init?.method) {
+    return init.method.toUpperCase();
+  }
+  if (input instanceof Request) {
+    return input.method.toUpperCase();
+  }
+  return 'GET';
+}
+
+function isVisibleTelegramSend(input: RequestInfo | URL, init?: RequestInit): boolean {
+  if (requestMethod(input, init) !== 'POST') {
+    return false;
+  }
+  const method = telegramMethodName(input);
+  return Boolean(method && /^(?:send|copy|forward|edit|delete)/i.test(method));
+}
+
 function hasProxyEnv(): boolean {
   return Boolean(
     process.env.HTTP_PROXY?.trim()
@@ -200,11 +224,35 @@ export function createTelegramApiFetch(
     } catch (error) {
       if (
         !isTelegramApiUrl(input)
+        || isVisibleTelegramSend(input, init)
         || (!isTelegramTlsVerificationError(error) && !isTelegramNetworkError(error))
       ) {
         throw error;
       }
       return effectiveFallback(input, init);
+    }
+  }) as typeof fetch;
+}
+
+export function createTelegramProxyAwareFetch(
+  proxyFetch: typeof fetch,
+  fallbackFetch: typeof fetch,
+): typeof fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (!isTelegramApiUrl(input)) {
+      return fallbackFetch(input, init);
+    }
+
+    try {
+      return await proxyFetch(input, init);
+    } catch (error) {
+      if (
+        isVisibleTelegramSend(input, init)
+        || (!isTelegramTlsVerificationError(error) && !isTelegramNetworkError(error))
+      ) {
+        throw error;
+      }
+      return fallbackFetch(input, init);
     }
   }) as typeof fetch;
 }
@@ -221,12 +269,7 @@ export function createDefaultTelegramApiFetch(): typeof fetch {
   if (!hasProxyEnv() || telegramProxyDisabled()) {
     return fallbackChain;
   }
-  return (async (input: RequestInfo | URL, init?: RequestInit) => {
-    if (isTelegramApiUrl(input)) {
-      return curlFetch(input, init);
-    }
-    return fallbackChain(input, init);
-  }) as typeof fetch;
+  return createTelegramProxyAwareFetch(curlFetch as typeof fetch, fallbackChain);
 }
 
 export const telegramNodeHttpsFetch = nodeHttpsFetch as typeof fetch;

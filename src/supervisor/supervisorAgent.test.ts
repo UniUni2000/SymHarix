@@ -682,6 +682,16 @@ describe('DefaultSupervisorAgentService', () => {
     expect(shouldUseReadOnlyClaudeForText('src/bots/assistant.ts 这文件干啥的')).toBe(true);
     expect(shouldUseReadOnlyClaudeForText('帮我结合最新官方文档看看 API')).toBe(true);
     expect(shouldUseReadOnlyClaudeForText('INT-157 卡在哪里，预计什么时候完成')).toBe(true);
+    expect(shouldUseReadOnlyClaudeForText('有哪些 issue')).toBe(false);
+    expect(shouldUseReadOnlyClaudeForText('活跃的 issue 呢')).toBe(false);
+    expect(shouldUseReadOnlyClaudeForText('活跃的呢')).toBe(false);
+    expect(shouldUseReadOnlyClaudeForText('open issues')).toBe(false);
+    expect(shouldUseReadOnlyClaudeForText('正在处理哪些任务')).toBe(false);
+    expect(shouldUseReadOnlyClaudeForText('github 上还有哪些 pr 没关')).toBe(false);
+    expect(shouldUseReadOnlyClaudeForText('Linear 里面还有开发中的单吗')).toBe(false);
+    expect(shouldUseReadOnlyClaudeForText('默认项目是什么')).toBe(false);
+    expect(shouldUseReadOnlyClaudeForText('现在 pending 的确认有哪些')).toBe(false);
+    expect(shouldUseReadOnlyClaudeForText('supervisor 现在在跑什么')).toBe(false);
     expect(shouldUseReadOnlyClaudeForText('我今天只是想聊聊')).toBe(false);
   });
 });
