@@ -1,12 +1,15 @@
 import type { CreateIssueRequest, RuntimeControlPlane, RuntimeIssueView } from '../runtime/types';
 import { BotConversationPreferenceRepository, type BotIssueFollowupRepository } from '../database';
 import { TrackerProjectResolutionService } from '../tracker/projectResolution';
+import { buildSupervisorIssueVisualCard } from '../supervisor/issueVisualCard';
+import { isTerminalIssue } from './issueVisibility';
 import { BotSubscriptionService } from './subscriptions';
 import type {
   BotCommandContext,
   BotCommandRequest,
   BotCommandResponse,
   BotCommandName,
+  BotTransportAction,
   BotWatchPreset,
 } from './types';
 
@@ -87,6 +90,83 @@ function formatIssue(issue: RuntimeIssueView): string {
   const timeline = issue.issue_id ? [] : [];
   void timeline;
   return lines.join('\n');
+}
+
+function runtimeIssueAppPath(issue: RuntimeIssueView): string {
+  return `/runtime/issues/${encodeURIComponent(issue.identifier || issue.issue_id)}/app`;
+}
+
+function primaryIssueCardAction(issue: RuntimeIssueView): BotTransportAction {
+  const stateText = `${issue.tracker_state} ${issue.orchestrator_state ?? ''}`;
+  if (/cancelled|canceled/i.test(stateText)) {
+    return {
+      label: '已取消',
+      style: 'success',
+      callback_data: `rt|${issue.identifier}|refresh`,
+    };
+  }
+  if (isTerminalIssue(issue)) {
+    return {
+      label: '已完成',
+      style: 'success',
+      callback_data: `rt|${issue.identifier}|refresh`,
+    };
+  }
+  if (issue.actions.can_stop) {
+    return {
+      label: '停止',
+      style: 'danger',
+      callback_data: `rt|${issue.identifier}|stop`,
+    };
+  }
+  if (issue.actions.can_retry) {
+    return {
+      label: '重试',
+      style: 'success',
+      callback_data: `rt|${issue.identifier}|retry`,
+    };
+  }
+  return {
+    label: '刷新卡片',
+    callback_data: `rt|${issue.identifier}|refresh`,
+  };
+}
+
+function buildIssueCardActionRows(issue: RuntimeIssueView): BotTransportAction[][] {
+  return [
+    [primaryIssueCardAction(issue)],
+    [
+      {
+        label: '刷新卡片',
+        callback_data: `rt|${issue.identifier}|refresh`,
+      },
+      {
+        label: '打开运行视图',
+        style: 'primary',
+        web_app: { url: runtimeIssueAppPath(issue) },
+      },
+    ],
+  ];
+}
+
+function buildIssueCardResponse(issue: RuntimeIssueView): BotCommandResponse {
+  const message = [
+    `Issue Card · ${issue.identifier}`,
+    issue.title,
+    `${issue.phase} · ${issue.tracker_state} · ${issue.orchestrator_state ?? 'unknown'}`,
+    issue.github_repo ? `Repo: ${issue.github_repo}` : null,
+  ].filter(Boolean).join('\n');
+  const visual = buildSupervisorIssueVisualCard(issue);
+  return {
+    message,
+    caption: visual.caption,
+    format: 'telegram_html',
+    media_key: visual.media_key,
+    photo: visual.photo,
+    show_caption_above_media: false,
+    action_rows: buildIssueCardActionRows(issue),
+    issue_id: issue.issue_id,
+  };
 }
 
 function formatGovernanceSuggestions(issue: RuntimeIssueView): string {
@@ -410,7 +490,7 @@ export class BotCommandService {
       };
     }
 
-    const issue = result.issue_id ? this.runtime.getIssue(result.issue_id) : null;
+    const issue = (result.issue_id ? this.runtime.getIssue(result.issue_id) : null) ?? result.issue;
     if (result.accepted && result.issue_id && context.transport === 'telegram') {
       this.followups?.upsert({
         transport: context.transport,
@@ -427,6 +507,7 @@ export class BotCommandService {
         ? `已收到，已创建 ${issue.identifier} · ${issue.title}`
         : `已收到，已创建 ${result.issue_identifier ?? '新任务'}`,
       issue_id: result.issue_id,
+      ...(issue && context.transport === 'telegram' ? buildIssueCardResponse(issue) : {}),
     };
   }
 
