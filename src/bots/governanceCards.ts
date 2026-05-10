@@ -1,5 +1,6 @@
 import type { BotTransportMessage } from './types';
 import type { RuntimeIssueView } from '../runtime/types';
+import { localizeKnownRuntimeText, type RuntimeLocale } from '../i18n/locale';
 import { buildGovernanceQuickActions, toGovernanceQuickActionRows } from './governanceQuickActions';
 
 function compact(value: string | null | undefined, maxLength = 180): string {
@@ -32,6 +33,23 @@ function escapeHtml(value: string | null | undefined): string {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
+}
+
+function isEnglishLocale(locale: RuntimeLocale | null | undefined): boolean {
+  return locale === 'en';
+}
+
+function issueLocale(issue: RuntimeIssueView): RuntimeLocale | null | undefined {
+  return issue.supervisor_locale;
+}
+
+function textForLocale(locale: RuntimeLocale | null | undefined, zh: string, en: string): string {
+  return isEnglishLocale(locale) ? en : zh;
+}
+
+function localizedKnown(value: string | null | undefined, locale: RuntimeLocale | null | undefined): string {
+  const text = String(value || '');
+  return isEnglishLocale(locale) ? localizeKnownRuntimeText(text, locale) : text;
 }
 
 function compressGovernanceSummary(summary: string | null | undefined): {
@@ -88,20 +106,20 @@ function buildSystemSuggestion(issue: RuntimeIssueView): string | null {
 
 function describeQueueState(queueState: RuntimeIssueView['governance_child_queue'] extends Array<infer T>
   ? T extends { queue_state?: infer S } ? S : never
-  : never): string {
+  : never, locale: RuntimeLocale | null | undefined = null): string {
   switch (queueState) {
     case 'current':
-      return '当前处理';
+      return textForLocale(locale, '当前处理', 'Current');
     case 'queued':
-      return '排队中';
+      return textForLocale(locale, '排队中', 'Queued');
     case 'blocked':
-      return '等待放行';
+      return textForLocale(locale, '等待放行', 'Blocked');
     case 'failed':
-      return '执行失败';
+      return textForLocale(locale, '执行失败', 'Failed');
     case 'completed':
-      return '已完成';
+      return textForLocale(locale, '已完成', 'Completed');
     default:
-      return '处理中';
+      return textForLocale(locale, '处理中', 'Processing');
   }
 }
 
@@ -124,18 +142,18 @@ function joinHtmlLines(lines: Array<string | null | undefined>): string {
   return lines.filter(Boolean).join('\n');
 }
 
-function summarizeChildIssues(issue: RuntimeIssueView): string[] {
+function summarizeChildIssues(issue: RuntimeIssueView, locale: RuntimeLocale | null | undefined = issueLocale(issue)): string[] {
   return (issue.governance_child_queue ?? issue.governance_child_issues ?? []).map((child) => {
     const deliveryReason = child.delivery_state === 'delivery_failed' && child.delivery_summary
-      ? compact(child.delivery_summary, 140)
+      ? compact(localizedKnown(child.delivery_summary, locale), 140)
       : null;
     const governanceReason = child.governance_summary && !isDegradedBoilerplate(child.governance_summary)
-      ? compact(child.governance_summary, 120)
+      ? compact(localizedKnown(child.governance_summary, locale), 120)
       : null;
     const reason = deliveryReason
       ?? governanceReason
-      ?? (child.queue_state ? describeQueueState(child.queue_state) : '等待处理');
-    return `${child.issue_identifier} · ${describeQueueState(child.queue_state)}：${reason}`;
+      ?? (child.queue_state ? describeQueueState(child.queue_state, locale) : textForLocale(locale, '等待处理', 'Waiting'));
+    return `${child.issue_identifier} · ${describeQueueState(child.queue_state, locale)}${textForLocale(locale, '：', ': ')}${reason}`;
   });
 }
 
@@ -183,31 +201,32 @@ export function buildGovernanceCardKey(issue: RuntimeIssueView): string {
 }
 
 export function buildGovernanceBlockedMessage(issue: RuntimeIssueView): BotTransportMessage {
+  const locale = issueLocale(issue);
   const { conclusion, repoReason } = compressGovernanceSummary(issue.governance_summary);
   const systemSuggestion = buildSystemSuggestion(issue);
 
   return {
     format: 'telegram_html',
     text: joinHtmlLines([
-      `<b>待你处理 · ${escapeHtml(issue.identifier)}</b>`,
-      '这张单已被治理拦住，正在等你决定下一步。',
+      `<b>${textForLocale(locale, '待你处理', 'Needs Your Decision')} · ${escapeHtml(issue.identifier)}</b>`,
+      textForLocale(locale, '这张单已被治理拦住，正在等你决定下一步。', 'This issue is blocked by governance and is waiting for your next decision.'),
       null,
-      '<b>仓库</b>',
-      issue.github_repo ? `<code>${escapeHtml(issue.github_repo)}</code>` : '未识别仓库',
+      `<b>${textForLocale(locale, '仓库', 'Repository')}</b>`,
+      issue.github_repo ? `<code>${escapeHtml(issue.github_repo)}</code>` : textForLocale(locale, '未识别仓库', 'Unknown repository'),
       null,
-      '<b>当前建议</b>',
+      `<b>${textForLocale(locale, '当前建议', 'Current Recommendation')}</b>`,
       issue.governance_decision === 'split_before_implement'
-        ? '先拆成两个更聚焦的任务，再继续开发。'
+        ? textForLocale(locale, '先拆成两个更聚焦的任务，再继续开发。', 'Split this into two more focused tasks before continuing development.')
         : issue.governance_decision === 'accept_with_rewrite'
-          ? '先把需求改写得更聚焦，再继续开发。'
-          : '先处理下面的治理建议，再继续开发。',
+          ? textForLocale(locale, '先把需求改写得更聚焦，再继续开发。', 'Rewrite the requirement into a more focused form before continuing development.')
+          : textForLocale(locale, '先处理下面的治理建议，再继续开发。', 'Handle the governance suggestion below before continuing development.'),
       null,
-      '<b>为什么被拦</b>',
-      `结论：${escapeHtml(conclusion)}`,
-      repoReason ? `Repo 原因：${escapeHtml(repoReason)}` : null,
-      systemSuggestion ? `系统建议：${escapeHtml(systemSuggestion)}` : null,
+      `<b>${textForLocale(locale, '为什么被拦', 'Why It Is Blocked')}</b>`,
+      `${textForLocale(locale, '结论：', 'Conclusion: ')}${escapeHtml(localizedKnown(conclusion, locale))}`,
+      repoReason ? `${textForLocale(locale, 'Repo 原因：', 'Repo reason: ')}${escapeHtml(localizedKnown(repoReason, locale))}` : null,
+      systemSuggestion ? `${textForLocale(locale, '系统建议：', 'System suggestion: ')}${escapeHtml(localizedKnown(systemSuggestion, locale))}` : null,
       null,
-      '也可以直接回复你的想法，例如“拆成两个任务”',
+      textForLocale(locale, '也可以直接回复你的想法，例如“拆成两个任务”', 'You can also reply with your preference, for example "split it into two tasks".'),
     ]),
     action_rows: toGovernanceQuickActionRows(issue),
   };
@@ -219,24 +238,25 @@ export function buildGovernanceConfirmingMessage(params: {
   confirmationSummary: string;
   notice?: string | null;
 }): BotTransportMessage {
+  const locale = issueLocale(params.issue);
   return {
     format: 'telegram_html',
     text: joinHtmlLines([
-      `<b>请确认 · ${escapeHtml(params.issue.identifier)}</b>`,
-      '你即将执行下面的操作；确认后 Symphony 会立即发起对应动作。',
+      `<b>${textForLocale(locale, '请确认', 'Please Confirm')} · ${escapeHtml(params.issue.identifier)}</b>`,
+      textForLocale(locale, '你即将执行下面的操作；确认后 Symphony 会立即发起对应动作。', 'You are about to run the action below. Once confirmed, Symphony will start it immediately.'),
       params.notice ? escapeHtml(params.notice) : null,
       null,
-      '<b>准备执行</b>',
+      `<b>${textForLocale(locale, '准备执行', 'Action')}</b>`,
       escapeHtml(params.actionLabel),
       null,
-      '<b>执行说明</b>',
+      `<b>${textForLocale(locale, '执行说明', 'Execution Note')}</b>`,
       escapeHtml(stripConfirmationTail(compact(params.confirmationSummary, 220))),
       null,
-      '使用下面的按钮继续，或返回上一步。',
+      textForLocale(locale, '使用下面的按钮继续，或返回上一步。', 'Use the buttons below to continue or go back.'),
     ]),
     action_rows: [
-      [{ label: '确认执行', callback_data: 'pending|confirm' }],
-      [{ label: '返回上一步', callback_data: 'pending|cancel' }],
+      [{ label: textForLocale(locale, '确认执行', 'Confirm'), callback_data: 'pending|confirm' }],
+      [{ label: textForLocale(locale, '返回上一步', 'Go Back'), callback_data: 'pending|cancel' }],
     ],
   };
 }
@@ -250,17 +270,18 @@ export function buildGovernanceExecutingMessage(
     actionLabel: '执行治理动作',
   },
 ): BotTransportMessage {
+  const locale = issueLocale(issue);
   return {
     format: 'telegram_html',
     text: joinHtmlLines([
-      `<b>正在执行 · ${escapeHtml(issue.identifier)}</b>`,
-      'Symphony 正在处理你的治理操作，请稍等片刻。',
+      `<b>${textForLocale(locale, '正在执行', 'Running')} · ${escapeHtml(issue.identifier)}</b>`,
+      textForLocale(locale, 'Symphony 正在处理你的治理操作，请稍等片刻。', 'Symphony is processing your governance action. Please wait a moment.'),
       params.notice ? escapeHtml(params.notice) : null,
       null,
-      '<b>当前动作</b>',
+      `<b>${textForLocale(locale, '当前动作', 'Current Action')}</b>`,
       escapeHtml(params.actionLabel),
       null,
-      '处理完成后，这张卡会自动更新结果。',
+      textForLocale(locale, '处理完成后，这张卡会自动更新结果。', 'This card will update automatically when processing finishes.'),
     ]),
     action_rows: [],
   };
@@ -276,56 +297,57 @@ export function buildGovernanceWaitingOnChildMessage(
     notice?: string | null;
   } = {},
 ): BotTransportMessage {
+  const locale = issueLocale(issue);
   const childQueue = issue.governance_child_queue ?? issue.governance_child_issues ?? [];
   const childIdentifiers = options.createdIssueIdentifiers ?? childQueue.map((child) => child.issue_identifier);
-  const childSummaryLines = options.childSummaries ?? summarizeChildIssues(issue);
+  const childSummaryLines = options.childSummaries ?? summarizeChildIssues(issue, locale);
   const currentChild = findCurrentChild(issue);
   const prioritizedChild = currentChild?.issue_identifier ?? childIdentifiers[0] ?? null;
   const currentChildTitle = currentChild?.title ? compact(currentChild.title, 120) : null;
   const currentChildDelivery = currentChild?.delivery_state === 'delivery_failed'
-    ? compact(currentChild.delivery_summary, 180)
+    ? compact(localizedKnown(currentChild.delivery_summary, locale), 180)
     : currentChild?.orchestrator_state === 'failed'
-      ? compact(currentChild.delivery_summary || '当前子任务执行失败，正在等待重试或人工处理。', 180)
+      ? compact(localizedKnown(currentChild.delivery_summary || textForLocale(locale, '当前子任务执行失败，正在等待重试或人工处理。', 'The current child task failed and is waiting for retry or manual handling.'), locale), 180)
       : currentChild?.delivery_state === 'proof_satisfied'
-        ? '代码和证据已经满足，正在等最终交付动作完成。'
+        ? textForLocale(locale, '代码和证据已经满足，正在等最终交付动作完成。', 'Code and evidence are satisfied; final delivery is pending.')
         : null;
+  const fallbackProgress = childIdentifiers.length > 0
+    ? textForLocale(locale, `已创建治理子任务 ${childIdentifiers.join('、')}，源单会在当前子任务处理完成后按顺序接力。`, `Created governance child task(s) ${childIdentifiers.join(', ')}. The source issue will continue in order after the current child is handled.`)
+    : textForLocale(locale, '已进入治理子任务阶段，源单暂时继续等待。', 'Entered the governance child-task phase; the source issue is waiting for now.');
   const progressSummary = compact(
-    options.userSummary
-      || (childIdentifiers.length > 0
-        ? `已创建治理子任务 ${childIdentifiers.join('、')}，源单会在当前子任务处理完成后按顺序接力。`
-        : '已进入治理子任务阶段，源单暂时继续等待。'),
+    localizedKnown(options.userSummary, locale) || fallbackProgress,
     220,
   );
 
   return {
     format: 'telegram_html',
     text: joinHtmlLines([
-      `<b>治理线程 · ${escapeHtml(issue.identifier)}</b>`,
-      '这张源单还没有继续开发，当前先处理下面这张子任务。',
+      `<b>${textForLocale(locale, '治理线程', 'Governance Thread')} · ${escapeHtml(issue.identifier)}</b>`,
+      textForLocale(locale, '这张源单还没有继续开发，当前先处理下面这张子任务。', 'The source issue has not resumed development yet; the child task below is being handled first.'),
       options.notice ? escapeHtml(options.notice) : null,
       null,
-      '<b>当前进展</b>',
+      `<b>${textForLocale(locale, '当前进展', 'Current Progress')}</b>`,
       escapeHtml(progressSummary),
       null,
-      prioritizedChild ? '<b>当前子任务</b>' : null,
+      prioritizedChild ? `<b>${textForLocale(locale, '当前子任务', 'Current Child Task')}</b>` : null,
       prioritizedChild ? `<code>${escapeHtml(prioritizedChild)}</code>${currentChildTitle ? ` · ${escapeHtml(currentChildTitle)}` : ''}` : null,
       currentChildDelivery
-        ? `${issue.governance_thread_state === 'child_failed' || currentChild?.orchestrator_state === 'failed' ? '当前失败：' : '当前卡点：'}${escapeHtml(currentChildDelivery)}`
+        ? `${issue.governance_thread_state === 'child_failed' || currentChild?.orchestrator_state === 'failed' ? textForLocale(locale, '当前失败：', 'Current failure: ') : textForLocale(locale, '当前卡点：', 'Current blocker: ')}${escapeHtml(currentChildDelivery)}`
         : null,
       null,
-      childIdentifiers.length > 0 ? '<b>子任务队列</b>' : null,
+      childIdentifiers.length > 0 ? `<b>${textForLocale(locale, '子任务队列', 'Child Queue')}</b>` : null,
       ...childSummaryLines.map((line) => escapeHtml(line)),
-      prioritizedChild ? `当前优先处理：${escapeHtml(prioritizedChild)}；后续子任务会按顺序自动接力。` : null,
+      prioritizedChild ? textForLocale(locale, `当前优先处理：${escapeHtml(prioritizedChild)}；后续子任务会按顺序自动接力。`, `Current priority: ${escapeHtml(prioritizedChild)}. Later child tasks will continue in order automatically.`) : null,
       null,
-      '<b>源单状态</b>',
-      '源单仍暂停，不会并发把所有子任务一起推进。',
-      issue.governance_pause_reason ? escapeHtml(issue.governance_pause_reason) : null,
-      issue.governance_expected_handoff ? `接力方式：${escapeHtml(issue.governance_expected_handoff)}` : null,
+      `<b>${textForLocale(locale, '源单状态', 'Source Issue Status')}</b>`,
+      textForLocale(locale, '源单仍暂停，不会并发把所有子任务一起推进。', 'The source issue is still paused; child tasks will not all run concurrently.'),
+      issue.governance_pause_reason ? escapeHtml(localizedKnown(issue.governance_pause_reason, locale)) : null,
+      issue.governance_expected_handoff ? `${textForLocale(locale, '接力方式', 'Handoff')}: ${escapeHtml(localizedKnown(issue.governance_expected_handoff, locale))}` : null,
       null,
-      '<b>下一步建议</b>',
-      escapeHtml(options.nextRecommendedAction || issue.next_recommended_action || '先处理子任务，再决定是否回到源单。'),
+      `<b>${textForLocale(locale, '下一步建议', 'Recommended Next Step')}</b>`,
+      escapeHtml(localizedKnown(options.nextRecommendedAction || issue.next_recommended_action || textForLocale(locale, '先处理子任务，再决定是否回到源单。', 'Handle the child task first, then decide whether to return to the source issue.'), locale)),
       null,
-      '如果你想换个方案，也可以直接回复你的想法。',
+      textForLocale(locale, '如果你想换个方案，也可以直接回复你的想法。', 'If you want a different approach, reply with your preference.'),
     ]),
     action_rows: [],
   };
@@ -338,17 +360,18 @@ export function buildGovernanceFailedMessage(
     notice?: string | null;
   } = {},
 ): BotTransportMessage {
+  const locale = issueLocale(issue);
   return {
     format: 'telegram_html',
     text: joinHtmlLines([
-      `<b>执行失败 · ${escapeHtml(issue.identifier)}</b>`,
-      '这次治理动作没有成功落地，源单仍停在当前状态。',
+      `<b>${textForLocale(locale, '执行失败', 'Execution Failed')} · ${escapeHtml(issue.identifier)}</b>`,
+      textForLocale(locale, '这次治理动作没有成功落地，源单仍停在当前状态。', 'This governance action did not complete. The source issue remains in its current state.'),
       options.notice ? escapeHtml(options.notice) : null,
       null,
-      '<b>失败原因</b>',
-      escapeHtml(compact(options.resultSummary || '执行失败，请稍后重试。', 220)),
+      `<b>${textForLocale(locale, '失败原因', 'Failure Reason')}</b>`,
+      escapeHtml(compact(localizedKnown(options.resultSummary || textForLocale(locale, '执行失败，请稍后重试。', 'Execution failed. Please retry later.'), locale), 220)),
       null,
-      '你可以稍后重试，或者直接回复新的处理思路。',
+      textForLocale(locale, '你可以稍后重试，或者直接回复新的处理思路。', 'You can retry later or reply with a new handling approach.'),
     ]),
     action_rows: [],
   };
@@ -361,19 +384,20 @@ export function buildGovernanceResolvedMessage(
     notice?: string | null;
   } = {},
 ): BotTransportMessage {
+  const locale = issueLocale(issue);
   return {
     format: 'telegram_html',
     text: joinHtmlLines([
-      `<b>已处理 · ${escapeHtml(issue.identifier)}</b>`,
-      '这张治理卡片已经处理完成，后续状态会继续同步到这里。',
+      `<b>${textForLocale(locale, '已处理', 'Processed')} · ${escapeHtml(issue.identifier)}</b>`,
+      textForLocale(locale, '这张治理卡片已经处理完成，后续状态会继续同步到这里。', 'This governance card has been processed. Follow-up status will continue syncing here.'),
       options.notice ? escapeHtml(options.notice) : null,
       null,
-      issue.github_repo ? `<b>仓库</b>\n<code>${escapeHtml(issue.github_repo)}</code>` : null,
+      issue.github_repo ? `<b>${textForLocale(locale, '仓库', 'Repository')}</b>\n<code>${escapeHtml(issue.github_repo)}</code>` : null,
       null,
-      '<b>处理结果</b>',
-      escapeHtml(compact(options.resultSummary || '已恢复自动执行，这张治理卡片已结束。', 220)),
+      `<b>${textForLocale(locale, '处理结果', 'Result')}</b>`,
+      escapeHtml(compact(localizedKnown(options.resultSummary || textForLocale(locale, '已恢复自动执行，这张治理卡片已结束。', 'Automatic execution has resumed and this governance card is closed.'), locale), 220)),
       null,
-      `当前状态：${escapeHtml([issue.phase, issue.tracker_state, issue.orchestrator_state || 'unknown'].join(' · '))}`,
+      `${textForLocale(locale, '当前状态', 'Current status')}: ${escapeHtml([issue.phase, issue.tracker_state, issue.orchestrator_state || 'unknown'].join(' · '))}`,
     ]),
     action_rows: [],
   };

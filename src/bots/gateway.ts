@@ -99,6 +99,14 @@ import type {
   SupervisorRepoUnderstandingService,
   SupervisorRepoUnderstandingSnapshot,
 } from '../supervisor/repoUnderstanding';
+
+function isEnglishRuntimeIssue(issue: RuntimeIssueView | null | undefined): boolean {
+  return issue?.supervisor_locale === 'en';
+}
+
+function textForIssueLocale(issue: RuntimeIssueView | null | undefined, zh: string, en: string): string {
+  return isEnglishRuntimeIssue(issue) ? en : zh;
+}
 import {
   createClaudeCodeRepoUnderstandingRunner,
   DefaultClaudeRepoUnderstandingService,
@@ -1580,6 +1588,7 @@ export class DefaultBotGateway implements BotGateway {
 
   private async handleRuntimeIssueCardAction(
     context: BotCommandContext,
+    issue: RuntimeIssueView | null,
     parsed: {
       issueIdentifier: string;
       runtimeAction?: TelegramRuntimeAction | null;
@@ -1590,17 +1599,18 @@ export class DefaultBotGateway implements BotGateway {
         message: '这张运行卡暂时不能直接执行按钮动作。你可以直接回复“查看当前 issue”或“重试 INT-xxx”。',
       };
     }
+    const english = issue?.supervisor_locale === 'en';
     const text = (() => {
       switch (parsed.runtimeAction) {
         case 'retry':
-          return `重试 ${parsed.issueIdentifier}`;
+          return english ? `retry ${parsed.issueIdentifier}` : `重试 ${parsed.issueIdentifier}`;
         case 'stop':
-          return `停止 ${parsed.issueIdentifier}`;
+          return english ? `stop ${parsed.issueIdentifier}` : `停止 ${parsed.issueIdentifier}`;
         case 'close':
-          return `清理 ${parsed.issueIdentifier} 的 GitHub 和 Linear 残留垃圾`;
+          return english ? `clean up GitHub and Linear residue for ${parsed.issueIdentifier}` : `清理 ${parsed.issueIdentifier} 的 GitHub 和 Linear 残留垃圾`;
         case 'refresh':
         default:
-          return `${parsed.issueIdentifier} 卡片`;
+          return english ? `${parsed.issueIdentifier} card` : `${parsed.issueIdentifier} 卡片`;
       }
     })();
     return this.supervisorAgentRuntime.respond({
@@ -1635,7 +1645,7 @@ export class DefaultBotGateway implements BotGateway {
     } | null;
   }> {
     if (parsed.kind === 'runtime_action' && parsed.issueIdentifier) {
-      const response = await this.handleRuntimeIssueCardAction(context, parsed);
+      const response = await this.handleRuntimeIssueCardAction(context, issue, parsed);
       const responseIssue = response.issue_id
         ? this.runtime.getIssue(response.issue_id)
         : issue;
@@ -1649,13 +1659,14 @@ export class DefaultBotGateway implements BotGateway {
         actions: response.actions,
         action_rows: response.action_rows,
       };
+      const english = responseIssue?.supervisor_locale === 'en' || issue?.supervisor_locale === 'en';
       return {
         outbound,
         toastText: parsed.runtimeAction === 'refresh'
-          ? '已刷新'
+          ? english ? 'Refreshed' : '已刷新'
           : parsed.runtimeAction === 'close'
-            ? '已准备确认'
-            : '已收到，正在处理',
+            ? english ? 'Confirmation ready' : '已准备确认'
+            : english ? 'Got it. Processing' : '已收到，正在处理',
         issue: responseIssue,
         cardState: hasPendingConfirmationButtons(response)
           ? 'confirming'
@@ -1677,11 +1688,11 @@ export class DefaultBotGateway implements BotGateway {
         return {
           outbound: buildGovernanceConfirmingMessage({
             issue: fallbackIssue,
-            actionLabel: '执行治理动作',
+            actionLabel: textForIssueLocale(fallbackIssue, '执行治理动作', 'Run governance action'),
             confirmationSummary: response.message,
-            notice: existingCardState ? null : '原卡片状态已丢失，已重新生成确认卡。',
+            notice: existingCardState ? null : textForIssueLocale(fallbackIssue, '原卡片状态已丢失，已重新生成确认卡。', 'The original card state was lost, so I regenerated the confirmation card.'),
           }),
-          toastText: '已收到，正在准备确认',
+          toastText: textForIssueLocale(fallbackIssue, '已收到，正在准备确认', 'Got it. Preparing confirmation'),
           issue: fallbackIssue,
           cardState: 'confirming',
           cardKey: `confirming|${buildGovernanceCardKey(fallbackIssue)}`,
@@ -1693,9 +1704,9 @@ export class DefaultBotGateway implements BotGateway {
       if (!selectedAction) {
         return {
           outbound: {
-            text: '没有找到对应的治理动作，请直接回复你的想法。',
+            text: textForIssueLocale(issue, '没有找到对应的治理动作，请直接回复你的想法。', 'I could not find that governance action. Please reply with what you want to do.'),
           },
-          toastText: '未找到动作',
+          toastText: textForIssueLocale(issue, '未找到动作', 'Action not found'),
           issue,
           cardState: issue.governance_thread_state === 'waiting_on_child' ? 'waiting_on_child' : 'open',
           cardKey: buildGovernanceCardKey(issue),
@@ -1724,9 +1735,9 @@ export class DefaultBotGateway implements BotGateway {
           issue,
           actionLabel: selectedAction.label,
           confirmationSummary,
-          notice: existingCardState ? null : '原卡片状态已丢失，已重新生成确认卡。',
+          notice: existingCardState ? null : textForIssueLocale(issue, '原卡片状态已丢失，已重新生成确认卡。', 'The original card state was lost, so I regenerated the confirmation card.'),
         }),
-        toastText: '已收到，正在准备确认',
+        toastText: textForIssueLocale(issue, '已收到，正在准备确认', 'Got it. Preparing confirmation'),
         issue,
         cardState: 'confirming',
         cardKey: `confirming|${buildGovernanceCardKey(issue)}`,
@@ -1743,7 +1754,7 @@ export class DefaultBotGateway implements BotGateway {
         originalMessageText,
       );
       if (!pendingAction || !this.pendingActions) {
-        const runtimeResult = await this.handleSupervisorRuntimePendingCallback(context, '确认');
+        const runtimeResult = await this.handleSupervisorRuntimePendingCallback(context, 'confirm');
         if (runtimeResult) {
           return runtimeResult;
         }
@@ -1774,9 +1785,9 @@ export class DefaultBotGateway implements BotGateway {
       return {
         outbound: buildGovernanceExecutingMessage(executingIssue, {
           actionLabel,
-          notice: existingCardState ? null : '原卡片状态已丢失，已重新生成执行卡。',
+          notice: existingCardState ? null : textForIssueLocale(executingIssue, '原卡片状态已丢失，已重新生成执行卡。', 'The original card state was lost, so I regenerated the execution card.'),
         }),
-        toastText: '已收到，正在执行',
+        toastText: textForIssueLocale(executingIssue, '已收到，正在执行', 'Got it. Running'),
         issue: executingIssue,
         cardState: 'executing',
         cardKey: `executing|${buildGovernanceCardKey(executingIssue)}`,
@@ -1801,7 +1812,7 @@ export class DefaultBotGateway implements BotGateway {
         originalMessageText,
       );
       if (!pendingAction || !this.pendingActions) {
-        const runtimeResult = await this.handleSupervisorRuntimePendingCallback(context, '取消');
+        const runtimeResult = await this.handleSupervisorRuntimePendingCallback(context, 'cancel');
         if (runtimeResult) {
           return runtimeResult;
         }
@@ -1830,9 +1841,9 @@ export class DefaultBotGateway implements BotGateway {
       if (fallbackIssue.governance_thread_state === 'waiting_on_child') {
         return {
           outbound: buildGovernanceWaitingOnChildMessage(fallbackIssue, {
-            notice: '已取消这次治理动作，源单仍在等待子任务。',
+            notice: textForIssueLocale(fallbackIssue, '已取消这次治理动作，源单仍在等待子任务。', 'Cancelled this governance action; the source issue is still waiting on the child task.'),
           }),
-          toastText: '已取消',
+          toastText: textForIssueLocale(fallbackIssue, '已取消', 'Cancelled'),
           issue: fallbackIssue,
           cardState: 'waiting_on_child',
           cardKey: buildGovernanceCardKey(fallbackIssue),
@@ -1843,7 +1854,7 @@ export class DefaultBotGateway implements BotGateway {
       if (isGovernanceBlockedIssue(fallbackIssue)) {
         return {
           outbound: buildGovernanceBlockedMessage(fallbackIssue),
-          toastText: '已取消',
+          toastText: textForIssueLocale(fallbackIssue, '已取消', 'Cancelled'),
           issue: fallbackIssue,
           cardState: 'open',
           cardKey: buildGovernanceCardKey(fallbackIssue),
@@ -1853,9 +1864,9 @@ export class DefaultBotGateway implements BotGateway {
 
       return {
         outbound: buildGovernanceResolvedMessage(fallbackIssue, {
-          resultSummary: '已取消当前治理操作。',
+          resultSummary: textForIssueLocale(fallbackIssue, '已取消当前治理操作。', 'Cancelled the current governance action.'),
         }),
-        toastText: '已取消',
+        toastText: textForIssueLocale(fallbackIssue, '已取消', 'Cancelled'),
         issue: fallbackIssue,
         cardState: 'resolved',
         cardKey: `resolved|${buildGovernanceCardKey(fallbackIssue)}`,
@@ -1878,7 +1889,7 @@ export class DefaultBotGateway implements BotGateway {
 
   private async handleSupervisorRuntimePendingCallback(
     context: BotCommandContext,
-    text: '确认' | '取消',
+    action: 'confirm' | 'cancel',
   ): Promise<{
     outbound: BotTransportMessage;
     toastText: string;
@@ -1895,13 +1906,18 @@ export class DefaultBotGateway implements BotGateway {
       return null;
     }
 
+    const pendingIssueId = typeof pending.tool_args.issue_id === 'string' ? pending.tool_args.issue_id : null;
+    const pendingIssue = pendingIssueId ? this.runtime.getIssue(pendingIssueId) : null;
+    const text = action === 'confirm'
+      ? textForIssueLocale(pendingIssue, '确认', 'Confirm')
+      : textForIssueLocale(pendingIssue, '取消', 'Cancel');
     const response = await this.supervisorAgentRuntime.respond({
       context,
       text,
       canWrite: this.botWriteAuthorizer(context),
     });
-    const issueId = response.issue_id ?? (typeof pending.tool_args.issue_id === 'string' ? pending.tool_args.issue_id : null);
-    const issue = issueId ? this.runtime.getIssue(issueId) : null;
+    const issueId = response.issue_id ?? pendingIssueId;
+    const issue = issueId ? this.runtime.getIssue(issueId) : pendingIssue;
     return {
       outbound: {
         text: response.message,
@@ -1913,10 +1929,12 @@ export class DefaultBotGateway implements BotGateway {
         actions: response.actions,
         action_rows: response.action_rows,
       },
-      toastText: text === '确认' ? '已执行' : '已取消',
+      toastText: action === 'confirm'
+        ? textForIssueLocale(issue, '已执行', 'Executed')
+        : textForIssueLocale(issue, '已取消', 'Cancelled'),
       issue,
-      cardState: text === '确认' ? 'resolved' : 'open',
-      cardKey: `supervisor_runtime_${text === '确认' ? 'confirmed' : 'cancelled'}`,
+      cardState: action === 'confirm' ? 'resolved' : 'open',
+      cardKey: `supervisor_runtime_${action === 'confirm' ? 'confirmed' : 'cancelled'}`,
       executeAfterAck: null,
     };
   }
@@ -2033,7 +2051,9 @@ export class DefaultBotGateway implements BotGateway {
         actions: response.actions,
         action_rows: response.action_rows,
       },
-      toastText: '已收到，正在处理',
+      toastText: inferRuntimeLocaleFromText(response.message) === 'en'
+        ? 'Got it. Processing'
+        : '已收到，正在处理',
       sessionId: response.session_id ?? params.parsed.sessionId ?? null,
       materialKey: response.material_key ?? null,
     };
