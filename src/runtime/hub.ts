@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import type { Database } from 'bun:sqlite';
 import {
   AgentRunRepository,
@@ -27,6 +28,7 @@ import type {
   RuntimeFileActivity,
   RuntimeGovernanceChildIssueView,
   RuntimeHistoryEntry,
+  RuntimeHistoryFileDiff,
   RuntimeIssueDigest,
   RuntimeIssueHistoryView,
   RuntimeIssueView,
@@ -118,6 +120,63 @@ function normalizeSummary(value: string | null | undefined, fallback: string, ma
 
 function compareDatesAscending(left: Date, right: Date): number {
   return left.getTime() - right.getTime();
+}
+
+function runGit(cwd: string, args: string[]): string | null {
+  try {
+    return execFileSync('git', ['-C', cwd, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trimEnd();
+  } catch {
+    return null;
+  }
+}
+
+function resolveHistoryDiffBaseRef(repoPath: string): string | null {
+  const originHead = runGit(repoPath, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']);
+  const candidates = [
+    originHead,
+    'origin/main',
+    'origin/master',
+    'main',
+    'master',
+    'develop',
+  ].filter((value): value is string => typeof value === 'string' && value.length > 0);
+
+  for (const candidate of candidates) {
+    if (runGit(repoPath, ['rev-parse', '--verify', candidate])) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function parseNumstatValue(value: string): number | null {
+  if (value === '-' || value === '') {
+    return null;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseNumstatLine(line: string): { path: string; additions: number | null; deletions: number | null } | null {
+  const parts = String(line || '').split('\t');
+  if (parts.length < 3) {
+    return null;
+  }
+
+  const path = parts.slice(2).join('\t').trim();
+  if (!path) {
+    return null;
+  }
+
+  return {
+    path,
+    additions: parseNumstatValue(parts[0] || ''),
+    deletions: parseNumstatValue(parts[1] || ''),
+  };
 }
 
 export class RuntimeHub implements RuntimeControlPlane {
@@ -233,6 +292,7 @@ export class RuntimeHub implements RuntimeControlPlane {
       issue_identifier: issueView.identifier,
       digest: this.buildIssueDigest(issueView, entries),
       entries,
+      file_diffs: this.buildWorkspaceFileDiffs(workItem),
     };
   }
 
@@ -1234,6 +1294,45 @@ export class RuntimeHub implements RuntimeControlPlane {
     return entries
       .sort((left, right) => right.timestamp.localeCompare(left.timestamp) || left.id.localeCompare(right.id))
       .slice(0, bounded);
+  }
+
+  private buildWorkspaceFileDiffs(workItem: WorkItem, limit = 12): RuntimeHistoryFileDiff[] {
+    if (!workItem.workspace_path) {
+      return [];
+    }
+
+    const repoRoot = runGit(workItem.workspace_path, ['rev-parse', '--show-toplevel']);
+    if (!repoRoot) {
+      return [];
+    }
+
+    const baseRef = resolveHistoryDiffBaseRef(repoRoot);
+    if (!baseRef) {
+      return [];
+    }
+
+    const baseCommit = runGit(repoRoot, ['merge-base', 'HEAD', baseRef]);
+    if (!baseCommit) {
+      return [];
+    }
+
+    const numstat = runGit(repoRoot, ['diff', '--numstat', '--find-renames', baseCommit, '--']);
+    if (!numstat) {
+      return [];
+    }
+
+    return numstat
+      .split('\n')
+      .map((line) => parseNumstatLine(line))
+      .filter((item): item is { path: string; additions: number | null; deletions: number | null } => Boolean(item))
+      .slice(0, Math.max(1, limit))
+      .map((item) => ({
+        path: item.path,
+        additions: item.additions,
+        deletions: item.deletions,
+        patch: runGit(repoRoot, ['diff', '--no-ext-diff', '--find-renames', '--unified=20', baseCommit, '--', item.path]),
+      }))
+      .filter((item) => Boolean(item.patch) || item.additions !== null || item.deletions !== null);
   }
 
   private extractRecentTools(timeline: RuntimeTimelineEvent[]): RuntimeToolActivity[] {

@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
+import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'events';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { initializeSchema } from '../database/schema';
 import {
   AgentRunRepository,
@@ -122,9 +126,16 @@ class FakeController extends EventEmitter {
 
 describe('RuntimeHub', () => {
   let db: Database;
+  const tempDirs: string[] = [];
 
   afterEach(() => {
     db?.close();
+    while (tempDirs.length > 0) {
+      const dir = tempDirs.pop();
+      if (dir) {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
   });
 
   test('builds runtime views from DB work items and live timeline events', () => {
@@ -1329,6 +1340,64 @@ describe('RuntimeHub', () => {
     expect(historyView.entries.some((entry: any) => entry.source === 'agent_run')).toBe(true);
     expect(historyView.entries.some((entry: any) => entry.source === 'governance')).toBe(true);
     expect(historyView.entries.some((entry: any) => entry.title.includes('Governance'))).toBe(true);
+
+    hub.dispose();
+  });
+
+  test('attaches full workspace file diffs to history views when a git worktree is available', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const repoDir = mkdtempSync(join(tmpdir(), 'runtime-hub-diff-'));
+    tempDirs.push(repoDir);
+    mkdirSync(join(repoDir, 'src', 'runtime'), { recursive: true });
+    writeFileSync(join(repoDir, 'src', 'runtime', 'miniAppPage.ts'), [
+      'const ring = renderProgressRing(progress);',
+      'const heroWidth = 176;',
+      'renderOverviewSignal(issue);',
+      '',
+    ].join('\n'));
+    execFileSync('git', ['init', '-b', 'main'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.email', 'codex@example.com'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.name', 'Codex'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['add', '.'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'base'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['checkout', '-b', 'feature/int-2'], { cwd: repoDir, stdio: 'pipe' });
+    writeFileSync(join(repoDir, 'src', 'runtime', 'miniAppPage.ts'), [
+      'const rail = renderProgressRail(progress, phase);',
+      'const heroWidth = 148;',
+      'renderOverviewSignal(issue);',
+      'openDiffDrawer(index);',
+      '',
+    ].join('\n'));
+    execFileSync('git', ['add', '.'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'feature diff'], { cwd: repoDir, stdio: 'pipe' });
+
+    const workItemRepository = new WorkItemRepository(db);
+    workItemRepository.create({
+      id: 'issue-diff',
+      linear_issue_id: 'issue-diff',
+      linear_identifier: 'INT-DIFF',
+      linear_title: 'Diff attachment test',
+      linear_state: 'In Progress',
+      github_repo: 'acme/repo',
+      branch_name: 'feature/int-2',
+      workspace_path: repoDir,
+      orchestrator_state: 'dev_running',
+    });
+
+    const controller = new FakeController();
+    const hub = new RuntimeHub(db, controller);
+
+    const historyView = (hub as any).getHistoryView('INT-DIFF', 5);
+
+    expect(Array.isArray(historyView.file_diffs)).toBe(true);
+    expect(historyView.file_diffs[0]?.path).toBe('src/runtime/miniAppPage.ts');
+    expect(historyView.file_diffs[0]?.patch).toContain('diff --git');
+    expect(historyView.file_diffs[0]?.patch).toContain('+const rail = renderProgressRail(progress, phase);');
+    expect(historyView.file_diffs[0]?.patch).toContain('-const ring = renderProgressRing(progress);');
+    expect(historyView.file_diffs[0]?.additions).toBeGreaterThan(0);
+    expect(historyView.file_diffs[0]?.deletions).toBeGreaterThan(0);
 
     hub.dispose();
   });
