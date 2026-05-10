@@ -2840,7 +2840,8 @@ export class DefaultBotGateway implements BotGateway {
         processingAckRef = await processingAckPromise;
       }
       let sent: BotTransportMessageRef;
-      if (processingAckRef && response.session_id) {
+      const shouldEditProcessingAck = Boolean(processingAckRef);
+      if (processingAckRef) {
         try {
           sent = await this.telegramNotifier!.editMessage(
             recipient,
@@ -2897,7 +2898,7 @@ export class DefaultBotGateway implements BotGateway {
         );
       }
       const issue = response.issue_id ? this.runtime.getIssue(response.issue_id) : null;
-      if (!(processingAckRef && response.session_id)) {
+      if (!shouldEditProcessingAck) {
         this.recordTransportEvent({
           recipient,
           issue,

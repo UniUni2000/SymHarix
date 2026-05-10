@@ -1012,6 +1012,7 @@ describe('DefaultBotGateway', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(requests).toHaveLength(2);
+    expect(requests[1]?.url).toContain('editMessageText');
     expect(String(requests[1]?.body.text)).toContain('INT-1 目前还在执行中');
   });
 
