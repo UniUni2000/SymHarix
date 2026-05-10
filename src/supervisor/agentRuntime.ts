@@ -9,7 +9,7 @@ import type {
 import type { RuntimeControlPlane, RuntimeIssueView } from '../runtime/types';
 import type { SupervisorPendingActionRecord } from '../database/types';
 import type { TrackerProjectResolutionService } from '../tracker/projectResolution';
-import type { BotCommandContext, BotCommandResponse } from '../bots/types';
+import type { BotCommandContext, BotCommandResponse, BotTransportAction } from '../bots/types';
 import type {
   BotAssistantDecision,
   BotAssistantDiagnostics,
@@ -171,7 +171,7 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function argsHash(args: Record<string, unknown>): string {
+export function argsHash(args: Record<string, unknown>): string {
   const input = stableStringify(args);
   let hash = 0;
   for (let index = 0; index < input.length; index += 1) {
@@ -231,7 +231,7 @@ function isDirectExecutionText(text: string): boolean {
 }
 
 function isStatusQuestion(text: string): boolean {
-  return /怎么样|状态|进度|status|stuck|blocked|卡住|卡在哪|doing|progress/i.test(text);
+  return /怎么样|状态|进度|status|stuck|blocked|卡住|卡在哪|卡到哪|到哪(?:里)?了|doing|progress|review\s*(?:到哪|状态|进度|status|progress)|审核.*(?:到哪|状态|进度)|评审.*(?:到哪|状态|进度)/i.test(text);
 }
 
 function isRetryRequest(text: string): boolean {
@@ -513,7 +513,7 @@ function summarizeControlPlane(context: SupervisorToolContext): string {
   ].filter(Boolean).join('\n');
 }
 
-function buildConfirmActions(locale: RuntimeLocale | null | undefined = null): BotTransportAction[] {
+export function buildConfirmActions(locale: RuntimeLocale | null | undefined = null): BotTransportAction[] {
   return [
     {
       label: textForLocale(locale, '确认', 'Confirm'),
@@ -782,6 +782,23 @@ function botIntentToSupervisorTurn(
         args: { issue_id: issueIdFromIntent({ intentIssueId: intent.issue_id, context: input.context }) },
         reason: 'LLM router selected stop.',
       };
+    case 'watch':
+      return {
+        type: 'tool_call',
+        tool: 'watch_issue',
+        args: {
+          issue_id: issueIdFromIntent({ intentIssueId: intent.issue_id, context: input.context }),
+          watch_preset: intent.watch_preset,
+        },
+        reason: 'LLM router selected watch subscription.',
+      };
+    case 'unwatch':
+      return {
+        type: 'tool_call',
+        tool: 'unwatch_issue',
+        args: { issue_id: issueIdFromIntent({ intentIssueId: intent.issue_id, context: input.context }) },
+        reason: 'LLM router selected unwatch subscription.',
+      };
     case 'close_issue':
       return {
         type: 'tool_call',
@@ -860,7 +877,7 @@ export function createSupervisorToolRouterModel(model: BotAssistantModel): Super
   };
 }
 
-function buildConfirmationSummary(
+export function buildConfirmationSummary(
   toolName: string,
   args: Record<string, unknown>,
   reason: string,
@@ -881,7 +898,7 @@ function buildConfirmationSummary(
   ].filter(Boolean).join('\n');
 }
 
-function validateToolArgs(definition: SupervisorToolDefinition, args: Record<string, unknown>): string | null {
+export function validateToolArgs(definition: SupervisorToolDefinition, args: Record<string, unknown>): string | null {
   if (!args || typeof args !== 'object' || Array.isArray(args)) {
     return `Invalid args for ${definition.name}: args must be an object.`;
   }
@@ -1440,15 +1457,44 @@ export class SupervisorAgentRuntimeService {
     }, 'failed');
   }
 
+  private inferSingleIssueIdFromText(text: string): string | null {
+    const issues = this.options.runtime.getOverview().issues;
+    let candidates: RuntimeIssueView[] = [];
+    if (isRetryRequest(text)) {
+      candidates = issues.filter((issue) => isUserVisibleActiveIssue(issue) && issue.actions.can_retry);
+    } else if (isStopRequest(text)) {
+      candidates = issues.filter((issue) => isUserVisibleActiveIssue(issue) && issue.actions.can_stop);
+    } else if (isCloseRequest(text)) {
+      candidates = issues.filter((issue) => !isTerminalIssue(issue));
+    } else if (/review|审核|评审/i.test(text)) {
+      candidates = issues.filter((issue) => issueMatchesStateFilter(issue, 'review') && !isTerminalIssue(issue));
+    } else if (/失败|failed|failure|halted|blocked|卡住|卡住了|stuck/i.test(text)) {
+      candidates = issues.filter((issue) => issueMatchesStateFilter(issue, 'failed') && !isTerminalIssue(issue));
+    } else if (isStatusQuestion(text) || isShowCardRequest(text)) {
+      candidates = issues.filter(isUserVisibleActiveIssue);
+    }
+    return candidates.length === 1 ? candidates[0]!.identifier : null;
+  }
+
   private createRun(request: SupervisorRuntimeRespondRequest) {
     const explicitIssueId = extractIssueIdentifiers(request.text)[0] ?? null;
-    const previousFocus = !explicitIssueId && (isShowCardRequest(request.text) || isStatusQuestion(request.text))
+    const shouldResolveContextualIssue = !explicitIssueId && (
+      isShowCardRequest(request.text) ||
+      isStatusQuestion(request.text) ||
+      isRetryRequest(request.text) ||
+      isStopRequest(request.text) ||
+      isCloseRequest(request.text)
+    );
+    const previousFocus = shouldResolveContextualIssue
       ? this.options.runs.findLatestByConversation({
           transport: request.context.transport,
           conversation_id: request.context.recipient.conversation_id,
         })?.active_issue_id ?? null
       : null;
-    const issueId = explicitIssueId ?? previousFocus;
+    const previousFocusIssue = previousFocus ? this.options.runtime.getIssue(previousFocus) : null;
+    const issueId = explicitIssueId
+      ?? previousFocusIssue?.identifier
+      ?? (shouldResolveContextualIssue ? this.inferSingleIssueIdFromText(request.text) : null);
     const issue = issueId ? this.options.runtime.getIssue(issueId) : null;
     const route = routeRepoRef({
       preferences: this.options.preferences ?? null,
@@ -1987,7 +2033,10 @@ export class SupervisorAgentRuntimeService {
     }
 
     const contextualIssueId = this.resolveContextualIssueId(text, run);
-    const control = this.detectControlTurn(text, contextualIssueId);
+    const focusedIssueRef = run.active_issue_id
+      ? this.options.runtime.getIssue(run.active_issue_id)?.identifier ?? run.active_issue_id
+      : null;
+    const control = this.detectControlTurn(text, contextualIssueId ?? focusedIssueRef);
     if (control) {
       return [control];
     }
@@ -2085,7 +2134,7 @@ export class SupervisorAgentRuntimeService {
   }
 }
 
-function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
+export function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
   const commandTool = (
     name: string,
     command: Parameters<BotCommandService['execute']>[1]['command'],
@@ -2095,6 +2144,8 @@ function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
       ? ['project_slug']
       : command === 'new'
         ? ['title']
+        : command === 'execute_governance_suggestion' || command === 'dismiss_governance_suggestion'
+          ? ['issue_id', 'suggestion_id']
         : ['issue_id'];
     return {
       name,
@@ -2108,6 +2159,8 @@ function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
           project_slug: { type: 'string' },
           title: { type: 'string' },
           description: { type: 'string' },
+          suggestion_id: { type: 'string' },
+          watch_preset: { type: 'string' },
           reason: { type: 'string' },
         },
       },
@@ -2119,7 +2172,9 @@ function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
           command,
           issue_id: firstString(record.issue_id),
           successor_issue_id: firstString(record.successor_issue_id),
+          suggestion_id: firstString(record.suggestion_id),
           project_slug: firstString(record.project_slug),
+          watch_preset: firstString(record.watch_preset) as 'default' | 'verbose' | 'failures' | 'status' | null,
           create_issue: command === 'new'
             ? {
                 title: firstString(record.title) ?? 'Untitled issue',
@@ -2474,11 +2529,15 @@ function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
     commandTool('retry_issue', 'retry', 'low_write'),
     commandTool('stop_issue', 'stop', 'low_write'),
     commandTool('set_default_project', 'project', 'low_write'),
+    commandTool('watch_issue', 'watch', 'low_write'),
+    commandTool('unwatch_issue', 'unwatch', 'low_write'),
     commandTool('create_issue', 'new', 'high_write'),
     commandTool('close_issue', 'close_issue', 'high_write'),
     commandTool('supersede_issue', 'supersede_issue', 'high_write'),
     commandTool('override_governance', 'override', 'high_write'),
     commandTool('rewrite_governance', 'rewrite', 'high_write'),
     commandTool('split_governance', 'split', 'high_write'),
+    commandTool('execute_governance_suggestion', 'execute_governance_suggestion', 'high_write'),
+    commandTool('dismiss_governance_suggestion', 'dismiss_governance_suggestion', 'high_write'),
   ];
 }

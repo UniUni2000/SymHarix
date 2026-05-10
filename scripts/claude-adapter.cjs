@@ -24,6 +24,50 @@ const TOOL_NAME_WEB_SEARCH = new Set(['WebSearch', 'web_search', 'WebSearchTool'
 const READ_ONLY_BLOCKED_TOOLS = new Set(['Bash', 'Write', 'Edit']);
 const READ_ONLY_EXTERNAL_TOOLS = new Set(['WebFetch', 'WebSearch']);
 
+function normalizeStringArray(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter(Boolean);
+  }
+  if (typeof value === 'string' && value.trim()) {
+    return value
+      .split(/[,\s]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function buildClaudeCliArgs(options = {}) {
+  const args = [
+    '--bare',
+    '-c',
+    '-p',
+    '--verbose',
+    '--input-format', 'stream-json',
+    '--output-format', 'stream-json',
+    '--replay-user-messages',
+    '--permission-mode', 'default',
+    '--permission-prompt-tool', 'stdio',
+  ];
+
+  if (typeof options.mcpConfig === 'string' && options.mcpConfig.trim()) {
+    args.push('--mcp-config', options.mcpConfig.trim());
+  }
+
+  const allowedTools = normalizeStringArray(options.allowedTools);
+  if (allowedTools.length > 0) {
+    args.push('--allowedTools', allowedTools.join(','));
+  }
+
+  if (typeof options.systemPrompt === 'string' && options.systemPrompt.trim()) {
+    args.push('--system-prompt', options.systemPrompt.trim());
+  }
+
+  return args;
+}
+
 function isAdapterDebugEnabled(env = process.env) {
   return env.SYMPHONY_ADAPTER_DEBUG === '1';
 }
@@ -914,17 +958,11 @@ function startAdapter({
         emitDebugLog(`Received thread/start. Spawning Claude Code at ${cwd}`);
 
         const cliPath = path.resolve(__dirname, '../claude-code/bin/claude-haha');
-        const args = [
-          '--bare',
-          '-c',
-          '-p',
-          '--verbose',
-          '--input-format', 'stream-json',
-          '--output-format', 'stream-json',
-          '--replay-user-messages',
-          '--permission-mode', 'default',
-          '--permission-prompt-tool', 'stdio',
-        ];
+        const args = buildClaudeCliArgs({
+          mcpConfig: msg.params?.mcpConfig,
+          allowedTools: msg.params?.allowedTools,
+          systemPrompt: msg.params?.systemPrompt,
+        });
 
         runtime.childProcess = cp.spawn(cliPath, args, {
           cwd,
@@ -1073,6 +1111,7 @@ function startAdapter({
 module.exports = {
   ADAPTER_TIMELINE_METHOD,
   ADAPTER_TRANSCRIPT_METHOD,
+  buildClaudeCliArgs,
   buildTimelineEvent,
   buildToolResultTimelineEvents,
   collectTimelineEventsFromClaudeMessage,

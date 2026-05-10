@@ -5958,9 +5958,10 @@ export class Orchestrator extends EventEmitter {
       let turnNumber = 1;
       let sessionActive = true;
       const turnBudget = this.getTurnBudget(isReview ? 'review' : 'dev', activeIssue);
+      let reviewArtifactRepairBudget = 0;
       const touchedPathSet = new Set(workItem.touched_paths);
 
-      while (sessionActive && turnNumber <= turnBudget) {
+      while (sessionActive && turnNumber <= turnBudget + reviewArtifactRepairBudget) {
         // Refresh issue state before each turn
         // Section 16.5: refresh failure should fail the worker
         const { issues, error } = await this.tracker.fetchIssueStatesByIds([issue.id]);
@@ -6149,6 +6150,16 @@ export class Orchestrator extends EventEmitter {
                 sessionActive = false;
               } else {
                 if (isReview) {
+                  const missingReviewReport = effectiveMissingRequirements.some((requirement) => requirement.key === 'review_report');
+                  if (missingReviewReport && reviewArtifactRepairBudget < 1) {
+                    reviewArtifactRepairBudget = 1;
+                    turnNumber++;
+                    currentPrompt = nextAction.message || `Review ${activeIssue.identifier} is missing .symphony/REVIEW_REPORT.md. Do only the minimum remaining review work, overwrite .symphony/REVIEW_REPORT.md with a canonical ## Review Decision line and a non-empty ## Review Summary section, then stop.`;
+                    console.log(
+                      `[orchestrator] Granting ${activeIssue.identifier} one review artifact repair turn because .symphony/REVIEW_REPORT.md is missing.`,
+                    );
+                    continue;
+                  }
                   result.next_action = 'retry_review';
                   result.retry_delay_ms = 1000;
                   result.failure_reason = 'agent_turn';
