@@ -1552,6 +1552,114 @@ describe('RuntimeHub', () => {
     hub.dispose();
   });
 
+  test('keeps workspace file diffs after the feature branch is merged into the base branch', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const repoDir = mkdtempSync(join(tmpdir(), 'runtime-hub-merged-diff-'));
+    tempDirs.push(repoDir);
+    mkdirSync(join(repoDir, 'src', 'runtime'), { recursive: true });
+    writeFileSync(join(repoDir, 'src', 'runtime', 'miniAppPage.ts'), [
+      'const ring = renderProgressRing(progress);',
+      'renderOverviewSignal(issue);',
+      '',
+    ].join('\n'));
+    execFileSync('git', ['init', '-b', 'main'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.email', 'codex@example.com'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.name', 'Codex'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['add', '.'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'base'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['checkout', '-b', 'feature/int-merged'], { cwd: repoDir, stdio: 'pipe' });
+    writeFileSync(join(repoDir, 'src', 'runtime', 'miniAppPage.ts'), [
+      'const rail = renderProgressRail(progress, phase);',
+      'renderOverviewSignal(issue);',
+      '',
+    ].join('\n'));
+    execFileSync('git', ['add', '.'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'feature diff'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['checkout', 'main'], { cwd: repoDir, stdio: 'pipe' });
+    writeFileSync(join(repoDir, 'README.md'), 'main-only change\n');
+    execFileSync('git', ['add', '.'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'main changed after branch'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['merge', '--no-ff', 'feature/int-merged', '-m', 'merge feature'], {
+      cwd: repoDir,
+      stdio: 'pipe',
+    });
+    execFileSync('git', ['checkout', 'feature/int-merged'], { cwd: repoDir, stdio: 'pipe' });
+
+    const workItemRepository = new WorkItemRepository(db);
+    workItemRepository.create({
+      id: 'issue-merged-diff',
+      linear_issue_id: 'issue-merged-diff',
+      linear_identifier: 'INT-MERGED',
+      linear_title: 'Merged diff attachment test',
+      linear_state: 'Done',
+      github_repo: 'acme/repo',
+      branch_name: 'feature/int-merged',
+      workspace_path: repoDir,
+      orchestrator_state: 'completed',
+    });
+
+    const controller = new FakeController();
+    const hub = new RuntimeHub(db, controller);
+
+    const historyView = (hub as any).getHistoryView('INT-MERGED', 5);
+
+    expect(historyView.file_diffs.map((item: any) => item.path)).toEqual(['src/runtime/miniAppPage.ts']);
+    expect(historyView.file_diffs[0]?.patch).toContain('+const rail = renderProgressRail(progress, phase);');
+    expect(historyView.file_diffs[0]?.patch).toContain('-const ring = renderProgressRing(progress);');
+    expect(historyView.file_diffs[0]?.patch).not.toContain('README.md');
+
+    hub.dispose();
+  });
+
+  test('includes untracked workspace files in history diffs', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const repoDir = mkdtempSync(join(tmpdir(), 'runtime-hub-untracked-diff-'));
+    tempDirs.push(repoDir);
+    writeFileSync(join(repoDir, 'README.md'), 'base\n');
+    execFileSync('git', ['init', '-b', 'main'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.email', 'codex@example.com'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.name', 'Codex'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['add', '.'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'base'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['checkout', '-b', 'feature/int-untracked'], { cwd: repoDir, stdio: 'pipe' });
+    mkdirSync(join(repoDir, 'src'), { recursive: true });
+    writeFileSync(join(repoDir, 'src', 'new-file.ts'), [
+      'export const answer = 42;',
+      'export const label = "runtime";',
+      '',
+    ].join('\n'));
+
+    const workItemRepository = new WorkItemRepository(db);
+    workItemRepository.create({
+      id: 'issue-untracked-diff',
+      linear_issue_id: 'issue-untracked-diff',
+      linear_identifier: 'INT-UNTRACKED',
+      linear_title: 'Untracked diff attachment test',
+      linear_state: 'In Progress',
+      github_repo: 'acme/repo',
+      branch_name: 'feature/int-untracked',
+      workspace_path: repoDir,
+      orchestrator_state: 'dev_running',
+    });
+
+    const controller = new FakeController();
+    const hub = new RuntimeHub(db, controller);
+
+    const historyView = (hub as any).getHistoryView('INT-UNTRACKED', 5);
+
+    expect(historyView.file_diffs[0]?.path).toBe('src/new-file.ts');
+    expect(historyView.file_diffs[0]?.additions).toBe(2);
+    expect(historyView.file_diffs[0]?.deletions).toBe(0);
+    expect(historyView.file_diffs[0]?.patch).toContain('new file mode');
+    expect(historyView.file_diffs[0]?.patch).toContain('+export const answer = 42;');
+
+    hub.dispose();
+  });
+
   test('surfaces governance suggestion action states on issue detail', () => {
     db = new Database(':memory:');
     initializeSchema(db);
