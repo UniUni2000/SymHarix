@@ -21,6 +21,8 @@ export interface RuntimeMiniAppDiffFileItem {
   badge: 'M' | 'A' | 'D' | 'R';
   summary: string;
   detail?: string | null;
+  additions?: number | null;
+  deletions?: number | null;
   timestamp: string | null;
   tone: 'green' | 'blue' | 'yellow' | 'red' | 'neutral';
 }
@@ -116,6 +118,64 @@ export function isRuntimeMiniAppIssueCompleted(issue: RuntimeIssueView): boolean
     issue.orchestrator_state === 'completed' ||
     /^(done|completed)$/i.test(issue.tracker_state || '') ||
     issue.supervisor_session_state === 'completed';
+}
+
+function runtimeMiniAppStateLabel(issue: RuntimeIssueView): string {
+  const englishOutput = issue.supervisor_locale === 'en';
+  if (isRuntimeMiniAppIssueCompleted(issue)) {
+    return englishOutput ? 'Completed' : '已完成';
+  }
+  if (issue.delivery_state === 'proof_satisfied') {
+    return englishOutput ? 'Proof satisfied' : '证据满足';
+  }
+  if (isRetryableRuntimeMiniAppFailure(issue)) {
+    return englishOutput ? 'Needs recovery' : '需要恢复';
+  }
+  if (issue.governance_thread_state === 'blocked' || issue.governance_thread_state === 'confirming' || issue.active_decision_kind) {
+    return englishOutput ? 'Needs decision' : '待确认';
+  }
+  if (issue.governance_thread_state === 'waiting_on_child') {
+    return englishOutput ? 'Waiting on child' : '等待子任务';
+  }
+  if (issue.phase === 'REVIEW' || issue.orchestrator_state === 'review_running') {
+    return englishOutput ? 'Review running' : 'Review 进行中';
+  }
+  if (issue.session || issue.orchestrator_state === 'dev_running') {
+    return englishOutput ? 'Running' : '运行中';
+  }
+  if (issue.orchestrator_state === 'retry_scheduled') {
+    return englishOutput ? 'Retry scheduled' : '等待重试';
+  }
+  if (issue.orchestrator_state === 'failed') {
+    return englishOutput ? 'Blocked' : '已阻塞';
+  }
+  if (issue.orchestrator_state === 'discovering' || issue.orchestrator_state === 'mapping' || issue.orchestrator_state === 'workspace_ready') {
+    return englishOutput ? 'Preparing' : '准备中';
+  }
+  if (issue.orchestrator_state === 'cancelled') {
+    return englishOutput ? 'Cancelled' : '已取消';
+  }
+  return compactPlainText(issue.tracker_state || issue.orchestrator_state || (englishOutput ? 'Waiting' : '等待中'), 36);
+}
+
+function runtimeMiniAppProgressLabel(issue: RuntimeIssueView, progress: number): string {
+  const englishOutput = issue.supervisor_locale === 'en';
+  if (isRuntimeMiniAppIssueCompleted(issue)) {
+    return `${englishOutput ? 'Done' : '完成'} ${progress}%`;
+  }
+  if (issue.delivery_state === 'proof_satisfied') {
+    return `${englishOutput ? 'Proof' : '证据'} ${progress}%`;
+  }
+  if (issue.phase === 'REVIEW' || issue.orchestrator_state === 'review_running') {
+    return `${englishOutput ? 'Review' : '审查'} ${progress}%`;
+  }
+  if (issue.session || issue.orchestrator_state === 'dev_running') {
+    return `${englishOutput ? 'Build' : '构建'} ${progress}%`;
+  }
+  if (issue.governance_thread_state === 'waiting_on_child') {
+    return `${englishOutput ? 'Dispatch' : '调度'} ${progress}%`;
+  }
+  return `${englishOutput ? 'Plan' : '计划'} ${progress}%`;
 }
 
 function isInternalRuntimeMiniAppMilestone(milestone: RuntimeMilestoneView): boolean {
@@ -599,11 +659,7 @@ export function buildRuntimeMiniAppIssuePresentation(issue: RuntimeIssueView): R
   return {
     mode: 'live',
     progress: retryableFailure ? Math.max(progress, 82) : progress,
-    stateLabel: issue.delivery_state === 'proof_satisfied'
-      ? 'Proof satisfied'
-      : retryableFailure
-        ? 'Needs recovery'
-        : issue.orchestrator_state || issue.tracker_state || 'Running',
+    stateLabel: runtimeMiniAppStateLabel(issue),
     stateTone: issue.delivery_state === 'proof_satisfied'
       ? 'green'
       : retryableFailure
@@ -810,12 +866,17 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       }
       .hero {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) 112px;
+        grid-template-columns: minmax(0, 5.1fr) minmax(96px, 1.9fr);
         gap: 12px;
-        align-items: center;
+        align-items: stretch;
         padding: 12px 10px 13px;
+        cursor: pointer;
       }
-      .hero > div:first-child {
+      .hero:focus-visible {
+        outline: 2px solid rgba(107, 180, 255, 0.42);
+        outline-offset: 2px;
+      }
+      .hero-main {
         min-width: 0;
       }
       .brand {
@@ -838,6 +899,20 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         font-weight: 820;
         letter-spacing: 0;
         overflow-wrap: anywhere;
+      }
+      .hero.collapsed .issue-title {
+        display: -webkit-box;
+        overflow: hidden;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 4;
+      }
+      .hero-details {
+        display: grid;
+        gap: 10px;
+        margin-top: 12px;
+      }
+      .hero.collapsed .hero-details {
+        display: none;
       }
       .repo-line,
       .status-line {
@@ -878,38 +953,54 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       .chip.green { color: var(--green); background: var(--green-soft); border-color: rgba(86, 227, 159, 0.2); }
       .chip.blue { color: var(--blue); background: var(--blue-soft); border-color: rgba(107, 180, 255, 0.22); }
       .chip.yellow { color: var(--yellow); background: var(--yellow-soft); border-color: rgba(255, 209, 102, 0.22); }
-      .ring {
-        position: relative;
-        width: 108px;
-        aspect-ratio: 1;
-        display: grid;
-        place-items: center;
-        border-radius: 50%;
-        background: conic-gradient(var(--green) var(--progress), var(--blue) calc(var(--progress) + 22deg), rgba(255,255,255,0.08) 0);
+      .progress-rail {
+        display: flex;
+        align-items: center;
+        justify-content: flex-start;
       }
-      .ring::before {
-        content: "";
-        position: absolute;
-        inset: 10px;
-        border-radius: 50%;
-        background: var(--ring-core);
-        box-shadow: inset 0 0 0 1px rgba(255,255,255,0.05);
+      .progress-summary {
+        width: 100%;
+        max-width: 112px;
+        margin-left: -4px;
+        padding-top: 10px;
       }
-      .ring-content {
-        position: relative;
-        text-align: center;
-      }
-      .ring-content strong {
+      .progress-kicker {
         display: block;
-        font-size: 28px;
-        line-height: 1;
-      }
-      .ring-content span {
-        display: block;
-        margin-top: 4px;
         color: var(--muted);
-        font-size: 12px;
+        font-size: 10px;
+        font-weight: 800;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+      }
+      .progress-value {
+        display: block;
+        margin-top: 10px;
+        font-size: 48px;
+        line-height: 0.9;
         font-weight: 620;
+        letter-spacing: -0.06em;
+      }
+      .progress-copy {
+        display: block;
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 15px;
+        font-weight: 720;
+      }
+      .progress-track {
+        width: 82px;
+        height: 10px;
+        margin-top: 16px;
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--line-strong) 72%, transparent);
+        overflow: hidden;
+      }
+      .progress-fill {
+        width: 0%;
+        height: 100%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, #56e39f 0%, #6bb4ff 100%);
+        transition: width 220ms ease, background 220ms ease;
       }
       .judgment {
         display: grid;
@@ -974,6 +1065,112 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         color: var(--soft);
         font-size: 14px;
         line-height: 1.55;
+      }
+      .signal-panel {
+        display: grid;
+        gap: 12px;
+      }
+      .signal-pills {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .signal-pill {
+        display: inline-flex;
+        min-height: 28px;
+        align-items: center;
+        padding: 0 10px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        font-size: 12px;
+        font-weight: 780;
+      }
+      .signal-pill.green {
+        color: var(--green);
+        background: var(--green-soft);
+        border-color: rgba(86, 227, 159, 0.24);
+      }
+      .signal-pill.blue {
+        color: var(--blue);
+        background: var(--blue-soft);
+        border-color: rgba(107, 180, 255, 0.24);
+      }
+      .signal-pill.yellow {
+        color: var(--yellow);
+        background: var(--yellow-soft);
+        border-color: rgba(255, 209, 102, 0.24);
+      }
+      .signal-list {
+        display: grid;
+        gap: 10px;
+      }
+      .signal-row {
+        display: grid;
+        grid-template-columns: 56px minmax(0, 1fr);
+        gap: 12px;
+        align-items: start;
+        padding: 11px 12px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.04);
+      }
+      .signal-row strong {
+        display: block;
+        color: var(--ink);
+        font-size: 15px;
+        line-height: 1.26;
+        font-weight: 790;
+      }
+      .signal-row span {
+        display: block;
+        margin-top: 5px;
+        color: var(--soft);
+        font-size: 13px;
+        line-height: 1.48;
+      }
+      .signal-key {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+      .signal-row.green {
+        background: color-mix(in srgb, var(--green-soft) 82%, transparent);
+        border-color: rgba(86, 227, 159, 0.22);
+      }
+      .signal-row.blue {
+        background: color-mix(in srgb, var(--blue-soft) 82%, transparent);
+        border-color: rgba(107, 180, 255, 0.2);
+      }
+      .signal-row.yellow {
+        background: color-mix(in srgb, var(--yellow-soft) 82%, transparent);
+        border-color: rgba(255, 209, 102, 0.2);
+      }
+      .signal-acceptance {
+        padding-top: 14px;
+        border-top: 1px solid var(--line);
+      }
+      .signal-acceptance strong {
+        display: block;
+        color: var(--ink);
+        font-size: 15px;
+        line-height: 1.24;
+        font-weight: 790;
+      }
+      .signal-acceptance span {
+        display: block;
+        margin-top: 5px;
+        color: var(--soft);
+        font-size: 13px;
+        line-height: 1.46;
+      }
+      .signal-acceptance-track {
+        height: 10px;
+        margin-top: 12px;
+        border-radius: 999px;
+        background:
+          linear-gradient(90deg, #56e39f 0%, #56e39f var(--accept-a, 0%), #6bb4ff var(--accept-a, 0%), #6bb4ff var(--accept-b, 0%), color-mix(in srgb, var(--line-strong) 72%, transparent) var(--accept-b, 0%), color-mix(in srgb, var(--line-strong) 72%, transparent) 100%);
       }
       .stage-row {
         display: grid;
@@ -1144,14 +1341,20 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       .diff-row {
         align-items: start;
       }
-      .diff-row details {
+      .diff-open-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
         margin-top: 7px;
-      }
-      .diff-row summary {
-        cursor: pointer;
+        padding: 4px 9px;
+        border: 1px solid rgba(107, 180, 255, 0.24);
+        border-radius: 8px;
         color: var(--blue);
+        background: rgba(107, 180, 255, 0.08);
+        cursor: pointer;
         font-size: 12px;
         font-weight: 760;
+        line-height: 1.1;
       }
       .diff-row strong {
         font-family: "SF Mono", "Menlo", "Consolas", monospace;
@@ -1211,6 +1414,41 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       .diff-stat.blue { color: var(--blue); background: var(--blue-soft); }
       .diff-stat.yellow { color: var(--yellow); background: var(--yellow-soft); }
       .diff-stat.red { color: #ffd1d1; background: var(--red-soft); }
+      .diff-stat-summary {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 52px;
+        padding: 5px 10px;
+        border: 1px solid rgba(156, 179, 204, 0.18);
+        border-radius: 10px;
+        background: rgba(107, 180, 255, 0.08);
+        text-align: center;
+        font-family: "SF Mono", "Menlo", "Consolas", monospace;
+        font-size: 12px;
+        font-weight: 820;
+      }
+      .diff-stat-summary[hidden] {
+        display: none;
+      }
+      .diff-stat-token.add {
+        color: var(--green);
+      }
+      .diff-stat-token.del {
+        color: var(--red);
+      }
+      .diff-row-stats {
+        display: inline-flex;
+        vertical-align: middle;
+        margin-right: 4px;
+      }
+      .diff-row-separator {
+        color: var(--muted);
+      }
+      html[data-theme="dark"] .diff-stat-summary {
+        border-color: rgba(134, 161, 191, 0.18);
+        background: rgba(255, 255, 255, 0.06);
+      }
       .mini-badge {
         min-width: 34px;
         max-width: 72px;
@@ -1278,6 +1516,162 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         line-height: 1.45;
         overflow-wrap: anywhere;
       }
+      .diff-drawer-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 24;
+        background: rgba(3, 10, 22, 0.34);
+        backdrop-filter: blur(6px);
+      }
+      .diff-drawer-backdrop[hidden] {
+        display: none;
+      }
+      .diff-drawer {
+        position: fixed;
+        top: 86px;
+        right: 14px;
+        bottom: 14px;
+        z-index: 25;
+        width: min(420px, calc(100vw - 28px));
+        padding: 16px;
+        border: 1px solid rgba(156, 179, 204, 0.2);
+        border-radius: 24px;
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(246, 250, 255, 0.98));
+        box-shadow: 0 26px 56px rgba(18, 31, 51, 0.26);
+        overflow: hidden;
+      }
+      .diff-drawer[hidden] {
+        display: none;
+      }
+      .diff-drawer-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .diff-drawer-kicker {
+        margin: 0;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+      }
+      .diff-drawer-header strong {
+        display: block;
+        margin-top: 7px;
+        color: var(--ink);
+        font-family: "SF Mono", "Menlo", "Consolas", monospace;
+        font-size: 13px;
+        line-height: 1.45;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+      .diff-drawer-header span {
+        display: block;
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.48;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+      .diff-drawer-meta {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 12px;
+      }
+      .diff-drawer-note {
+        display: block;
+        margin-top: 10px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+      .diff-drawer-note[hidden] {
+        display: none;
+      }
+      .diff-drawer-body {
+        margin-top: 14px;
+        height: calc(100% - 116px);
+        padding: 12px 12px 14px;
+        border: 1px solid rgba(156, 179, 204, 0.14);
+        border-radius: 18px;
+        background: rgba(246, 250, 255, 0.92);
+        overflow: auto;
+      }
+      .diff-drawer-code {
+        margin: 0;
+        white-space: pre-wrap;
+        font-family: "SF Mono", "Menlo", "Consolas", monospace;
+        font-size: 11px;
+        line-height: 1.58;
+        color: var(--ink);
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+      .diff-drawer-line {
+        display: block;
+      }
+      .diff-drawer-line.add {
+        color: #17844e;
+      }
+      .diff-drawer-line.context {
+        color: var(--ink);
+      }
+      .diff-drawer-line.del {
+        color: #c23f66;
+      }
+      .diff-drawer-line.hunk {
+        margin: 8px 0 6px;
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 780;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+      .diff-drawer-line.meta {
+        color: var(--muted);
+      }
+      html[data-theme="dark"] .diff-drawer-backdrop {
+        background: rgba(2, 6, 14, 0.52);
+      }
+      html[data-theme="dark"] .diff-drawer {
+        border-color: rgba(134, 161, 191, 0.22);
+        background:
+          linear-gradient(180deg, rgba(12, 22, 34, 0.98), rgba(8, 16, 27, 0.98));
+      }
+      html[data-theme="dark"] .diff-drawer-body {
+        border-color: rgba(134, 161, 191, 0.14);
+        background: rgba(6, 13, 23, 0.86);
+      }
+      html[data-theme="dark"] .diff-drawer-line.add {
+        color: #56e39f;
+      }
+      html[data-theme="dark"] .diff-drawer-line.context {
+        color: #dbe6f5;
+      }
+      html[data-theme="dark"] .diff-drawer-line.del {
+        color: #ff9bac;
+      }
+      @media (max-width: 720px) {
+        .diff-drawer {
+          top: auto;
+          right: 0;
+          bottom: 0;
+          width: 100%;
+          max-width: 100%;
+          border-right: 0;
+          border-bottom: 0;
+          border-left: 0;
+          border-radius: 24px 24px 0 0;
+        }
+        .diff-drawer-body {
+          height: calc(100% - 122px);
+        }
+      }
       .actions {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1304,7 +1698,11 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       }
       .actions .danger { color: #ffd1d1; background: var(--red-soft); border-color: rgba(255, 123, 123, 0.24); }
       .actions .primary { color: #c7efff; background: var(--blue-soft); border-color: rgba(107, 180, 255, 0.24); }
+      .actions .success { color: #d7ffea; background: var(--green-soft); border-color: rgba(86, 227, 159, 0.24); }
       .actions .disabled { color: var(--muted); pointer-events: none; opacity: 0.62; }
+      html[data-theme="light"] .actions .danger { color: #c23f66; background: rgba(252, 231, 236, 0.92); border-color: rgba(247, 186, 198, 0.84); }
+      html[data-theme="light"] .actions .primary { color: #225ca8; background: rgba(231, 240, 255, 0.96); border-color: rgba(191, 216, 255, 0.84); }
+      html[data-theme="light"] .actions .success { color: #17844e; background: rgba(232, 247, 239, 0.96); border-color: rgba(183, 235, 203, 0.84); }
       .loading {
         min-height: 180px;
         display: grid;
@@ -1313,9 +1711,10 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       }
       @media (min-width: 720px) {
         .shell { padding-left: 22px; padding-right: 22px; }
-        .hero { grid-template-columns: minmax(0, 1fr) 176px; padding: 18px 20px 18px; }
-        .ring { width: 160px; }
-        .ring-content strong { font-size: 42px; }
+        .hero { grid-template-columns: minmax(0, 5.2fr) minmax(108px, 1.8fr); padding: 18px 20px 18px; }
+        .progress-summary { max-width: 132px; margin-left: -6px; }
+        .progress-value { font-size: 58px; }
+        .progress-track { width: 96px; }
         .judgment { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .layout { grid-template-columns: minmax(0, 1.5fr) minmax(320px, 0.88fr); align-items: stretch; }
         .layout > .panel:first-child { min-height: 430px; }
@@ -1341,8 +1740,8 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             <button class="segmented-option" type="button" data-lang-choice="en" aria-pressed="false">EN</button>
           </div>
         </div>
-        <section id="hero" class="hero panel">
-          <div>
+        <section id="hero" class="hero panel collapsed" role="button" tabindex="0" aria-expanded="false">
+          <div class="hero-main">
             <div class="brand">
               <svg class="wave" viewBox="0 0 70 42" aria-hidden="true">
                 <path d="M4 23 C12 5 26 8 27 24 C29 42 47 39 50 19 C53 2 63 9 66 21" fill="none" stroke="#56e39f" stroke-width="6" stroke-linecap="round"/>
@@ -1350,18 +1749,25 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
               <span>symphonyness</span>
             </div>
             <h1 id="issue-title" class="issue-title">${escapedIssueId}</h1>
-            <div id="repo-line" class="repo-line">
-              <svg class="github-mark" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0.2a8 8 0 0 0-2.53 15.59c0.4 0.07 0.55-0.17 0.55-0.38v-1.49c-2.24 0.49-2.71-0.95-2.71-0.95-0.36-0.92-0.88-1.16-0.88-1.16-0.72-0.49 0.05-0.48 0.05-0.48 0.8 0.06 1.22 0.82 1.22 0.82 0.71 1.21 1.86 0.86 2.31 0.66 0.07-0.52 0.28-0.86 0.5-1.06-1.79-0.2-3.67-0.89-3.67-3.98 0-0.88 0.31-1.6 0.82-2.16-0.08-0.2-0.36-1.02 0.08-2.13 0 0 0.67-0.21 2.2 0.82A7.62 7.62 0 0 1 8 4.03c0.68 0 1.36 0.09 2 0.27 1.52-1.03 2.19-0.82 2.19-0.82 0.44 1.11 0.16 1.93 0.08 2.13 0.51 0.56 0.82 1.28 0.82 2.16 0 3.1-1.89 3.77-3.69 3.97 0.29 0.25 0.55 0.74 0.55 1.5v2.22c0 0.21 0.15 0.46 0.56 0.38A8 8 0 0 0 8 0.2Z"/></svg>
-              <span class="repo-name">loading</span>
-            </div>
-            <div id="status-line" class="status-line">
-              <span class="chip green">Loading</span>
+            <div id="hero-details" class="hero-details">
+              <div id="repo-line" class="repo-line">
+                <svg class="github-mark" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0.2a8 8 0 0 0-2.53 15.59c0.4 0.07 0.55-0.17 0.55-0.38v-1.49c-2.24 0.49-2.71-0.95-2.71-0.95-0.36-0.92-0.88-1.16-0.88-1.16-0.72-0.49 0.05-0.48 0.05-0.48 0.8 0.06 1.22 0.82 1.22 0.82 0.71 1.21 1.86 0.86 2.31 0.66 0.07-0.52 0.28-0.86 0.5-1.06-1.79-0.2-3.67-0.89-3.67-3.98 0-0.88 0.31-1.6 0.82-2.16-0.08-0.2-0.36-1.02 0.08-2.13 0 0 0.67-0.21 2.2 0.82A7.62 7.62 0 0 1 8 4.03c0.68 0 1.36 0.09 2 0.27 1.52-1.03 2.19-0.82 2.19-0.82 0.44 1.11 0.16 1.93 0.08 2.13 0.51 0.56 0.82 1.28 0.82 2.16 0 3.1-1.89 3.77-3.69 3.97 0.29 0.25 0.55 0.74 0.55 1.5v2.22c0 0.21 0.15 0.46 0.56 0.38A8 8 0 0 0 8 0.2Z"/></svg>
+                <span>loading</span>
+                <span class="repo-name">loading</span>
+              </div>
+              <div id="status-line" class="status-line">
+                <span class="chip green">Loading</span>
+              </div>
             </div>
           </div>
-          <div id="progress-ring" class="ring" style="--progress: 0deg">
-            <div class="ring-content">
-              <strong id="progress-value">0%</strong>
-              <span data-i18n="overallProgress">整体进度</span>
+          <div class="progress-rail">
+            <div class="progress-summary">
+              <span class="progress-kicker">PROGRESS</span>
+              <strong id="progress-value" class="progress-value">0%</strong>
+              <span id="progress-copy" class="progress-copy" data-i18n="overallProgress">整体进度</span>
+              <div class="progress-track">
+                <div id="progress-fill" class="progress-fill"></div>
+              </div>
             </div>
           </div>
         </section>
@@ -1376,6 +1782,17 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
 
       <section id="tab-overview" class="tab-panel active" role="tabpanel">
         <div class="tab-stack">
+          <section class="panel pad signal-panel">
+            <h2 class="panel-title"><span data-i18n="overviewSignal">Overview Signal</span> <span id="signal-state-badge" class="chip green">Running</span></h2>
+            <div id="signal-pills" class="signal-pills"></div>
+            <div id="overview-signal" class="signal-list"></div>
+            <div class="signal-acceptance">
+              <strong id="signal-acceptance-title">Acceptance: 0/0</strong>
+              <span id="signal-acceptance-copy">Waiting for runtime signal.</span>
+              <div id="signal-acceptance-track" class="signal-acceptance-track" style="--accept-a:0%;--accept-b:0%"></div>
+            </div>
+          </section>
+
           <section class="judgment">
             <article class="panel pad">
             <h2 class="panel-title" data-i18n="currentJudgment">当前判断</h2>
@@ -1454,7 +1871,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           </section>
 
           <section id="history-panel" class="panel pad history-panel" hidden>
-            <h2 class="panel-title"><span data-i18n="fullLog">完整日志</span> <button id="history-close-button" class="text-button" type="button">收起</button></h2>
+            <h2 class="panel-title"><span data-i18n="fullLog">完整日志</span> <button id="history-close-button" class="text-button" type="button" data-i18n="collapse">收起</button></h2>
             <p id="history-digest" class="panel-copy">等待历史记录。</p>
             <div id="history-entry-list"></div>
           </section>
@@ -1467,6 +1884,26 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           </div>
         </div>
       </section>
+
+      <div id="diff-drawer-backdrop" class="diff-drawer-backdrop" hidden></div>
+      <aside id="diff-drawer" class="diff-drawer" hidden aria-hidden="true" aria-labelledby="diff-drawer-title">
+        <div class="diff-drawer-header">
+          <div>
+            <p class="diff-drawer-kicker" data-i18n="codeChanges">代码改动</p>
+            <strong id="diff-drawer-title">src/runtime/miniAppPage.ts</strong>
+            <span id="diff-drawer-reason">等待更详细的改动摘要。</span>
+          </div>
+          <button id="diff-drawer-close-button" class="text-button" type="button" data-i18n="collapse">收起</button>
+        </div>
+        <div class="diff-drawer-meta">
+          <b id="diff-drawer-stat" class="diff-stat-summary"><span class="diff-stat-token add">+0</span><span class="diff-stat-token del">-0</span></b>
+          <span id="diff-drawer-badge" class="chip blue">M</span>
+        </div>
+        <span id="diff-drawer-note" class="diff-drawer-note" hidden>以下只展示片段。</span>
+        <div class="diff-drawer-body">
+          <code id="diff-drawer-detail" class="diff-drawer-code">No diff detail yet.</code>
+        </div>
+      </aside>
     </main>
 
     <script>
@@ -1492,18 +1929,29 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           history: null,
           stream: null,
           activeTab: 'overview',
+          heroExpanded: false,
+          renderedDiffFiles: [],
           theme: window.localStorage.getItem('symphony.miniapp.theme') || 'dark',
           lang: storedLang || null,
           langInitialized: storedLang === 'en' || storedLang === 'zh'
         };
         const el = {
+          hero: document.getElementById('hero'),
+          heroDetails: document.getElementById('hero-details'),
           themeToggle: document.getElementById('theme-toggle'),
           languageToggle: document.getElementById('language-toggle'),
           issueTitle: document.getElementById('issue-title'),
           repoLine: document.getElementById('repo-line'),
           statusLine: document.getElementById('status-line'),
-          progressRing: document.getElementById('progress-ring'),
           progressValue: document.getElementById('progress-value'),
+          progressCopy: document.getElementById('progress-copy'),
+          progressFill: document.getElementById('progress-fill'),
+          signalStateBadge: document.getElementById('signal-state-badge'),
+          signalPills: document.getElementById('signal-pills'),
+          overviewSignal: document.getElementById('overview-signal'),
+          signalAcceptanceTitle: document.getElementById('signal-acceptance-title'),
+          signalAcceptanceCopy: document.getElementById('signal-acceptance-copy'),
+          signalAcceptanceTrack: document.getElementById('signal-acceptance-track'),
           judgmentCopy: document.getElementById('judgment-copy'),
           nextCopy: document.getElementById('next-copy'),
           stageRow: document.getElementById('stage-row'),
@@ -1526,6 +1974,15 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           historyDigest: document.getElementById('history-digest'),
           historyEntryList: document.getElementById('history-entry-list'),
           historyCloseButton: document.getElementById('history-close-button'),
+          diffDrawerBackdrop: document.getElementById('diff-drawer-backdrop'),
+          diffDrawer: document.getElementById('diff-drawer'),
+          diffDrawerTitle: document.getElementById('diff-drawer-title'),
+          diffDrawerReason: document.getElementById('diff-drawer-reason'),
+          diffDrawerStat: document.getElementById('diff-drawer-stat'),
+          diffDrawerBadge: document.getElementById('diff-drawer-badge'),
+          diffDrawerNote: document.getElementById('diff-drawer-note'),
+          diffDrawerDetail: document.getElementById('diff-drawer-detail'),
+          diffDrawerCloseButton: document.getElementById('diff-drawer-close-button'),
           prLink: document.getElementById('pr-link'),
           pauseButton: document.getElementById('pause-button'),
           requestButton: document.getElementById('request-button'),
@@ -1539,6 +1996,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             themeLight: '日间',
             langLabel: '中文',
             overallProgress: '整体进度',
+            overviewSignal: 'Overview Signal',
             currentJudgment: '当前判断',
             nextRecommendation: '下一步推荐',
             roundGoalTitle: '当前轮次目标',
@@ -1568,9 +2026,12 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             noCodeChanges: '还没有可展示的代码改动。',
             noAgentProgress: '暂无 agent 最近进度。',
             noMilestones: '暂无关键节点总结。',
-            diffDetails: '完整 diff / 详情',
+            diffDetails: '完整 diff',
+            diffSummary: '改动摘要',
             reason: '原因',
             noDiffDetail: '暂无更详细的 diff 摘要。',
+            diffExcerptNote: '这里展示的是运行时历史里的改动片段，+ / - 数字来自整份文件的改动统计。',
+            diffSummaryOnlyNote: '这里还没有完整 patch，只拿到了这份文件的改动摘要，+ / - 数字来自整份文件的改动统计。',
             restore: '恢复',
             restorable: '可一键恢复',
             noRestore: '无需恢复',
@@ -1633,13 +2094,19 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             liveJudgmentFallback: '当前只推进最有把握的下一步，保持 child 队列有序。',
             retryRecommendation: '交付恢复卡住了，但这类问题可以一键重试：先清理工作流产物，再重新进入交付。',
             waitingSupervisorAction: '等待 supervisor 写入下一步动作。',
-            waitingRuntimeSignal: '等待下一步运行时信号。'
+            waitingRuntimeSignal: '等待下一步运行时信号。',
+            nowLabel: 'Now',
+            latestLabel: 'Latest',
+            nextLabel: 'Next',
+            runningShort: '运行中',
+            acceptanceSummary: '验收：{passed}/{total}'
           },
           en: {
             themeDark: 'Dark',
             themeLight: 'Light',
             langLabel: 'EN',
             overallProgress: 'Overall',
+            overviewSignal: 'Overview Signal',
             currentJudgment: 'Current Judgment',
             nextRecommendation: 'Next Recommendation',
             roundGoalTitle: 'Round Goal',
@@ -1669,9 +2136,12 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             noCodeChanges: 'No code changes to show yet.',
             noAgentProgress: 'No recent agent progress yet.',
             noMilestones: 'No milestone summary yet.',
-            diffDetails: 'Full diff / details',
+            diffDetails: 'Full diff',
+            diffSummary: 'Summary',
             reason: 'Reason',
             noDiffDetail: 'No deeper diff detail is available yet.',
+            diffExcerptNote: 'This panel shows an excerpt from runtime history. The + / - totals come from the full file diff stats.',
+            diffSummaryOnlyNote: 'A full patch is not available here yet. The + / - totals come from the full file diff stats.',
             restore: 'Recovery',
             restorable: 'One-click recovery available',
             noRestore: 'No recovery needed',
@@ -1734,7 +2204,12 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             liveJudgmentFallback: 'The system is advancing the highest-confidence next step and keeping child work ordered.',
             retryRecommendation: 'Delivery recovery is blocked, but this can be retried: clean workflow artifacts and re-enter delivery.',
             waitingSupervisorAction: 'Waiting for the supervisor to write the next action.',
-            waitingRuntimeSignal: 'Waiting for the next runtime signal.'
+            waitingRuntimeSignal: 'Waiting for the next runtime signal.',
+            nowLabel: 'Now',
+            latestLabel: 'Latest',
+            nextLabel: 'Next',
+            runningShort: 'Running',
+            acceptanceSummary: 'Acceptance: {passed}/{total}'
           }
         };
         function t(key, vars) {
@@ -1932,6 +2407,46 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             issue.orchestrator_state === 'failed'
           ));
         }
+        function runtimeStateLabel(issue) {
+          if (!issue) return t('waiting');
+          if (isCompletedIssue(issue)) return t('completed');
+          if (issue.delivery_state === 'proof_satisfied') return isEnglish() ? 'Proof satisfied' : '证据满足';
+          if (isRetryableDeliveryFailure(issue)) return isEnglish() ? 'Needs recovery' : '需要恢复';
+          if (issue.governance_thread_state === 'blocked' || issue.governance_thread_state === 'confirming' || issue.active_decision_kind) {
+            return isEnglish() ? 'Needs decision' : '待确认';
+          }
+          if (issue.governance_thread_state === 'waiting_on_child') {
+            return isEnglish() ? 'Waiting on child' : '等待子任务';
+          }
+          if (issue.phase === 'REVIEW' || issue.orchestrator_state === 'review_running') {
+            return isEnglish() ? 'Review running' : 'Review 进行中';
+          }
+          if (issue.session || issue.orchestrator_state === 'dev_running') {
+            return t('runningShort');
+          }
+          if (issue.orchestrator_state === 'retry_scheduled') {
+            return isEnglish() ? 'Retry scheduled' : '等待重试';
+          }
+          if (issue.orchestrator_state === 'failed') {
+            return isEnglish() ? 'Blocked' : '已阻塞';
+          }
+          if (issue.orchestrator_state === 'discovering' || issue.orchestrator_state === 'mapping' || issue.orchestrator_state === 'workspace_ready') {
+            return isEnglish() ? 'Preparing' : '准备中';
+          }
+          if (issue.orchestrator_state === 'cancelled') {
+            return isEnglish() ? 'Cancelled' : '已取消';
+          }
+          return compactText(issue.tracker_state || issue.orchestrator_state || t('waiting'), 36);
+        }
+        function runtimeProgressLabel(issue, progress) {
+          if (!issue) return String(progress || 0) + '%';
+          if (isCompletedIssue(issue)) return (isEnglish() ? 'Done' : '完成') + ' ' + String(progress) + '%';
+          if (issue.delivery_state === 'proof_satisfied') return (isEnglish() ? 'Proof' : '证据') + ' ' + String(progress) + '%';
+          if (issue.phase === 'REVIEW' || issue.orchestrator_state === 'review_running') return (isEnglish() ? 'Review' : '审查') + ' ' + String(progress) + '%';
+          if (issue.session || issue.orchestrator_state === 'dev_running') return (isEnglish() ? 'Build' : '构建') + ' ' + String(progress) + '%';
+          if (issue.governance_thread_state === 'waiting_on_child') return (isEnglish() ? 'Dispatch' : '调度') + ' ' + String(progress) + '%';
+          return (isEnglish() ? 'Plan' : '计划') + ' ' + String(progress) + '%';
+        }
         function isInternalMilestone(item) {
           if (!item || item.kind !== 'delivery_failed') return false;
           return /supervisor_turn_budget_exhausted|turn_budget_exhausted/i.test([
@@ -2049,9 +2564,24 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           });
           return sources;
         }
+        function historyFileDiffs(history) {
+          return history && Array.isArray(history.file_diffs) ? history.file_diffs : [];
+        }
+        function historyFileDiffForPath(history, path) {
+          if (!path) return null;
+          return historyFileDiffs(history).find((item) => readablePath(item.path) === readablePath(path)) || null;
+        }
         function parseChangeLine(line) {
           const trimmed = String(line || '').replace(/^[-*]\\s+/, '').trim();
           if (!trimmed) return null;
+          function parseDiffStats(value) {
+            const match = String(value || '').match(/\\+(\\d+)\\s*-\\s*(\\d+)/);
+            if (!match) return { additions: null, deletions: null };
+            return {
+              additions: Number(match[1] || 0),
+              deletions: Number(match[2] || 0)
+            };
+          }
           function isLikelyDiffPath(value) {
             const candidate = readablePath(value).replace(/^['"]|['"]$/g, '').trim();
             if (!candidate || /\\s/.test(candidate)) return false;
@@ -2059,18 +2589,21 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
               || /^(README|CHANGELOG|LICENSE)(?:\\.|$)/i.test(candidate)
               || /^(src|test|tests|docs|scripts|packages|app|lib|public|config)\\//.test(candidate);
           }
-          let match = trimmed.match(/^\\|\\s*\`?([^\`|]+?)\`?\\s*\\|\\s*([^|]+?)\\s*\\|/);
+          let match = trimmed.match(/^\\|?\\s*\`?([^\`|]+?)\`?\\s*\\|\\s*([^|]+?)(?:\\|\\s*([^|]+?))?(?:\\||$)/);
           if (match && match[1]) {
             const path = readablePath(match[1]);
             if (!isLikelyDiffPath(path)) return null;
             const action = String(match[2] || '').toLowerCase();
             const deleted = /delete|remove|删除|移除/.test(action);
             const added = /add|create|新增|创建/.test(action);
+            const stats = parseDiffStats(match[3] || trimmed);
             return {
               path,
               badge: deleted ? 'D' : added ? 'A' : 'M',
               summary: summarizeDiffPath(path, deleted ? t('deleteFile', { name: fileDisplayName(path) }) : added ? t('addFile', { name: fileDisplayName(path) }) : t('updateFile', { name: fileDisplayName(path) })),
               detail: compactText(trimmed.replace(/\\|/g, ' '), 260),
+              additions: stats.additions,
+              deletions: stats.deletions,
               timestamp: null,
               tone: deleted ? 'red' : added ? 'green' : 'blue'
             };
@@ -2137,6 +2670,19 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         }
         function extractDiffFilesFromHistory(history) {
           const byPath = new Map();
+          historyFileDiffs(history).forEach((item) => {
+            if (!item || !item.path) return;
+            byPath.set(readablePath(item.path), {
+              path: readablePath(item.path),
+              badge: item.deletions != null && item.additions === 0 ? 'D' : item.additions != null && item.deletions === 0 ? 'A' : 'M',
+              summary: summarizeDiffPath(readablePath(item.path), t('updateFile', { name: fileDisplayName(readablePath(item.path)) })),
+              detail: compactText(item.patch || '', 260),
+              additions: item.additions,
+              deletions: item.deletions,
+              timestamp: null,
+              tone: item.deletions != null && item.additions === 0 ? 'red' : item.additions != null && item.deletions === 0 ? 'green' : 'blue'
+            });
+          });
           changeTextSourcesFromHistory(history).forEach((source) => {
             splitHistoryChangeLines(source).forEach((line) => {
               const item = parseChangeLine(line);
@@ -2145,6 +2691,48 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             });
           });
           return Array.from(byPath.values()).slice(0, 12);
+        }
+        function extractDiffStatsFromHistory(history) {
+          const byPath = new Map();
+          changeTextSourcesFromHistory(history).forEach((source) => {
+            splitHistoryChangeLines(source).forEach((line) => {
+              const trimmed = String(line || '').replace(/^[-*]\\s+/, '').trim();
+              const match = trimmed.match(/^\\|?\\s*\`?([^\`|]+?)\`?\\s*\\|\\s*[^|]+?\\|\\s*([^|]+?)(?:\\||$)/);
+              if (!match || !match[1]) return;
+              const path = readablePath(match[1]);
+              const statsMatch = String(match[2] || '').match(/\\+(\\d+)\\s*-\\s*(\\d+)/);
+              if (!path || !statsMatch) return;
+              byPath.set(path, {
+                additions: Number(statsMatch[1] || 0),
+                deletions: Number(statsMatch[2] || 0)
+              });
+            });
+          });
+          return byPath;
+        }
+        function diffStatsForPath(history, path) {
+          if (!path) return null;
+          const fromWorkspace = historyFileDiffForPath(history, path);
+          if (fromWorkspace && (fromWorkspace.additions != null || fromWorkspace.deletions != null)) {
+            return {
+              additions: fromWorkspace.additions,
+              deletions: fromWorkspace.deletions
+            };
+          }
+          const direct = extractDiffStatsFromHistory(history).get(path);
+          if (direct) return direct;
+          const escapedPath = String(path).replace(/[.*+?^$()|[\]{}\\]/g, '\\$&');
+          const pattern = new RegExp('(?:^|\\\\n)\\\\|?\\\\s*' + escapedPath + '\\\\s*\\\\|\\\\s*[^|]+?\\\\|\\\\s*\\\\+(\\\\d+)\\\\s*-\\\\s*(\\\\d+)', 'i');
+          for (const source of changeTextSourcesFromHistory(history)) {
+            const match = String(source || '').match(pattern);
+            if (match) {
+              return {
+                additions: Number(match[1] || 0),
+                deletions: Number(match[2] || 0)
+              };
+            }
+          }
+          return null;
         }
         function buildDiffFiles(issue) {
           const byPath = new Map();
@@ -2337,11 +2925,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           return {
             mode: 'live',
             progress: retryableFailure ? Math.max(progress, 82) : progress,
-            stateLabel: issue.delivery_state === 'proof_satisfied'
-              ? 'Proof satisfied'
-              : retryableFailure
-                ? 'Needs recovery'
-                : issue.orchestrator_state || issue.tracker_state || 'Running',
+            stateLabel: runtimeStateLabel(issue),
             stateTone: issue.delivery_state === 'proof_satisfied'
               ? 'green'
               : retryableFailure
@@ -2376,6 +2960,107 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         function chip(label, tone) {
           return '<span class="chip ' + escapeHtml(tone || '') + '">' + escapeHtml(label) + '</span>';
         }
+        function signalPill(label, tone) {
+          return '<span class="signal-pill ' + escapeHtml(tone || '') + '">' + escapeHtml(label) + '</span>';
+        }
+        function signalRow(label, title, copy, tone) {
+          return '<div class="signal-row ' + escapeHtml(tone || '') + '"><b class="signal-key">' + escapeHtml(label) + '</b><div><strong>' + escapeHtml(title) + '</strong><span>' + escapeHtml(copy) + '</span></div></div>';
+        }
+        function setHeroExpanded(expanded) {
+          state.heroExpanded = !!expanded;
+          el.hero.classList.toggle('collapsed', !state.heroExpanded);
+          el.hero.classList.toggle('expanded', state.heroExpanded);
+          el.hero.setAttribute('aria-expanded', state.heroExpanded ? 'true' : 'false');
+        }
+        function progressRailGradient(issue) {
+          if (isCompletedIssue(issue)) {
+            return 'linear-gradient(90deg, #56e39f 0%, #1ea967 100%)';
+          }
+          if (issue.phase === 'REVIEW' || issue.orchestrator_state === 'review_running') {
+            return 'linear-gradient(90deg, #56e39f 0%, #6bb4ff 60%, #6e6bff 100%)';
+          }
+          if (issue.session || issue.orchestrator_state === 'dev_running') {
+            return 'linear-gradient(90deg, #56e39f 0%, #6bb4ff 100%)';
+          }
+          return 'linear-gradient(90deg, #56e39f 0%, #56e39f 100%)';
+        }
+        function latestChangedFile(issue, diffFiles) {
+          const files = issue && issue.session && Array.isArray(issue.session.recent_files) ? issue.session.recent_files.slice() : [];
+          const candidate = files
+            .filter((item) => item && item.operation !== 'read')
+            .sort((left, right) => String(right.timestamp || '').localeCompare(String(left.timestamp || '')))[0];
+          if (candidate) {
+            return {
+              path: readablePath(candidate.path),
+              timestamp: candidate.timestamp || null,
+            };
+          }
+          const diffFile = Array.isArray(diffFiles) ? diffFiles[0] : null;
+          return diffFile ? { path: diffFile.path, timestamp: diffFile.timestamp || null } : null;
+        }
+        function renderOverviewSignal(issue) {
+          const presentation = getPresentation(issue);
+          const diffFiles = presentation.diffFiles || [];
+          const latestFile = latestChangedFile(issue, diffFiles);
+          const latestFeed = (presentation.activityFeed || [])[0] || null;
+          const evidence = issue.evidence_summary || null;
+          const missing = Array.isArray(issue.missing_requirements) ? issue.missing_requirements : [];
+          const total = evidence ? Number(evidence.total_requirements || 0) : Math.max(missing.length, diffFiles.length ? 1 : 0);
+          const satisfied = evidence ? Number(evidence.satisfied || 0) : Math.max(0, total - missing.length);
+          const changedLabel = diffFiles.length
+            ? '+' + String(diffFiles.length) + ' files'
+            : t('noCodeChanges');
+          const latestTitle = latestFile
+            ? (isEnglish()
+                ? [(latestFile.timestamp ? shortTime(latestFile.timestamp) : ''), 'edited ' + fileDisplayName(latestFile.path)].filter(Boolean).join(' · ')
+                : [(latestFile.timestamp ? shortTime(latestFile.timestamp) : ''), '改了 ' + fileDisplayName(latestFile.path)].filter(Boolean).join(' · '))
+            : (latestFeed ? latestFeed.summary : t('waitingSignal'));
+          const latestCopy = latestFile
+            ? (isEnglish()
+                ? 'This round includes real code changes, not just analysis.'
+                : '这轮有真实代码改动，不是停留在分析。')
+            : (latestFeed ? latestFeed.detail || latestFeed.status || t('waitingSignal') : t('waitingSignal'));
+          const nowTitle = compactText(
+            presentation.mode === 'completed'
+              ? t('closedSummary')
+              : ((issue.session && issue.session.last_message)
+                || (issue.phase === 'REVIEW' ? t('reviewRunning') : t('devRunning'))),
+            120,
+          ) || presentation.stateLabel;
+          const nextTitle = compactText(presentation.nextRecommendation, 120) || t('waitingSupervisorAction');
+          const nextCopy = isCompletedIssue(issue)
+            ? t('doneNoPr')
+            : (issue.phase === 'REVIEW' || issue.orchestrator_state === 'review_running')
+              ? (isEnglish() ? 'Review is the next visible step.' : '下一步会先产出 review 结果。')
+              : (isEnglish() ? 'The next visible signal will come from review or delivery.' : '接下来会先等 review 或 delivery 信号。');
+          const pillTone = presentation.mode === 'completed'
+            ? 'green'
+            : presentation.stateTone === 'yellow'
+              ? 'yellow'
+              : 'green';
+          el.signalStateBadge.className = 'chip ' + escapeHtml(pillTone);
+          el.signalStateBadge.textContent = presentation.mode === 'completed' ? t('completed') : t('runningShort');
+          el.signalPills.innerHTML = [
+            signalPill(presentation.mode === 'completed' ? t('completed') : t('runningShort'), pillTone),
+            signalPill(runtimeProgressLabel(issue, presentation.progress), presentation.mode === 'completed' ? 'green' : (issue.phase === 'REVIEW' ? 'blue' : 'yellow')),
+            diffFiles.length ? signalPill(changedLabel, 'blue') : '',
+          ].filter(Boolean).join('');
+          el.overviewSignal.innerHTML = [
+            signalRow(t('nowLabel'), nowTitle, isEnglish() ? 'The task is actively moving forward.' : '用户第一眼知道任务正在推进。', pillTone),
+            signalRow(t('latestLabel'), latestTitle, latestCopy, 'blue'),
+            signalRow(t('nextLabel'), nextTitle, nextCopy, presentation.mode === 'completed' ? 'green' : 'yellow'),
+          ].join('');
+          el.signalAcceptanceTitle.textContent = t('acceptanceSummary', { passed: satisfied, total: total || 0 });
+          el.signalAcceptanceCopy.textContent = presentation.mode === 'completed'
+            ? t('closedSummary')
+            : (missing.length
+                ? (isEnglish() ? 'Review summary or delivery evidence is still pending.' : '目前还差 review summary 或 delivery evidence。')
+                : t('validating'));
+          const firstStop = total > 0 ? Math.round(Math.max(0, Math.min(100, (satisfied / total) * 100))) : 0;
+          const secondStop = total > 0 ? Math.round(Math.max(firstStop, Math.min(100, ((satisfied + 1) / total) * 100))) : firstStop;
+          el.signalAcceptanceTrack.style.setProperty('--accept-a', firstStop + '%');
+          el.signalAcceptanceTrack.style.setProperty('--accept-b', secondStop + '%');
+        }
         function setActiveTab(tab) {
           state.activeTab = tab || 'overview';
           tabButtons.forEach((button) => {
@@ -2386,6 +3071,9 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           tabPanels.forEach((panel) => {
             panel.classList.toggle('active', panel.id === 'tab-' + state.activeTab);
           });
+          if (state.activeTab !== 'changes') {
+            closeDiffDrawer();
+          }
         }
         function renderHero(issue) {
           const presentation = getPresentation(issue);
@@ -2395,6 +3083,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             ? rawTitle
             : identifier + ' · ' + rawTitle;
           document.body.classList.toggle('is-completed', presentation.mode === 'completed');
+          setHeroExpanded(state.heroExpanded);
           el.issueTitle.textContent = displayTitle;
           el.repoLine.innerHTML = githubMark() + '<span>' + escapeHtml(t('repository')) + '</span><span class="repo-name">' + escapeHtml(issue.github_repo || 'repo pending') + '</span>';
           const child = issue.governance_current_child || (Array.isArray(issue.governance_child_queue) ? issue.governance_child_queue.find((item) => item.queue_state === 'current') : null);
@@ -2408,7 +3097,8 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           ].join('');
           const progress = presentation.progress;
           el.progressValue.textContent = progress + '%';
-          el.progressRing.style.setProperty('--progress', Math.round(progress * 3.6) + 'deg');
+          el.progressFill.style.width = Math.max(0, Math.min(100, progress)) + '%';
+          el.progressFill.style.background = progressRailGradient(issue);
           renderExpandableText(el.judgmentCopy, presentation.judgmentSummary, '', 180);
           renderExpandableText(el.nextCopy, presentation.nextRecommendation, '', 180);
           el.rootLabel.textContent = 'Root: ' + (issue.governance_root_issue_identifier || identifier);
@@ -2466,6 +3156,145 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             '<div class="file-row"><div><strong>' + escapeHtml(fileDisplayName(file.path)) + '</strong><span>' + escapeHtml(humanFileOperation(file.operation)) + ' · ' + escapeHtml(shortTime(file.timestamp)) + '</span></div><b class="mini-badge ' + escapeHtml(feedToneFromStatus(file.status)) + '">' + escapeHtml((file.operation || 'M').slice(0, 1).toUpperCase()) + '</b></div>'
           )).join('');
         }
+        function formatDiffHunkHeader(line) {
+          const match = String(line || '').match(/^@@\\s+-(\\d+)(?:,(\\d+))?\\s+\\+(\\d+)(?:,(\\d+))?\\s+@@/);
+          if (!match) return compactText(String(line || '').trim(), 72);
+          function lineRange(startValue, countValue) {
+            const start = Number(startValue || 0);
+            const count = Number(countValue || 1);
+            if (!start || count <= 1) return String(start);
+            return String(start) + '-' + String(start + count - 1);
+          }
+          return (isEnglish() ? 'Hunk ' : '片段 ')
+            + lineRange(match[1], match[2])
+            + ' -> '
+            + lineRange(match[3], match[4]);
+        }
+        function renderDiffDrawerDetail(detail, mode) {
+          const raw = String(detail || t('noDiffDetail'));
+          if (mode === 'summary') {
+            return raw
+              .split(/\\n+/)
+              .map((line) => String(line || '').replace(/^\\s*#+\\s*/, '').trim())
+              .filter(Boolean)
+              .map((line) => '<span class="diff-drawer-line meta">' + escapeHtml(line) + '</span>')
+              .join('');
+          }
+          return raw.split(/\\n/).map((line) => {
+            if (/^diff --git /.test(line) || /^index /.test(line) || /^--- /.test(line) || /^\\+\\+\\+ /.test(line)) {
+              return '';
+            }
+            if (/^@@ /.test(line)) {
+              return '<span class="diff-drawer-line hunk">' + escapeHtml(formatDiffHunkHeader(line)) + '</span>';
+            }
+            if (/^\\\\ No newline at end of file$/.test(line)) {
+              return '<span class="diff-drawer-line meta">' + escapeHtml(isEnglish() ? 'No newline at end of file' : '文件结尾没有换行') + '</span>';
+            }
+            const tone = /^\\+/.test(line)
+              ? ' add'
+              : /^-/.test(line)
+                ? ' del'
+                : /^[|]/.test(line)
+                  ? ' meta'
+                  : ' context';
+            return '<span class="diff-drawer-line' + tone + '">' + escapeHtml(line || ' ') + '</span>';
+          }).filter(Boolean).join('');
+        }
+        function diffLineCounts(detail) {
+          return String(detail || '').split(/\\n/).reduce((acc, line) => {
+            if (/^\\+(?!\\+\\+)/.test(line)) acc.additions += 1;
+            if (/^-(?!--)/.test(line)) acc.deletions += 1;
+            return acc;
+          }, { additions: 0, deletions: 0 });
+        }
+        function renderDiffStatMarkup(stats) {
+          if (!stats || (stats.additions == null && stats.deletions == null)) {
+            return '';
+          }
+          const additions = Number(stats.additions || 0);
+          const deletions = Number(stats.deletions || 0);
+          return '<span class="diff-stat-token add">+' + String(additions) + '</span><span class="diff-stat-token del">-' + String(deletions) + '</span>';
+        }
+        function pathHeaderLine(line) {
+          const match = String(line || '').match(/^\\s*\`?([^\`|]+?)\`?\\s*\\|\\s*(?:[^|]+?)(?:\\|\\s*[^|]+)?(?:\\||$)/);
+          return match ? readablePath(match[1]) : '';
+        }
+        function extractDiffDetailForPath(history, path) {
+          if (!path) return null;
+          for (const source of changeTextSourcesFromHistory(history)) {
+            const lines = String(source || '').split(/\\n/).map((line) => line.replace(/\\s+$/g, ''));
+            const divider = lines.findIndex((line) => !String(line).trim());
+            const statLines = divider >= 0 ? lines.slice(0, divider) : lines.slice();
+            const hunkLines = divider >= 0 ? lines.slice(divider + 1).filter((line) => String(line).trim()) : [];
+            const statIndex = statLines.findIndex((line) => pathHeaderLine(line) === path);
+            if (statIndex >= 0) {
+              const statLine = statLines[statIndex].trim();
+              if (statIndex === 0 && hunkLines.some((line) => /^[+-]/.test(line))) {
+                return [statLine, ''].concat(hunkLines.slice(0, 18)).join('\\n');
+              }
+              return statLine;
+            }
+            const matchingLine = lines.find((line) => String(line).indexOf(path) >= 0);
+            if (matchingLine) return matchingLine.trim();
+          }
+          return null;
+        }
+        function diffDetailForFile(file, stats) {
+          const path = readablePath(file && file.path || '');
+          const workspaceDiff = historyFileDiffForPath(state.history, path);
+          if (workspaceDiff && typeof workspaceDiff.patch === 'string' && workspaceDiff.patch.trim()) {
+            return {
+              text: workspaceDiff.patch.trim(),
+              mode: 'full',
+              isExcerpt: false,
+              noteKey: 'diffExcerptNote'
+            };
+          }
+          const candidates = [];
+          [file && file.detail, file && file.summary].forEach((value) => {
+            if (typeof value === 'string' && value.trim()) candidates.push(value.trim());
+          });
+          const extracted = extractDiffDetailForPath(state.history, path);
+          if (extracted) candidates.push(extracted);
+          const best = candidates.sort((left, right) => right.length - left.length)[0];
+          const text = best || t('noDiffDetail');
+          const counts = diffLineCounts(text);
+          const additions = stats && stats.additions != null ? Number(stats.additions || 0) : null;
+          const deletions = stats && stats.deletions != null ? Number(stats.deletions || 0) : null;
+          const hasAnyShownLines = counts.additions > 0 || counts.deletions > 0;
+          const isExcerpt = additions != null && deletions != null
+            ? counts.additions < additions || counts.deletions < deletions
+            : !hasAnyShownLines;
+          const noteKey = hasAnyShownLines ? 'diffExcerptNote' : 'diffSummaryOnlyNote';
+          return {
+            text,
+            mode: hasAnyShownLines ? 'excerpt' : 'summary',
+            isExcerpt,
+            noteKey
+          };
+        }
+        function closeDiffDrawer() {
+          el.diffDrawer.hidden = true;
+          el.diffDrawer.setAttribute('aria-hidden', 'true');
+          el.diffDrawerBackdrop.hidden = true;
+        }
+        function openDiffDrawer(index) {
+          const file = state.renderedDiffFiles[index];
+          if (!file) return;
+          el.diffDrawerTitle.textContent = file.path || 'diff';
+          el.diffDrawerReason.textContent = file.summary || t('noDiffDetail');
+          el.diffDrawerStat.hidden = !file.statsMarkup;
+          el.diffDrawerStat.innerHTML = file.statsMarkup || '';
+          el.diffDrawerStat.className = 'diff-stat-summary';
+          el.diffDrawerBadge.className = 'chip ' + (file.tone || 'blue');
+          el.diffDrawerBadge.textContent = file.badge || 'M';
+          el.diffDrawerNote.hidden = !file.drawerIsExcerpt;
+          el.diffDrawerNote.textContent = file.drawerIsExcerpt ? t(file.drawerNoteKey || 'diffExcerptNote') : '';
+          el.diffDrawerDetail.innerHTML = renderDiffDrawerDetail(file.drawerDetail, file.drawerMode);
+          el.diffDrawer.hidden = false;
+          el.diffDrawer.setAttribute('aria-hidden', 'false');
+          el.diffDrawerBackdrop.hidden = false;
+        }
         function renderDiff(issue) {
           const files = extractDiffFilesFromHistory(state.history).concat(getPresentation(issue).diffFiles || []);
           const seen = new Set();
@@ -2475,20 +3304,35 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             seen.add(key);
             return true;
           }).slice(0, 12);
+          state.renderedDiffFiles = [];
           if (!uniqueFiles.length) {
+            closeDiffDrawer();
             el.diffList.innerHTML = '<p class="panel-copy">' + escapeHtml(t('noCodeChanges')) + '</p>';
             return;
           }
           function diffStatLabel(file) {
-            if (file.additions != null || file.deletions != null) {
-              return '+' + String(file.additions || 0) + ' -' + String(file.deletions || 0);
+            const stats = (file.additions != null || file.deletions != null) ? file : diffStatsForPath(state.history, file.path);
+            if (stats && (stats.additions != null || stats.deletions != null)) {
+              return '+' + String(stats.additions || 0) + ' -' + String(stats.deletions || 0);
             }
-            if (file.badge === 'A') return '+? -0';
-            if (file.badge === 'D') return '+0 -?';
-            return '+? -?';
+            return '';
           }
-          el.diffList.innerHTML = uniqueFiles.map((file) => (
-            '<div class="diff-row"><div><strong>' + escapeHtml(file.path) + '</strong><span>' + escapeHtml(diffStatLabel(file)) + ' · ' + escapeHtml(t('reason')) + ': ' + expandableCopy(file.summary || 'modified', 'modified', 130) + '</span><details><summary>' + escapeHtml(t('diffDetails')) + '</summary><small class="diff-detail">' + expandableCopy(file.detail || file.summary || t('noDiffDetail'), '', 260) + '</small></details></div><b class="diff-stat ' + escapeHtml(file.tone || '') + '">' + escapeHtml(file.badge) + '</b></div>'
+          state.renderedDiffFiles = uniqueFiles.map((file) => {
+            const stats = (file.additions != null || file.deletions != null) ? file : diffStatsForPath(state.history, file.path);
+            const statsLabel = diffStatLabel(file);
+            const statsMarkup = renderDiffStatMarkup(stats);
+            const detail = diffDetailForFile(file, stats);
+            return Object.assign({}, file, {
+              statsLabel,
+              statsMarkup,
+              drawerDetail: detail.text,
+              drawerMode: detail.mode,
+              drawerIsExcerpt: detail.isExcerpt,
+              drawerNoteKey: detail.noteKey
+            });
+          });
+          el.diffList.innerHTML = state.renderedDiffFiles.map((file, index) => (
+            '<div class="diff-row"><div><strong>' + escapeHtml(file.path) + '</strong><span>' + (file.statsMarkup ? ('<span class="diff-row-stats"><span class="diff-stat-summary">' + file.statsMarkup + '</span></span><span class="diff-row-separator"> · </span>') : '') + escapeHtml(t('reason')) + ': ' + expandableCopy(file.summary || 'modified', 'modified', 130) + '</span><button class="diff-open-button" type="button" data-diff-open="' + String(index) + '">' + escapeHtml(file.drawerMode === 'full' ? t('diffDetails') : t('diffSummary')) + '</button></div><b class="diff-stat ' + escapeHtml(file.tone || '') + '">' + escapeHtml(file.badge) + '</b></div>'
           )).join('');
         }
         function findExpandedHistoryText(summary) {
@@ -2597,8 +3441,8 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         function renderActions(issue) {
           const presentation = getPresentation(issue);
           if (presentation.mode === 'completed') {
-            setRuntimeAction(el.pauseButton, 'history', t('fullLogButton'), 'primary');
-            setRuntimeAction(el.requestButton, 'request', t('newRequest'), 'primary');
+            setRuntimeAction(el.pauseButton, 'history', t('completed'), 'success');
+            setRuntimeAction(el.requestButton, 'request', t('addRequirement'), 'primary');
             setRuntimeAction(el.backButton, 'back', t('backTelegram'), '');
             return;
           }
@@ -2616,6 +3460,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           if (!state.issue) return;
           applyPreferences();
           renderHero(state.issue);
+          renderOverviewSignal(state.issue);
           renderRound(state.issue);
           renderStages(state.issue);
           renderTimeline();
@@ -2676,6 +3521,10 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           if (!button) return;
           if (button.classList.contains('expand-button')) {
             toggleExpandedText(button);
+            return;
+          }
+          if (button.classList.contains('diff-open-button')) {
+            openDiffDrawer(Number(button.getAttribute('data-diff-open') || '-1'));
           }
         });
         document.querySelectorAll('[data-runtime-action]').forEach((button) => {
@@ -2717,6 +3566,15 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             setActiveTab(button.getAttribute('data-tab'));
           });
         });
+        el.hero.addEventListener('click', () => {
+          setHeroExpanded(!state.heroExpanded);
+        });
+        el.hero.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            setHeroExpanded(!state.heroExpanded);
+          }
+        });
         el.themeToggle.addEventListener('click', (event) => {
           const button = event.target && event.target.closest ? event.target.closest('[data-theme-choice]') : null;
           state.theme = button ? button.getAttribute('data-theme-choice') : (state.theme === 'light' ? 'dark' : 'light');
@@ -2730,6 +3588,12 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         });
         el.historyCloseButton.addEventListener('click', () => {
           el.historyPanel.hidden = true;
+        });
+        el.diffDrawerCloseButton.addEventListener('click', () => {
+          closeDiffDrawer();
+        });
+        el.diffDrawerBackdrop.addEventListener('click', () => {
+          closeDiffDrawer();
         });
         applyPreferences();
         load().then(openStream).catch((error) => {

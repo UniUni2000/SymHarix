@@ -172,6 +172,24 @@ describe('Telegram Mini App issue presentation', () => {
     expect(presentation.emptyChildQueueLabel).toContain('单 issue');
   });
 
+  test('humanizes live state labels instead of exposing raw orchestrator enums', () => {
+    const running = buildRuntimeMiniAppIssuePresentation(createIssue({
+      supervisor_locale: 'en',
+      phase: 'DEV',
+      orchestrator_state: 'dev_running',
+    }));
+    const review = buildRuntimeMiniAppIssuePresentation(createIssue({
+      supervisor_locale: 'en',
+      phase: 'REVIEW',
+      orchestrator_state: 'review_running',
+    }));
+
+    expect(running.stateLabel).toBe('Running');
+    expect(review.stateLabel).toBe('Review running');
+    expect(running.stateLabel).not.toContain('dev_running');
+    expect(review.stateLabel).not.toContain('review_running');
+  });
+
   test('reserves an auto-sized column for activity feed badges', () => {
     const html = renderRuntimeMiniAppPage('INT-143');
 
@@ -296,6 +314,7 @@ describe('Telegram Mini App issue presentation', () => {
 
     expect(html).toContain('class="github-mark"');
     expect(html).toContain('id="diff-list"');
+    expect(html).toContain('id="diff-drawer"');
     expect(html).toContain('代码改动');
   });
 
@@ -331,9 +350,15 @@ describe('Telegram Mini App issue presentation', () => {
     expect(html).toContain('验收标准');
     expect(html).toContain('id="acceptance-list"');
     expect(html).toContain('id="delivery-summary"');
-    expect(html).toContain('完整 diff / 详情');
+    expect(html).toContain('完整 diff');
+    expect(html).toContain('改动摘要');
     expect(html).toContain("escapeHtml(t('reason'))");
+    expect(html).toContain('class="diff-open-button"');
+    expect(html).toContain('id="diff-drawer-note"');
     expect(html).toContain("[t('restore'), isRetryableDeliveryFailure(issue) ? t('restorable') : t('noRestore')]");
+    expect(html).toContain('class="diff-stat-summary"');
+    expect(html).toContain('class="diff-stat-token add"');
+    expect(html).toContain('class="diff-stat-token del"');
   });
 
   test('renders Mini App event times down to seconds', () => {
@@ -357,7 +382,7 @@ describe('Telegram Mini App issue presentation', () => {
     }));
     const html = renderRuntimeMiniAppPage('INT-155');
 
-    expect(presentation.stateLabel).toBe('Needs recovery');
+    expect(presentation.stateLabel).toBe('需要恢复');
     expect(presentation.nextRecommendation).toContain('一键重试');
     expect(html).toContain('修复交付并重试');
     expect(html).toContain("setRuntimeAction(el.pauseButton, 'retry', t('retryDelivery')");
@@ -369,10 +394,21 @@ describe('Telegram Mini App issue presentation', () => {
 
     expect(html).toContain('id="history-panel"');
     expect(html).toContain('id="history-entry-list"');
-    expect(html).toContain("setRuntimeAction(el.pauseButton, 'history', t('fullLogButton')");
+    expect(html).toContain("setRuntimeAction(el.pauseButton, 'history', t('completed'), 'success')");
     expect(html).toContain("if (action === 'history')");
     expect(html).toContain('renderHistoryPanel()');
     expect(html).toContain('完整日志');
+  });
+
+  test('renders the compact hero rail and overview signal shell', () => {
+    const html = renderRuntimeMiniAppPage('INT-155');
+
+    expect(html).toContain('id="progress-fill"');
+    expect(html).toContain('class="progress-value"');
+    expect(html).toContain('id="overview-signal"');
+    expect(html).toContain('id="signal-pills"');
+    expect(html).toContain("function renderOverviewSignal(issue)");
+    expect(html).toContain("el.hero.addEventListener('click'");
   });
 
   test('renders expandable controls for long Mini App summaries', () => {
@@ -389,15 +425,36 @@ describe('Telegram Mini App issue presentation', () => {
     expect(html).toContain('expandableCopy(findExpandedHistoryText(item.summary)');
   });
 
+  test('emits syntactically valid inline client script for the Mini App page', () => {
+    const html = renderRuntimeMiniAppPage('INT-155');
+    const scriptMatch = html.match(/<script>([\s\S]*)<\/script>/);
+
+    expect(scriptMatch).not.toBeNull();
+    expect(() => new Function(scriptMatch?.[1] || '')).not.toThrow();
+  });
+
   test('extracts deleted and modified files from history for the code diff panel', () => {
     const html = renderRuntimeMiniAppPage('INT-155');
 
     expect(html).toContain('function extractDiffFilesFromHistory(');
     expect(html).toContain('entry.detail && entry.detail.payload && entry.detail.payload.body');
     expect(html).toContain("parseChangeLine(line)");
+    expect(html).toContain("const match = String(value || '').match(/\\+(\\d+)\\s*-\\s*(\\d+)/);");
+    expect(html).toContain('additions: stats.additions');
+    expect(html).toContain('deletions: stats.deletions');
     expect(html).toContain("badge: 'D'");
     expect(html).toContain("badge: 'M'");
-    expect(html).toContain('class="diff-detail"');
+    expect(html).toContain('function openDiffDrawer(index)');
+    expect(html).toContain("diffExcerptNote");
+    expect(html).toContain("diffSummaryOnlyNote");
+    expect(html).toContain("diffSummary");
+    expect(html).toContain('history && Array.isArray(history.file_diffs)');
+    expect(html).toContain('historyFileDiffForPath(history, path)');
+    expect(html).toContain('function formatDiffHunkHeader(line)');
+    expect(html).toContain("/^diff --git /.test(line)");
+    expect(html).toContain("return '<span class=\"diff-drawer-line hunk\">'");
+    expect(html).toContain('id="diff-drawer-detail"');
+    expect(html).toContain("file.drawerMode === 'full' ? t('diffDetails') : t('diffSummary')");
     expect(html).toContain('getPresentation(issue).diffFiles');
     expect(html).toContain('extractDiffFilesFromHistory(state.history)');
   });
