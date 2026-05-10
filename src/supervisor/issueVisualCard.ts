@@ -1,6 +1,7 @@
 import { Resvg } from '@resvg/resvg-js';
 import type { BotTransportPhoto } from '../bots/types';
 import type { RuntimeIssueView } from '../runtime/types';
+import { inferRuntimeLocaleFromText, localizeKnownRuntimeText, type RuntimeLocale } from '../i18n/locale';
 
 export interface SupervisorIssueVisualCard {
   media_key: string;
@@ -90,13 +91,34 @@ function isFailed(issue: RuntimeIssueView): boolean {
     /failed|blocked|halted/i.test(issue.orchestrator_state ?? '');
 }
 
-function statusLabel(issue: RuntimeIssueView): string {
-  if (isCanceled(issue)) return '已取消';
-  if (isDone(issue)) return '已完成';
-  if (isFailed(issue)) return '需要处理';
-  if (issue.active_decision_kind || issue.governance_status === 'blocked') return '需要决策';
-  if (issue.phase === 'REVIEW' || /review/i.test(issue.tracker_state)) return 'Review 中';
-  return '执行中';
+function isEnglishLocale(locale: RuntimeLocale | null | undefined): boolean {
+  return locale === 'en';
+}
+
+function issueLocale(issue: RuntimeIssueView): RuntimeLocale {
+  return issue.supervisor_locale ?? inferRuntimeLocaleFromText([
+    issue.title,
+    issue.supervisor_plan_summary,
+    issue.delivery_summary,
+    issue.next_recommended_action,
+  ].filter(Boolean).join('\n'));
+}
+
+function textForLocale(locale: RuntimeLocale | null | undefined, zh: string, en: string): string {
+  return isEnglishLocale(locale) ? en : zh;
+}
+
+function localizedKnown(value: string, locale: RuntimeLocale | null | undefined): string {
+  return isEnglishLocale(locale) ? localizeKnownRuntimeText(value, locale) : value;
+}
+
+function statusLabel(issue: RuntimeIssueView, locale: RuntimeLocale | null | undefined = issueLocale(issue)): string {
+  if (isCanceled(issue)) return textForLocale(locale, '已取消', 'Cancelled');
+  if (isDone(issue)) return textForLocale(locale, '已完成', 'Completed');
+  if (isFailed(issue)) return textForLocale(locale, '需要处理', 'Needs recovery');
+  if (issue.active_decision_kind || issue.governance_status === 'blocked') return textForLocale(locale, '需要决策', 'Needs decision');
+  if (issue.phase === 'REVIEW' || /review/i.test(issue.tracker_state)) return textForLocale(locale, 'Review 中', 'In review');
+  return textForLocale(locale, '执行中', 'Running');
 }
 
 function statusTone(issue: RuntimeIssueView): { pill: string; text: string; progress: string; debt: string } {
@@ -125,13 +147,14 @@ function detailChips(issue: RuntimeIssueView): string[] {
 }
 
 function latestSignal(issue: RuntimeIssueView): string {
+  const locale = issueLocale(issue);
   const milestone = issue.milestones?.at(-1)?.summary;
   return compact(
-    issue.delivery_summary ||
+    localizedKnown(issue.delivery_summary ||
       issue.next_recommended_action ||
       milestone ||
       issue.supervisor_plan_summary ||
-      'Supervisor has the issue tracked in the runtime control plane.',
+      textForLocale(locale, 'Supervisor 已在 runtime 控制面跟踪这张单。', 'Supervisor has the issue tracked in the runtime control plane.'), locale),
     92,
   );
 }
@@ -145,6 +168,7 @@ function progressValue(issue: RuntimeIssueView): number {
 }
 
 export function buildSupervisorIssueVisualCardSvg(issue: RuntimeIssueView): string {
+  const locale = issueLocale(issue);
   const tone = statusTone(issue);
   const titleLines = wrapText(issue.title, 31, 2);
   const chips = detailChips(issue);
@@ -152,14 +176,18 @@ export function buildSupervisorIssueVisualCardSvg(issue: RuntimeIssueView): stri
   const progressWidth = Math.round(760 * progress / 100);
   const signalLines = wrapText(latestSignal(issue), 38, 2);
   const scopeLines = [
-    issue.phase === 'REVIEW' ? 'Review 当前交付状态与证据' : '分析仓库当前状态与缺失内容',
-    issue.actions.can_retry ? '识别失败原因并准备重试' : '识别最紧急问题与下一步',
-    '保持 GitHub / Linear / runtime 状态一致',
+    issue.phase === 'REVIEW'
+      ? textForLocale(locale, 'Review 当前交付状态与证据', 'Review current delivery state and evidence')
+      : textForLocale(locale, '分析仓库当前状态与缺失内容', 'Analyze current repo state and gaps'),
+    issue.actions.can_retry
+      ? textForLocale(locale, '识别失败原因并准备重试', 'Identify failure cause and prepare retry')
+      : textForLocale(locale, '识别最紧急问题与下一步', 'Identify the most urgent issue and next step'),
+    textForLocale(locale, '保持 GitHub / Linear / runtime 状态一致', 'Keep GitHub / Linear / runtime state aligned'),
   ];
   const acceptanceLines = [
-    issue.github_issue_number ? `GitHub #${issue.github_issue_number} 状态可追踪` : 'Issue 已被 runtime 跟踪',
-    issue.active_pr_number ? `PR #${issue.active_pr_number} 与单据一致` : '交付状态清晰可解释',
-    '用户能从 Telegram 打开运行视图',
+    issue.github_issue_number ? `GitHub #${issue.github_issue_number} ${textForLocale(locale, '状态可追踪', 'is traceable')}` : textForLocale(locale, 'Issue 已被 runtime 跟踪', 'Issue is tracked by runtime'),
+    issue.active_pr_number ? `PR #${issue.active_pr_number} ${textForLocale(locale, '与单据一致', 'matches the issue')}` : textForLocale(locale, '交付状态清晰可解释', 'Delivery state is clear and explainable'),
+    textForLocale(locale, '用户能从 Telegram 打开运行视图', 'User can open the runtime view from Telegram'),
   ];
   const chipSvg = chips.slice(0, 2).map((chip, index) => {
     const widths = [520, 310];
@@ -196,7 +224,7 @@ export function buildSupervisorIssueVisualCardSvg(issue: RuntimeIssueView): stri
   <rect x="88" y="142" width="158" height="38" rx="12" fill="#132B3B" stroke="#24495C"/>
   <text x="112" y="168" fill="#A6C2D1" font-size="18" font-weight="800">${escapeXml(issue.identifier)}</text>
   <rect x="262" y="142" width="232" height="38" rx="12" fill="${tone.pill}" stroke="#51472C"/>
-  <text x="286" y="168" fill="${tone.text}" font-size="18" font-weight="800">${escapeXml(`${issue.complexity ?? 'L2'} · ${statusLabel(issue)}`)}</text>
+  <text x="286" y="168" fill="${tone.text}" font-size="18" font-weight="800">${escapeXml(`${issue.complexity ?? 'L2'} · ${statusLabel(issue, locale)}`)}</text>
   <rect x="512" y="142" width="258" height="38" rx="12" fill="#103B2B" stroke="#1D6B48"/>
   <text x="536" y="168" fill="#80E6AD" font-size="18" font-weight="800">High Confidence</text>
 
@@ -213,8 +241,8 @@ export function buildSupervisorIssueVisualCardSvg(issue: RuntimeIssueView): stri
   ${chipSvg}
 
   <rect x="88" y="382" width="904" height="128" rx="22" fill="#0C2432" stroke="#214455" stroke-width="2"/>
-  <text x="122" y="424" fill="#63E7A8" font-size="24" font-weight="850">Supervisor 判断</text>
-  <text x="870" y="424" text-anchor="end" fill="${tone.text}" font-size="22" font-weight="850">${escapeXml(statusLabel(issue))}</text>
+  <text x="122" y="424" fill="#63E7A8" font-size="24" font-weight="850">${textForLocale(locale, 'Supervisor 判断', 'Supervisor Judgment')}</text>
+  <text x="870" y="424" text-anchor="end" fill="${tone.text}" font-size="22" font-weight="850">${escapeXml(statusLabel(issue, locale))}</text>
   ${textLines({
     x: 122,
     y: 462,
@@ -226,35 +254,36 @@ export function buildSupervisorIssueVisualCardSvg(issue: RuntimeIssueView): stri
   })}
 
   <rect x="88" y="540" width="424" height="180" rx="20" fill="#0B2230" stroke="#1F4253" stroke-width="2"/>
-  <text x="122" y="586" fill="#FFFFFF" font-size="22" font-weight="850">本次范围</text>
+  <text x="122" y="586" fill="#FFFFFF" font-size="22" font-weight="850">${textForLocale(locale, '本次范围', 'Scope')}</text>
   ${listItems(scopeLines, 124, 626, '#66F0B4')}
 
   <rect x="548" y="540" width="444" height="180" rx="20" fill="#0B2230" stroke="#1F4253" stroke-width="2"/>
-  <text x="582" y="586" fill="#FFFFFF" font-size="22" font-weight="850">验收标准</text>
+  <text x="582" y="586" fill="#FFFFFF" font-size="22" font-weight="850">${textForLocale(locale, '验收标准', 'Acceptance')}</text>
   ${listItems(acceptanceLines, 584, 626, '#8CCAFF')}
 
   <rect x="88" y="750" width="904" height="110" rx="20" fill="#24261E" stroke="#615332" stroke-width="2"/>
-  <text x="122" y="794" fill="${tone.debt}" font-size="23" font-weight="850">交付阻塞</text>
+  <text x="122" y="794" fill="${tone.debt}" font-size="23" font-weight="850">${textForLocale(locale, '交付阻塞', 'Delivery Blocker')}</text>
   <circle cx="126" cy="828" r="6" fill="${tone.debt}"/>
-  <text x="148" y="836" fill="#E7DDB7" font-size="21" font-weight="650">${escapeXml(compact(issue.next_recommended_action || '继续等待最终交付动作完成。', 48))}</text>
+  <text x="148" y="836" fill="#E7DDB7" font-size="21" font-weight="650">${escapeXml(compact(localizedKnown(issue.next_recommended_action || textForLocale(locale, '继续等待最终交付动作完成。', 'Continue waiting for final delivery to complete.'), locale), 48))}</text>
 
-  <text x="88" y="912" fill="#E8F4FA" font-size="24" font-weight="850">阶段进度</text>
+  <text x="88" y="912" fill="#E8F4FA" font-size="24" font-weight="850">${textForLocale(locale, '阶段进度', 'Stage Progress')}</text>
   <text x="884" y="912" text-anchor="end" fill="#8AA4B3" font-size="18" font-weight="700">Plan · Dispatch · Execution</text>
   <rect x="156" y="954" width="760" height="10" rx="5" fill="#1E4358"/>
   <rect x="156" y="954" width="${progressWidth}" height="10" rx="5" fill="${tone.progress}"/>
   <circle cx="156" cy="958" r="24" fill="#68E7A7"/>
-  <text x="156" y="1004" text-anchor="middle" fill="#84E9B5" font-size="18" font-weight="800">计划</text>
+  <text x="156" y="1004" text-anchor="middle" fill="#84E9B5" font-size="18" font-weight="800">${textForLocale(locale, '计划', 'Plan')}</text>
   <text x="156" y="1028" text-anchor="middle" fill="#84E9B5" font-size="17" font-weight="800">100%</text>
   <circle cx="536" cy="958" r="24" fill="${progress >= 66 ? '#68E7A7' : '#16384B'}" stroke="#4AA9DF" stroke-width="4"/>
-  <text x="536" y="1004" text-anchor="middle" fill="${progress >= 66 ? '#84E9B5' : '#88A2B2'}" font-size="18" font-weight="800">调度</text>
-  <text x="536" y="1028" text-anchor="middle" fill="${progress >= 66 ? '#84E9B5' : '#88A2B2'}" font-size="17" font-weight="800">${progress >= 66 ? '100%' : '进行中'}</text>
+  <text x="536" y="1004" text-anchor="middle" fill="${progress >= 66 ? '#84E9B5' : '#88A2B2'}" font-size="18" font-weight="800">${textForLocale(locale, '调度', 'Dispatch')}</text>
+  <text x="536" y="1028" text-anchor="middle" fill="${progress >= 66 ? '#84E9B5' : '#88A2B2'}" font-size="17" font-weight="800">${progress >= 66 ? '100%' : textForLocale(locale, '进行中', 'Active')}</text>
   <circle cx="916" cy="958" r="24" fill="${progress >= 100 ? '#68E7A7' : '#102D40'}" stroke="#4AA9DF" stroke-width="5"/>
-  <text x="916" y="1004" text-anchor="middle" fill="${progress >= 100 ? '#84E9B5' : '#8CCAFF'}" font-size="18" font-weight="800">交付</text>
-  <text x="916" y="1028" text-anchor="middle" fill="${progress >= 100 ? '#84E9B5' : '#8CCAFF'}" font-size="17" font-weight="800">${progress >= 100 ? '100%' : '处理中'}</text>
+  <text x="916" y="1004" text-anchor="middle" fill="${progress >= 100 ? '#84E9B5' : '#8CCAFF'}" font-size="18" font-weight="800">${textForLocale(locale, '交付', 'Delivery')}</text>
+  <text x="916" y="1028" text-anchor="middle" fill="${progress >= 100 ? '#84E9B5' : '#8CCAFF'}" font-size="17" font-weight="800">${progress >= 100 ? '100%' : textForLocale(locale, '处理中', 'Pending')}</text>
 </svg>`;
 }
 
 export function buildSupervisorIssueVisualCard(issue: RuntimeIssueView): SupervisorIssueVisualCard {
+  const locale = issueLocale(issue);
   const svg = buildSupervisorIssueVisualCardSvg(issue);
   const png = new Resvg(svg, {
     fitTo: {
@@ -273,7 +302,7 @@ export function buildSupervisorIssueVisualCard(issue: RuntimeIssueView): Supervi
   const repo = issue.github_repo ? ` · ${escapeXml(compact(issue.github_repo, 34))}` : '';
   return {
     media_key: `issue-card|${issue.identifier}|${stateKey}`,
-    caption: `<b>${escapeXml(issue.identifier)} · ${escapeXml(compact(issue.title, 56))}</b>\n${escapeXml(statusLabel(issue))}${repo}`,
+    caption: `<b>${escapeXml(issue.identifier)} · ${escapeXml(compact(issue.title, 56))}</b>\n${escapeXml(statusLabel(issue, locale))}${repo}`,
     photo: {
       bytes: png,
       filename: `${safeFilenamePart(issue.identifier)}-issue-card.png`,

@@ -102,6 +102,25 @@ describe('governanceCards', () => {
     expect(message.action_rows ?? []).toHaveLength(0);
   });
 
+  test('renders resolved cards in English for English supervisor issues', () => {
+    const issue = createGovernanceBlockedIssue();
+    issue.supervisor_locale = 'en';
+    const message = buildGovernanceResolvedMessage(issue, {
+      resultSummary: '已恢复自动执行，这张治理卡片已结束。',
+    });
+
+    expect(message.format).toBe('telegram_html');
+    expect(message.text).toContain('<b>Processed · INT-37</b>');
+    expect(message.text).toContain('This governance card has been processed');
+    expect(message.text).toContain('<b>Repository</b>');
+    expect(message.text).toContain('<b>Result</b>');
+    expect(message.text).toContain('Automatic execution has resumed');
+    expect(message.text).toContain('Current status: DEV · In Progress · halted');
+    expect(message.text).not.toContain('已处理');
+    expect(message.text).not.toContain('处理结果');
+    expect(message.text).not.toContain('当前状态');
+  });
+
   test('renders executing cards while Telegram governance actions are still running', () => {
     const message = buildGovernanceExecutingMessage(createGovernanceBlockedIssue(), {
       actionLabel: '按方案拆成两个任务',
