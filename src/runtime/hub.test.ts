@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
+import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'events';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { initializeSchema } from '../database/schema';
 import {
   AgentRunRepository,
@@ -38,6 +42,14 @@ class FakeController extends EventEmitter {
     accepted: true,
     status: 'queued' as const,
     message: `queued ${issueId}`,
+    issue_id: issueId,
+    issue_identifier: 'INT-1',
+  });
+
+  closeIssue = async (issueId: string, request: { successor_issue_id?: string | null; reason?: string | null } = {}) => ({
+    accepted: true,
+    status: 'accepted' as const,
+    message: `closed ${issueId}${request.successor_issue_id ? ` -> ${request.successor_issue_id}` : ''}`,
     issue_id: issueId,
     issue_identifier: 'INT-1',
   });
@@ -122,9 +134,16 @@ class FakeController extends EventEmitter {
 
 describe('RuntimeHub', () => {
   let db: Database;
+  const tempDirs: string[] = [];
 
   afterEach(() => {
     db?.close();
+    while (tempDirs.length > 0) {
+      const dir = tempDirs.pop();
+      if (dir) {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
   });
 
   test('builds runtime views from DB work items and live timeline events', () => {
@@ -1233,6 +1252,148 @@ describe('RuntimeHub', () => {
     hub.dispose();
   });
 
+  test('falls back to rejected governance suggestion actions when controller handlers are unavailable', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workItemRepository = new WorkItemRepository(db);
+    workItemRepository.create({
+      id: 'issue-1',
+      linear_issue_id: 'issue-1',
+      linear_identifier: 'INT-1',
+      linear_title: 'Governance action proxy',
+      linear_state: 'Todo',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'halted',
+    });
+
+    const controller = new FakeController();
+    Object.assign(controller, {
+      executeGovernanceSuggestion: undefined,
+      dismissGovernanceSuggestion: undefined,
+    });
+    const hub = new RuntimeHub(db, controller);
+
+    await expect((hub as any).executeGovernanceSuggestion('INT-1', 'suggestion-1')).resolves.toMatchObject({
+      accepted: false,
+      status: 'rejected',
+      message: 'Governance suggestion execution is not available',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+    });
+    await expect((hub as any).dismissGovernanceSuggestion('INT-1', 'suggestion-1')).resolves.toMatchObject({
+      accepted: false,
+      status: 'rejected',
+      message: 'Governance suggestion dismissal is not available',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+    });
+
+    hub.dispose();
+  });
+
+  test('translates successor identifiers when closing an issue and publishes the successor view', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workItemRepository = new WorkItemRepository(db);
+    workItemRepository.create({
+      id: 'issue-1',
+      linear_issue_id: 'issue-1',
+      linear_identifier: 'INT-1',
+      linear_title: 'Close the current issue',
+      linear_state: 'In Progress',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'dev_running',
+    });
+    workItemRepository.create({
+      id: 'issue-2',
+      linear_issue_id: 'issue-2',
+      linear_identifier: 'INT-2',
+      linear_title: 'Follow-up issue',
+      linear_state: 'Todo',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'halted',
+    });
+
+    const controller = new FakeController();
+    let receivedRequest: { successor_issue_id?: string | null; reason?: string | null } | null = null;
+    controller.closeIssue = async (issueId: string, request = {}) => {
+      receivedRequest = request;
+      return {
+        accepted: true,
+        status: 'accepted',
+        message: `closed ${issueId}`,
+        issue_id: issueId,
+        issue_identifier: 'INT-1',
+      };
+    };
+
+    const hub = new RuntimeHub(db, controller);
+    const events: Array<{ type: string; identifier?: string | null }> = [];
+    const unsubscribe = hub.subscribe((event) => {
+      events.push({
+        type: event.type,
+        identifier: event.type === 'issue' ? event.data.identifier : undefined,
+      });
+    });
+
+    await expect(hub.closeIssue('INT-1', {
+      successor_issue_id: 'INT-2',
+      reason: 'Follow-up in a new issue',
+    })).resolves.toMatchObject({
+      accepted: true,
+      issue_id: 'issue-1',
+    });
+
+    expect(receivedRequest).toEqual({
+      successor_issue_id: 'issue-2',
+      reason: 'Follow-up in a new issue',
+    });
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'issue', identifier: 'INT-1' }),
+      expect.objectContaining({ type: 'issue', identifier: 'INT-2' }),
+    ]));
+
+    unsubscribe();
+    hub.dispose();
+  });
+
+  test('adds and removes runtime subscribers through direct subscriptions and stream readers', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const hub = new RuntimeHub(db, new FakeController());
+    const receivedTypes: string[] = [];
+    const unsubscribe = hub.subscribe((event) => {
+      receivedTypes.push(event.type);
+    });
+
+    expect((hub as any).subscribers.size).toBe(1);
+
+    const controller = new FakeController();
+    hub.setController(controller);
+    controller.emit('state:changed');
+
+    expect(receivedTypes).toContain('overview');
+
+    unsubscribe();
+    expect((hub as any).subscribers.size).toBe(0);
+
+    const stream = hub.createStream();
+    const reader = stream.getReader();
+    const first = await reader.read();
+    const payload = new TextDecoder().decode(first.value);
+
+    expect(payload).toContain('event: snapshot');
+    expect((hub as any).subscribers.size).toBe(1);
+
+    await reader.cancel();
+    expect((hub as any).subscribers.size).toBe(0);
+
+    hub.dispose();
+  });
+
   test('builds summary and replay history from agent runs and review events', () => {
     db = new Database(':memory:');
     initializeSchema(db);
@@ -1329,6 +1490,172 @@ describe('RuntimeHub', () => {
     expect(historyView.entries.some((entry: any) => entry.source === 'agent_run')).toBe(true);
     expect(historyView.entries.some((entry: any) => entry.source === 'governance')).toBe(true);
     expect(historyView.entries.some((entry: any) => entry.title.includes('Governance'))).toBe(true);
+
+    hub.dispose();
+  });
+
+  test('attaches full workspace file diffs to history views when a git worktree is available', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const repoDir = mkdtempSync(join(tmpdir(), 'runtime-hub-diff-'));
+    tempDirs.push(repoDir);
+    mkdirSync(join(repoDir, 'src', 'runtime'), { recursive: true });
+    writeFileSync(join(repoDir, 'src', 'runtime', 'miniAppPage.ts'), [
+      'const ring = renderProgressRing(progress);',
+      'const heroWidth = 176;',
+      'renderOverviewSignal(issue);',
+      '',
+    ].join('\n'));
+    execFileSync('git', ['init', '-b', 'main'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.email', 'codex@example.com'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.name', 'Codex'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['add', '.'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'base'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['checkout', '-b', 'feature/int-2'], { cwd: repoDir, stdio: 'pipe' });
+    writeFileSync(join(repoDir, 'src', 'runtime', 'miniAppPage.ts'), [
+      'const rail = renderProgressRail(progress, phase);',
+      'const heroWidth = 148;',
+      'renderOverviewSignal(issue);',
+      'openDiffDrawer(index);',
+      '',
+    ].join('\n'));
+    execFileSync('git', ['add', '.'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'feature diff'], { cwd: repoDir, stdio: 'pipe' });
+
+    const workItemRepository = new WorkItemRepository(db);
+    workItemRepository.create({
+      id: 'issue-diff',
+      linear_issue_id: 'issue-diff',
+      linear_identifier: 'INT-DIFF',
+      linear_title: 'Diff attachment test',
+      linear_state: 'In Progress',
+      github_repo: 'acme/repo',
+      branch_name: 'feature/int-2',
+      workspace_path: repoDir,
+      orchestrator_state: 'dev_running',
+    });
+
+    const controller = new FakeController();
+    const hub = new RuntimeHub(db, controller);
+
+    const historyView = (hub as any).getHistoryView('INT-DIFF', 5);
+
+    expect(Array.isArray(historyView.file_diffs)).toBe(true);
+    expect(historyView.file_diffs[0]?.path).toBe('src/runtime/miniAppPage.ts');
+    expect(historyView.file_diffs[0]?.patch).toContain('diff --git');
+    expect(historyView.file_diffs[0]?.patch).toContain('+const rail = renderProgressRail(progress, phase);');
+    expect(historyView.file_diffs[0]?.patch).toContain('-const ring = renderProgressRing(progress);');
+    expect(historyView.file_diffs[0]?.additions).toBeGreaterThan(0);
+    expect(historyView.file_diffs[0]?.deletions).toBeGreaterThan(0);
+
+    hub.dispose();
+  });
+
+  test('keeps workspace file diffs after the feature branch is merged into the base branch', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const repoDir = mkdtempSync(join(tmpdir(), 'runtime-hub-merged-diff-'));
+    tempDirs.push(repoDir);
+    mkdirSync(join(repoDir, 'src', 'runtime'), { recursive: true });
+    writeFileSync(join(repoDir, 'src', 'runtime', 'miniAppPage.ts'), [
+      'const ring = renderProgressRing(progress);',
+      'renderOverviewSignal(issue);',
+      '',
+    ].join('\n'));
+    execFileSync('git', ['init', '-b', 'main'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.email', 'codex@example.com'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.name', 'Codex'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['add', '.'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'base'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['checkout', '-b', 'feature/int-merged'], { cwd: repoDir, stdio: 'pipe' });
+    writeFileSync(join(repoDir, 'src', 'runtime', 'miniAppPage.ts'), [
+      'const rail = renderProgressRail(progress, phase);',
+      'renderOverviewSignal(issue);',
+      '',
+    ].join('\n'));
+    execFileSync('git', ['add', '.'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'feature diff'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['checkout', 'main'], { cwd: repoDir, stdio: 'pipe' });
+    writeFileSync(join(repoDir, 'README.md'), 'main-only change\n');
+    execFileSync('git', ['add', '.'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'main changed after branch'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['merge', '--no-ff', 'feature/int-merged', '-m', 'merge feature'], {
+      cwd: repoDir,
+      stdio: 'pipe',
+    });
+    execFileSync('git', ['checkout', 'feature/int-merged'], { cwd: repoDir, stdio: 'pipe' });
+
+    const workItemRepository = new WorkItemRepository(db);
+    workItemRepository.create({
+      id: 'issue-merged-diff',
+      linear_issue_id: 'issue-merged-diff',
+      linear_identifier: 'INT-MERGED',
+      linear_title: 'Merged diff attachment test',
+      linear_state: 'Done',
+      github_repo: 'acme/repo',
+      branch_name: 'feature/int-merged',
+      workspace_path: repoDir,
+      orchestrator_state: 'completed',
+    });
+
+    const controller = new FakeController();
+    const hub = new RuntimeHub(db, controller);
+
+    const historyView = (hub as any).getHistoryView('INT-MERGED', 5);
+
+    expect(historyView.file_diffs.map((item: any) => item.path)).toEqual(['src/runtime/miniAppPage.ts']);
+    expect(historyView.file_diffs[0]?.patch).toContain('+const rail = renderProgressRail(progress, phase);');
+    expect(historyView.file_diffs[0]?.patch).toContain('-const ring = renderProgressRing(progress);');
+    expect(historyView.file_diffs[0]?.patch).not.toContain('README.md');
+
+    hub.dispose();
+  });
+
+  test('includes untracked workspace files in history diffs', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const repoDir = mkdtempSync(join(tmpdir(), 'runtime-hub-untracked-diff-'));
+    tempDirs.push(repoDir);
+    writeFileSync(join(repoDir, 'README.md'), 'base\n');
+    execFileSync('git', ['init', '-b', 'main'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.email', 'codex@example.com'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.name', 'Codex'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['add', '.'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'base'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['checkout', '-b', 'feature/int-untracked'], { cwd: repoDir, stdio: 'pipe' });
+    mkdirSync(join(repoDir, 'src'), { recursive: true });
+    writeFileSync(join(repoDir, 'src', 'new-file.ts'), [
+      'export const answer = 42;',
+      'export const label = "runtime";',
+      '',
+    ].join('\n'));
+
+    const workItemRepository = new WorkItemRepository(db);
+    workItemRepository.create({
+      id: 'issue-untracked-diff',
+      linear_issue_id: 'issue-untracked-diff',
+      linear_identifier: 'INT-UNTRACKED',
+      linear_title: 'Untracked diff attachment test',
+      linear_state: 'In Progress',
+      github_repo: 'acme/repo',
+      branch_name: 'feature/int-untracked',
+      workspace_path: repoDir,
+      orchestrator_state: 'dev_running',
+    });
+
+    const controller = new FakeController();
+    const hub = new RuntimeHub(db, controller);
+
+    const historyView = (hub as any).getHistoryView('INT-UNTRACKED', 5);
+
+    expect(historyView.file_diffs[0]?.path).toBe('src/new-file.ts');
+    expect(historyView.file_diffs[0]?.additions).toBe(2);
+    expect(historyView.file_diffs[0]?.deletions).toBe(0);
+    expect(historyView.file_diffs[0]?.patch).toContain('new file mode');
+    expect(historyView.file_diffs[0]?.patch).toContain('+export const answer = 42;');
 
     hub.dispose();
   });
