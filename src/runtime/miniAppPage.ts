@@ -158,7 +158,7 @@ function runtimeMiniAppStateLabel(issue: RuntimeIssueView): string {
   return compactPlainText(issue.tracker_state || issue.orchestrator_state || (englishOutput ? 'Waiting' : '等待中'), 36);
 }
 
-function runtimeMiniAppProgressLabel(issue: RuntimeIssueView, progress: number): string {
+export function runtimeMiniAppProgressLabel(issue: RuntimeIssueView, progress: number): string {
   const englishOutput = issue.supervisor_locale === 'en';
   if (isRuntimeMiniAppIssueCompleted(issue)) {
     return `${englishOutput ? 'Done' : '完成'} ${progress}%`;
