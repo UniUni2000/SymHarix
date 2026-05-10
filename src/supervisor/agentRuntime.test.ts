@@ -559,7 +559,7 @@ describe('SupervisorAgentRuntimeService', () => {
     });
 
     expect(pending.message).toContain('Action: create issue');
-    expect(pending.message).toContain('Reply with: 确认 / 取消');
+    expect(pending.message).toContain('Reply with: Confirm / Cancel');
     expect(h.pendingActions.findOpenByConversation({
       transport: 'telegram',
       conversation_id: 'chat-1',
@@ -575,9 +575,9 @@ describe('SupervisorAgentRuntimeService', () => {
     expect(confirmed.media_key).toContain('issue-card|INT-999');
     expect(confirmed.photo?.content_type).toBe('image/png');
     expect(confirmed.action_rows?.flat().map((action) => action.label)).toEqual([
-      '停止',
-      '刷新卡片',
-      '打开运行视图',
+      'Stop',
+      'Refresh Card',
+      'Open Runtime View',
     ]);
     expect(confirmed.action_rows?.[1]?.[1]?.web_app?.url).toBe('/runtime/issues/INT-999/app');
     expect(h.pendingActions.findOpenByConversation({
@@ -1106,7 +1106,7 @@ describe('SupervisorAgentRuntimeService', () => {
       context: h.context,
       text: 'create an issue: 添加 Python 类型注解 no confirmation',
     });
-    expect(created.message).toContain('Issue Card · INT-999');
+    expect(created.message).toContain('已收到，已创建 INT-999');
     expect(created.issue_id).toBe('issue-new');
     expect(created.media_key).toContain('issue-card|INT-999');
 
