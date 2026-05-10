@@ -46,6 +46,14 @@ class FakeController extends EventEmitter {
     issue_identifier: 'INT-1',
   });
 
+  closeIssue = async (issueId: string, request: { successor_issue_id?: string | null; reason?: string | null } = {}) => ({
+    accepted: true,
+    status: 'accepted' as const,
+    message: `closed ${issueId}${request.successor_issue_id ? ` -> ${request.successor_issue_id}` : ''}`,
+    issue_id: issueId,
+    issue_identifier: 'INT-1',
+  });
+
   overrideGovernance = async (issueId: string) => ({
     accepted: true,
     status: 'accepted' as const,
@@ -1240,6 +1248,148 @@ describe('RuntimeHub', () => {
       accepted: true,
       message: 'dismissed suggestion-1 for issue-1',
     });
+
+    hub.dispose();
+  });
+
+  test('falls back to rejected governance suggestion actions when controller handlers are unavailable', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workItemRepository = new WorkItemRepository(db);
+    workItemRepository.create({
+      id: 'issue-1',
+      linear_issue_id: 'issue-1',
+      linear_identifier: 'INT-1',
+      linear_title: 'Governance action proxy',
+      linear_state: 'Todo',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'halted',
+    });
+
+    const controller = new FakeController();
+    Object.assign(controller, {
+      executeGovernanceSuggestion: undefined,
+      dismissGovernanceSuggestion: undefined,
+    });
+    const hub = new RuntimeHub(db, controller);
+
+    await expect((hub as any).executeGovernanceSuggestion('INT-1', 'suggestion-1')).resolves.toMatchObject({
+      accepted: false,
+      status: 'rejected',
+      message: 'Governance suggestion execution is not available',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+    });
+    await expect((hub as any).dismissGovernanceSuggestion('INT-1', 'suggestion-1')).resolves.toMatchObject({
+      accepted: false,
+      status: 'rejected',
+      message: 'Governance suggestion dismissal is not available',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+    });
+
+    hub.dispose();
+  });
+
+  test('translates successor identifiers when closing an issue and publishes the successor view', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workItemRepository = new WorkItemRepository(db);
+    workItemRepository.create({
+      id: 'issue-1',
+      linear_issue_id: 'issue-1',
+      linear_identifier: 'INT-1',
+      linear_title: 'Close the current issue',
+      linear_state: 'In Progress',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'dev_running',
+    });
+    workItemRepository.create({
+      id: 'issue-2',
+      linear_issue_id: 'issue-2',
+      linear_identifier: 'INT-2',
+      linear_title: 'Follow-up issue',
+      linear_state: 'Todo',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'halted',
+    });
+
+    const controller = new FakeController();
+    let receivedRequest: { successor_issue_id?: string | null; reason?: string | null } | null = null;
+    controller.closeIssue = async (issueId: string, request = {}) => {
+      receivedRequest = request;
+      return {
+        accepted: true,
+        status: 'accepted',
+        message: `closed ${issueId}`,
+        issue_id: issueId,
+        issue_identifier: 'INT-1',
+      };
+    };
+
+    const hub = new RuntimeHub(db, controller);
+    const events: Array<{ type: string; identifier?: string | null }> = [];
+    const unsubscribe = hub.subscribe((event) => {
+      events.push({
+        type: event.type,
+        identifier: event.type === 'issue' ? event.data.identifier : undefined,
+      });
+    });
+
+    await expect(hub.closeIssue('INT-1', {
+      successor_issue_id: 'INT-2',
+      reason: 'Follow-up in a new issue',
+    })).resolves.toMatchObject({
+      accepted: true,
+      issue_id: 'issue-1',
+    });
+
+    expect(receivedRequest).toEqual({
+      successor_issue_id: 'issue-2',
+      reason: 'Follow-up in a new issue',
+    });
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'issue', identifier: 'INT-1' }),
+      expect.objectContaining({ type: 'issue', identifier: 'INT-2' }),
+    ]));
+
+    unsubscribe();
+    hub.dispose();
+  });
+
+  test('adds and removes runtime subscribers through direct subscriptions and stream readers', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const hub = new RuntimeHub(db, new FakeController());
+    const receivedTypes: string[] = [];
+    const unsubscribe = hub.subscribe((event) => {
+      receivedTypes.push(event.type);
+    });
+
+    expect((hub as any).subscribers.size).toBe(1);
+
+    const controller = new FakeController();
+    hub.setController(controller);
+    controller.emit('state:changed');
+
+    expect(receivedTypes).toContain('overview');
+
+    unsubscribe();
+    expect((hub as any).subscribers.size).toBe(0);
+
+    const stream = hub.createStream();
+    const reader = stream.getReader();
+    const first = await reader.read();
+    const payload = new TextDecoder().decode(first.value);
+
+    expect(payload).toContain('event: snapshot');
+    expect((hub as any).subscribers.size).toBe(1);
+
+    await reader.cancel();
+    expect((hub as any).subscribers.size).toBe(0);
 
     hub.dispose();
   });

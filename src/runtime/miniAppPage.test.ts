@@ -4,7 +4,10 @@ import {
   buildRuntimeMiniAppActivityFeed,
   buildRuntimeMiniAppDiffFiles,
   buildRuntimeMiniAppIssuePresentation,
+  buildRuntimeMiniAppMilestones,
+  normalizeRuntimeMiniAppSummary,
   renderRuntimeMiniAppPage,
+  runtimeMiniAppProgressLabel,
   visibleRuntimeMiniAppMilestones,
 } from './miniAppPage';
 
@@ -157,6 +160,258 @@ describe('Telegram Mini App issue presentation', () => {
     expect(feed.every((item) => item.timestamp)).toBe(true);
   });
 
+  test('normalizes structured runtime summaries across tool, message, and fallback payloads', () => {
+    expect(normalizeRuntimeMiniAppSummary(JSON.stringify({
+      tool_name: 'bash',
+      code: 'tool_started',
+      message: 'Using Bash',
+    }))).toBe('Bash 正在运行');
+
+    expect(normalizeRuntimeMiniAppSummary(JSON.stringify({
+      tool_name: 'read',
+      code: 'tool_completed',
+      message: 'Read complete',
+    }))).toBe('Read 完成');
+
+    expect(normalizeRuntimeMiniAppSummary(JSON.stringify({
+      tool_name: 'custom_tool',
+      code: 'tool_failed',
+    }))).toBe('Custom tool failed');
+
+    expect(normalizeRuntimeMiniAppSummary(JSON.stringify({
+      message: '正在读取当前 issue 状态。',
+    }), '', 120, 'en')).toBe('正在读取当前 issue 状态。');
+
+    expect(normalizeRuntimeMiniAppSummary('{oops')).toBe('{oops');
+    expect(normalizeRuntimeMiniAppSummary('', 'Fallback summary')).toBe('Fallback summary');
+    expect(normalizeRuntimeMiniAppSummary('["array"]')).toBe('["array"]');
+    expect(normalizeRuntimeMiniAppSummary('word '.repeat(40), '', 24)).toBe('word word word word wor…');
+  });
+
+  test('derives fallback milestones for decision, proof, review, dev, and completed states', () => {
+    const blocked = buildRuntimeMiniAppMilestones(createIssue({
+      phase: 'DEV',
+      tracker_state: 'Todo',
+      orchestrator_state: 'halted',
+      governance_thread_state: 'blocked',
+      next_recommended_action: '等待用户确认下一步。',
+      milestones: [],
+      session: null,
+    }));
+    const proof = buildRuntimeMiniAppMilestones(createIssue({
+      phase: 'DEV',
+      tracker_state: 'In Progress',
+      orchestrator_state: 'halted',
+      delivery_state: 'proof_satisfied',
+      delivery_summary: '证据已满足，等待最终交付。',
+      milestones: [],
+      session: null,
+    }));
+    const review = buildRuntimeMiniAppMilestones(createIssue({
+      phase: 'REVIEW',
+      orchestrator_state: 'review_running',
+      milestones: [],
+      session: {
+        session_id: 'session-review',
+        turn_count: 4,
+        stage: 'review',
+        last_event: 'tool.completed',
+        last_message: 'Waiting for reviewer confirmation.',
+        started_at: '2026-05-04T04:15:00.000Z',
+        last_event_at: '2026-05-04T04:19:00.000Z',
+        tokens: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        recent_tools: [],
+        recent_files: [],
+      },
+    }));
+    const dev = buildRuntimeMiniAppMilestones(createIssue({
+      phase: 'DEV',
+      orchestrator_state: 'dev_running',
+      milestones: [],
+      session: {
+        session_id: 'session-dev',
+        turn_count: 2,
+        stage: 'coding',
+        last_event: 'tool.started',
+        last_message: 'Implementing the current round.',
+        started_at: '2026-05-04T04:15:00.000Z',
+        last_event_at: '2026-05-04T04:18:00.000Z',
+        tokens: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        recent_tools: [],
+        recent_files: [],
+      },
+    }));
+    const completed = buildRuntimeMiniAppMilestones(createIssue({
+      tracker_state: 'Done',
+      orchestrator_state: 'completed',
+      delivery_state: 'completed',
+      delivery_summary: 'Issue 已完成，交付闭环。',
+      milestones: [],
+      session: null,
+    }));
+
+    expect(blocked.map((item) => item.kind)).toEqual(['plan_ready', 'needs_decision']);
+    expect(blocked[1]?.summary).toContain('等待用户确认下一步');
+    expect(proof.at(-1)?.kind).toBe('proof_satisfied');
+    expect(review.at(-1)).toMatchObject({
+      kind: 'review_running',
+      timestamp: '2026-05-04T04:19:00.000Z',
+    });
+    expect(dev.at(-1)?.kind).toBe('dev_running');
+    expect(completed.at(-1)?.kind).toBe('delivery_completed');
+  });
+
+  test('uses milestone fallback copy when plan, decision, delivery, review, and dev text are missing', () => {
+    const planAndDecision = buildRuntimeMiniAppMilestones(createIssue({
+      supervisor_locale: 'en',
+      title: '',
+      supervisor_plan_summary: '',
+      phase: 'DEV',
+      tracker_state: 'Todo',
+      orchestrator_state: null as any,
+      governance_thread_state: 'blocked',
+      next_recommended_action: '',
+      governance_summary: '',
+      milestones: [],
+      session: null,
+    }));
+    const dispatchReady = buildRuntimeMiniAppMilestones(createIssue({
+      supervisor_locale: 'en',
+      phase: 'DEV',
+      tracker_state: 'Todo',
+      orchestrator_state: null as any,
+      governance_thread_state: null,
+      milestones: [],
+      session: null,
+    }));
+    const completed = buildRuntimeMiniAppMilestones(createIssue({
+      supervisor_locale: 'en',
+      tracker_state: 'Done',
+      orchestrator_state: 'completed',
+      delivery_state: 'completed',
+      delivery_summary: '',
+      milestones: [],
+      session: null,
+    }));
+    const proof = buildRuntimeMiniAppMilestones(createIssue({
+      supervisor_locale: 'en',
+      phase: 'DEV',
+      tracker_state: 'In Progress',
+      orchestrator_state: 'halted',
+      delivery_state: 'proof_satisfied',
+      delivery_summary: '',
+      milestones: [],
+      session: null,
+    }));
+    const review = buildRuntimeMiniAppMilestones(createIssue({
+      supervisor_locale: 'en',
+      phase: 'REVIEW',
+      tracker_state: 'In Review',
+      orchestrator_state: 'review_running',
+      next_recommended_action: '',
+      milestones: [],
+      session: {
+        session_id: 'session-review-fallback',
+        turn_count: 1,
+        stage: 'review',
+        last_event: 'tool.started',
+        last_message: '',
+        started_at: '2026-05-04T04:15:00.000Z',
+        last_event_at: null,
+        tokens: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        recent_tools: [],
+        recent_files: [],
+      },
+    }));
+    const dev = buildRuntimeMiniAppMilestones(createIssue({
+      supervisor_locale: 'en',
+      phase: 'DEV',
+      tracker_state: 'In Progress',
+      orchestrator_state: 'dev_running',
+      next_recommended_action: '',
+      milestones: [],
+      session: {
+        session_id: 'session-dev-fallback',
+        turn_count: 1,
+        stage: 'coding',
+        last_event: 'tool.started',
+        last_message: '',
+        started_at: '2026-05-04T04:15:00.000Z',
+        last_event_at: null,
+        tokens: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        recent_tools: [],
+        recent_files: [],
+      },
+    }));
+
+    expect(planAndDecision[0]?.summary).toBe('Plan is ready and waiting for the execution signal.');
+    expect(planAndDecision[1]?.summary).toBe('User confirmation is needed for the next step.');
+    expect(dispatchReady[1]?.summary).toBe('Ready to enter the runtime lane.');
+    expect(completed.at(-1)?.summary).toBe('Issue is complete and final delivery is closed.');
+    expect(proof.at(-1)?.summary).toBe('Proof is satisfied and final delivery is pending.');
+    expect(review.at(-1)?.summary).toBe('Review is checking delivery quality.');
+    expect(dev.at(-1)?.summary).toBe('The dev agent is advancing the current round.');
+  });
+
+  test('formats runtime progress labels across done, proof, review, build, dispatch, and plan states', () => {
+    expect(runtimeMiniAppProgressLabel(createIssue({
+      supervisor_locale: 'en',
+      tracker_state: 'Done',
+      orchestrator_state: 'completed',
+      delivery_state: 'completed',
+    }), 100)).toBe('Done 100%');
+
+    expect(runtimeMiniAppProgressLabel(createIssue({
+      supervisor_locale: 'en',
+      phase: 'DEV',
+      orchestrator_state: 'halted',
+      delivery_state: 'proof_satisfied',
+      session: null,
+    }), 82)).toBe('Proof 82%');
+
+    expect(runtimeMiniAppProgressLabel(createIssue({
+      supervisor_locale: 'en',
+      phase: 'REVIEW',
+      orchestrator_state: 'review_running',
+      session: null,
+    }), 72)).toBe('Review 72%');
+
+    expect(runtimeMiniAppProgressLabel(createIssue({
+      supervisor_locale: 'en',
+      phase: 'DEV',
+      orchestrator_state: 'dev_running',
+      session: {
+        session_id: 'session-progress',
+        turn_count: 1,
+        stage: 'coding',
+        last_event: 'tool.started',
+        last_message: 'Running',
+        started_at: '2026-05-04T04:15:00.000Z',
+        last_event_at: '2026-05-04T04:16:00.000Z',
+        tokens: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        recent_tools: [],
+        recent_files: [],
+      },
+    }), 42)).toBe('Build 42%');
+
+    expect(runtimeMiniAppProgressLabel(createIssue({
+      supervisor_locale: 'en',
+      phase: 'DEV',
+      tracker_state: 'In Progress',
+      orchestrator_state: 'halted',
+      governance_thread_state: 'waiting_on_child',
+      session: null,
+    }), 34)).toBe('Dispatch 34%');
+
+    expect(runtimeMiniAppProgressLabel(createIssue({
+      supervisor_locale: 'en',
+      phase: 'DEV',
+      tracker_state: 'Todo',
+      orchestrator_state: null as any,
+      session: null,
+    }), 18)).toBe('Plan 18%');
+  });
+
   test('switches completed issues to a closed delivery summary mode', () => {
     const presentation = buildRuntimeMiniAppIssuePresentation(createIssue({
       tracker_state: 'Done',
@@ -267,6 +522,109 @@ describe('Telegram Mini App issue presentation', () => {
     expect(diffFiles[0]?.badge).toBe('M');
     expect(new Set(diffFiles.map((file) => file.summary)).size).toBeGreaterThan(1);
     expect(diffFiles.some((file) => file.path === 'docs/CONFIGURATION.md')).toBe(false);
+  });
+
+  test('classifies diff files for docs, evidence, packages, tests, and new writes', () => {
+    const issue = createIssue({
+      change_pack_summary: {
+        profile: 'coding',
+        complexity: 'small',
+        files: [
+          'docs/README.md',
+          '.symphony/evidence.json',
+          'package.json',
+          'tests/smoke.test.ts',
+          '/Users/liupenghui/Documents/code/agent/test-cc/.symphony/state.json',
+          '/opt/project/plain.txt',
+          'src/feature.ts',
+          '',
+        ],
+        overview: 'Mini App runtime cleanup',
+      },
+      session: {
+        session_id: 'session-143',
+        turn_count: 5,
+        stage: 'coding',
+        last_event: 'tool.completed',
+        last_message: '正在更新多个交付文件。',
+        started_at: '2026-05-04T04:15:00.000Z',
+        last_event_at: '2026-05-04T04:20:00.000Z',
+        tokens: { input_tokens: 1200, output_tokens: 480, total_tokens: 1680 },
+        recent_tools: [],
+        recent_files: [
+          {
+            path: 'src/new-file.ts',
+            operation: 'write',
+            status: 'started',
+            timestamp: '2026-05-04T04:20:00.000Z',
+          },
+          {
+            path: 'src/feature.ts',
+            operation: 'edit',
+            status: 'failed',
+            timestamp: '2026-05-04T04:19:00.000Z',
+          },
+          {
+            path: 'docs/README.md',
+            operation: 'read',
+            status: 'completed',
+            timestamp: '2026-05-04T04:18:00.000Z',
+          },
+        ],
+      },
+    });
+
+    const files = buildRuntimeMiniAppDiffFiles(issue);
+    const byPath = new Map(files.map((file) => [file.path, file]));
+
+    expect(byPath.get('docs/README.md')?.summary).toBe('更新文档说明。');
+    expect(byPath.get('.symphony/evidence.json')?.summary).toBe('更新运行证据与交付状态。');
+    expect(byPath.get('package.json')?.summary).toBe('更新依赖或脚本配置。');
+    expect(byPath.get('tests/smoke.test.ts')?.summary).toBe('补充或更新回归测试。');
+    expect(byPath.get('.symphony/state.json')?.summary).toBe('更新运行证据与交付状态。');
+    expect(byPath.get('plain.txt')?.summary).toBe('Mini App runtime cleanup');
+    expect(byPath.get('src/new-file.ts')).toMatchObject({
+      badge: 'A',
+      tone: 'blue',
+    });
+    expect(byPath.get('src/new-file.ts')?.summary).toContain('写入中');
+    expect(byPath.get('src/feature.ts')?.tone).toBe('red');
+    expect(files.some((file) => file.path === '')).toBe(false);
+  });
+
+  test('covers generic file activity labels and single-segment folders in the live feed', () => {
+    const issue = createIssue({
+      phase: 'DEV',
+      orchestrator_state: 'dev_running',
+      session: {
+        session_id: 'session-generic-file',
+        turn_count: 2,
+        stage: 'coding',
+        last_event: 'tool.completed',
+        last_message: '正在处理通用文件动作。',
+        started_at: '2026-05-04T04:15:00.000Z',
+        last_event_at: '2026-05-04T04:16:00.000Z',
+        tokens: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        recent_tools: [],
+        recent_files: [
+          {
+            path: 'README.md',
+            operation: 'rename' as any,
+            status: null as any,
+            timestamp: '2026-05-04T04:16:00.000Z',
+          },
+        ],
+      },
+    });
+
+    expect(buildRuntimeMiniAppActivityFeed(issue)).toEqual([
+      expect.objectContaining({
+        label: 'File',
+        summary: '文件活动 README.md',
+        detail: '文件活动',
+        tone: 'neutral',
+      }),
+    ]);
   });
 
   test('shortens absolute runtime paths before rendering file and diff rows', () => {
@@ -457,6 +815,298 @@ describe('Telegram Mini App issue presentation', () => {
     expect(html).toContain("file.drawerMode === 'full' ? t('diffDetails') : t('diffSummary')");
     expect(html).toContain('getPresentation(issue).diffFiles');
     expect(html).toContain('extractDiffFilesFromHistory(state.history)');
+  });
+
+  test('covers state labels and progress states for waiting, blocked, retry, preparing, and cancellation flows', () => {
+    const waitingOnChild = buildRuntimeMiniAppIssuePresentation(createIssue({
+      supervisor_locale: 'en',
+      phase: 'DEV',
+      tracker_state: 'In Progress',
+      orchestrator_state: 'halted',
+      governance_thread_state: 'waiting_on_child',
+      session: null,
+    }));
+    const needsDecision = buildRuntimeMiniAppIssuePresentation(createIssue({
+      supervisor_locale: 'en',
+      phase: 'DEV',
+      tracker_state: 'Todo',
+      orchestrator_state: 'halted',
+      governance_thread_state: 'confirming',
+      active_decision_kind: 'close_as_done',
+      session: null,
+    }));
+    const retryScheduled = buildRuntimeMiniAppIssuePresentation(createIssue({
+      supervisor_locale: 'en',
+      phase: 'DEV',
+      tracker_state: 'Todo',
+      orchestrator_state: 'retry_scheduled',
+      session: null,
+    }));
+    const blocked = buildRuntimeMiniAppIssuePresentation(createIssue({
+      supervisor_locale: 'en',
+      phase: 'DEV',
+      tracker_state: 'Todo',
+      orchestrator_state: 'failed',
+      session: null,
+      delivery_state: null,
+      delivery_code: null,
+      actions: {
+        can_stop: false,
+        can_retry: false,
+        can_open_pr: false,
+      },
+    }));
+    const preparing = buildRuntimeMiniAppIssuePresentation(createIssue({
+      supervisor_locale: 'en',
+      phase: 'DEV',
+      tracker_state: 'Todo',
+      orchestrator_state: 'mapping',
+      session: null,
+    }));
+    const cancelled = buildRuntimeMiniAppIssuePresentation(createIssue({
+      supervisor_locale: 'en',
+      phase: 'DEV',
+      tracker_state: 'Todo',
+      orchestrator_state: 'cancelled',
+      session: null,
+    }));
+
+    expect(waitingOnChild).toMatchObject({
+      stateLabel: 'Waiting on child',
+      progress: 34,
+      dispatchStatus: 'Done',
+    });
+    expect(needsDecision.stateLabel).toBe('Needs decision');
+    expect(retryScheduled.stateLabel).toBe('Retry scheduled');
+    expect(blocked.stateLabel).toBe('Blocked');
+    expect(preparing.stateLabel).toBe('Preparing');
+    expect(cancelled.stateLabel).toBe('Cancelled');
+  });
+
+  test('truncates long fallback state labels when no known runtime state applies', () => {
+    const presentation = buildRuntimeMiniAppIssuePresentation(createIssue({
+      phase: 'DEV',
+      tracker_state: 'Paused by operator because cleanup is required before continuing work',
+      orchestrator_state: null as any,
+      session: null,
+    }));
+
+    expect(presentation.stateLabel).toBe('Paused by operator because cleanup…');
+  });
+
+  test('summarizes shell-heavy activity feeds into compact user-facing labels', () => {
+    const issue = createIssue({
+      phase: 'DEV',
+      orchestrator_state: 'dev_running',
+      session: {
+        session_id: 'session-commands',
+        turn_count: 6,
+        stage: 'coding',
+        last_event: 'tool.completed',
+        last_message: '正在推进 runtime Mini App 收尾。',
+        started_at: '2026-05-04T04:15:00.000Z',
+        last_event_at: '2026-05-04T04:21:00.000Z',
+        tokens: { input_tokens: 1200, output_tokens: 480, total_tokens: 1680 },
+        recent_tools: [
+          {
+            tool_name: 'Bash',
+            status: 'completed',
+            message: 'gh pr view 42',
+            summary: null,
+            path: null,
+            timestamp: '2026-05-04T04:21:00.000Z',
+          },
+          {
+            tool_name: 'Bash',
+            status: 'completed',
+            message: 'pytest -q',
+            summary: null,
+            path: null,
+            timestamp: '2026-05-04T04:20:00.000Z',
+          },
+          {
+            tool_name: 'Bash',
+            status: 'completed',
+            message: 'ls src/runtime',
+            summary: null,
+            path: null,
+            timestamp: '2026-05-04T04:19:00.000Z',
+          },
+          {
+            tool_name: 'Bash',
+            status: 'completed',
+            message: 'rm -rf docs && echo cleaned',
+            summary: null,
+            path: null,
+            timestamp: '2026-05-04T04:18:00.000Z',
+          },
+          {
+            tool_name: 'Bash',
+            status: 'completed',
+            message: 'cat > "/tmp/workspaces/INT-1/result.txt" << EOF',
+            summary: null,
+            path: null,
+            timestamp: '2026-05-04T04:17:00.000Z',
+          },
+          {
+            tool_name: 'Bash',
+            status: 'completed',
+            message: 'cat /tmp/workspaces/INT-1/notes.txt',
+            summary: null,
+            path: null,
+            timestamp: '2026-05-04T04:16:00.000Z',
+          },
+        ],
+        recent_files: [],
+      },
+    });
+
+    const summaries = buildRuntimeMiniAppActivityFeed(issue).map((item) => item.summary);
+
+    expect(summaries).toEqual(expect.arrayContaining([
+      '查看 PR #42',
+      '运行测试',
+      '检查文件列表',
+      'rm -rf docs，然后 echo cleaned',
+      '写入 result.txt',
+      '读取 notes.txt',
+    ]));
+  });
+
+  test('handles JSON shell summaries, git status, generic tool labels, and anonymized command fallbacks', () => {
+    const issue = createIssue({
+      phase: 'DEV',
+      orchestrator_state: 'dev_running',
+      session: {
+        session_id: 'session-tool-labels',
+        turn_count: 6,
+        stage: 'coding',
+        last_event: 'tool.completed',
+        last_message: '正在推进工具摘要整理。',
+        started_at: '2026-05-04T04:15:00.000Z',
+        last_event_at: '2026-05-04T04:21:00.000Z',
+        tokens: { input_tokens: 1200, output_tokens: 480, total_tokens: 1680 },
+        recent_tools: [
+          {
+            tool_name: 'Bash',
+            status: 'started',
+            message: '{"tool_name":"Bash","code":"tool_started","message":"Using Bash"}',
+            summary: null,
+            path: null,
+            timestamp: '2026-05-04T04:21:00.000Z',
+          },
+          {
+            tool_name: 'Bash',
+            status: 'completed',
+            message: 'git status > /dev/null 2> /dev/null',
+            summary: null,
+            path: null,
+            timestamp: '2026-05-04T04:20:00.000Z',
+          },
+          {
+            tool_name: 'Bash',
+            status: 'completed',
+            message: 'echo /Users/liupenghui/Documents/private.txt',
+            summary: null,
+            path: null,
+            timestamp: '2026-05-04T04:19:00.000Z',
+          },
+          {
+            tool_name: 'apply_patch',
+            status: 'completed',
+            message: '',
+            summary: '',
+            path: null,
+            timestamp: '2026-05-04T04:18:00.000Z',
+          },
+          {
+            tool_name: 'pytest',
+            status: null as any,
+            message: '',
+            summary: 'Smoke suite',
+            path: null,
+            timestamp: '2026-05-04T04:17:00.000Z',
+          },
+          {
+            tool_name: 'review_agent',
+            status: 'completed',
+            message: '',
+            summary: '',
+            path: null,
+            timestamp: '2026-05-04T04:16:00.000Z',
+          },
+        ],
+        recent_files: [],
+      },
+    });
+
+    expect(buildRuntimeMiniAppActivityFeed(issue)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: 'Bash', summary: 'Bash 正在运行', detail: 'workspace', tone: 'blue' }),
+      expect.objectContaining({ label: 'Bash', summary: '检查 Git 状态' }),
+      expect.objectContaining({ label: 'Bash', summary: 'echo private.txt' }),
+      expect.objectContaining({ label: 'Edit', summary: '编辑 workspace' }),
+      expect.objectContaining({ label: 'Test', summary: 'Smoke suite', tone: 'neutral' }),
+      expect.objectContaining({ label: 'Review', summary: 'Review running' }),
+    ]));
+  });
+
+  test('uses a graceful completed-feed fallback when final delivery copy is absent', () => {
+    const feed = buildRuntimeMiniAppActivityFeed(createIssue({
+      supervisor_locale: 'en',
+      tracker_state: 'Done',
+      orchestrator_state: 'completed',
+      delivery_state: 'completed',
+      delivery_summary: null,
+      active_pr_number: null,
+      session: null,
+    }));
+
+    expect(feed).toEqual([
+      expect.objectContaining({
+        label: 'Closed',
+        summary: 'Issue is complete and final delivery is closed.',
+        detail: 'UniUni2000/test2',
+        tone: 'green',
+      }),
+    ]);
+  });
+
+  test('uses graceful live and completed presentation fallbacks when supervisor signals are missing', () => {
+    const completed = buildRuntimeMiniAppIssuePresentation(createIssue({
+      supervisor_locale: 'en',
+      tracker_state: 'Done',
+      orchestrator_state: 'completed',
+      delivery_state: 'completed',
+      delivery_summary: '',
+      active_pr_number: null,
+      session: null,
+      riskDelta: '',
+      risk_delta: '',
+    }));
+    const live = buildRuntimeMiniAppIssuePresentation(createIssue({
+      supervisor_locale: 'en',
+      phase: 'DEV',
+      tracker_state: 'Todo',
+      orchestrator_state: null as any,
+      session: null,
+      supervisor_plan_summary: '',
+      governance_summary: '',
+      delivery_summary: '',
+      next_recommended_action: '',
+      governance_expected_handoff: '',
+      roundGoal: '',
+      riskDelta: '',
+      risk_delta: '',
+      milestones: [],
+    }));
+
+    expect(completed.judgmentSummary).toBe('Plan thread is complete and final delivery is closed.');
+    expect(completed.nextRecommendation).toBe('Completed. You can return to Telegram to start the next request.');
+    expect(live.progress).toBe(18);
+    expect(live.judgmentSummary).toBe('The system is advancing the highest-confidence next step and keeping child work ordered.');
+    expect(live.nextRecommendation).toBe('Waiting for the supervisor to write the next action.');
+    expect(live.roundGoal).toBe('Waiting for the next runtime signal.');
+    expect(live.riskDelta).toBe('stable');
   });
 
   test('humanizes raw runtime JSON before it reaches agent progress or milestones', () => {
