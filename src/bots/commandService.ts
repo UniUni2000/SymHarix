@@ -1,15 +1,15 @@
 import type { CreateIssueRequest, RuntimeControlPlane, RuntimeIssueView } from '../runtime/types';
 import { BotConversationPreferenceRepository, type BotIssueFollowupRepository } from '../database';
 import { TrackerProjectResolutionService } from '../tracker/projectResolution';
-import { buildSupervisorIssueVisualCard } from '../supervisor/issueVisualCard';
-import { isTerminalIssue } from './issueVisibility';
+import { inferRuntimeLocaleFromText, type RuntimeLocale } from '../i18n/locale';
 import { BotSubscriptionService } from './subscriptions';
+import { buildIssueCardActionRows } from './issueCardActions';
+import { buildSupervisorIssueVisualCard } from '../supervisor/issueVisualCard';
 import type {
   BotCommandContext,
   BotCommandRequest,
   BotCommandResponse,
   BotCommandName,
-  BotTransportAction,
   BotWatchPreset,
 } from './types';
 
@@ -92,83 +92,6 @@ function formatIssue(issue: RuntimeIssueView): string {
   return lines.join('\n');
 }
 
-function runtimeIssueAppPath(issue: RuntimeIssueView): string {
-  return `/runtime/issues/${encodeURIComponent(issue.identifier || issue.issue_id)}/app`;
-}
-
-function primaryIssueCardAction(issue: RuntimeIssueView): BotTransportAction {
-  const stateText = `${issue.tracker_state} ${issue.orchestrator_state ?? ''}`;
-  if (/cancelled|canceled/i.test(stateText)) {
-    return {
-      label: '已取消',
-      style: 'success',
-      callback_data: `rt|${issue.identifier}|refresh`,
-    };
-  }
-  if (isTerminalIssue(issue)) {
-    return {
-      label: '已完成',
-      style: 'success',
-      callback_data: `rt|${issue.identifier}|refresh`,
-    };
-  }
-  if (issue.actions.can_stop) {
-    return {
-      label: '停止',
-      style: 'danger',
-      callback_data: `rt|${issue.identifier}|stop`,
-    };
-  }
-  if (issue.actions.can_retry) {
-    return {
-      label: '重试',
-      style: 'success',
-      callback_data: `rt|${issue.identifier}|retry`,
-    };
-  }
-  return {
-    label: '刷新卡片',
-    callback_data: `rt|${issue.identifier}|refresh`,
-  };
-}
-
-function buildIssueCardActionRows(issue: RuntimeIssueView): BotTransportAction[][] {
-  return [
-    [primaryIssueCardAction(issue)],
-    [
-      {
-        label: '刷新卡片',
-        callback_data: `rt|${issue.identifier}|refresh`,
-      },
-      {
-        label: '打开运行视图',
-        style: 'primary',
-        web_app: { url: runtimeIssueAppPath(issue) },
-      },
-    ],
-  ];
-}
-
-function buildIssueCardResponse(issue: RuntimeIssueView): BotCommandResponse {
-  const message = [
-    `Issue Card · ${issue.identifier}`,
-    issue.title,
-    `${issue.phase} · ${issue.tracker_state} · ${issue.orchestrator_state ?? 'unknown'}`,
-    issue.github_repo ? `Repo: ${issue.github_repo}` : null,
-  ].filter(Boolean).join('\n');
-  const visual = buildSupervisorIssueVisualCard(issue);
-  return {
-    message,
-    caption: visual.caption,
-    format: 'telegram_html',
-    media_key: visual.media_key,
-    photo: visual.photo,
-    show_caption_above_media: false,
-    action_rows: buildIssueCardActionRows(issue),
-    issue_id: issue.issue_id,
-  };
-}
-
 function formatGovernanceSuggestions(issue: RuntimeIssueView): string {
   const suggestions = issue.active_governance_suggestions ?? [];
   if (suggestions.length === 0) {
@@ -193,6 +116,43 @@ function formatGovernanceSummary(issue: RuntimeIssueView): string {
     formatGovernanceSuggestions(issue),
   ].filter(Boolean);
   return parts.join('\n');
+}
+
+function inferCommandLocale(params: {
+  issue?: RuntimeIssueView | null;
+  input?: CreateIssueRequest | null;
+  rawText?: string | null;
+}): RuntimeLocale {
+  if (params.issue?.supervisor_locale === 'zh' || params.issue?.supervisor_locale === 'en') {
+    return params.issue.supervisor_locale;
+  }
+  return inferRuntimeLocaleFromText([
+    params.rawText,
+    params.input?.title,
+    params.input?.description,
+  ].filter(Boolean).join('\n'));
+}
+
+function formatIssueCreatedMessage(params: {
+  issue?: RuntimeIssueView | null;
+  issueIdentifier?: string | null;
+  input?: CreateIssueRequest | null;
+  rawText?: string | null;
+}): string {
+  const locale = inferCommandLocale({
+    issue: params.issue,
+    input: params.input,
+    rawText: params.rawText,
+  });
+  const identifier = params.issue?.identifier ?? params.issueIdentifier ?? (locale === 'en' ? 'the new issue' : '新任务');
+  if (params.issue) {
+    return locale === 'en'
+      ? `Got it, created ${params.issue.identifier} · ${params.issue.title}`
+      : `已收到，已创建 ${params.issue.identifier} · ${params.issue.title}`;
+  }
+  return locale === 'en'
+    ? `Got it, created ${identifier}`
+    : `已收到，已创建 ${identifier}`;
 }
 
 function parseWatchArgs(inlineArgs: string): {
@@ -351,7 +311,7 @@ export class BotCommandService {
       case 'status':
         return this.handleStatus(request.issue_id);
       case 'new':
-        return this.handleNew(context, request.create_issue);
+        return this.handleNew(context, request.create_issue, request.raw_text);
       case 'project':
         return this.handleProject(context, request.project_slug);
       case 'watch':
@@ -437,6 +397,7 @@ export class BotCommandService {
   private async handleNew(
     context: BotCommandContext,
     input?: CreateIssueRequest | null,
+    rawText?: string | null,
   ): Promise<BotCommandResponse> {
     if (!this.canWrite(context)) {
       return {
@@ -502,12 +463,29 @@ export class BotCommandService {
       });
     }
 
+    const message = formatIssueCreatedMessage({
+      issue,
+      issueIdentifier: result.issue_identifier,
+      input,
+      rawText,
+    });
+    if (issue) {
+      const visual = buildSupervisorIssueVisualCard(issue);
+      return {
+        message,
+        caption: visual.caption,
+        format: 'telegram_html',
+        media_key: visual.media_key,
+        photo: visual.photo,
+        show_caption_above_media: false,
+        action_rows: buildIssueCardActionRows(issue),
+        issue_id: result.issue_id,
+      };
+    }
+
     return {
-      message: issue
-        ? `已收到，已创建 ${issue.identifier} · ${issue.title}`
-        : `已收到，已创建 ${result.issue_identifier ?? '新任务'}`,
+      message,
       issue_id: result.issue_id,
-      ...(issue && context.transport === 'telegram' ? buildIssueCardResponse(issue) : {}),
     };
   }
 
