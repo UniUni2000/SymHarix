@@ -404,4 +404,49 @@ describe('TelegramWebhookBootstrapService', () => {
       'https://api.telegram.org/bottelegram-token/setWebhook',
     ]);
   });
+
+  test('retries when the tunnel provider exits before publishing a URL', async () => {
+    const calls: string[] = [];
+    const tunnelProvider = mock(async () => {
+      if (tunnelProvider.mock.calls.length === 1) {
+        throw new Error('cloudflared tunnel exited before publishing a URL (code=1, signal=null)');
+      }
+      return {
+        publicBaseUrl: 'https://good.trycloudflare.com',
+        dispose: async () => undefined,
+      };
+    });
+    const fetcher = mock(async (input: string) => {
+      calls.push(input);
+      if (input === 'https://good.trycloudflare.com') {
+        return new Response('ready', { status: 200 });
+      }
+      if (input.endsWith('/setWebhook')) {
+        return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+    });
+
+    const service = new TelegramWebhookBootstrapService({
+      botToken: 'telegram-token',
+      webhookSecret: 'secret',
+      publicBaseUrl: null,
+      fetcher: fetcher as unknown as typeof fetch,
+      retryDelayMs: 0,
+      retryAttempts: 2,
+      tunnelProvider,
+    });
+
+    const result = await service.bootstrap({
+      localBaseUrl: 'http://127.0.0.1:8080',
+      inboundPath: '/api/v1/bots/telegram/webhook',
+    });
+
+    expect(result.webhookUrl).toBe('https://good.trycloudflare.com/api/v1/bots/telegram/webhook');
+    expect(tunnelProvider).toHaveBeenCalledTimes(2);
+    expect(calls).toEqual([
+      'https://good.trycloudflare.com',
+      'https://api.telegram.org/bottelegram-token/setWebhook',
+    ]);
+  });
 });
