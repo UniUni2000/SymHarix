@@ -1076,6 +1076,73 @@ describe('SupervisorAgentRuntimeService', () => {
     ]);
   });
 
+  test('renders a visual card for explicit numeric issue card requests', async () => {
+    const h = createHarness();
+
+    const card = await h.service.respond({
+      context: h.context,
+      text: '给我看 158 卡片',
+    });
+
+    expect(card.message).toContain('Issue Card · INT-158');
+    expect(card.issue_id).toBe('issue-158');
+    expect(card.media_key).toContain('issue-card|INT-158');
+    expect(card.photo?.content_type).toBe('image/png');
+    expect(card.photo?.bytes?.length ?? 0).toBeGreaterThan(1000);
+    const cardRun = h.runs.findLatestByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(h.toolCalls.findByRun(cardRun!.id).map((call) => call.tool_name)).toEqual(['show_issue_card']);
+  });
+
+  test('diagnoses the only review issue when the user asks where review is without an explicit id', async () => {
+    const h = createHarness();
+    const reviewIssue = h.runtime.getIssue('INT-158');
+    expect(reviewIssue).not.toBeNull();
+    reviewIssue!.phase = 'REVIEW';
+    reviewIssue!.tracker_state = 'In Review';
+    reviewIssue!.orchestrator_state = 'failed';
+
+    const response = await h.service.respond({
+      context: h.context,
+      text: '可以，现在 review 到哪里了',
+    });
+
+    expect(response.message).toContain('INT-158');
+    expect(response.message).toContain('State: REVIEW · In Review · failed');
+    const run = h.runs.findLatestByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name).sort()).toEqual([
+      'diagnose_issue',
+      'get_issue',
+    ]);
+  });
+
+  test('retries the only retryable review issue when the user says retry review', async () => {
+    const h = createHarness();
+    const reviewIssue = h.runtime.getIssue('INT-158');
+    expect(reviewIssue).not.toBeNull();
+    reviewIssue!.phase = 'REVIEW';
+    reviewIssue!.tracker_state = 'In Review';
+    reviewIssue!.orchestrator_state = 'failed';
+
+    const response = await h.service.respond({
+      context: h.context,
+      text: '重试 review',
+    });
+
+    expect(response.message).toContain('Queued INT-158');
+    expect(h.runtime.retryCalls).toEqual(['INT-158']);
+    const run = h.runs.findLatestByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name)).toEqual(['retry_issue']);
+  });
+
   test('lets the LLM tool router resolve a contextual card request from the latest created issue', async () => {
     const modelInputs: Array<Parameters<SupervisorModelLoop>[0]> = [];
     const model = createSupervisorToolRouterModel({

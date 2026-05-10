@@ -179,6 +179,43 @@ function getBlockedExternalWriteReason(request: PendingRuntimeRequest): string |
   return null;
 }
 
+function repairReviewReportWriteRequest(
+  request: PendingRuntimeRequest,
+): { updatedInput: Record<string, unknown>; reason: string } | null {
+  if (request.kind !== 'approval') {
+    return null;
+  }
+  const input = request.raw.input;
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return null;
+  }
+  const command = (input as Record<string, unknown>).command;
+  if (typeof command !== 'string' || !/REVIEW_REPORT\.md/.test(command) || !/<<\s*['"]?EOF/.test(command)) {
+    return null;
+  }
+
+  let repaired = command.replace(
+    /(^|[;&|]\s*)\.?\/?(?:[\w.-]+\/)*\.symphony\/REVIEW_REPORT\.md\s*<</,
+    '$1cat > .symphony/REVIEW_REPORT.md <<',
+  );
+  repaired = repaired.replace(
+    /cat\s+>\s+\.?\/?(?:[\w.-]+\/)*\.symphony\/REVIEW_REPORT\.md\s*<</,
+    'cat > .symphony/REVIEW_REPORT.md <<',
+  );
+
+  if (repaired === command || !/cat > \.symphony\/REVIEW_REPORT\.md <</.test(repaired)) {
+    return null;
+  }
+
+  return {
+    updatedInput: {
+      ...(input as Record<string, unknown>),
+      command: repaired,
+    },
+    reason: 'Rewrote unsafe review report heredoc to write the canonical .symphony/REVIEW_REPORT.md from the workspace root.',
+  };
+}
+
 function buildPermissionResponse(
   request: PendingRuntimeRequest,
   behavior: 'allow' | 'deny',
@@ -382,6 +419,16 @@ export class AnthropicSupervisorService implements SupervisorService {
   async respondToRuntimeRequest(
     context: SupervisorRuntimeRequestContext,
   ): Promise<RuntimeRequestResponse> {
+    const reviewReportWriteRepair = repairReviewReportWriteRequest(context.request);
+    if (reviewReportWriteRepair) {
+      return buildPermissionResponse(
+        context.request,
+        'allow',
+        reviewReportWriteRepair.reason,
+        reviewReportWriteRepair.updatedInput,
+      );
+    }
+
     const blockedReason = getBlockedExternalWriteReason(context.request);
     if (blockedReason) {
       if (context.request.kind === 'approval') {

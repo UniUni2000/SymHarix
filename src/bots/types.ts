@@ -62,6 +62,7 @@ export interface BotTransportMessage {
   media_key?: string | null;
   photo?: BotTransportPhoto | null;
   show_caption_above_media?: boolean;
+  reply_to_message_id?: string | number | null;
   actions?: BotTransportAction[];
   action_rows?: BotTransportAction[][];
 }
@@ -91,6 +92,7 @@ export interface BotCommandContext {
   transport: BotTransport;
   recipient: BotRecipient;
   identity: BotIdentity;
+  message_id?: string | number | null;
 }
 
 export interface BotCommandRequest {
@@ -228,6 +230,16 @@ export interface BotGateway {
     body: Record<string, unknown>;
   }>;
   handleDiscordInteraction(rawBody: string, headers: Headers | Record<string, string | undefined>): Promise<{
+    status: number;
+    body: Record<string, unknown>;
+  }>;
+  handleSupervisorContextTool?(body: unknown, headers?: Headers | Record<string, string | undefined>): Promise<{
+    ok: boolean;
+    status: number;
+    body: Record<string, unknown>;
+  }>;
+  handleSupervisorOrchestratorTool?(body: unknown, headers?: Headers | Record<string, string | undefined>): Promise<{
+    ok: boolean;
     status: number;
     body: Record<string, unknown>;
   }>;

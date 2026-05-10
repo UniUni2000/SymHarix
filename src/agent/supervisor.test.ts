@@ -209,6 +209,47 @@ describe('AnthropicSupervisorService', () => {
     expect(String(result.response.message || '')).toContain('orchestrator');
   });
 
+  test('repairs malformed review report heredoc writes before consulting the provider', async () => {
+    const service = new AnthropicSupervisorService('test-model');
+    const create = mock(async () => ({
+      content: [],
+    }));
+    (service as any).client = { messages: { create } };
+
+    const result = await service.respondToRuntimeRequest({
+      ...runtimeContext,
+      request: {
+        ...runtimeContext.request,
+        raw: {
+          subtype: 'can_use_tool',
+          tool_name: 'Bash',
+          tool_use_id: 'tool-review-report',
+          input: {
+            command: `INT-163/.symphony/REVIEW_REPORT.md <<'EOF'
+## Review Decision: APPROVE
+
+## Review Summary
+Looks good.
+EOF`,
+          },
+        },
+        summary: {
+          title: 'Permission request for Bash',
+          message: 'Run INT-163/.symphony/REVIEW_REPORT.md heredoc',
+          tool_name: 'Bash',
+          subtype: 'can_use_tool',
+        },
+      },
+    });
+
+    expect(create).not.toHaveBeenCalled();
+    expect(result.response.behavior).toBe('allow');
+    expect(result.response.toolUseID).toBe('tool-review-report');
+    expect(result.response.updatedInput).toMatchObject({
+      command: expect.stringContaining("cat > .symphony/REVIEW_REPORT.md <<'EOF'"),
+    });
+  });
+
   test.each([
     ['git commit -m "feat(INT-160): add CI"'],
     ['git push -u origin feature/int-160'],

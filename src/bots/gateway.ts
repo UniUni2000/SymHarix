@@ -115,10 +115,22 @@ import {
 import { DefaultRepoProfileService } from '../supervisor/repoProfileService';
 import { GovernanceMemoryService } from '../governance/repoIntelligence';
 import { SupervisorAgentRuntimeService, createSupervisorToolRouterModel } from '../supervisor/agentRuntime';
+import { SupervisorClaudeRuntimeService, type SupervisorClaudeRuntimeHandle } from '../supervisor/claudeRuntime';
+import {
+  SUPERVISOR_CONTEXT_TOOL_NAMES,
+  SupervisorContextBroker,
+  type SupervisorContextToolName,
+} from '../supervisor/contextBroker';
+import {
+  SUPERVISOR_ORCHESTRATOR_TOOL_NAMES,
+  SupervisorOrchestratorBroker,
+  type SupervisorOrchestratorToolName,
+} from '../supervisor/orchestratorBroker';
 
 interface TelegramUpdate {
   update_id?: number | string;
   message?: {
+    message_id?: number | string;
     text?: string;
     chat?: { id: number | string };
     from?: { id: number | string; username?: string; first_name?: string; last_name?: string };
@@ -372,6 +384,7 @@ class TelegramNotifier implements BotTransportNotifier {
           chat_id: recipient.conversation_id,
           text: message.text,
           parse_mode: message.format === 'telegram_html' ? 'HTML' : undefined,
+          reply_to_message_id: message.reply_to_message_id ?? undefined,
           reply_markup: keyboard,
         }),
       },
@@ -411,6 +424,9 @@ class TelegramNotifier implements BotTransportNotifier {
     const keyboard = buildTelegramInlineKeyboard(message, this.getPublicBaseUrl());
     const form = new FormData();
     form.set('chat_id', recipient.conversation_id);
+    if (message.reply_to_message_id !== undefined && message.reply_to_message_id !== null) {
+      form.set('reply_to_message_id', String(message.reply_to_message_id));
+    }
     this.appendPhoto(form, message);
     form.set('caption', message.caption ?? message.text);
     if (message.format === 'telegram_html') {
@@ -815,6 +831,26 @@ function parsePositiveInteger(value: string | null | undefined): number | null {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+function isPureRepositoryQuestionText(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized || normalized.startsWith('/')) {
+    return false;
+  }
+  if (/(?:创建|新建|建|开|提|执行|开始|批准|取消|关闭|关掉|关了|作废|废弃|不要|不用|不做|清理|清空|删除|移除|重试|重新|停止|做成|实现|修复|修掉|改成|发布|部署|跑一下|create|open|start|approve|cancel|close|cleanup|delete|remove|retry|rerun|stop|ship|deploy)/i.test(normalized)) {
+    return false;
+  }
+  return shouldUseReadOnlyClaudeForText(normalized) ||
+    /(?:这个|当前|默认)?仓库.*(?:干啥|干什么|是干嘛|是什么|有啥|有什么|有哪些)|(?:文件|函数|模块|目录|代码).*(?:有什么用|干啥|干什么|定义|是什么)|(?:what|why|how).*(?:repo|repository|file|function|module)/i.test(normalized);
+}
+
+function shouldSendTelegramProcessingAck(text: string): boolean {
+  return !isPureRepositoryQuestionText(text);
+}
+
+function waitForTelegramRetry(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 function mapReadyRepoUnderstanding(
   record: SupervisorRepoUnderstanding | null,
 ): SupervisorRepoUnderstandingSnapshot | null {
@@ -894,6 +930,9 @@ export class DefaultBotGateway implements BotGateway {
   private readonly supervisorRepoSourceResolver: SupervisorRepoSourceResolver | null;
   private readonly supervisorAgentService: SupervisorAgentService | null;
   private readonly supervisorAgentRuntime: SupervisorAgentRuntimeService | null;
+  private readonly supervisorClaudeRuntime: SupervisorClaudeRuntimeHandle | null;
+  private readonly supervisorContextBroker: SupervisorContextBroker | null;
+  private readonly supervisorOrchestratorBroker: SupervisorOrchestratorBroker | null;
   private readonly supervisorRuns: SupervisorRunRepository | null;
   private readonly supervisorRunEvents: SupervisorRunEventRepository | null;
   private readonly supervisorToolCalls: SupervisorToolCallRepository | null;
@@ -935,6 +974,9 @@ export class DefaultBotGateway implements BotGateway {
       supervisorPlanBrain?: SupervisorPlanBrain | null;
       supervisorExecutionOverseer?: SupervisorExecutionOverseer | null;
       supervisorRepoIntelligenceResolver?: SupervisorRepoIntelligenceResolver | null;
+      supervisorClaudeRuntimeService?: SupervisorClaudeRuntimeHandle | null;
+      supervisorContextBroker?: SupervisorContextBroker | null;
+      supervisorOrchestratorBroker?: SupervisorOrchestratorBroker | null;
       workItemRepository?: WorkItemRepository | null;
       projectResolver?: TrackerProjectResolutionService | null;
       supervisorRepoSourceResolver?: SupervisorRepoSourceResolver | null;
@@ -1040,6 +1082,43 @@ export class DefaultBotGateway implements BotGateway {
             options.supervisorExecutionOverseer ?? createSupervisorExecutionOverseerFromEnv(),
           )
         : null);
+    this.supervisorContextBroker = options.supervisorContextBroker === undefined
+      ? new SupervisorContextBroker({
+          runtime,
+          preferences: options.preferencesRepository ?? null,
+          conversationFocuses: this.conversationFocuses,
+          projectResolver: options.projectResolver ?? null,
+          repoProfileService: new DefaultRepoProfileService(),
+          repoUnderstandingService: options.repoUnderstandingService ?? null,
+          repoSourceResolver: this.supervisorRepoSourceResolver,
+          supervisorMemories,
+          supervisorSessions: this.supervisorSessions,
+          repoIntelligenceResolver: options.supervisorRepoIntelligenceResolver ?? null,
+      })
+      : options.supervisorContextBroker;
+    this.supervisorOrchestratorBroker = options.supervisorOrchestratorBroker === undefined
+      ? (
+          this.supervisorRuns &&
+          this.supervisorRunEvents &&
+          this.supervisorToolCalls &&
+          this.supervisorPendingActions
+            ? new SupervisorOrchestratorBroker({
+                runtime,
+                commandService: this.commandService,
+                preferences: options.preferencesRepository ?? null,
+                projectResolver: options.projectResolver ?? null,
+                runs: this.supervisorRuns,
+                events: this.supervisorRunEvents,
+                toolCalls: this.supervisorToolCalls,
+                pendingActions: this.supervisorPendingActions,
+                repoConversations: this.repoClaudeConversations,
+                supervisorAgentService: this.supervisorAgentService,
+              })
+            : null
+        )
+      : options.supervisorOrchestratorBroker;
+    this.supervisorClaudeRuntime = options.supervisorClaudeRuntimeService ?? null;
+    this.supervisorClaudeRuntime?.setOrchestratorBridge?.(this.supervisorOrchestratorBroker);
     this.assistantService = new BotAssistantService(
       runtime,
       this.commandService,
@@ -1057,6 +1136,7 @@ export class DefaultBotGateway implements BotGateway {
       this.supervisorRepoSourceResolver,
       this.conversationFocuses,
       this.supervisorAgentRuntime,
+      this.supervisorClaudeRuntime,
     );
     const runStartupRepair = () => {
       try {
@@ -1240,6 +1320,10 @@ export class DefaultBotGateway implements BotGateway {
     localBaseUrl: string;
     inboundPath?: string;
   }): Promise<void> {
+    const localBaseUrl = params.localBaseUrl.replace(/\/+$/, '');
+    this.supervisorClaudeRuntime?.setContextEndpoint?.(`${localBaseUrl}/api/v1/bots/supervisor-context/call`);
+    this.supervisorClaudeRuntime?.setOrchestratorEndpoint?.(`${localBaseUrl}/api/v1/bots/supervisor-orchestrator/call`);
+
     if (!this.telegramBootstrap) {
       return;
     }
@@ -1272,7 +1356,195 @@ export class DefaultBotGateway implements BotGateway {
     this.supervisorJobLoop?.dispose();
     this.supervisorSessionService?.dispose();
     void this.supervisorAgentService?.disposeRepoConversations?.();
+    void this.supervisorClaudeRuntime?.dispose?.();
     void this.telegramBootstrap?.dispose();
+  }
+
+  async handleSupervisorContextTool(
+    body: unknown,
+    headers: Headers | Record<string, string | undefined> = {},
+  ): Promise<{ ok: boolean; status: number; body: Record<string, unknown> }> {
+    if (!this.supervisorContextBroker) {
+      return {
+        ok: false,
+        status: 503,
+        body: { ok: false, error: 'Supervisor context broker is not configured' },
+      };
+    }
+
+    const expectedToken = this.supervisorClaudeRuntime?.getContextToken?.() ?? null;
+    if (expectedToken) {
+      const receivedToken = getHeaderValue(headers, 'x-supervisor-context-token');
+      if (receivedToken !== expectedToken) {
+        return {
+          ok: false,
+          status: 403,
+          body: { ok: false, error: 'Invalid supervisor context token' },
+        };
+      }
+    }
+
+    const payload = body && typeof body === 'object' ? body as Record<string, unknown> : {};
+    const toolName = typeof payload.tool === 'string'
+      ? payload.tool
+      : typeof payload.name === 'string'
+        ? payload.name
+        : null;
+    if (!toolName || !(SUPERVISOR_CONTEXT_TOOL_NAMES as readonly string[]).includes(toolName)) {
+      return {
+        ok: false,
+        status: 400,
+        body: { ok: false, error: 'Unknown supervisor context tool' },
+      };
+    }
+
+    const rawArguments = payload.arguments ?? payload.args;
+    const args = rawArguments && typeof rawArguments === 'object' && !Array.isArray(rawArguments)
+      ? rawArguments as Record<string, unknown>
+      : {};
+    const rawContext = payload.context && typeof payload.context === 'object'
+      ? payload.context as Record<string, unknown>
+      : {};
+    const transport = rawContext.transport === 'discord' ? 'discord' : 'telegram';
+    const conversationId = typeof rawContext.conversation_id === 'string' && rawContext.conversation_id.trim()
+      ? rawContext.conversation_id.trim()
+      : 'supervisor-context';
+    const text = typeof payload.text === 'string'
+      ? payload.text
+      : typeof args.text === 'string'
+        ? args.text
+        : undefined;
+
+    try {
+      const result = await this.supervisorContextBroker.callTool(
+        toolName as SupervisorContextToolName,
+        args,
+        {
+          context: {
+            transport,
+            recipient: {
+              transport,
+              conversation_id: conversationId,
+            },
+            identity: {
+              user_id: typeof rawContext.user_id === 'string' ? rawContext.user_id : null,
+              display_name: typeof rawContext.display_name === 'string' ? rawContext.display_name : null,
+            },
+          },
+          text,
+        },
+      );
+      return {
+        ok: true,
+        status: 200,
+        body: { ok: true, result },
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        status: 400,
+        body: {
+          ok: false,
+          error: error instanceof Error ? error.message : 'Supervisor context tool failed',
+        },
+      };
+    }
+  }
+
+  async handleSupervisorOrchestratorTool(
+    body: unknown,
+    headers: Headers | Record<string, string | undefined> = {},
+  ): Promise<{ ok: boolean; status: number; body: Record<string, unknown> }> {
+    if (!this.supervisorOrchestratorBroker) {
+      return {
+        ok: false,
+        status: 503,
+        body: { ok: false, error: 'Supervisor orchestrator broker is not configured' },
+      };
+    }
+
+    const expectedToken = this.supervisorClaudeRuntime?.getContextToken?.() ?? null;
+    if (expectedToken) {
+      const receivedToken = getHeaderValue(headers, 'x-supervisor-orchestrator-token');
+      if (receivedToken !== expectedToken) {
+        return {
+          ok: false,
+          status: 403,
+          body: { ok: false, error: 'Invalid supervisor orchestrator token' },
+        };
+      }
+    }
+
+    const payload = body && typeof body === 'object' ? body as Record<string, unknown> : {};
+    const toolName = typeof payload.tool === 'string'
+      ? payload.tool
+      : typeof payload.name === 'string'
+        ? payload.name
+        : null;
+    if (!toolName || !(SUPERVISOR_ORCHESTRATOR_TOOL_NAMES as readonly string[]).includes(toolName)) {
+      return {
+        ok: false,
+        status: 400,
+        body: { ok: false, error: 'Unknown supervisor orchestrator tool' },
+      };
+    }
+
+    const rawArguments = payload.arguments ?? payload.args;
+    const args = rawArguments && typeof rawArguments === 'object' && !Array.isArray(rawArguments)
+      ? rawArguments as Record<string, unknown>
+      : {};
+    const rawContext = payload.context && typeof payload.context === 'object'
+      ? payload.context as Record<string, unknown>
+      : {};
+    const transport = rawContext.transport === 'discord' ? 'discord' : 'telegram';
+    const conversationId = typeof rawContext.conversation_id === 'string' && rawContext.conversation_id.trim()
+      ? rawContext.conversation_id.trim()
+      : 'supervisor-orchestrator';
+    const text = typeof payload.text === 'string'
+      ? payload.text
+      : typeof args.text === 'string'
+        ? args.text
+        : undefined;
+    const repoRef = typeof rawContext.repo_ref === 'string' && rawContext.repo_ref.trim()
+      ? rawContext.repo_ref.trim()
+      : null;
+
+    try {
+      const result = await this.supervisorOrchestratorBroker.callTool(
+        toolName as SupervisorOrchestratorToolName,
+        args,
+        {
+          context: {
+            transport,
+            recipient: {
+              transport,
+              conversation_id: conversationId,
+            },
+            identity: {
+              user_id: typeof rawContext.user_id === 'string' ? rawContext.user_id : null,
+              display_name: typeof rawContext.display_name === 'string' ? rawContext.display_name : null,
+            },
+          },
+          text,
+          repoRef,
+          canWrite: true,
+        },
+      );
+      return {
+        ok: true,
+        status: 200,
+        body: { ok: true, result },
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        status: 400,
+        body: {
+          ok: false,
+          error: error instanceof Error ? error.message : 'Supervisor orchestrator tool failed',
+        },
+      };
+    }
   }
 
   async handleTelegramWebhook(
@@ -1573,6 +1845,7 @@ export class DefaultBotGateway implements BotGateway {
           [message?.from?.first_name, message?.from?.last_name].filter(Boolean).join(' ') ||
           null,
       },
+      message_id: message?.message_id ?? null,
     };
     this.queueTelegramTextResponse(context, text);
 
@@ -2768,6 +3041,38 @@ export class DefaultBotGateway implements BotGateway {
     }, 0);
   }
 
+  private async sendTelegramFinalMessageWithRetry(
+    recipient: BotRecipient,
+    outbound: BotTransportMessage,
+    params: {
+      context: BotCommandContext;
+      isCommand: boolean;
+      maxAttempts?: number;
+    },
+  ): Promise<BotTransportMessageRef> {
+    const maxAttempts = Math.max(1, params.maxAttempts ?? 3);
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await this.telegramNotifier!.sendMessage(recipient, outbound);
+      } catch (error) {
+        lastError = error;
+        if (attempt >= maxAttempts) {
+          break;
+        }
+        logger.warn('Telegram final reply send failed; retrying', {
+          chat_id: params.context.recipient.conversation_id,
+          user_id: params.context.identity.user_id,
+          is_command: params.isCommand,
+          attempt,
+          max_attempts: maxAttempts,
+        }, error instanceof Error ? error : undefined);
+        await waitForTelegramRetry();
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error('Telegram final reply send failed');
+  }
+
   private async processTelegramTextResponse(context: BotCommandContext, text: string): Promise<void> {
     logger.info('Telegram text processing started', {
       chat_id: context.recipient.conversation_id,
@@ -2780,7 +3085,8 @@ export class DefaultBotGateway implements BotGateway {
     let processingAckPromise: Promise<BotTransportMessageRef | null> | null = null;
     const runtimeLocale = inferRuntimeLocaleFromText(text);
     const isEnglish = runtimeLocale === 'en';
-    const processingAckTimer = setTimeout(() => {
+    const shouldSendProcessingAck = shouldSendTelegramProcessingAck(text);
+    const processingAckTimer = shouldSendProcessingAck ? setTimeout(() => {
       if (processingFinished || !this.telegramNotifier) {
         return;
       }
@@ -2795,6 +3101,7 @@ export class DefaultBotGateway implements BotGateway {
             : shouldUseReadOnlyClaudeForText(text)
               ? isEnglish ? 'Got it. I am reading the latest repository context and will reply shortly.' : '收到，我正在读取最新仓库信息，整理好后马上回复。'
               : isEnglish ? 'Got your message. I am thinking it through and will reply shortly.' : '收到您的消息了，我这边正在思考和处理，给我点时间',
+          reply_to_message_id: context.message_id ?? undefined,
         },
       ).then((sent) => {
         processingAckRef = sent;
@@ -2818,14 +3125,16 @@ export class DefaultBotGateway implements BotGateway {
         }, error instanceof Error ? error : undefined);
         return null;
       });
-    }, this.telegramTextProcessingAckDelayMs);
+    }, this.telegramTextProcessingAckDelayMs) : null;
 
     try {
       const response = text.startsWith('/') && !isTelegramClearRepoConversationCommand(text)
         ? await this.commandService.executeText(context, text)
         : await this.assistantService.respondToText(context, text);
       processingFinished = true;
-      clearTimeout(processingAckTimer);
+      if (processingAckTimer) {
+        clearTimeout(processingAckTimer);
+      }
 
       logger.info('Telegram text processing finished', {
         chat_id: context.recipient.conversation_id,
@@ -2844,6 +3153,7 @@ export class DefaultBotGateway implements BotGateway {
         media_key: response.media_key ?? undefined,
         photo: response.photo,
         show_caption_above_media: response.show_caption_above_media,
+        reply_to_message_id: context.message_id ?? undefined,
         actions: response.actions,
         action_rows: response.action_rows,
       };
@@ -2885,7 +3195,10 @@ export class DefaultBotGateway implements BotGateway {
               chat_id: context.recipient.conversation_id,
               user_id: context.identity.user_id,
             }, error instanceof Error ? error : undefined);
-            sent = await this.telegramNotifier!.sendMessage(recipient, outbound);
+            sent = await this.sendTelegramFinalMessageWithRetry(recipient, outbound, {
+              context,
+              isCommand: text.startsWith('/'),
+            });
             this.recordTransportEvent({
               recipient,
               issue: response.issue_id ? this.runtime.getIssue(response.issue_id) : null,
@@ -2898,7 +3211,10 @@ export class DefaultBotGateway implements BotGateway {
           }
         }
       } else {
-        sent = await this.telegramNotifier!.sendMessage(recipient, outbound);
+        sent = await this.sendTelegramFinalMessageWithRetry(recipient, outbound, {
+          context,
+          isCommand: text.startsWith('/'),
+        });
       }
       this.bindPendingConfirmationToTelegramMessage(context, response, sent);
       if (response.session_id) {
@@ -2926,7 +3242,9 @@ export class DefaultBotGateway implements BotGateway {
       });
     } catch (error) {
       processingFinished = true;
-      clearTimeout(processingAckTimer);
+      if (processingAckTimer) {
+        clearTimeout(processingAckTimer);
+      }
       const recipient = {
         transport: 'telegram' as const,
         conversation_id: context.recipient.conversation_id,
@@ -3139,6 +3457,26 @@ export function createBotGatewayFromEnv(
           }),
         )
       : null;
+  const supervisorContextBroker = new SupervisorContextBroker({
+    runtime,
+    preferences: preferencesRepository,
+    conversationFocuses: conversationFocusRepository,
+    projectResolver: options.projectResolver ?? null,
+    repoProfileService: new DefaultRepoProfileService(),
+    repoUnderstandingService: repoUnderstandingService ?? null,
+    repoSourceResolver: supervisorRepoSourceResolver ?? null,
+    supervisorMemories: supervisorMemoryRepository,
+    supervisorSessions: supervisorSessionRepository,
+    repoIntelligenceResolver: supervisorRepoIntelligenceResolver,
+  });
+  const supervisorClaudeRuntimeService = process.env.SYMPHONY_SUPERVISOR_CLAUDE_RUNTIME === 'off'
+    ? null
+    : new SupervisorClaudeRuntimeService({
+        resolveWorkspace: (input) => supervisorContextBroker.resolveWorkspace(input),
+        command: process.env.SYMPHONY_SUPERVISOR_CLAUDE_COMMAND || 'node scripts/claude-adapter.cjs',
+        contextEndpoint: process.env.SYMPHONY_SUPERVISOR_CONTEXT_ENDPOINT || null,
+        projectRoot: process.cwd(),
+      });
 
   return new DefaultBotGateway(runtime, {
     botToken: process.env.SYMPHONY_TELEGRAM_BOT_TOKEN || null,
@@ -3167,6 +3505,8 @@ export function createBotGatewayFromEnv(
     supervisorPendingActionRepository,
     repoClaudeConversationRepository,
     supervisorRepoIntelligenceResolver,
+    supervisorContextBroker,
+    supervisorClaudeRuntimeService,
     supervisorPlanBrain: createSupervisorPlanBrainFromEnv(),
     supervisorExecutionOverseer: createSupervisorExecutionOverseerFromEnv(),
     workItemRepository,
