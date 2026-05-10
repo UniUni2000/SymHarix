@@ -1093,7 +1093,7 @@ describe('DefaultBotGateway', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(requests).toHaveLength(1);
-    expect(String(requests[0]?.body.text)).toContain('收到您的消息了，我这边正在思考和处理，给我点时间');
+    expect(String(requests[0]?.body.text)).toContain('Got your message. I am thinking it through and will reply shortly.');
 
     resolveAssistant?.();
     await new Promise((resolve) => setTimeout(resolve, 0));

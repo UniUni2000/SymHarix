@@ -1393,14 +1393,25 @@ function prefixFallbackNotice(message: string, diagnostics: BotAssistantDiagnost
 }
 
 function buildScopedHelp(context: BotRuntimeCopilotContext, originalText: string): string {
+  const english = inferRuntimeLocaleFromText(originalText) === 'en';
   const availableProjects = context.available_projects.map((project) => project.project_slug);
   return [
-    '我主要负责 Symphony 控制面：建单、查状态、看仓库路由、设置默认项目、stop/retry/watch，以及治理相关的 rewrite/split/override。',
-    context.default_project_slug ? `当前默认项目：${context.default_project_slug}` : null,
-    availableProjects.length > 0 ? `可用项目：${availableProjects.join(', ')}` : null,
-    context.overview.active_issues.length > 0 ? `当前活跃 issue 数：${context.overview.active_issues.length}` : null,
-    `未识别请求：${compact(normalizeText(originalText), 160)}`,
-    '你可以直接说“INT-31 现在怎么样了”、“仓库 test2 建一个 issue”、“执行第一个治理建议”，或者用 /project /status /new 这些命令。',
+    english
+      ? 'I mainly handle the Symphony control plane: creating issues, checking status, reading repository routes, setting the default project, stop/retry/watch, and governance actions such as rewrite/split/override.'
+      : '我主要负责 Symphony 控制面：建单、查状态、看仓库路由、设置默认项目、stop/retry/watch，以及治理相关的 rewrite/split/override。',
+    context.default_project_slug
+      ? english ? `Current default project: ${context.default_project_slug}` : `当前默认项目：${context.default_project_slug}`
+      : null,
+    availableProjects.length > 0
+      ? english ? `Available projects: ${availableProjects.join(', ')}` : `可用项目：${availableProjects.join(', ')}`
+      : null,
+    context.overview.active_issues.length > 0
+      ? english ? `Active issue count: ${context.overview.active_issues.length}` : `当前活跃 issue 数：${context.overview.active_issues.length}`
+      : null,
+    english ? `Unrecognized request: ${compact(normalizeText(originalText), 160)}` : `未识别请求：${compact(normalizeText(originalText), 160)}`,
+    english
+      ? 'You can say "How is INT-31 doing?", "Create an issue in repo test2", "Run the first governance suggestion", or use /project /status /new.'
+      : '你可以直接说“INT-31 现在怎么样了”、“仓库 test2 建一个 issue”、“执行第一个治理建议”，或者用 /project /status /new 这些命令。',
   ].filter(Boolean).join('\n');
 }
 
@@ -1840,14 +1851,6 @@ export class BotAssistantService {
       return this.commandService.execute(context, parseTextCommand(text));
     }
 
-    if (context.transport === 'telegram' && this.supervisorAgentRuntime) {
-      return this.supervisorAgentRuntime.respond({
-        context,
-        text,
-        canWrite: this.canWrite(context),
-      });
-    }
-
     const runtimeContext = await this.runtimeContext.buildContext(
       context,
       text,
@@ -1866,6 +1869,14 @@ export class BotAssistantService {
       return {
         message: buildGreetingReply(runtimeContext, text),
       };
+    }
+
+    if (context.transport === 'telegram' && this.supervisorAgentRuntime) {
+      return this.supervisorAgentRuntime.respond({
+        context,
+        text,
+        canWrite: this.canWrite(context),
+      });
     }
 
     if (isIssueListQuestion(text)) {
