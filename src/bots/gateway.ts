@@ -45,7 +45,7 @@ import {
 } from '../database';
 import type { RuntimeActionResult, RuntimeControlPlane, RuntimeIssueView } from '../runtime/types';
 import type { Database } from 'bun:sqlite';
-import type { SupervisorRepoUnderstanding } from '../database/types';
+import type { BotFollowupCardKind, SupervisorRepoUnderstanding } from '../database/types';
 import type {
   BotManifest,
   BotCommandContext,
@@ -486,6 +486,13 @@ class TelegramNotifier implements BotTransportNotifier {
         }
       } catch {
         description = null;
+      }
+
+      if ((description ?? '').toLowerCase().includes('there is no text in the message to edit')) {
+        return this.editCaption(recipient, messageRef, {
+          ...message,
+          caption: message.caption ?? message.text,
+        });
       }
 
       throw new BotMessageEditError(
@@ -1469,6 +1476,7 @@ export class DefaultBotGateway implements BotGateway {
             conversationId,
             issue: callbackResult.issue,
             deliveredMessageId: delivered.ref.provider_message_id,
+            cardKind: callbackResult.cardKind,
             cardState: callbackResult.cardState,
             cardKey: callbackResult.cardKey,
             existingCardState,
@@ -1636,6 +1644,7 @@ export class DefaultBotGateway implements BotGateway {
     outbound: BotTransportMessage;
     toastText: string;
     issue: RuntimeIssueView | null;
+    cardKind?: BotFollowupCardKind;
     cardState: 'open' | 'confirming' | 'executing' | 'waiting_on_child' | 'resolved' | 'failed';
     cardKey: string;
     executeAfterAck?: {
@@ -1668,6 +1677,7 @@ export class DefaultBotGateway implements BotGateway {
             ? english ? 'Confirmation ready' : '已准备确认'
             : english ? 'Got it. Processing' : '已收到，正在处理',
         issue: responseIssue,
+        cardKind: 'runtime_issue',
         cardState: hasPendingConfirmationButtons(response)
           ? 'confirming'
           : responseIssue?.governance_thread_state === 'waiting_on_child'
@@ -2449,6 +2459,7 @@ export class DefaultBotGateway implements BotGateway {
     conversationId: string;
     issue: RuntimeIssueView;
     deliveredMessageId: string;
+    cardKind?: BotFollowupCardKind;
     cardState: 'open' | 'confirming' | 'executing' | 'waiting_on_child' | 'resolved' | 'failed';
     cardKey: string;
     existingCardState: ReturnType<BotFollowupMessageStateRepository['findByConversationIssue']> | null;
@@ -2463,7 +2474,7 @@ export class DefaultBotGateway implements BotGateway {
       issue_id: params.issue.issue_id,
       issue_identifier: params.issue.identifier,
       message_id: params.deliveredMessageId,
-      card_kind: 'governance_blocked' as const,
+      card_kind: params.cardKind ?? 'governance_blocked',
       card_key: params.cardKey,
       card_state: params.cardState,
     };

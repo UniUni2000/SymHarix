@@ -26,6 +26,24 @@ class DevHook:
         "REVIEW_REPORT.md",
         ".symphony",
     )
+    PRODUCT_COMMIT_EXCLUDED_PATHS = (
+        "DEVELOPMENT_LOG.md",
+        "HANDOVER.md",
+        "REVIEW_REPORT.md",
+        ".symphony",
+        ".symphony/**",
+        "__pycache__",
+        "__pycache__/**",
+        "**/__pycache__/**",
+        ".pytest_cache",
+        ".pytest_cache/**",
+        ".mypy_cache",
+        ".mypy_cache/**",
+        ".ruff_cache",
+        ".ruff_cache/**",
+        "*.pyc",
+        "**/*.pyc",
+    )
 
     def __init__(
         self,
@@ -256,8 +274,11 @@ Agent completed the task for issue [{self.issue_id}](https://linear.app/inteliwa
         base_ref = self._resolve_base_ref()
         self._sanitize_workflow_artifacts_for_pr(base_ref)
         ahead_count = self._count_commits_ahead(base_ref)
+        if ahead_count <= 0 and self._workspace_has_uncommitted_product_changes():
+            self._commit_product_changes_if_needed()
+            ahead_count = self._count_commits_ahead(base_ref)
         if ahead_count <= 0:
-            if self._workspace_has_uncommitted_changes():
+            if self._workspace_has_uncommitted_product_changes():
                 message = (
                     f"Workspace for {self.branch} has uncommitted changes but no commits "
                     f"relative to {base_ref}; commit and push are required before PR creation"
@@ -288,6 +309,10 @@ Agent completed the task for issue [{self.issue_id}](https://linear.app/inteliwa
         )
         if push_result.returncode != 0:
             message = (push_result.stderr or push_result.stdout or "").strip()
+            self._set_delivery_failure(
+                "review_submit_failed",
+                f"Failed to push branch {self.branch}: {message or 'unknown git error'}",
+            )
             raise RuntimeError(f"Failed to push branch {self.branch}: {message or 'unknown git error'}")
 
     def _push_branch_to_github_remote(self) -> None:
@@ -378,6 +403,57 @@ Agent completed the task for issue [{self.issue_id}](https://linear.app/inteliwa
                 + ", ".join(remaining_paths)
             )
 
+    def _commit_product_changes_if_needed(self) -> bool:
+        """Commit agent-produced product changes while leaving runtime artifacts private."""
+        self._git("reset", "--", *self.PRODUCT_COMMIT_EXCLUDED_PATHS, check=False)
+        add_result = self._git(
+            "add",
+            "--all",
+            *self._product_commit_pathspecs(),
+            check=False,
+        )
+        if add_result.returncode != 0:
+            message = (add_result.stderr or add_result.stdout or "").strip()
+            raise RuntimeError(
+                f"Failed to stage product changes for {self.branch}: {message or 'unknown git error'}"
+            )
+
+        staged_paths = self._git_path_list("diff", "--cached", "--name-only")
+        product_paths = [
+            path
+            for path in staged_paths
+            if not self._is_private_runtime_or_cache_path(path)
+        ]
+        if not product_paths:
+            return False
+
+        commit_result = self._git(
+            "commit",
+            "--no-verify",
+            "-m",
+            f"feat({self.issue_id}): prepare product changes for review",
+            check=False,
+        )
+        if commit_result.returncode == 0:
+            return True
+
+        message = (commit_result.stderr or commit_result.stdout or "").strip()
+        if "nothing to commit" in message.lower():
+            return False
+        raise RuntimeError(
+            f"Failed to commit product changes for {self.branch}: {message or 'unknown git error'}"
+        )
+
+    def _product_commit_pathspecs(self) -> tuple[str, ...]:
+        return (
+            "--",
+            ".",
+            *(
+                f":(exclude){path}"
+                for path in self.PRODUCT_COMMIT_EXCLUDED_PATHS
+            ),
+        )
+
     def _restore_paths_from_ref(self, source_ref: str, paths: list[str]) -> None:
         for workflow_path in paths:
             if self._path_exists_in_ref(source_ref, workflow_path):
@@ -425,6 +501,42 @@ Agent completed the task for issue [{self.issue_id}](https://linear.app/inteliwa
     def _workspace_has_uncommitted_changes(self) -> bool:
         """Check whether the workspace has local tracked or untracked changes."""
         return bool(self._git_stdout("status", "--short"))
+
+    def _workspace_has_uncommitted_product_changes(self) -> bool:
+        """Check for uncommitted changes that belong in the product branch."""
+        status_output = self._git_stdout("status", "--short")
+        if not status_output:
+            return False
+        for line in status_output.splitlines():
+            path = self._status_path_from_line(line)
+            if path and not self._is_private_runtime_or_cache_path(path):
+                return True
+        return False
+
+    def _status_path_from_line(self, line: str) -> Optional[str]:
+        if len(line) < 4:
+            return None
+        path = line[3:].strip()
+        if " -> " in path:
+            path = path.rsplit(" -> ", 1)[1].strip()
+        return path.strip('"')
+
+    def _is_private_runtime_or_cache_path(self, raw_path: str) -> bool:
+        path = raw_path.strip().strip('"')
+        while path.startswith("./"):
+            path = path[2:]
+        if not path:
+            return True
+        if path in {"DEVELOPMENT_LOG.md", "HANDOVER.md", "REVIEW_REPORT.md", ".symphony"}:
+            return True
+        if path.startswith(".symphony/"):
+            return True
+        if path.endswith(".pyc"):
+            return True
+        parts = path.split("/")
+        if "__pycache__" in parts:
+            return True
+        return parts[0] in {".pytest_cache", ".mypy_cache", ".ruff_cache"}
 
     def _git_path_list(self, *args: str) -> list[str]:
         output = self._git_stdout(*args)

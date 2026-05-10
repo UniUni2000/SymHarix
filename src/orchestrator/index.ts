@@ -2484,6 +2484,27 @@ export class Orchestrator extends EventEmitter {
     return issue.updated_at.getTime() <= workItem.updated_at.getTime();
   }
 
+  private usesDeliveryHaltDispatchBlock(workItem: WorkItem | null, issue: Issue): boolean {
+    if (
+      !workItem ||
+      workItem.orchestrator_state !== 'halted' ||
+      !workItem.delivery_code ||
+      workItem.delivery_code === 'manual_stop'
+    ) {
+      return false;
+    }
+
+    if ((workItem.linear_state || '').trim().toLowerCase() !== issue.state.trim().toLowerCase()) {
+      return false;
+    }
+
+    if (!issue.updated_at) {
+      return true;
+    }
+
+    return issue.updated_at.getTime() <= workItem.updated_at.getTime();
+  }
+
   private usesSupervisorSessionDispatchBlock(workItem: WorkItem | null): boolean {
     const session = this.findSupervisorSessionForWorkItem(workItem);
     return session?.state === 'cancelled' || session?.state === 'completed';
@@ -2807,6 +2828,10 @@ export class Orchestrator extends EventEmitter {
     }
 
     if (this.usesManualStopDispatchBlock(trackedWorkItem, issue)) {
+      return false;
+    }
+
+    if (this.usesDeliveryHaltDispatchBlock(trackedWorkItem, issue)) {
       return false;
     }
 
@@ -6279,6 +6304,10 @@ export class Orchestrator extends EventEmitter {
       this.persistDeliveryResult(workItem.id, cliResult.result ?? null);
 
       if (!cliResult.success || !cliResult.result || !cliResult.result.ok) {
+        result.work_item_id = workItem.id;
+        result.agent_run_id = agentRun.id;
+        result.workspace_path = workspace.path;
+        result.cli_result = cliResult.result;
         result.failure_reason = 'cli_business';
         result.error =
           cliResult.result?.delivery_summary

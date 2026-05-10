@@ -1580,6 +1580,9 @@ describe('DefaultBotGateway', () => {
   });
 
   test('handles runtime issue card buttons by refreshing the same Telegram card through supervisor runtime', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const followupMessageStates = new BotFollowupMessageStateRepository(db);
     const requests: Array<{ url: string; body: FormData | Record<string, unknown> }> = [];
     const runtimeTexts: string[] = [];
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -1632,6 +1635,7 @@ describe('DefaultBotGateway', () => {
             };
           },
         } as unknown as SupervisorAgentRuntimeService,
+        followupMessageStateRepository: followupMessageStates,
       },
     );
     (gateway as any).telegramPublicBaseUrl = 'https://app.example.test';
@@ -1666,8 +1670,16 @@ describe('DefaultBotGateway', () => {
         [{ text: '刷新卡片', callback_data: 'rt|INT-1|refresh' }],
       ],
     });
+    expect(
+      followupMessageStates.findByConversationIssue({
+        transport: 'telegram',
+        conversation_id: '42',
+        issue_id: 'issue-1',
+      })?.card_kind,
+    ).toBe('runtime_issue');
 
     gateway.dispose();
+    db.close();
   });
 
   test('edits Telegram visual issue cards with editMessageMedia instead of text edits', async () => {
@@ -1798,6 +1810,70 @@ describe('DefaultBotGateway', () => {
           [{ text: '打开运行视图', style: 'primary', url: 'https://app.example.test/runtime/issues/INT-248/app' }],
         ],
       },
+    });
+
+    gateway.dispose();
+  });
+
+  test('falls back to editing a media caption when a text edit targets a photo card', async () => {
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+      requests.push({ url, body });
+      if (url.includes('editMessageText')) {
+        return new Response(JSON.stringify({
+          ok: false,
+          description: 'Bad Request: there is no text in the message to edit',
+        }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 444 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+    );
+
+    await (gateway as any).telegramNotifier.editMessage(
+      {
+        transport: 'telegram',
+        conversation_id: '42',
+      },
+      {
+        provider_message_id: '101',
+      },
+      {
+        text: '<b>已处理 · INT-162</b>',
+        format: 'telegram_html',
+      },
+    );
+
+    expect(requests.map((request) => request.url)).toEqual([
+      expect.stringContaining('editMessageText'),
+      expect.stringContaining('editMessageCaption'),
+    ]);
+    expect(requests[1]?.body).toMatchObject({
+      chat_id: '42',
+      message_id: '101',
+      caption: '<b>已处理 · INT-162</b>',
+      parse_mode: 'HTML',
     });
 
     gateway.dispose();

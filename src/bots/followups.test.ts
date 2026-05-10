@@ -17,6 +17,7 @@ import type {
   BotTransportMessageRef,
   BotTransportNotifier,
 } from './types';
+import { BotMessageEditError } from './types';
 import { BotFollowupService } from './followups';
 
 function createRuntimeControlPlane(): RuntimeControlPlane & { emit: (event: RuntimeStreamEvent) => void } {
@@ -186,6 +187,17 @@ class DeferredNotifier extends MemoryNotifier {
     return {
       provider_message_id: `msg-${this.messages.length}`,
     };
+  }
+}
+
+class FailingEditDeferredNotifier extends DeferredNotifier {
+  override async editMessage(): Promise<BotTransportMessageRef> {
+    throw new BotMessageEditError(
+      'hard_failure',
+      'Telegram editMessageText failed with status 400: Bad Request: there is no text in the message to edit',
+      400,
+      'Bad Request: there is no text in the message to edit',
+    );
   }
 }
 
@@ -1191,6 +1203,80 @@ describe('BotFollowupService', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(notifier.messages).toHaveLength(1);
+    expect(
+      messageStates.findByConversationIssue({
+        transport: 'telegram',
+        conversation_id: 'chat-origin',
+        issue_id: 'issue-1',
+      })?.message_id,
+    ).toBe('msg-1');
+
+    service.dispose();
+    db.close();
+  });
+
+  test('suppresses duplicate governance resolved fallbacks while the first resolve is still in flight', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const issue = runtime.getIssue('issue-1');
+    if (!issue) {
+      throw new Error('Expected issue-1 to exist');
+    }
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+
+    followups.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      user_id: 'user-1',
+      role: 'origin',
+    });
+    messageStates.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      message_id: 'photo-card-1',
+      card_kind: 'governance_blocked',
+      card_key: 'blocked',
+      card_state: 'open',
+    });
+
+    let releaseSend: (() => void) | null = null;
+    const sendGate = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    const notifier = new FailingEditDeferredNotifier(sendGate);
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, messageStates, {
+      bootstrapCurrentGovernanceCards: false,
+    });
+
+    const unblockedIssue = {
+      ...issue,
+      governance_status: null,
+      governance_decision: null,
+      governance_summary: null,
+      active_governance_suggestions: [],
+      orchestrator_state: 'review_running',
+      tracker_state: 'In Review',
+      phase: 'REVIEW',
+    } satisfies RuntimeIssueView;
+
+    runtime.emit({ type: 'issue', data: unblockedIssue });
+    runtime.emit({ type: 'issue', data: unblockedIssue });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    releaseSend?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(notifier.messages).toHaveLength(1);
+    expect(notifier.messages[0]?.message.text).toContain('已处理 · INT-1');
     expect(
       messageStates.findByConversationIssue({
         transport: 'telegram',

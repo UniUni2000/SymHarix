@@ -332,6 +332,88 @@ describe('changePackService', () => {
     ]));
   });
 
+  test('keeps review-only command checks out of dev completion requirements', async () => {
+    workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-change-pack-dev-review-gate-'));
+    fs.mkdirSync(path.join(workspacePath, '.symphony', 'change-pack'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspacePath, '.symphony', 'change-pack', 'evidence.json'),
+      JSON.stringify({
+        requirements: [
+          {
+            key: 'command:review_checks',
+            label: 'Record successful review_checks verification',
+            reason: 'Completion requires evidence that review_checks succeeded.',
+            kind: 'verification',
+          },
+        ],
+      }),
+      'utf8',
+    );
+
+    await initializeChangePack({
+      workspacePath,
+      issue: makeIssue(),
+      profile: 'coding',
+      mode: 'dev',
+      harness: {
+        verification: {
+          required_commands: ['test', 'review_checks'],
+        },
+      },
+      governanceSummary: 'No governance blockers detected.',
+    });
+
+    const evidence = JSON.parse(
+      fs.readFileSync(path.join(workspacePath, '.symphony', 'change-pack', 'evidence.json'), 'utf8'),
+    ) as {
+      requirements?: Array<{ key: string }>;
+    };
+    const requirementKeys = (evidence.requirements ?? []).map((item) => item.key);
+
+    expect(requirementKeys).toContain('command:test');
+    expect(requirementKeys).not.toContain('command:review_checks');
+  });
+
+  test('ignores persisted review-only command requirements when evaluating dev state', async () => {
+    workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-change-pack-dev-eval-review-gate-'));
+    fs.mkdirSync(path.join(workspacePath, '.symphony', 'change-pack'), { recursive: true });
+    fs.mkdirSync(path.join(workspacePath, '.symphony'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspacePath, '.symphony', 'HANDOVER.md'),
+      '# Handover\n\nUnit tests: PASS\n',
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(workspacePath, '.symphony', 'change-pack', 'evidence.json'),
+      JSON.stringify({
+        requirements: [
+          {
+            key: 'handover',
+            label: 'Write .symphony/HANDOVER.md',
+            reason: 'Completion requires a handover artifact.',
+            kind: 'artifact',
+          },
+          {
+            key: 'command:review_checks',
+            label: 'Record successful review_checks verification',
+            reason: 'Completion requires evidence that review_checks succeeded.',
+            kind: 'verification',
+          },
+        ],
+      }),
+      'utf8',
+    );
+
+    const state = await evaluateChangePackState({
+      workspacePath,
+      issue: makeIssue(),
+      mode: 'dev',
+    });
+
+    expect(state.missing_requirements).toEqual([]);
+    expect(state.evidence_summary.total_requirements).toBe(1);
+  });
+
   test('treats custom verification requirements with structured evidence as satisfied', async () => {
     workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-change-pack-custom-verification-'));
     fs.mkdirSync(path.join(workspacePath, '.symphony'), { recursive: true });
