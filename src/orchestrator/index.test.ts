@@ -596,6 +596,59 @@ describe('Orchestrator Stability', () => {
     expect(state.completed.has(issue.id)).toBe(false);
   });
 
+  it('preserves non-retryable dev delivery failures after post-processing halts', async () => {
+    const issue = makeIssue({ state: 'Todo' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-dev-delivery-failure-'));
+    fs.mkdirSync(path.join(workspacePath, '.git'), { recursive: true });
+    writeWorkflowArtifacts(workspacePath, {
+      handover: '# Handover\nReady, but delivery publishing failed.\n',
+      developmentLog: '# Development Log\nReady, but delivery publishing failed.\n',
+    });
+
+    ctx.workspaceManager.createForIssue = mock(async () => ({
+      success: true,
+      workspace: {
+        path: workspacePath,
+        workspace_key: 'INT-1',
+        created_now: false,
+      },
+    }));
+    (orchestrator as any).workspaceManager = ctx.workspaceManager;
+
+    (orchestrator as any).runCliCommand = mock(async (command: string) => {
+      if (command === 'dispatch') {
+        return { success: true, result: makeCliResult({ final_state: 'In Progress' }) };
+      }
+      return {
+        success: false,
+        result: makeCliResult({
+          ok: false,
+          final_state: 'In Progress',
+          feedback: 'GitHub rejected the branch push.',
+          delivery_code: 'review_submit_failed',
+          delivery_summary: 'GitHub rejected the branch push.',
+          retry_hint: 'stop',
+        }),
+      };
+    });
+
+    try {
+      await (orchestrator as any).dispatchIssue(issue, null);
+      await awaitWorker(orchestrator, issue.id);
+
+      const workItem = ctx.workItemRepository.findByLinearIssueId(issue.id);
+      expect(workItem?.orchestrator_state).toBe('halted');
+      expect(workItem?.delivery_code).toBe('review_submit_failed');
+      expect(workItem?.delivery_summary).toBe('GitHub rejected the branch push.');
+      expect((orchestrator as any).state.retry_attempts.size).toBe(0);
+    } finally {
+      fs.rmSync(workspacePath, { recursive: true, force: true });
+    }
+  });
+
   it('treats tracker terminal state after a dev turn as completion instead of rerunning dev post-processing', async () => {
     const issue = makeIssue({ state: 'In Progress' });
     const terminalIssue = { ...issue, state: 'Done' };
@@ -4368,6 +4421,26 @@ describe('Orchestrator Stability', () => {
     expect(result.status).toBe('completed');
     expect(updatedWorkItem?.orchestrator_state).toBe('halted');
     expect(updatedWorkItem?.delivery_code).toBe('manual_stop');
+    expect((orchestrator as any).shouldDispatch(issue)).toBe(false);
+  });
+
+  it('does not redispatch a stale delivery-halted active work item', () => {
+    const issue = makeIssue({ state: 'In Progress', updated_at: new Date('2025-01-01T00:00:00Z') });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+
+    ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: issue.state,
+      github_repo: 'owner/repo',
+      orchestrator_state: 'halted',
+      delivery_code: 'dirty_workspace_no_commit',
+      delivery_summary: 'Workspace has product changes but no delivery commit.',
+    });
+
     expect((orchestrator as any).shouldDispatch(issue)).toBe(false);
   });
 

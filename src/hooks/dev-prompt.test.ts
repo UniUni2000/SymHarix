@@ -45,6 +45,7 @@ describe('agent prompts', () => {
     expect(prompt).toContain('Do not run `git push`');
     expect(prompt).toContain('Do not run `gh pr create`');
     expect(prompt).toContain('The orchestrator/state machine owns commit, push, PR creation, tracker updates, and final synchronization');
+    expect(prompt).toContain('After you stop, the orchestrator will stage and commit product-file changes while excluding `.symphony/` and cache artifacts.');
     expect(prompt).not.toContain('Commit changes, push, and create PR');
     expect(prompt).not.toContain('When complete: commit, push, create PR');
   });

@@ -253,6 +253,7 @@ ${existingLog ? `## Existing Progress\n${existingLog}\n---\nContinue from where 
 ${liveVerifierImportant ? `${liveVerifierImportant}\n` : ''}
 - GitHub Issue and PR are the source of engineering context. Prefer them over stale tracker text if they conflict.
 - The orchestrator/state machine owns commit, push, PR creation, tracker updates, and final synchronization.
+- After you stop, the orchestrator will stage and commit product-file changes while excluding \`.symphony/\` and cache artifacts.
 - Do not run \`git commit\`.
 - Do not run \`git push\`.
 - Do not run \`gh pr create\`.
