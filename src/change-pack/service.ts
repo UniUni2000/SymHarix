@@ -866,6 +866,7 @@ function inferProfile(issue: Issue, mode?: 'dev' | 'review'): 'coding' | 'resear
 function buildDefaultRequirements(params: {
   profile: 'coding' | 'research' | 'ui' | 'review';
   issue: Issue;
+  mode?: 'dev' | 'review';
   harness?: RepositoryHarnessConfig | null;
 }): CompletionRequirement[] {
   const requirements: CompletionRequirement[] = [];
@@ -897,7 +898,8 @@ function buildDefaultRequirements(params: {
     return requirements;
   }
 
-  const requiredCommands = params.harness?.verification?.required_commands || [];
+  const requiredCommands = (params.harness?.verification?.required_commands || [])
+    .filter((commandName) => !isReviewOnlyCommandRequirement(`command:${commandName}`, params.mode));
   if (requiredCommands.length > 0) {
     for (const commandName of requiredCommands) {
       requirements.push({
@@ -935,6 +937,10 @@ function buildDefaultRequirements(params: {
   }
 
   return requirements;
+}
+
+function isReviewOnlyCommandRequirement(key: string, mode?: 'dev' | 'review'): boolean {
+  return mode === 'dev' && key === 'command:review_checks';
 }
 
 export async function initializeChangePack(params: {
@@ -989,7 +995,12 @@ export async function initializeChangePack(params: {
     evidencePath,
     {},
   );
-  const defaultRequirements = buildDefaultRequirements({ profile, issue: params.issue, harness: params.harness });
+  const defaultRequirements = buildDefaultRequirements({
+    profile,
+    issue: params.issue,
+    mode: params.mode,
+    harness: params.harness,
+  });
   const existingRequirements = new Map(
     (existingEvidence.requirements ?? []).map((requirement) => [requirement.key, requirement]),
   );
@@ -1002,6 +1013,9 @@ export async function initializeChangePack(params: {
     kind: requirement.kind,
   }));
   for (const requirement of existingEvidence.requirements ?? []) {
+    if (isReviewOnlyCommandRequirement(requirement.key, params.mode)) {
+      continue;
+    }
     if (!requirements.some((candidate) => candidate.key === requirement.key)) {
       requirements.push(requirement);
     }
@@ -1108,6 +1122,9 @@ export async function evaluateChangePackState(params: {
   const profile = evidence.profile ?? inferProfile(params.issue, params.mode);
   const requirements: Array<CompletionRequirement & { status: 'missing' | 'satisfied' }> = [];
   for (const item of evidence.requirements ?? []) {
+    if (isReviewOnlyCommandRequirement(item.key, params.mode)) {
+      continue;
+    }
     let satisfied = item.status === 'satisfied' || isSatisfiedEvidenceRecord(item as Record<string, unknown>);
 
     if (item.kind === 'verification' && hasStructuredRequirementEvidence(item.evidence)) {

@@ -90,10 +90,11 @@ def test_dev_hook_fails_without_new_commits(tmp_path, monkeypatch):
         WORKFLOW_DIFF_COMMAND,
         ("rev-list", "--count", "refs/remotes/origin/main..HEAD"),
         ("status", "--short"),
+        ("status", "--short"),
     ]
 
 
-def test_dev_hook_reports_dirty_workspace_without_commits(tmp_path, monkeypatch):
+def test_dev_hook_reports_dirty_workspace_when_product_changes_cannot_be_staged(tmp_path, monkeypatch):
     hook = make_hook(tmp_path)
     hook.github.pr_exists.return_value = None
 
@@ -114,6 +115,12 @@ def test_dev_hook_reports_dirty_workspace_without_commits(tmp_path, monkeypatch)
             result.stdout = ""
         elif command == ("rev-list", "--count", "refs/remotes/origin/main..HEAD"):
             result.stdout = "0\n"
+        elif command[0:2] == ("reset", "--"):
+            result.stdout = ""
+        elif command[0:3] == ("add", "--all", "--"):
+            result.stdout = ""
+        elif command == ("diff", "--cached", "--name-only"):
+            result.stdout = ""
         elif command == ("status", "--short"):
             result.stdout = "?? Cargo.toml\n?? src/main.rs\n"
         else:
@@ -128,6 +135,114 @@ def test_dev_hook_reports_dirty_workspace_without_commits(tmp_path, monkeypatch)
         "Workspace for feature/int-25 has uncommitted changes but no commits "
         "relative to refs/remotes/origin/main; commit and push are required before PR creation"
     )
+
+
+def test_dev_hook_commits_uncommitted_product_changes_before_pr(tmp_path, monkeypatch):
+    hook = make_hook(tmp_path)
+    hook.github.pr_exists.return_value = None
+    hook.github.create_pull_request.return_value = {
+        "html_url": "https://github.com/owner/repo/pull/25",
+        "number": 25,
+    }
+
+    git_calls: list[tuple[str, ...]] = []
+    committed = False
+
+    def fake_run(cmd, cwd, capture_output, text, check):
+        nonlocal committed
+        assert cwd == hook.store.symphony_dir.path.parent
+        assert cmd[0] == "git"
+        git_calls.append(tuple(cmd[1:]))
+
+        result = MagicMock()
+        result.returncode = 0
+        result.stderr = ""
+        result.stdout = ""
+
+        command = tuple(cmd[1:])
+        if command == ("rev-parse", "--verify", "refs/remotes/origin/main"):
+            result.stdout = "origin-main-sha\n"
+        elif command == WORKFLOW_DIFF_COMMAND:
+            result.stdout = ""
+        elif command[0:2] == ("reset", "--"):
+            result.stdout = ""
+        elif command[0:3] == ("add", "--all", "--"):
+            result.stdout = ""
+        elif command == ("diff", "--cached", "--name-only"):
+            result.stdout = ".github/workflows/test.yml\n"
+        elif command == ("commit", "--no-verify", "-m", "feat(INT-25): prepare product changes for review"):
+            committed = True
+            result.stdout = "[feature/int-25 commit-sha] feat(INT-25): prepare product changes for review\n"
+        elif command == ("rev-list", "--count", "refs/remotes/origin/main..HEAD"):
+            result.stdout = "1\n" if committed else "0\n"
+        elif command == ("rev-parse", "HEAD"):
+            result.stdout = "committed-head-sha\n"
+        elif command == ("rev-parse", "--verify", "refs/remotes/origin/feature/int-25"):
+            result.returncode = 128
+            result.stderr = "fatal: Needed a single revision\n"
+        elif command == ("push", "-u", "origin", "HEAD:feature/int-25"):
+            result.stdout = "branch set up to track origin/feature/int-25\n"
+        elif command == ("status", "--short"):
+            result.stdout = " M .github/workflows/test.yml\n?? .symphony/state.json\n?? __pycache__/module.pyc\n"
+        else:
+            raise AssertionError(f"Unexpected git command: {cmd}")
+
+        return result
+
+    monkeypatch.setattr("scripts.hooks.dev.subprocess.run", fake_run)
+
+    assert hook.run() is True
+    hook.github.create_pull_request.assert_called_once()
+    assert ("commit", "--no-verify", "-m", "feat(INT-25): prepare product changes for review") in git_calls
+    assert ("push", "-u", "origin", "HEAD:feature/int-25") in git_calls
+
+
+def test_dev_hook_ignores_private_runtime_and_cache_changes_when_no_product_diff(tmp_path, monkeypatch):
+    hook = make_hook(tmp_path)
+    hook.github.pr_exists.return_value = None
+
+    git_calls: list[tuple[str, ...]] = []
+
+    def fake_run(cmd, cwd, capture_output, text, check):
+        assert cwd == hook.store.symphony_dir.path.parent
+        assert cmd[0] == "git"
+        git_calls.append(tuple(cmd[1:]))
+
+        result = MagicMock()
+        result.returncode = 0
+        result.stderr = ""
+        result.stdout = ""
+
+        command = tuple(cmd[1:])
+        if command == ("rev-parse", "--verify", "refs/remotes/origin/main"):
+            result.stdout = "origin-main-sha\n"
+        elif command == WORKFLOW_DIFF_COMMAND:
+            result.stdout = ""
+        elif command[0:2] == ("reset", "--"):
+            result.stdout = ""
+        elif command[0:3] == ("add", "--all", "--"):
+            result.stdout = ""
+        elif command == ("diff", "--cached", "--name-only"):
+            result.stdout = ""
+        elif command == ("rev-list", "--count", "refs/remotes/origin/main..HEAD"):
+            result.stdout = "0\n"
+        elif command == ("status", "--short"):
+            result.stdout = "?? .symphony/state.json\n?? __pycache__/module.pyc\n?? .pytest_cache/v/cache/nodeids\n"
+        else:
+            raise AssertionError(f"Unexpected git command: {cmd}")
+
+        return result
+
+    monkeypatch.setattr("scripts.hooks.dev.subprocess.run", fake_run)
+
+    assert hook.run() is False
+    assert hook.github.create_pull_request.call_count == 0
+    assert hook.last_delivery_code == "no_actionable_diff"
+    assert hook.store.get_state()["error"] == (
+        "No commits found on feature/int-25 relative to refs/remotes/origin/main; "
+        "skipping PR creation"
+    )
+    assert all(call[0] != "commit" for call in git_calls)
 
 
 def test_dev_hook_pushes_branch_before_creating_pr(tmp_path, monkeypatch):
@@ -231,6 +346,47 @@ def test_dev_hook_pushes_current_head_to_expected_runtime_branch(tmp_path, monke
     hook.github.create_pull_request.assert_called_once()
     assert hook.github.create_pull_request.call_args.kwargs["head"] == "liupenghui/int-25-runtime-branch"
     assert ("push", "-u", "origin", "HEAD:liupenghui/int-25-runtime-branch") in git_calls
+
+
+def test_dev_hook_marks_origin_push_failure_as_review_submit_failed(tmp_path, monkeypatch):
+    hook = make_hook(tmp_path)
+    hook.github.pr_exists.return_value = None
+
+    def fake_run(cmd, cwd, capture_output, text, check):
+        assert cwd == hook.store.symphony_dir.path.parent
+        assert cmd[0] == "git"
+
+        result = MagicMock()
+        result.returncode = 0
+        result.stderr = ""
+        result.stdout = ""
+
+        command = tuple(cmd[1:])
+        if command == ("rev-parse", "--verify", "refs/remotes/origin/main"):
+            result.stdout = "origin-main-sha\n"
+        elif command == WORKFLOW_DIFF_COMMAND:
+            result.stdout = ""
+        elif command == ("rev-list", "--count", "refs/remotes/origin/main..HEAD"):
+            result.stdout = "1\n"
+        elif command == ("rev-parse", "HEAD"):
+            result.stdout = "local-head-sha\n"
+        elif command == ("rev-parse", "--verify", "refs/remotes/origin/feature/int-25"):
+            result.returncode = 128
+            result.stderr = "fatal: Needed a single revision\n"
+        elif command == ("push", "-u", "origin", "HEAD:feature/int-25"):
+            result.returncode = 1
+            result.stderr = "remote rejected: workflow scope required\n"
+        else:
+            raise AssertionError(f"Unexpected git command: {cmd}")
+
+        return result
+
+    monkeypatch.setattr("scripts.hooks.dev.subprocess.run", fake_run)
+
+    assert hook.run() is False
+    assert hook.last_delivery_code == "review_submit_failed"
+    assert "workflow scope required" in (hook.last_delivery_summary or "")
+    hook.github.create_pull_request.assert_not_called()
 
 
 def test_dev_hook_publishes_handover_to_pull_request_comment(tmp_path, monkeypatch):

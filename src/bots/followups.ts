@@ -780,7 +780,21 @@ export class BotFollowupService {
         return;
       }
 
+      const materialKey = `resolved|${issue.orchestrator_state || 'unknown'}|${issue.tracker_state}`;
+      const inFlightKey = [
+        recipient.transport,
+        recipient.conversation_id,
+        issue.issue_id,
+        'resolved',
+        materialKey,
+      ].join(':');
+      if (this.governanceCardsInFlight.has(inFlightKey)) {
+        resolvedAny = true;
+        return;
+      }
+
       resolvedAny = true;
+      this.governanceCardsInFlight.add(inFlightKey);
       try {
         await notifier.editMessage(
           recipient,
@@ -792,7 +806,7 @@ export class BotFollowupService {
           conversation_id: recipient.conversation_id,
           issue_id: issue.issue_id,
           issue_identifier: issue.identifier,
-          card_key: `resolved|${issue.orchestrator_state || 'unknown'}|${issue.tracker_state}`,
+          card_key: materialKey,
           card_state: 'resolved',
         });
         this.options.deliveryStateRepository?.upsert({
@@ -801,7 +815,7 @@ export class BotFollowupService {
           root_issue_id: issue.issue_id,
           root_issue_identifier: issue.identifier,
           delivery_kind: 'governance_card',
-          last_material_key: `resolved|${issue.orchestrator_state || 'unknown'}|${issue.tracker_state}`,
+          last_material_key: materialKey,
           last_notification_class: null,
           last_message_id: existing.message_id,
         });
@@ -812,7 +826,7 @@ export class BotFollowupService {
           action: 'edit',
           result: 'success',
           messageId: existing.message_id,
-          materialKey: `resolved|${issue.orchestrator_state || 'unknown'}|${issue.tracker_state}`,
+          materialKey,
         });
       } catch (error) {
         if (getBotMessageEditFailureKind(error) === 'not_modified') {
@@ -821,7 +835,7 @@ export class BotFollowupService {
             conversation_id: recipient.conversation_id,
             issue_id: issue.issue_id,
             issue_identifier: issue.identifier,
-            card_key: `resolved|${issue.orchestrator_state || 'unknown'}|${issue.tracker_state}`,
+            card_key: materialKey,
             card_state: 'resolved',
           });
           this.options.deliveryStateRepository?.upsert({
@@ -830,7 +844,7 @@ export class BotFollowupService {
             root_issue_id: issue.issue_id,
             root_issue_identifier: issue.identifier,
             delivery_kind: 'governance_card',
-            last_material_key: `resolved|${issue.orchestrator_state || 'unknown'}|${issue.tracker_state}`,
+            last_material_key: materialKey,
             last_notification_class: null,
             last_message_id: existing.message_id,
           });
@@ -841,7 +855,7 @@ export class BotFollowupService {
             action: 'edit',
             result: 'success',
             messageId: existing.message_id,
-            materialKey: `resolved|${issue.orchestrator_state || 'unknown'}|${issue.tracker_state}`,
+            materialKey,
           });
           return;
         }
@@ -852,7 +866,7 @@ export class BotFollowupService {
           action: 'edit',
           result: 'failed',
           messageId: existing.message_id,
-          materialKey: `resolved|${issue.orchestrator_state || 'unknown'}|${issue.tracker_state}`,
+          materialKey,
           errorMessage: error instanceof Error ? error.message : String(error),
         });
         const messageRef = await notifier.sendMessage(recipient, message);
@@ -863,7 +877,7 @@ export class BotFollowupService {
           issue_identifier: issue.identifier,
           message_id: messageRef.provider_message_id,
           card_kind: 'governance_blocked',
-          card_key: `resolved|${issue.orchestrator_state || 'unknown'}|${issue.tracker_state}`,
+          card_key: materialKey,
           card_state: 'resolved',
         });
         this.options.deliveryStateRepository?.upsert({
@@ -872,7 +886,7 @@ export class BotFollowupService {
           root_issue_id: issue.issue_id,
           root_issue_identifier: issue.identifier,
           delivery_kind: 'governance_card',
-          last_material_key: `resolved|${issue.orchestrator_state || 'unknown'}|${issue.tracker_state}`,
+          last_material_key: materialKey,
           last_notification_class: null,
           last_message_id: messageRef.provider_message_id,
         });
@@ -883,8 +897,10 @@ export class BotFollowupService {
           action: 'fallback',
           result: 'success',
           messageId: messageRef.provider_message_id,
-          materialKey: `resolved|${issue.orchestrator_state || 'unknown'}|${issue.tracker_state}`,
+          materialKey,
         });
+      } finally {
+        this.governanceCardsInFlight.delete(inFlightKey);
       }
     }));
 
