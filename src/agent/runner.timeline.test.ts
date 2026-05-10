@@ -32,6 +32,60 @@ function createFakeChildProcess() {
 }
 
 describe('AgentRunner timeline events', () => {
+  test('passes supervisor MCP config, allowed tools, and system prompt through thread start', async () => {
+    const runner = new AgentRunner({
+      codexCommand: 'node ./scripts/claude-adapter.cjs',
+      approvalPolicy: 'on-request',
+      threadSandbox: 'workspace-read',
+      mcpConfig: JSON.stringify({
+        mcpServers: {
+          'supervisor-context': {
+            command: 'bun',
+            args: ['run', 'src/supervisor/contextMcpServer.ts'],
+          },
+          'supervisor-orchestrator': {
+            command: 'bun',
+            args: ['run', 'src/supervisor/orchestratorMcpServer.ts'],
+          },
+        },
+      }),
+      allowedTools: ['Read', 'Grep', 'Glob', 'LS', 'mcp__supervisor-context__list_context_sources', 'mcp__supervisor-orchestrator__show_issue_card'],
+      systemPrompt: 'You are the top-level Supervisor Claude Code runtime.',
+      turnTimeoutMs: 5000,
+      readTimeoutMs: 1000,
+      stallTimeoutMs: 5000,
+      projectRoot: process.cwd(),
+    });
+    const child = createFakeChildProcess();
+
+    const initialized = runner.initializeSession(child, process.cwd());
+
+    queueMicrotask(() => {
+      child.stdout.emit('data', Buffer.from(`${JSON.stringify({ id: 1, result: { ok: true } })}\n`));
+      child.stdout.emit('data', Buffer.from(`${JSON.stringify({
+        id: 2,
+        result: { thread: { id: 'thread-supervisor' } },
+      })}\n`));
+    });
+
+    await initialized;
+    const threadStart = child.stdin.writes
+      .map((line) => JSON.parse(line))
+      .find((message) => message.method === 'thread/start');
+    const rawMcpConfig = threadStart.params.mcpConfig;
+
+    expect(threadStart.params).toMatchObject({
+      approvalPolicy: 'on-request',
+      sandbox: 'workspace-read',
+      mcpConfig: expect.any(String),
+      allowedTools: ['Read', 'Grep', 'Glob', 'LS', 'mcp__supervisor-context__list_context_sources', 'mcp__supervisor-orchestrator__show_issue_card'],
+      systemPrompt: 'You are the top-level Supervisor Claude Code runtime.',
+    });
+    const mcpConfig = JSON.parse(rawMcpConfig);
+    expect(mcpConfig.mcpServers['supervisor-context']).toBeTruthy();
+    expect(mcpConfig.mcpServers['supervisor-orchestrator']).toBeTruthy();
+  });
+
   test('maps agent/timeline messages to timeline AgentEvent without breaking turn completion tokens', async () => {
     const runner = new AgentRunner({
       codexCommand: 'node ./scripts/claude-adapter.cjs',

@@ -42,6 +42,9 @@ export interface AgentRunnerOptions {
   approvalPolicy?: string | null;
   threadSandbox?: string | null;
   turnSandboxPolicy?: string | null;
+  mcpConfig?: string | null;
+  allowedTools?: string[] | null;
+  systemPrompt?: string | null;
   turnTimeoutMs: number;
   readTimeoutMs: number;
   stallTimeoutMs: number;
@@ -689,7 +692,10 @@ export class AgentRunner extends EventEmitter {
               params: {
                 approvalPolicy: this.options.approvalPolicy || 'on-request',
                 sandbox: this.options.threadSandbox || 'workspace-write',
-                cwd: String(workspacePath || '')
+                cwd: String(workspacePath || ''),
+                ...(this.options.mcpConfig ? { mcpConfig: this.options.mcpConfig } : {}),
+                ...(this.options.allowedTools?.length ? { allowedTools: this.options.allowedTools } : {}),
+                ...(this.options.systemPrompt ? { systemPrompt: this.options.systemPrompt } : {}),
               }
             };
             child.stdin?.write(JSON.stringify(threadStartMsg) + '\n');
@@ -780,7 +786,10 @@ export class AgentRunner extends EventEmitter {
         params: {
           approvalPolicy: approvalPolicy || 'auto',
           sandbox: threadSandbox || 'trusted',
-          cwd: String(workspacePath || '')
+          cwd: String(workspacePath || ''),
+          ...(this.options.mcpConfig ? { mcpConfig: this.options.mcpConfig } : {}),
+          ...(this.options.allowedTools?.length ? { allowedTools: this.options.allowedTools } : {}),
+          ...(this.options.systemPrompt ? { systemPrompt: this.options.systemPrompt } : {}),
         }
       };
       child.stdin?.write(JSON.stringify(threadStartMsg) + '\n');

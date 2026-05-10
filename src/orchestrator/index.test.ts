@@ -1780,19 +1780,23 @@ describe('Orchestrator Stability', () => {
     try {
       ctx.supervisor.decideNextAction = mock(async () => ({
         kind: 'continue',
-        message: 'Continue the review.',
+        message: 'Write the missing .symphony/REVIEW_REPORT.md.',
       }));
       (orchestrator as any).supervisor = ctx.supervisor;
 
-      ctx.agentRunner.runTurn = mock(async () => ({
-        success: true,
-        completed: true,
-        cancelled: false,
-        tokens: { input: 6, output: 3, total: 9 },
-        claude_api_calls: 1,
-        timeline: [],
-        transcript: [],
-      }));
+      const reviewPrompts: string[] = [];
+      ctx.agentRunner.runTurn = mock(async (_child, _threadId, prompt: string) => {
+        reviewPrompts.push(prompt);
+        return {
+          success: true,
+          completed: true,
+          cancelled: false,
+          tokens: { input: 6, output: 3, total: 9 },
+          claude_api_calls: 1,
+          timeline: [],
+          transcript: [],
+        };
+      });
       (orchestrator as any).agentRunner = ctx.agentRunner;
 
       (orchestrator as any).readWorkspaceFile = mock(async (_workspacePath: string, filename: string) => {
@@ -1827,9 +1831,10 @@ describe('Orchestrator Stability', () => {
       const state = (orchestrator as any).state;
       const workItem = ctx.workItemRepository.findById(issue.id);
 
-      expect(ctx.agentRunner.runTurn).toHaveBeenCalledTimes(1);
+      expect(ctx.agentRunner.runTurn).toHaveBeenCalledTimes(2);
+      expect(reviewPrompts[1]).toContain('.symphony/REVIEW_REPORT.md');
       expect(fs.existsSync(`${workspacePath}/.symphony/REVIEW_REPORT.md`)).toBe(false);
-      expect(ctx.supervisor.decideNextAction).toHaveBeenCalledTimes(1);
+      expect(ctx.supervisor.decideNextAction).toHaveBeenCalledTimes(2);
       expect((orchestrator as any).runCliCommand).toHaveBeenCalledTimes(1);
       expect(state.retry_attempts.get(issue.id)?.attempt).toBe(1);
       expect(workItem?.linear_state).toBe('In Review');

@@ -636,6 +636,7 @@ describe('DefaultBotGateway', () => {
     const result = await gateway.handleTelegramWebhook(
       {
         message: {
+          message_id: 654,
           text: 'INT-1 现在怎么样了',
           chat: { id: 42 },
           from: { id: 9, username: 'alice' },
@@ -654,6 +655,79 @@ describe('DefaultBotGateway', () => {
     expect(requests).toHaveLength(1);
     expect(String(requests[0]?.body.text)).toContain('当前自然语言模型暂不可用');
     expect(String(requests[0]?.body.text)).toContain('INT-1');
+  });
+
+  test('sends Telegram natural language replies as native replies to the inbound message', async () => {
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body || '{}')),
+      });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 202 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        assistantModel: {
+          decide: async () => ({
+            intent: {
+              kind: 'answer_question',
+              answer: '这个仓库是一个恒星质量-光度关系计算器。',
+            },
+          }),
+          getDiagnostics: () => ({
+            provider: 'test',
+            model: 'test-model',
+            configured: true,
+            health: 'healthy',
+            fallback_available: true,
+            last_error_code: null,
+          }),
+        },
+      },
+    );
+
+    const result = await gateway.handleTelegramWebhook(
+      {
+        message: {
+          message_id: 321,
+          text: '这个仓库是干啥的',
+          chat: { id: 42 },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(result.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toContain('sendMessage');
+    expect(requests[0]?.body.chat_id).toBe('42');
+    expect(requests[0]?.body.reply_to_message_id).toBe(321);
+    expect(String(requests[0]?.body.text)).toContain('恒星质量-光度关系');
+    gateway.dispose();
   });
 
   test('wires the configured assistant model into the supervisor runtime tool router', async () => {
@@ -992,6 +1066,7 @@ describe('DefaultBotGateway', () => {
     const result = await gateway.handleTelegramWebhook(
       {
         message: {
+          message_id: 654,
           text: 'INT-1 现在怎么样了',
           chat: { id: 42 },
           from: { id: 9, username: 'alice' },
@@ -1006,6 +1081,7 @@ describe('DefaultBotGateway', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(requests).toHaveLength(1);
     expect(String(requests[0]?.body.text)).toContain('收到您的消息了，我这边正在思考和处理，给我点时间');
+    expect(requests[0]?.body.reply_to_message_id).toBe(654);
 
     resolveAssistant?.();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1104,7 +1180,7 @@ describe('DefaultBotGateway', () => {
     expect(String(requests[1]?.body.text)).toContain('No active work right now.');
   });
 
-  test('mentions latest repo reading in the slow acknowledgement for repo questions', async () => {
+  test('does not send a slow acknowledgement for pure repo questions before the direct answer', async () => {
     const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
     const db = new Database(':memory:');
     initializeSchema(db);
@@ -1202,15 +1278,113 @@ describe('DefaultBotGateway', () => {
 
     expect(result.status).toBe(200);
     await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(String(requests[0]?.body.text)).toContain('正在读取最新仓库信息');
+    expect(requests).toHaveLength(0);
 
     resolveAgent?.();
     await new Promise((resolve) => setTimeout(resolve, 0));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(String(requests[1]?.body.text)).toContain('README.md');
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toContain('sendMessage');
+    expect(String(requests[0]?.body.text)).toContain('README.md');
     gateway.dispose();
     db.close();
+  });
+
+  test('retries the final Telegram reply when ack edit and fallback send hit transient failures', async () => {
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    let nextMessageId = 900;
+    let resolveAssistant: (() => void) | null = null;
+    const assistantDone = new Promise<void>((resolve) => {
+      resolveAssistant = resolve;
+    });
+
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body || '{}'));
+      requests.push({ url, body });
+      if (url.includes('editMessageText')) {
+        throw new Error('Telegram edit timeout');
+      }
+      const finalSendAttempts = requests.filter((request) =>
+        request.url.includes('sendMessage') &&
+        String(request.body.text).includes('最终答案')
+      ).length;
+      if (url.includes('sendMessage') && String(body.text).includes('最终答案') && finalSendAttempts === 1) {
+        throw new Error('Telegram send timeout');
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: nextMessageId += 1 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        telegramTextProcessingAckDelayMs: 5,
+        assistantModel: {
+          decide: async () => {
+            await assistantDone;
+            return {
+              intent: {
+                kind: 'answer_question',
+                answer: '最终答案：这个任务还在处理中。',
+              },
+            };
+          },
+          getDiagnostics: () => ({
+            provider: 'test',
+            model: 'test-model',
+            configured: true,
+            health: 'healthy',
+            fallback_available: true,
+            last_error_code: null,
+          }),
+        },
+      },
+    );
+
+    const result = await gateway.handleTelegramWebhook(
+      {
+        message: {
+          text: 'INT-1 现在怎么样了',
+          chat: { id: 42 },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(result.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(requests.filter((request) => request.url.includes('sendMessage'))).toHaveLength(1);
+
+    resolveAssistant?.();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    expect(requests.some((request) => request.url.includes('editMessageText'))).toBe(true);
+    const finalSends = requests.filter((request) =>
+      request.url.includes('sendMessage') &&
+      String(request.body.text).includes('最终答案')
+    );
+    expect(finalSends).toHaveLength(2);
+    gateway.dispose();
   });
 
   test('edits the slow-processing acknowledgement into the supervisor Plan Card instead of sending a second card', async () => {
@@ -3098,10 +3272,9 @@ describe('DefaultBotGateway', () => {
     );
 
     expect(result.status).toBe(200);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 20));
 
-    expect(requests.filter((request) => request.url.includes('sendMessage'))).toHaveLength(1);
+    expect(requests.filter((request) => request.url.includes('sendMessage'))).toHaveLength(3);
     expect(transportEvents.findAll()).toEqual([
       expect.objectContaining({
         source: 'sync_ack',

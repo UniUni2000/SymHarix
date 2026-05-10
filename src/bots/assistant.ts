@@ -36,13 +36,14 @@ import {
 } from '../supervisor/supervisorAgent';
 import type { SupervisorRepoSourceResolver } from '../supervisor/repoSourceResolver';
 import type { SupervisorRepoUnderstandingService } from '../supervisor/repoUnderstanding';
+import type { SupervisorClaudeRuntimeService } from '../supervisor/claudeRuntime';
 import { SupervisorSessionService } from '../supervisor/sessionService';
 import type { SupervisorAgentRuntimeService } from '../supervisor/agentRuntime';
 import { inferRuntimeLocaleFromText } from '../i18n/locale';
 import { extractIssueIdentifier } from './issueIdentifier';
 import { isIssueListQuestion } from './issueQueryIntent';
 
-const CONFIRM_WORDS = new Set(['确认', '是的', '是', '对', '对的', '没错', 'yes', 'y', 'ok', 'okay', '好', '执行', '继续', 'confirm']);
+const CONFIRM_WORDS = new Set(['确认', '是的', '是', '对', '对的', '没错', 'yes', 'y', 'ok', 'okay', '好', '可以', '准了', '批准', '同意', '开始', '执行', '继续', 'confirm']);
 const CANCEL_WORDS = new Set(['取消', 'cancel', 'no', 'n', '停止']);
 const TRANSPARENT_FALLBACK_NOTICE = '当前自然语言模型暂不可用，已切换到简化理解模式。';
 const SUGGESTION_TYPE_ALIASES: Record<string, string[]> = {
@@ -135,7 +136,7 @@ function isSupervisorSessionControlText(text: string): boolean {
 
 function isSupervisorSessionFocusText(text: string): boolean {
   const normalized = text.trim().replace(/\s+/g, ' ');
-  return /^(?:卡片给我|把卡片发我|把当前卡片发我|发我卡片|发一下卡片|当前卡片|查看当前计划|看当前计划|当前计划|查看计划卡|看计划卡|计划卡给我)$/i.test(normalized)
+  return /^(?:卡片给我|卡片发我|把卡片发我|把当前卡片发我|发我卡片|发一下卡片|当前卡片|查看当前计划|看当前计划|当前计划|查看计划卡|看计划卡|计划卡给我)$/i.test(normalized)
     || /^(?:发|给|看看|看一下).{0,8}(?:当前|这张|这个|现有).{0,8}(?:卡片|计划卡|计划)$/i.test(normalized)
     || /^(?:当前|这张|这个|现有).{0,8}(?:卡片|计划卡).{0,8}(?:发我|给我|看看|看一下)$/i.test(normalized);
 }
@@ -346,6 +347,134 @@ function toSupervisorAgentIssueIntent(
     description: [result.summary, result.nextStep].filter(Boolean).join('\n\n'),
     project_slug: context.default_project_slug,
   };
+}
+
+function nonBlankString(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function parseSupervisorClaudeStructuredIntent(message: string): BotAssistantIntent | null {
+  const record = extractJsonObject(message);
+  if (!record) {
+    return null;
+  }
+
+  if (record.mode === 'issue_recommendation') {
+    const title = nonBlankString(record.title);
+    const summary = nonBlankString(record.summary);
+    if (!title || !summary) {
+      return null;
+    }
+    const nextStep = nonBlankString(record.next_step ?? record.nextStep);
+    return {
+      kind: 'create_issue',
+      title,
+      description: [summary, nextStep].filter(Boolean).join('\n\n'),
+      project_slug: nonBlankString(record.project_slug ?? record.projectSlug),
+    };
+  }
+
+  if (record.mode === 'artifact_ideation') {
+    const title = nonBlankString(record.title);
+    const recommendation = nonBlankString(record.recommendation);
+    const rationale = nonBlankString(record.rationale);
+    const nextStep = nonBlankString(record.next_step ?? record.nextStep);
+    if (!title || !recommendation || !rationale) {
+      return null;
+    }
+    return {
+      kind: 'create_issue',
+      title,
+      description: [
+        `Artifact recommendation: ${recommendation}`,
+        `Rationale: ${rationale}`,
+        nextStep ? `Next step: ${nextStep}` : null,
+      ].filter(Boolean).join('\n'),
+      project_slug: nonBlankString(record.project_slug ?? record.projectSlug),
+    };
+  }
+
+  if (record.mode === 'handoff_to_session') {
+    const title = nonBlankString(record.suggested_title ?? record.suggestedTitle);
+    if (!title) {
+      return null;
+    }
+    return {
+      kind: 'create_issue',
+      title,
+      description: nonBlankString(record.suggested_body ?? record.suggestedBody),
+      project_slug: nonBlankString(record.project_slug ?? record.projectSlug),
+    };
+  }
+
+  return null;
+}
+
+function parseSupervisorClaudeStructuredReply(message: string): BotCommandResponse | null {
+  const record = extractJsonObject(message);
+  if (!record) {
+    return null;
+  }
+
+  if (record.mode === 'repo_answer') {
+    const answer = nonBlankString(record.answer);
+    return answer ? { message: answer } : null;
+  }
+
+  if (record.mode === 'chat_reply') {
+    const reply = nonBlankString(record.message);
+    return reply ? { message: reply } : null;
+  }
+
+  if (record.mode === 'clarify') {
+    const question = nonBlankString(record.question);
+    return question ? { message: question } : null;
+  }
+
+  return null;
+}
+
+function hasOrchestratorBackedResponseShape(response: BotCommandResponse): boolean {
+  return Boolean(
+    response.issue_id ||
+    response.session_id ||
+    response.material_key ||
+    response.media_key ||
+    response.photo ||
+    response.actions?.length ||
+    response.action_rows?.length
+  );
+}
+
+function shouldRequireOrchestratorBackedResponse(text: string): boolean {
+  const normalized = text.trim();
+  return isSupervisorSessionFocusText(normalized) ||
+    /卡片|card/i.test(normalized) ||
+    isIssueStatusQuestion(normalized) ||
+    Boolean(detectPendingReplacementControlIntent(normalized)) ||
+    isNaturalRetryRequest(normalized) ||
+    /停止|停掉|stop|cancel run|halt/i.test(normalized) ||
+    /(?:创建|新建).{0,24}issue|(?:建|开|提).{0,12}(?:一个|个|一条|条)?\s*(?:issue|任务|工单|单子)|create\s+(?:an?\s+)?issue|open\s+(?:an?\s+)?issue/i.test(normalized) ||
+    /(?:让你|你来|由你|给你).{0,16}(?:提|建|开).{0,8}(?:issue|任务|工单|单子)/i.test(normalized);
+}
+
+function isSupervisorClaudeBusinessToolDenial(message: string): boolean {
+  return /(?:无法|不能|没法).{0,24}(?:直接)?(?:操作|调用|触发).{0,24}(?:orchestrator|控制台|工具|tool)|(?:需要|请).{0,24}(?:通过|到).{0,24}(?:orchestrator|控制台|Linear|GitHub).{0,24}(?:手动|触发|操作)/i.test(message);
+}
+
+function shouldFallbackToOrchestratorBackedRuntime(params: {
+  requestText: string;
+  response: BotCommandResponse;
+}): boolean {
+  if (hasOrchestratorBackedResponseShape(params.response)) {
+    return false;
+  }
+  return shouldRequireOrchestratorBackedResponse(params.requestText) ||
+    isSupervisorClaudeBusinessToolDenial(params.response.message);
 }
 
 function shouldProbeActiveSupervisorSession(params: {
@@ -993,7 +1122,7 @@ function detectIssueCloseIntent(text: string): BotAssistantIntent | null {
 }
 
 function isIssueStatusQuestion(text: string): boolean {
-  return /现在怎么样|怎么样了|怎么样|状态|status|进度|哪个仓库|分配到哪个仓库|卡在哪|卡住|stuck|blocked|why .*run/i.test(text.trim());
+  return /现在怎么样|怎么样了|怎么样|状态|status|进度|哪个仓库|分配到哪个仓库|卡在哪|卡住|卡到哪|到哪(?:里)?了|stuck|blocked|why .*run|review\s*(?:到哪|状态|进度|status|progress)|审核.*(?:到哪|状态|进度)|评审.*(?:到哪|状态|进度)/i.test(text.trim());
 }
 
 function extractStatusIssueIdentifier(text: string): string | null {
@@ -1499,6 +1628,7 @@ export class BotAssistantService {
     private readonly supervisorRepoSourceResolver: SupervisorRepoSourceResolver | null = null,
     private readonly conversationFocuses: BotConversationFocusRepository | null = null,
     private readonly supervisorAgentRuntime: Pick<SupervisorAgentRuntimeService, 'respond'> | null = null,
+    private readonly supervisorClaudeRuntime: Pick<SupervisorClaudeRuntimeService, 'respond'> | null = null,
   ) {
     this.model = normalizeModel(model);
     this.runtimeContext = new BotRuntimeContextService(
@@ -1685,7 +1815,7 @@ export class BotAssistantService {
 
   private rememberIssueFocus(
     context: BotCommandContext,
-    issue: BotIssueContextView | null | undefined,
+    issue: Pick<BotIssueContextView, 'issue_id' | 'identifier' | 'github_repo'> | null | undefined,
     source: 'explicit_issue' | 'runtime_issue' | 'repo_advisor' | 'callback' = 'runtime_issue',
   ): void {
     if (!issue || !this.conversationFocuses) {
@@ -1699,6 +1829,118 @@ export class BotAssistantService {
       repo_ref: issue.github_repo,
       source,
     });
+  }
+
+  private rememberResponseIssueFocus(
+    context: BotCommandContext,
+    response: BotCommandResponse,
+  ): void {
+    if (!response.issue_id) {
+      return;
+    }
+    this.rememberIssueFocus(context, this.runtime.getIssue(response.issue_id), 'runtime_issue');
+  }
+
+  private async respondToCardFocusRequest(
+    context: BotCommandContext,
+    text: string,
+  ): Promise<BotCommandResponse | null> {
+    if (!isSupervisorSessionFocusText(text)) {
+      return null;
+    }
+
+    const runtimeContext = await this.runtimeContext.buildContext(
+      context,
+      text,
+      this.getDiagnostics(),
+    );
+
+    if (this.supervisorSessionService?.hasActiveSession(context)) {
+      const response = await this.supervisorSessionService.respond({
+        context,
+        text,
+        intent: null,
+        runtimeContext,
+        canWrite: this.canWrite(context),
+        source: 'telegram_chat',
+      });
+      if (response) {
+        return response;
+      }
+    }
+
+    if (context.transport === 'telegram' && this.supervisorAgentRuntime) {
+      return this.supervisorAgentRuntime.respond({
+        context,
+        text,
+        canWrite: this.canWrite(context),
+      });
+    }
+
+    if (runtimeContext.focus_issue) {
+      return this.handleIntent(
+        context,
+        {
+          kind: 'show_issue_card',
+          issue_id: runtimeContext.focus_issue.issue.identifier,
+        },
+        text,
+        runtimeContext,
+      );
+    }
+
+    return null;
+  }
+
+  private async respondWithSupervisorClaudeRuntime(
+    context: BotCommandContext,
+    text: string,
+    options: { allowStructuredIntent?: boolean } = {},
+  ): Promise<BotCommandResponse | null> {
+    if (context.transport !== 'telegram' || !this.supervisorClaudeRuntime) {
+      return null;
+    }
+    const supervisorClaudeResponse = await this.supervisorClaudeRuntime.respond({
+      context,
+      text,
+      canWrite: this.canWrite(context),
+    });
+    if (!supervisorClaudeResponse) {
+      return null;
+    }
+    const allowStructuredIntent = options.allowStructuredIntent ?? true;
+    if (allowStructuredIntent) {
+      const structuredIntent = parseSupervisorClaudeStructuredIntent(supervisorClaudeResponse.message);
+      if (structuredIntent) {
+        const runtimeContext = await this.runtimeContext.buildContext(
+          context,
+          text,
+          this.getDiagnostics(),
+        );
+        return this.handleIntent(context, structuredIntent, text, runtimeContext);
+      }
+    }
+    const structuredReply = parseSupervisorClaudeStructuredReply(supervisorClaudeResponse.message);
+    if (structuredReply) {
+      return structuredReply;
+    }
+    if (
+      shouldFallbackToOrchestratorBackedRuntime({
+        requestText: text,
+        response: supervisorClaudeResponse,
+      }) &&
+      this.supervisorAgentRuntime
+    ) {
+      const fallbackResponse = await this.supervisorAgentRuntime.respond({
+        context,
+        text,
+        canWrite: this.canWrite(context),
+      });
+      this.rememberResponseIssueFocus(context, fallbackResponse);
+      return fallbackResponse;
+    }
+    this.rememberResponseIssueFocus(context, supervisorClaudeResponse);
+    return supervisorClaudeResponse;
   }
 
   private async respondFromSupervisorAgentResult(params: {
@@ -1793,6 +2035,29 @@ export class BotAssistantService {
         };
       }
 
+      if (isConfirmation(normalized)) {
+        const request = pending.normalized_payload as BotCommandRequest;
+        this.pendingActions?.delete({
+          transport: context.transport,
+          conversation_id: context.recipient.conversation_id,
+          issue_id: pending.issue_id,
+        });
+        const response = await this.commandService.execute(context, request);
+        this.rememberResponseIssueFocus(context, response);
+        return response;
+      }
+
+      if (isCancellation(normalized)) {
+        this.pendingActions?.delete({
+          transport: context.transport,
+          conversation_id: context.recipient.conversation_id,
+          issue_id: pending.issue_id,
+        });
+        return {
+          message: 'Cancelled the pending action.',
+        };
+      }
+
       const replacementControlIntent = detectPendingReplacementControlIntent(normalized);
       if (replacementControlIntent) {
         this.pendingActions?.delete({
@@ -1808,7 +2073,20 @@ export class BotAssistantService {
         return this.handleIntent(context, replacementControlIntent, text, runtimeContext);
       }
 
-      if (!isSlashCommandText(normalized) && shouldBypassPendingForReadOnlyIssueQuestion(normalized)) {
+      if (!isSlashCommandText(normalized) && (
+        shouldBypassPendingForReadOnlyIssueQuestion(normalized) ||
+        isSupervisorSessionFocusText(normalized)
+      )) {
+        const supervisorClaudeResponse = await this.respondWithSupervisorClaudeRuntime(context, text, {
+          allowStructuredIntent: false,
+        });
+        if (supervisorClaudeResponse) {
+          return supervisorClaudeResponse;
+        }
+        const cardFocusResponse = await this.respondToCardFocusRequest(context, normalized);
+        if (cardFocusResponse) {
+          return cardFocusResponse;
+        }
         const runtimeContext = await this.runtimeContext.buildContext(
           context,
           text,
@@ -1820,27 +2098,6 @@ export class BotAssistantService {
         }
       }
 
-      if (isConfirmation(normalized)) {
-        const request = pending.normalized_payload as BotCommandRequest;
-        this.pendingActions?.delete({
-          transport: context.transport,
-          conversation_id: context.recipient.conversation_id,
-          issue_id: pending.issue_id,
-        });
-        return this.commandService.execute(context, request);
-      }
-
-      if (isCancellation(normalized)) {
-        this.pendingActions?.delete({
-          transport: context.transport,
-          conversation_id: context.recipient.conversation_id,
-          issue_id: pending.issue_id,
-        });
-        return {
-          message: 'Cancelled the pending action.',
-        };
-      }
-
       return {
         message: `${pending.summary_message}\nReply with 确认 / 取消.`,
         actions: [...buildConfirmActions()],
@@ -1849,6 +2106,33 @@ export class BotAssistantService {
 
     if (isSlashCommandText(text)) {
       return this.commandService.execute(context, parseTextCommand(text));
+    }
+
+    const destructiveControlIntent = detectIssueCloseIntent(normalized);
+    if (destructiveControlIntent) {
+      if (context.transport === 'telegram' && this.supervisorAgentRuntime) {
+        return this.supervisorAgentRuntime.respond({
+          context,
+          text,
+          canWrite: this.canWrite(context),
+        });
+      }
+      const runtimeContext = await this.runtimeContext.buildContext(
+        context,
+        text,
+        this.getDiagnostics(),
+      );
+      return this.handleIntent(context, destructiveControlIntent, text, runtimeContext);
+    }
+
+    const supervisorClaudeResponse = await this.respondWithSupervisorClaudeRuntime(context, text);
+    if (supervisorClaudeResponse) {
+      return supervisorClaudeResponse;
+    }
+
+    const cardFocusResponse = await this.respondToCardFocusRequest(context, normalized);
+    if (cardFocusResponse) {
+      return cardFocusResponse;
     }
 
     const runtimeContext = await this.runtimeContext.buildContext(
