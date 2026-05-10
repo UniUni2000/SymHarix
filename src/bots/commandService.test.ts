@@ -381,11 +381,16 @@ describe('BotCommandService', () => {
     expect(setProject.message).toContain('Default project set to test2');
 
     const created = await service.executeText(context, '/new Build dashboard\nTrack progress');
-    expect(created.message).toContain('Issue Card · INT-2');
+    expect(created.message).toBe('Got it, created INT-2 · Created by bot');
     expect(created.caption).toContain('INT-2');
-    expect(created.media_key).toContain('issue-card|INT-2');
     expect(created.photo?.content_type).toBe('image/png');
-    expect(created.action_rows?.flat().some((action) => action.web_app?.url === '/runtime/issues/INT-2/app')).toBe(true);
+    expect(created.media_key).toContain('issue-card|INT-2');
+    expect(created.action_rows?.flat().map((action) => action.label)).toEqual([
+      'Refresh Card',
+      'Refresh Card',
+      'Open Runtime View',
+    ]);
+    expect(created.action_rows?.[1]?.[1]?.web_app?.url).toBe('/runtime/issues/INT-2/app');
 
     const watched = await service.executeText(context, '/watch INT-1');
     expect(watched.watch_registered).toBe(true);
@@ -542,7 +547,7 @@ describe('BotCommandService', () => {
     );
 
     expect(response.issue_id).toBe('issue-2');
-    expect(response.message).toContain('Issue Card · INT-2');
+    expect(response.message).toBe('Got it, created INT-2 · Created by bot');
     expect(response.media_key).toContain('issue-card|INT-2');
     expect(response.photo?.content_type).toBe('image/png');
     expect(response.action_rows?.flat().some((action) => action.web_app?.url === '/runtime/issues/INT-2/app')).toBe(true);
