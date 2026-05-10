@@ -595,6 +595,7 @@ export function buildRuntimeMiniAppIssuePresentation(issue: RuntimeIssueView): R
       : issue.governance_thread_state === 'waiting_on_child'
         ? 34
         : 18;
+  const reviewActive = issue.phase === 'REVIEW' || issue.orchestrator_state === 'review_running';
   return {
     mode: 'live',
     progress: retryableFailure ? Math.max(progress, 82) : progress,
@@ -631,9 +632,9 @@ export function buildRuntimeMiniAppIssuePresentation(issue: RuntimeIssueView): R
     riskDelta: normalizeRuntimeMiniAppSummary(issue.riskDelta || issue.risk_delta, '', 4000, issue.supervisor_locale) || 'stable',
     planStatus: englishOutput ? 'Done' : '完成',
     dispatchStatus: progress >= 30 ? (englishOutput ? 'Done' : '完成') : (englishOutput ? 'Waiting' : '等待'),
-    devStatus: progress >= 100 ? (englishOutput ? 'Done' : '完成') : (englishOutput ? 'Running' : '运行中'),
-    reviewStatus: progress >= 78 ? (englishOutput ? 'Running' : '运行中') : (englishOutput ? 'Waiting' : '等待中'),
-    reviewDeliveryStatus: issue.phase === 'REVIEW' ? 'running' : 'waiting for review',
+    devStatus: reviewActive ? (englishOutput ? 'Done' : '完成') : (englishOutput ? 'Running' : '运行中'),
+    reviewStatus: reviewActive ? (englishOutput ? 'Running' : '运行中') : (englishOutput ? 'Waiting' : '等待中'),
+    reviewDeliveryStatus: reviewActive ? 'running' : 'waiting for review',
     emptyChildQueueLabel: englishOutput
       ? 'Single-issue execution. No child tasks are needed.'
       : '这是单 issue 执行，没有必要拆分子任务。',
@@ -2332,6 +2333,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             };
           }
           const progress = getIssueProgress(issue);
+          const reviewActive = issue.phase === 'REVIEW' || issue.orchestrator_state === 'review_running';
           return {
             mode: 'live',
             progress: retryableFailure ? Math.max(progress, 82) : progress,
@@ -2359,9 +2361,9 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             riskDelta: normalizeRuntimeSummary(issue.riskDelta || issue.risk_delta, '', 4000) || 'stable',
             planStatus: t('completed'),
             dispatchStatus: progress >= 30 ? t('completed') : t('waiting'),
-            devStatus: progress >= 100 ? t('completed') : t('running'),
-            reviewStatus: progress >= 78 ? t('running') : t('waiting'),
-            reviewDeliveryStatus: issue.phase === 'REVIEW' ? 'running' : 'waiting for review',
+            devStatus: reviewActive ? t('completed') : t('running'),
+            reviewStatus: reviewActive ? t('running') : t('waiting'),
+            reviewDeliveryStatus: reviewActive ? 'running' : 'waiting for review',
             emptyChildQueueLabel: t('noChildQueue'),
             activityFeed: buildActivityFeed(issue),
             visibleMilestones: buildMilestones(issue),
@@ -2422,11 +2424,12 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           const presentation = getPresentation(issue);
           const progress = presentation.progress;
           const completed = isCompletedIssue(issue);
+          const reviewActive = issue.phase === 'REVIEW' || issue.orchestrator_state === 'review_running';
           const stages = [
             ['Plan', 100, '#56e39f', presentation.planStatus],
             ['Dispatch', progress >= 30 ? 100 : 0, '#56e39f', presentation.dispatchStatus],
-            ['Dev', Math.min(100, Math.max(0, progress)), completed ? '#56e39f' : '#6bb4ff', presentation.devStatus],
-            ['Review', completed ? 100 : progress >= 78 ? Math.min(100, progress) : 0, completed ? '#56e39f' : '#c9d5e1', presentation.reviewStatus]
+            ['Dev', reviewActive || completed ? 100 : Math.min(100, Math.max(0, progress)), reviewActive || completed ? '#56e39f' : '#6bb4ff', presentation.devStatus],
+            ['Review', completed ? 100 : reviewActive ? Math.min(100, progress) : 0, completed ? '#56e39f' : reviewActive ? '#6bb4ff' : '#c9d5e1', presentation.reviewStatus]
           ];
           el.stageRow.innerHTML = stages.map(([label, value, tone, status]) => (
             '<div class="stage"><strong>' + escapeHtml(label) + '</strong><span>' + escapeHtml(status) + '</span><div class="stage-meter"><i style="--value:' + value + '%;--tone:' + tone + '"></i></div></div>'

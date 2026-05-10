@@ -48,6 +48,15 @@ function createIssue(overrides: Partial<RuntimeIssueView> = {}): RuntimeIssueVie
 }
 
 describe('Telegram Mini App issue presentation', () => {
+  test('shows review as active once dev has handed off to review', () => {
+    const presentation = buildRuntimeMiniAppIssuePresentation(createIssue());
+
+    expect(presentation.progress).toBe(72);
+    expect(presentation.devStatus).toBe('完成');
+    expect(presentation.reviewStatus).toBe('运行中');
+    expect(presentation.reviewDeliveryStatus).toBe('running');
+  });
+
   test('treats completed delivery as the highest-priority issue fact', () => {
     const presentation = buildRuntimeMiniAppIssuePresentation(createIssue({
       tracker_state: 'Done',
