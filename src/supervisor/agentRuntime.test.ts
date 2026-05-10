@@ -550,6 +550,51 @@ describe('SupervisorAgentRuntimeService', () => {
     });
   });
 
+  test('shows the runtime issue card immediately after a confirmed create issue action', async () => {
+    const h = createHarness();
+
+    const pending = await h.service.respond({
+      context: h.context,
+      text: 'open an issue for an HTML 2048 game',
+    });
+
+    expect(pending.message).toContain('Action: create issue');
+    expect(pending.message).toContain('Reply with: 确认 / 取消');
+    expect(h.pendingActions.findOpenByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    })?.tool_name).toBe('create_issue');
+
+    const confirmed = await h.service.respond({
+      context: h.context,
+      text: '确认',
+    });
+
+    expect(confirmed.message).toContain('Issue Card · INT-999');
+    expect(confirmed.issue_id).toBe('issue-new');
+    expect(confirmed.media_key).toContain('issue-card|INT-999');
+    expect(confirmed.photo?.content_type).toBe('image/png');
+    expect(confirmed.action_rows?.flat().map((action) => action.label)).toEqual([
+      '停止',
+      '刷新卡片',
+      '打开运行视图',
+    ]);
+    expect(confirmed.action_rows?.[1]?.[1]?.web_app?.url).toBe('/runtime/issues/INT-999/app');
+    expect(h.pendingActions.findOpenByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    })).toBeNull();
+
+    const run = h.runs.findLatestByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name)).toEqual([
+      'create_issue',
+      'show_issue_card',
+    ]);
+  });
+
   test('uses the last issue recommendation when the user asks to create that suggested issue', async () => {
     const h = createHarness(undefined, {
       supervisorAgentService: {
