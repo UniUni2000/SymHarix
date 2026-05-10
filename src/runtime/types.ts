@@ -253,11 +253,19 @@ export interface RuntimeHistoryEntry {
   detail: Record<string, unknown> | null;
 }
 
+export interface RuntimeHistoryFileDiff {
+  path: string;
+  additions: number | null;
+  deletions: number | null;
+  patch: string | null;
+}
+
 export interface RuntimeIssueHistoryView {
   issue_id: string;
   issue_identifier: string | null;
   digest: RuntimeIssueDigest;
   entries: RuntimeHistoryEntry[];
+  file_diffs?: RuntimeHistoryFileDiff[];
 }
 
 export interface RuntimeAccessView {

@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import type { Database } from 'bun:sqlite';
 import {
   AgentRunRepository,
@@ -27,6 +28,7 @@ import type {
   RuntimeFileActivity,
   RuntimeGovernanceChildIssueView,
   RuntimeHistoryEntry,
+  RuntimeHistoryFileDiff,
   RuntimeIssueDigest,
   RuntimeIssueHistoryView,
   RuntimeIssueView,
@@ -118,6 +120,169 @@ function normalizeSummary(value: string | null | undefined, fallback: string, ma
 
 function compareDatesAscending(left: Date, right: Date): number {
   return left.getTime() - right.getTime();
+}
+
+function outputFromGitError(error: unknown): string | null {
+  const candidate = error as { stdout?: unknown };
+  if (typeof candidate.stdout === 'string') {
+    return candidate.stdout.trimEnd();
+  }
+  if (candidate.stdout instanceof Buffer) {
+    return candidate.stdout.toString('utf8').trimEnd();
+  }
+  return null;
+}
+
+function runGit(cwd: string, args: string[], allowedExitCodes: number[] = [0]): string | null {
+  try {
+    return execFileSync('git', ['-C', cwd, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trimEnd();
+  } catch (error) {
+    const status = (error as { status?: unknown }).status;
+    if (typeof status === 'number' && allowedExitCodes.includes(status)) {
+      return outputFromGitError(error);
+    }
+    return null;
+  }
+}
+
+function gitSucceeds(cwd: string, args: string[]): boolean {
+  try {
+    execFileSync('git', ['-C', cwd, ...args], {
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveHistoryDiffBaseRef(repoPath: string): string | null {
+  const originHead = runGit(repoPath, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']);
+  const candidates = [
+    originHead,
+    'origin/main',
+    'origin/master',
+    'main',
+    'master',
+    'develop',
+  ].filter((value): value is string => typeof value === 'string' && value.length > 0);
+
+  for (const candidate of candidates) {
+    if (runGit(repoPath, ['rev-parse', '--verify', candidate])) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function resolveMergedBranchBaseCommit(repoPath: string, baseRef: string): string | null {
+  if (!gitSucceeds(repoPath, ['merge-base', '--is-ancestor', 'HEAD', baseRef])) {
+    return null;
+  }
+
+  const mergeCommits = runGit(repoPath, ['rev-list', '--ancestry-path', '--merges', '--reverse', `HEAD..${baseRef}`]);
+  for (const mergeCommit of (mergeCommits || '').split('\n').filter(Boolean)) {
+    const parentsLine = runGit(repoPath, ['rev-list', '--parents', '-n', '1', mergeCommit]);
+    const [, firstParent, ...otherParents] = (parentsLine || '').split(/\s+/).filter(Boolean);
+    if (!firstParent || otherParents.length === 0) {
+      continue;
+    }
+
+    const branchWasMerged = otherParents.some((parent) =>
+      gitSucceeds(repoPath, ['merge-base', '--is-ancestor', 'HEAD', parent]),
+    );
+    if (!branchWasMerged) {
+      continue;
+    }
+
+    const forkBase = runGit(repoPath, ['merge-base', firstParent, 'HEAD']);
+    if (forkBase) {
+      return forkBase;
+    }
+  }
+
+  return null;
+}
+
+function resolveHistoryDiffBaseCommit(repoPath: string): string | null {
+  const baseRef = resolveHistoryDiffBaseRef(repoPath);
+  if (!baseRef) {
+    return null;
+  }
+
+  return (
+    resolveMergedBranchBaseCommit(repoPath, baseRef) ||
+    runGit(repoPath, ['merge-base', '--fork-point', baseRef, 'HEAD']) ||
+    runGit(repoPath, ['merge-base', 'HEAD', baseRef])
+  );
+}
+
+function parseNumstatValue(value: string): number | null {
+  if (value === '-' || value === '') {
+    return null;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeNumstatPath(path: string): string {
+  const noIndexPath = path.match(/^\/dev\/null\s+=>\s+(.+)$/);
+  if (noIndexPath?.[1]) {
+    return noIndexPath[1].trim();
+  }
+
+  const braceRename = path.match(/^(.*)\{(.+)\s+=>\s+(.+)\}(.*)$/);
+  if (braceRename) {
+    return `${braceRename[1] || ''}${braceRename[3] || ''}${braceRename[4] || ''}`.trim();
+  }
+
+  const simpleRename = path.match(/^(.+)\s+=>\s+(.+)$/);
+  if (simpleRename?.[2]) {
+    return simpleRename[2].trim();
+  }
+
+  return path.trim();
+}
+
+function parseNumstatLine(line: string): { path: string; additions: number | null; deletions: number | null } | null {
+  const parts = String(line || '').split('\t');
+  if (parts.length < 3) {
+    return null;
+  }
+
+  const path = normalizeNumstatPath(parts.slice(2).join('\t'));
+  if (!path) {
+    return null;
+  }
+
+  return {
+    path,
+    additions: parseNumstatValue(parts[0] || ''),
+    deletions: parseNumstatValue(parts[1] || ''),
+  };
+}
+
+function listUntrackedWorkspaceFileDiffs(repoRoot: string): RuntimeHistoryFileDiff[] {
+  const untrackedFiles = (runGit(repoRoot, ['ls-files', '--others', '--exclude-standard', '-z']) || '')
+    .split('\0')
+    .map((path) => path.trim())
+    .filter(Boolean);
+
+  return untrackedFiles.map((path) => {
+    const numstat = parseNumstatLine(
+      runGit(repoRoot, ['diff', '--no-index', '--numstat', '--', '/dev/null', path], [0, 1]) || '',
+    );
+    return {
+      path,
+      additions: numstat?.additions ?? null,
+      deletions: numstat?.deletions ?? null,
+      patch: runGit(repoRoot, ['diff', '--no-index', '--no-ext-diff', '--unified=20', '--', '/dev/null', path], [0, 1]),
+    };
+  });
 }
 
 export class RuntimeHub implements RuntimeControlPlane {
@@ -233,6 +398,7 @@ export class RuntimeHub implements RuntimeControlPlane {
       issue_identifier: issueView.identifier,
       digest: this.buildIssueDigest(issueView, entries),
       entries,
+      file_diffs: this.buildWorkspaceFileDiffs(workItem),
     };
   }
 
@@ -1234,6 +1400,39 @@ export class RuntimeHub implements RuntimeControlPlane {
     return entries
       .sort((left, right) => right.timestamp.localeCompare(left.timestamp) || left.id.localeCompare(right.id))
       .slice(0, bounded);
+  }
+
+  private buildWorkspaceFileDiffs(workItem: WorkItem, limit = 12): RuntimeHistoryFileDiff[] {
+    if (!workItem.workspace_path) {
+      return [];
+    }
+
+    const repoRoot = runGit(workItem.workspace_path, ['rev-parse', '--show-toplevel']);
+    if (!repoRoot) {
+      return [];
+    }
+
+    const baseCommit = resolveHistoryDiffBaseCommit(repoRoot);
+    if (!baseCommit) {
+      return listUntrackedWorkspaceFileDiffs(repoRoot).slice(0, Math.max(1, limit));
+    }
+
+    const numstat = runGit(repoRoot, ['diff', '--numstat', '--find-renames', baseCommit, '--']);
+    const trackedDiffs = (numstat || '')
+      .split('\n')
+      .map((line) => parseNumstatLine(line))
+      .filter((item): item is { path: string; additions: number | null; deletions: number | null } => Boolean(item))
+      .map((item) => ({
+        path: item.path,
+        additions: item.additions,
+        deletions: item.deletions,
+        patch: runGit(repoRoot, ['diff', '--no-ext-diff', '--find-renames', '--unified=20', baseCommit, '--', item.path]),
+      }));
+
+    return trackedDiffs
+      .concat(listUntrackedWorkspaceFileDiffs(repoRoot))
+      .slice(0, Math.max(1, limit))
+      .filter((item) => Boolean(item.patch) || item.additions !== null || item.deletions !== null);
   }
 
   private extractRecentTools(timeline: RuntimeTimelineEvent[]): RuntimeToolActivity[] {
