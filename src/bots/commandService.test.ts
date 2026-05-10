@@ -381,7 +381,11 @@ describe('BotCommandService', () => {
     expect(setProject.message).toContain('Default project set to test2');
 
     const created = await service.executeText(context, '/new Build dashboard\nTrack progress');
-    expect(created.message).toBe('已收到，已创建 INT-2 · Created by bot');
+    expect(created.message).toContain('Issue Card · INT-2');
+    expect(created.caption).toContain('INT-2');
+    expect(created.media_key).toContain('issue-card|INT-2');
+    expect(created.photo?.content_type).toBe('image/png');
+    expect(created.action_rows?.flat().some((action) => action.web_app?.url === '/runtime/issues/INT-2/app')).toBe(true);
 
     const watched = await service.executeText(context, '/watch INT-1');
     expect(watched.watch_registered).toBe(true);
@@ -495,7 +499,7 @@ describe('BotCommandService', () => {
     subscriptions.dispose();
   });
 
-  test('registers an origin follow-up and returns an ACK-only response when Telegram creates an issue', async () => {
+  test('registers an origin follow-up and returns an issue card when Telegram creates an issue', async () => {
     const db = new Database(':memory:');
     initializeSchema(db);
     const runtime = createRuntimeControlPlane();
@@ -538,7 +542,10 @@ describe('BotCommandService', () => {
     );
 
     expect(response.issue_id).toBe('issue-2');
-    expect(response.message).toBe('已收到，已创建 INT-2 · Created by bot');
+    expect(response.message).toContain('Issue Card · INT-2');
+    expect(response.media_key).toContain('issue-card|INT-2');
+    expect(response.photo?.content_type).toBe('image/png');
+    expect(response.action_rows?.flat().some((action) => action.web_app?.url === '/runtime/issues/INT-2/app')).toBe(true);
     expect(followups.findByIssueId('issue-2')).toHaveLength(1);
     expect(followups.findByIssueId('issue-2')[0]?.conversation_id).toBe('chat-42');
 

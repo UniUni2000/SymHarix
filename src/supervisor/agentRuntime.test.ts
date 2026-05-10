@@ -1081,7 +1081,9 @@ describe('SupervisorAgentRuntimeService', () => {
       context: h.context,
       text: 'create an issue: 添加 Python 类型注解 no confirmation',
     });
-    expect(created.message).toContain('已创建 INT-999');
+    expect(created.message).toContain('Issue Card · INT-999');
+    expect(created.issue_id).toBe('issue-new');
+    expect(created.media_key).toContain('issue-card|INT-999');
 
     const createRun = h.runs.findLatestByConversation({
       transport: 'telegram',
