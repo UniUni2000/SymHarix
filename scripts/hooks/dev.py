@@ -406,10 +406,15 @@ Agent completed the task for issue [{self.issue_id}](https://linear.app/inteliwa
     def _commit_product_changes_if_needed(self) -> bool:
         """Commit agent-produced product changes while leaving runtime artifacts private."""
         self._git("reset", "--", *self.PRODUCT_COMMIT_EXCLUDED_PATHS, check=False)
+        product_change_paths = self._uncommitted_product_paths()
+        if not product_change_paths:
+            return False
+
         add_result = self._git(
             "add",
             "--all",
-            *self._product_commit_pathspecs(),
+            "--",
+            *product_change_paths,
             check=False,
         )
         if add_result.returncode != 0:
@@ -442,16 +447,6 @@ Agent completed the task for issue [{self.issue_id}](https://linear.app/inteliwa
             return False
         raise RuntimeError(
             f"Failed to commit product changes for {self.branch}: {message or 'unknown git error'}"
-        )
-
-    def _product_commit_pathspecs(self) -> tuple[str, ...]:
-        return (
-            "--",
-            ".",
-            *(
-                f":(exclude){path}"
-                for path in self.PRODUCT_COMMIT_EXCLUDED_PATHS
-            ),
         )
 
     def _restore_paths_from_ref(self, source_ref: str, paths: list[str]) -> None:
@@ -504,22 +499,32 @@ Agent completed the task for issue [{self.issue_id}](https://linear.app/inteliwa
 
     def _workspace_has_uncommitted_product_changes(self) -> bool:
         """Check for uncommitted changes that belong in the product branch."""
+        return bool(self._uncommitted_product_paths())
+
+    def _uncommitted_product_paths(self) -> list[str]:
+        """Return changed product paths without touching private runtime artifacts."""
         status_output = self._git_stdout("status", "--short")
         if not status_output:
-            return False
-        for line in status_output.splitlines():
-            path = self._status_path_from_line(line)
-            if path and not self._is_private_runtime_or_cache_path(path):
-                return True
-        return False
+            return []
 
-    def _status_path_from_line(self, line: str) -> Optional[str]:
-        if len(line) < 4:
-            return None
-        path = line[3:].strip()
+        product_paths: list[str] = []
+        seen_paths = set()
+        for line in status_output.splitlines():
+            for path in self._status_paths_from_line(line):
+                if self._is_private_runtime_or_cache_path(path) or path in seen_paths:
+                    continue
+                product_paths.append(path)
+                seen_paths.add(path)
+        return product_paths
+
+    def _status_paths_from_line(self, line: str) -> list[str]:
+        if len(line) < 3:
+            return []
+        path = line[2:].strip()
         if " -> " in path:
-            path = path.rsplit(" -> ", 1)[1].strip()
-        return path.strip('"')
+            old_path, new_path = path.rsplit(" -> ", 1)
+            return [old_path.strip().strip('"'), new_path.strip().strip('"')]
+        return [path.strip('"')]
 
     def _is_private_runtime_or_cache_path(self, raw_path: str) -> bool:
         path = raw_path.strip().strip('"')
