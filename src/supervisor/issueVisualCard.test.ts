@@ -40,19 +40,47 @@ function issue(overrides: Partial<RuntimeIssueView> = {}): RuntimeIssueView {
 }
 
 describe('issue visual cards', () => {
-  test('renders direct issue cards with the same dark symphonyness card language as Telegram session cards', () => {
-    const svg = buildSupervisorIssueVisualCardSvg(issue());
+  test('renders direct issue cards as Mini App-aligned Telegram status previews', () => {
+    const svg = buildSupervisorIssueVisualCardSvg(issue({
+      phase: 'REVIEW',
+      tracker_state: 'In Progress',
+      orchestrator_state: 'review_running',
+      delivery_state: null,
+      active_pr_number: 112,
+      session: {
+        session_id: 'session-157',
+        turn_count: 3,
+        stage: null,
+        last_event: 'timeline',
+        last_message: 'Review is checking delivery evidence.',
+        started_at: '2026-05-08T00:00:00.000Z',
+        last_event_at: '2026-05-08T00:03:00.000Z',
+        tokens: {
+          input_tokens: 100,
+          output_tokens: 50,
+          total_tokens: 150,
+        },
+        recent_tools: [],
+        recent_files: [{
+          path: '/tmp/workspaces/INT-157/README.md',
+          operation: 'edit',
+          status: 'completed',
+          timestamp: '2026-05-08T00:03:00.000Z',
+        }],
+      },
+    }));
 
     expect(svg).toContain('symphonyness');
-    expect(svg).toContain('Supervisor');
-    expect(svg).toContain('Supervisor 判断');
-    expect(svg).toContain('本次范围');
-    expect(svg).toContain('验收标准');
-    expect(svg).toContain('阶段进度');
-    expect(svg).toContain('High Confidence');
-    expect(svg).toContain('#071622');
+    expect(svg).toContain('打开 Mini App');
+    expect(svg).toContain('状态概览');
+    expect(svg).toContain('Telegram 预览');
+    expect(svg).toContain('实时进度');
+    expect(svg).toContain('Review 进行中');
+    expect(svg).toContain('PR #112');
+    expect(svg).toContain('改了 README.md');
+    expect(svg).toContain('#0B1016');
     expect(svg).not.toContain('#F8FBFD');
-    expect(svg).not.toContain('LATEST SIGNAL');
+    expect(svg).not.toContain('High Confidence');
   });
 
   test('renders English issue cards without Chinese labels when the issue locale is English', () => {
@@ -63,14 +91,41 @@ describe('issue visual cards', () => {
       next_recommended_action: null,
     }));
 
-    expect(svg).toContain('Supervisor Judgment');
-    expect(svg).toContain('Scope');
-    expect(svg).toContain('Acceptance');
-    expect(svg).toContain('Stage Progress');
+    expect(svg).toContain('Open Mini App');
+    expect(svg).toContain('Status Overview');
+    expect(svg).toContain('Telegram Preview');
+    expect(svg).toContain('Live progress');
     expect(svg).toContain('Cancelled');
-    expect(svg).not.toContain('Supervisor 判断');
-    expect(svg).not.toContain('本次范围');
-    expect(svg).not.toContain('验收标准');
-    expect(svg).not.toContain('阶段进度');
+    expect(svg).not.toContain('状态概览');
+    expect(svg).not.toContain('打开 Mini App');
+    expect(svg).not.toContain('实时进度');
+  });
+
+  test('keeps completed progress labels from colliding with the live progress caption', () => {
+    const svg = buildSupervisorIssueVisualCardSvg(issue({
+      tracker_state: 'Done',
+      orchestrator_state: 'completed',
+      delivery_state: 'completed',
+      active_pr_number: 112,
+    }));
+
+    expect(svg).toContain('100%');
+    expect(svg).toContain('font-size="58"');
+    expect(svg).toContain('x="252"');
+  });
+
+  test('omits row detail when the latest signal wraps to two lines', () => {
+    const svg = buildSupervisorIssueVisualCardSvg(issue({
+      tracker_state: 'Done',
+      orchestrator_state: 'completed',
+      delivery_state: 'completed',
+      active_pr_number: 117,
+      branch_name: 'feature/int-166',
+      github_repo: 'repo-overlap-check',
+      delivery_summary: '## Review Decision: APPROVE ## Review Summary 已完整审查 PR #117 的所有变更，并确认交付证据已经闭环。',
+    }));
+
+    expect(svg).toContain('## Review Decision: APPROVE');
+    expect(svg).not.toContain('repo-overlap-check');
   });
 });
