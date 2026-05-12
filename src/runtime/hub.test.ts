@@ -1613,6 +1613,69 @@ describe('RuntimeHub', () => {
     hub.dispose();
   });
 
+  test('recovers file diffs from the shared source repo when a completed worktree was cleaned', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workspaceRoot = mkdtempSync(join(tmpdir(), 'runtime-hub-source-diff-'));
+    tempDirs.push(workspaceRoot);
+    const sourceDir = join(workspaceRoot, 'acme__repo', 'source');
+    mkdirSync(join(sourceDir, 'src', 'runtime'), { recursive: true });
+    writeFileSync(join(sourceDir, 'src', 'runtime', 'miniAppPage.ts'), [
+      'const ring = renderProgressRing(progress);',
+      'renderOverviewSignal(issue);',
+      '',
+    ].join('\n'));
+    execFileSync('git', ['init', '-b', 'main'], { cwd: sourceDir, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.email', 'codex@example.com'], { cwd: sourceDir, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.name', 'Codex'], { cwd: sourceDir, stdio: 'pipe' });
+    execFileSync('git', ['add', '.'], { cwd: sourceDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'base'], { cwd: sourceDir, stdio: 'pipe' });
+    execFileSync('git', ['checkout', '-b', 'feature/int-cleaned'], { cwd: sourceDir, stdio: 'pipe' });
+    writeFileSync(join(sourceDir, 'src', 'runtime', 'miniAppPage.ts'), [
+      'const rail = renderProgressRail(progress, phase);',
+      'renderOverviewSignal(issue);',
+      'openDiffDrawer(index);',
+      '',
+    ].join('\n'));
+    execFileSync('git', ['add', '.'], { cwd: sourceDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'feature diff'], { cwd: sourceDir, stdio: 'pipe' });
+    execFileSync('git', ['checkout', 'main'], { cwd: sourceDir, stdio: 'pipe' });
+    execFileSync('git', ['merge', '--squash', 'feature/int-cleaned'], { cwd: sourceDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'feat(INT-CLEANED): mini app diff (#112)'], {
+      cwd: sourceDir,
+      stdio: 'pipe',
+    });
+    execFileSync('git', ['branch', '-D', 'feature/int-cleaned'], { cwd: sourceDir, stdio: 'pipe' });
+
+    const workItemRepository = new WorkItemRepository(db);
+    workItemRepository.create({
+      id: 'issue-cleaned-diff',
+      linear_issue_id: 'issue-cleaned-diff',
+      linear_identifier: 'INT-CLEANED',
+      linear_title: 'Cleaned worktree diff attachment test',
+      linear_state: 'Done',
+      github_repo: 'acme/repo',
+      active_pr_number: 112,
+      branch_name: 'feature/int-cleaned',
+      workspace_path: join(workspaceRoot, 'acme__repo', 'worktrees', 'INT-CLEANED'),
+      orchestrator_state: 'completed',
+    });
+
+    const controller = new FakeController();
+    const hub = new RuntimeHub(db, controller, { workspaceRoot });
+
+    const historyView = (hub as any).getHistoryView('INT-CLEANED', 5);
+
+    expect(historyView.file_diffs.map((item: any) => item.path)).toEqual(['src/runtime/miniAppPage.ts']);
+    expect(historyView.file_diffs[0]?.patch).toContain('+const rail = renderProgressRail(progress, phase);');
+    expect(historyView.file_diffs[0]?.patch).toContain('-const ring = renderProgressRing(progress);');
+    expect(historyView.file_diffs[0]?.additions).toBeGreaterThan(0);
+    expect(historyView.file_diffs[0]?.deletions).toBeGreaterThan(0);
+
+    hub.dispose();
+  });
+
   test('includes untracked workspace files in history diffs', () => {
     db = new Database(':memory:');
     initializeSchema(db);
