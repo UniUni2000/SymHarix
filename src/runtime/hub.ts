@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import type { Database } from 'bun:sqlite';
 import {
   AgentRunRepository,
@@ -41,6 +42,7 @@ import type {
   RuntimeTimelineEvent,
   RuntimeToolActivity,
 } from './types';
+import { getRepoSourcePath, getSourcePathFromWorktree, sanitizeWorkspaceKey } from '../workspace/shared';
 
 interface RuntimeHubController {
   getStateSnapshot(): OrchestratorStateSnapshot;
@@ -59,6 +61,7 @@ interface RuntimeHubController {
 
 interface RuntimeHubOptions {
   timelineHistoryLimit?: number;
+  workspaceRoot?: string;
 }
 
 function isTimelinePayload(payload: AgentEvent['payload']): payload is AgentTimelinePayload {
@@ -285,6 +288,63 @@ function listUntrackedWorkspaceFileDiffs(repoRoot: string): RuntimeHistoryFileDi
   });
 }
 
+function listGitFileDiffs(
+  repoRoot: string,
+  baseCommit: string,
+  headCommit: string | null = null,
+  limit = 12,
+): RuntimeHistoryFileDiff[] {
+  const rangeArgs = headCommit ? [baseCommit, headCommit] : [baseCommit];
+  const numstat = runGit(repoRoot, ['diff', '--numstat', '--find-renames', ...rangeArgs, '--']);
+  const trackedDiffs = (numstat || '')
+    .split('\n')
+    .map((line) => parseNumstatLine(line))
+    .filter((item): item is { path: string; additions: number | null; deletions: number | null } => Boolean(item))
+    .map((item) => ({
+      path: item.path,
+      additions: item.additions,
+      deletions: item.deletions,
+      patch: runGit(repoRoot, ['diff', '--no-ext-diff', '--find-renames', '--unified=20', ...rangeArgs, '--', item.path]),
+    }));
+
+  return trackedDiffs
+    .slice(0, Math.max(1, limit))
+    .filter((item) => Boolean(item.patch) || item.additions !== null || item.deletions !== null);
+}
+
+function repoCacheKeyFromGithubRepo(repo: string): string {
+  const [owner, name] = repo.trim().split('/');
+  if (owner && name) {
+    return [
+      sanitizeWorkspaceKey(owner.toLowerCase()),
+      sanitizeWorkspaceKey(name.toLowerCase()),
+    ].join('__');
+  }
+  return sanitizeWorkspaceKey(repo.trim().toLowerCase());
+}
+
+function findPrMergeCommit(repoRoot: string, prNumber: number | null): string | null {
+  if (!prNumber) {
+    return null;
+  }
+
+  return runGit(repoRoot, [
+    'log',
+    '--all',
+    '--fixed-strings',
+    '--grep',
+    `(#${prNumber})`,
+    '--format=%H',
+    '-n',
+    '1',
+  ]);
+}
+
+function firstCommitParent(repoRoot: string, commit: string): string | null {
+  return runGit(repoRoot, ['rev-parse', '--verify', `${commit}^1`]) ||
+    runGit(repoRoot, ['rev-parse', '--verify', `${commit}^`]);
+}
+
 export class RuntimeHub implements RuntimeControlPlane {
   private readonly workItemRepository: WorkItemRepository;
   private readonly agentRunRepository: AgentRunRepository;
@@ -296,6 +356,7 @@ export class RuntimeHub implements RuntimeControlPlane {
   private readonly supervisorSessionRepository: SupervisorSessionRepository;
   private readonly supervisorJobRepository: SupervisorJobRepository;
   private readonly timelineHistoryLimit: number;
+  private readonly workspaceRoot: string | null;
   private readonly issueCacheById = new Map<string, Issue>();
   private readonly timelineByIssueId = new Map<string, RuntimeTimelineEvent[]>();
   private readonly subscribers = new Map<number, (event: RuntimeStreamEvent) => void>();
@@ -318,6 +379,7 @@ export class RuntimeHub implements RuntimeControlPlane {
     this.supervisorSessionRepository = new SupervisorSessionRepository(db);
     this.supervisorJobRepository = new SupervisorJobRepository(db);
     this.timelineHistoryLimit = Math.max(10, options.timelineHistoryLimit ?? 200);
+    this.workspaceRoot = options.workspaceRoot ?? null;
     this.controller = controller;
     this.bindControllerListeners();
   }
@@ -1404,35 +1466,66 @@ export class RuntimeHub implements RuntimeControlPlane {
 
   private buildWorkspaceFileDiffs(workItem: WorkItem, limit = 12): RuntimeHistoryFileDiff[] {
     if (!workItem.workspace_path) {
-      return [];
+      return this.buildSharedSourceFileDiffs(workItem, limit);
     }
 
     const repoRoot = runGit(workItem.workspace_path, ['rev-parse', '--show-toplevel']);
     if (!repoRoot) {
-      return [];
+      return this.buildSharedSourceFileDiffs(workItem, limit);
     }
 
     const baseCommit = resolveHistoryDiffBaseCommit(repoRoot);
     if (!baseCommit) {
-      return listUntrackedWorkspaceFileDiffs(repoRoot).slice(0, Math.max(1, limit));
+      const untrackedDiffs = listUntrackedWorkspaceFileDiffs(repoRoot).slice(0, Math.max(1, limit));
+      return untrackedDiffs.length > 0 ? untrackedDiffs : this.buildSharedSourceFileDiffs(workItem, limit);
     }
 
-    const numstat = runGit(repoRoot, ['diff', '--numstat', '--find-renames', baseCommit, '--']);
-    const trackedDiffs = (numstat || '')
-      .split('\n')
-      .map((line) => parseNumstatLine(line))
-      .filter((item): item is { path: string; additions: number | null; deletions: number | null } => Boolean(item))
-      .map((item) => ({
-        path: item.path,
-        additions: item.additions,
-        deletions: item.deletions,
-        patch: runGit(repoRoot, ['diff', '--no-ext-diff', '--find-renames', '--unified=20', baseCommit, '--', item.path]),
-      }));
-
-    return trackedDiffs
+    const workspaceDiffs = listGitFileDiffs(repoRoot, baseCommit, null, limit)
       .concat(listUntrackedWorkspaceFileDiffs(repoRoot))
       .slice(0, Math.max(1, limit))
       .filter((item) => Boolean(item.patch) || item.additions !== null || item.deletions !== null);
+    return workspaceDiffs.length > 0 ? workspaceDiffs : this.buildSharedSourceFileDiffs(workItem, limit);
+  }
+
+  private buildSharedSourceFileDiffs(workItem: WorkItem, limit = 12): RuntimeHistoryFileDiff[] {
+    if (!this.workspaceRoot || !workItem.github_repo) {
+      return [];
+    }
+
+    const sourceCandidates = [
+      workItem.workspace_path ? getSourcePathFromWorktree(workItem.workspace_path) : null,
+      getRepoSourcePath(this.workspaceRoot, repoCacheKeyFromGithubRepo(workItem.github_repo)),
+    ].filter((value): value is string => Boolean(value));
+    const sourcePath = sourceCandidates.find((candidate) => existsSync(candidate));
+    if (!sourcePath) {
+      return [];
+    }
+
+    const repoRoot = runGit(sourcePath, ['rev-parse', '--show-toplevel']);
+    if (!repoRoot) {
+      return [];
+    }
+
+    const prMergeCommit = findPrMergeCommit(repoRoot, workItem.active_pr_number);
+    if (prMergeCommit) {
+      const parent = firstCommitParent(repoRoot, prMergeCommit);
+      if (parent) {
+        const prDiffs = listGitFileDiffs(repoRoot, parent, prMergeCommit, limit);
+        if (prDiffs.length > 0) {
+          return prDiffs;
+        }
+      }
+    }
+
+    if (workItem.branch_name && runGit(repoRoot, ['rev-parse', '--verify', workItem.branch_name])) {
+      const baseRef = resolveHistoryDiffBaseRef(repoRoot);
+      const baseCommit = baseRef ? runGit(repoRoot, ['merge-base', baseRef, workItem.branch_name]) : null;
+      if (baseCommit) {
+        return listGitFileDiffs(repoRoot, baseCommit, workItem.branch_name, limit);
+      }
+    }
+
+    return [];
   }
 
   private extractRecentTools(timeline: RuntimeTimelineEvent[]): RuntimeToolActivity[] {
