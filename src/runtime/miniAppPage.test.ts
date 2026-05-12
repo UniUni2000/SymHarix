@@ -676,19 +676,22 @@ describe('Telegram Mini App issue presentation', () => {
     expect(html).toContain('代码改动');
   });
 
-  test('renders the Mini App as four issue tabs under a fixed status header', () => {
+  test('renders the Mini App as a three-item bottom phone tab bar', () => {
     const html = renderRuntimeMiniAppPage('INT-143');
 
     expect(html).toContain('class="fixed-header"');
     expect(html).toContain('data-tab="overview"');
-    expect(html).toContain('data-tab="activity"');
     expect(html).toContain('data-tab="changes"');
     expect(html).toContain('data-tab="delivery"');
     expect(html).toContain('id="tab-overview"');
-    expect(html).toContain('id="tab-activity"');
     expect(html).toContain('id="tab-changes"');
     expect(html).toContain('id="tab-delivery"');
-    expect(html).toContain("chip(t('phase') + ' ' + (issue.phase || 'unknown'), 'blue')");
+    expect(html).toContain('class="tab-icon"');
+    expect(html).toContain('<span class="tab-label">Issue</span>');
+    expect(html).toContain('<span class="tab-label">Changes</span>');
+    expect(html).toContain('<span class="tab-label">Delivery</span>');
+    expect(html).toContain("chip(issue.active_pr_number ? 'PR #' + issue.active_pr_number : t('prPending'), 'blue')");
+    expect(html).toContain("chip(issue.branch_name || (child && child.issue_identifier) || t('rootIssue'), 'blue')");
     expect(html).toContain('id="theme-toggle"');
     expect(html).toContain('id="language-toggle"');
     expect(html).toContain('class="segmented-control"');
@@ -717,6 +720,10 @@ describe('Telegram Mini App issue presentation', () => {
     expect(html).toContain('class="diff-stat-summary"');
     expect(html).toContain('class="diff-stat-token add"');
     expect(html).toContain('class="diff-stat-token del"');
+    expect(html).toContain('background: rgba(255, 255, 255, 0.98);');
+    expect(html).toContain('background: rgba(248, 251, 255, 0.96);');
+    expect(html).toContain('html[data-theme="dark"] .diff-drawer');
+    expect(html).toContain('html[data-theme="dark"] .diff-drawer-code');
   });
 
   test('renders Mini App event times down to seconds', () => {
@@ -772,13 +779,18 @@ describe('Telegram Mini App issue presentation', () => {
   test('uses real phone Mini App proportions with a bottom tab bar', () => {
     const html = renderRuntimeMiniAppPage('INT-155');
 
-    expect(html).toContain('--miniapp-width: 430px;');
+    expect(html).toContain('--miniapp-width: 390px;');
     expect(html).toContain('max-width: var(--miniapp-width);');
     expect(html).toContain('min-height: 100svh;');
-    expect(html).toContain('padding-bottom: calc(96px + env(safe-area-inset-bottom));');
+    expect(html).toContain('padding-bottom: calc(86px + env(safe-area-inset-bottom));');
     expect(html).toContain('position: fixed;');
     expect(html).toContain('bottom: calc(8px + env(safe-area-inset-bottom));');
-    expect(html).toContain('width: min(calc(100vw - 24px), calc(var(--miniapp-width) - 24px));');
+    expect(html).toContain('width: min(calc(100vw - 34px), calc(var(--miniapp-width) - 34px));');
+    expect(html).toContain('html[data-theme="light"] .tabbar');
+    expect(html).toContain('html[data-theme="light"] .tab-button.active');
+    expect(html).toContain("state.theme = state.theme === 'light' ? 'dark' : 'light'");
+    expect(html).toContain("state.lang = state.lang === 'en' ? 'zh' : 'en'");
+    expect(html).toContain("background: url(\"data:image/svg+xml");
     expect(html).toContain('.hero {');
     expect(html).toContain('grid-template-columns: minmax(0, 1fr);');
     expect(html).toContain('.progress-value {');

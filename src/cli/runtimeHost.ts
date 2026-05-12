@@ -102,7 +102,7 @@ export class RuntimeHost {
       ((config, definition) => new Orchestrator(config, definition, { db: options.db }));
     this.runtimeHubFactory =
       options.runtimeHubFactory ??
-      ((db, controller) => new RuntimeHub(db, controller));
+      ((db, controller) => new RuntimeHub(db, controller, { workspaceRoot: this.config.workspaceRoot }));
     this.serverFactory =
       options.serverFactory ??
       ((db, config, runtimeHub) => {
