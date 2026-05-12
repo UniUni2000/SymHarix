@@ -1,44 +1,54 @@
 # symphonyness
 
-symphonyness is a harness-based, Telegram-first control plane for end-to-end code development. It combines repo-local contracts, planning, supervised Claude Code-style execution, review, delivery, and cleanup into one recoverable flow.
+symphonyness is a local-first, Telegram-first control plane for supervised coding work. It turns a user request into a plan, routes it to the right repository, runs the bundled Claude Code runtime under orchestration, and keeps the operator informed through Telegram and the Runtime Deck.
 
-The repo is intentionally local-first. Secrets live in `.env`, orchestration policy lives in local `WORKFLOW.md`, and target repositories can declare their own `.symphony-repo.yaml` and `.symphony-constitution.md` contracts.
+symphonyness 是一个本地优先、Telegram 优先的代码执行控制平面。它会把用户请求变成计划，路由到正确仓库，通过编排层调用内置 Claude Code runtime，并在 Telegram 和 Runtime Deck 中同步关键状态。
 
-## Quick Start
+## Quick Start / 快速开始
 
-From a fresh checkout, create local config files once:
+Run setup once:
+
+先执行一次本地初始化：
 
 ```bash
 bun run setup:local
 ```
 
-Fill the required values in `.env` and set the target repo route in `WORKFLOW.md`.
+Then fill `.env` and `WORKFLOW.md`.
 
-After that, the normal local loop is one command:
+然后填写 `.env` 和 `WORKFLOW.md`。
+
+Normal local startup is one command:
+
+日常本地启动只需要一个命令：
 
 ```bash
 bun run start:local
 ```
 
-`start:local` reruns the safe setup guard, then starts the whole local product. If Telegram is configured and `SYMPHONY_PUBLIC_BASE_URL` is empty, it now pre-provisions a temporary `cloudflared` tunnel before launching the server so webhook registration does not depend on in-process tunnel bootstrap timing. The temporary URL is injected only for the current run. If the config files already exist, they are not overwritten. If you only want to start without the setup guard:
+`start:local` keeps existing config files, starts the service, prepares Telegram proxy settings, and, when Telegram is configured without a public URL, tries to create a temporary `cloudflared` HTTPS tunnel for this run. It does not write the temporary tunnel URL back into `.env`.
 
-```bash
-bun run start
-```
+`start:local` 会保留已有配置文件，启动服务，准备 Telegram 代理配置；如果已经配置 Telegram 但没有公网 URL，它会尝试为本次运行创建临时 `cloudflared` HTTPS 隧道。临时隧道地址不会写回 `.env`。
 
-Open the runtime deck and Telegram Mini App pages from the same server:
+Open the local Runtime Deck:
+
+打开本地 Runtime Deck：
 
 ```text
 http://localhost:3000/runtime
 ```
 
-Use another port only when `3000` is occupied:
+If port `3000` is busy:
+
+如果 `3000` 端口被占用：
 
 ```bash
-PORT=4000 bun run start
+PORT=4000 bun run start:local
 ```
 
-Stop every local symphonyness service and companion process:
+Stop local services:
+
+停止本地服务：
 
 ```bash
 bun run stop
@@ -46,13 +56,13 @@ bun run stop
 
 More detail:
 
-- [QUICKSTART.md](./QUICKSTART.md) for a step-by-step local setup.
-- [docs/CONFIGURATION.md](./docs/CONFIGURATION.md) for every important `.env` and `WORKFLOW.md` setting.
-- [docs/AI_OPERATOR_GUIDE.md](./docs/AI_OPERATOR_GUIDE.md) for AI agents or maintainers operating this repo.
+更多说明：
 
-## What Runs
+- [QUICKSTART.md](./QUICKSTART.md): step-by-step local setup / 本地配置步骤。
+- [docs/CONFIGURATION.md](./docs/CONFIGURATION.md): `.env` and `WORKFLOW.md` reference / 配置参考。
+- [docs/AI_OPERATOR_GUIDE.md](./docs/AI_OPERATOR_GUIDE.md): operator guide for maintainers and agents / 维护者与 AI 操作者指南。
 
-The main execution chain is:
+## What Runs / 运行链路
 
 ```text
 Telegram / Runtime / Linear poll
@@ -65,50 +75,40 @@ Telegram / Runtime / Linear poll
   -> GitHub / Linear / runtime history
 ```
 
-Important modules:
+Main modules:
 
-- `src/cli`: startup, stop, repair, and live verifier commands.
-- `src/server`: runtime API, web UI, bot webhook routes.
-- `src/runtime`: user-facing issue projections, timeline, history, actions.
-- `src/bots`: Telegram/Discord adapters over the shared runtime control plane.
-- `src/supervisor`: Telegram-first sessions, planning, job loop, memory, execution oversight.
-- `src/orchestrator`: dispatch, retry, governance, dev/review handoff, delivery cleanup.
-- `src/agent`: Claude Code runner and compact dev context.
-- `src/database`: SQLite schema and repositories.
-- `scripts/claude-adapter.cjs`: bridge to the bundled Claude Code runtime.
-- `scripts/hooks`: dev/review post-processing and delivery classification.
+主要模块：
 
-## Telegram-First Supervisor Flow
+- `src/cli`: startup, stop, repair, and live verifier commands / 启停、修复、实时验证命令。
+- `src/server`: runtime API, web UI, and bot webhook routes / Runtime API、网页界面、Bot webhook。
+- `src/runtime`: issue views, timeline, history, and actions / 工单视图、时间线、历史、操作。
+- `src/bots`: Telegram and Discord adapters over the shared control plane / Telegram 与 Discord 适配层。
+- `src/supervisor`: Telegram-first assistant sessions, planning, repo understanding, and execution oversight / Telegram 优先的助手会话、计划、仓库理解、执行监督。
+- `src/orchestrator`: dispatch, retry, governance, dev/review handoff, and cleanup / 派发、重试、治理、开发/评审交接、清理。
+- `src/agent`: Claude Code runner and compact dev context / Claude Code 运行器与压缩开发上下文。
+- `src/database`: SQLite schema and repositories / SQLite 表结构与仓库层。
+- `scripts/claude-adapter.cjs`: bridge to the bundled Claude Code runtime / 到内置 Claude Code runtime 的桥接。
 
-Telegram is the primary product surface for new user requests.
+## Configuration / 配置模型
 
-Typical flow:
+symphonyness reads three layers:
 
-1. User sends a natural-language request in Telegram.
-2. Bot routes it into a Supervisor session.
-3. Supervisor decides whether it is a small direct-run task or a plan that needs clarification/approval.
-4. Telegram shows a Plan Card with goal, scope, non-goals, acceptance criteria, risks, and recommended action.
-5. After approval, Supervisor creates a root issue and, for larger plans, a sequential child queue.
-6. Orchestrator runs only the current child while later children stay queued.
-7. Supervisor watches dev/review milestones, writes directives for the next dev turn, and asks the user only for high-risk decisions.
-8. Telegram edits the same lifecycle card with the latest issue state instead of posting noisy event streams.
-9. The Mini App shows the rich cockpit: progress, live tool/file events, key milestones, code-change preview, PR/delivery, and child queue.
-
-Linear and GitHub are records and delivery surfaces. They are not the main place for clarification or approval.
-
-## Configuration Model
-
-There are three layers:
+symphonyness 读取三层配置：
 
 1. `.env`: secrets, API keys, local runtime switches, Telegram tunnel/bootstrap, LLM providers.
+   `.env`：密钥、API key、本地运行开关、Telegram 隧道/启动、LLM provider。
 2. `WORKFLOW.md`: local orchestration policy, tracker states, repository routing, agent command.
-3. Target repo contracts:
-   - `.symphony-repo.yaml` defines setup/test/build/review checks and required artifacts.
-   - `.symphony-constitution.md` defines architectural boundaries, preferred directions, and cleanup triggers.
+   `WORKFLOW.md`：本地编排策略、Tracker 状态、仓库路由、Agent 命令。
+3. Target repo contracts: `.symphony-repo.yaml` and `.symphony-constitution.md`.
+   目标仓库契约：`.symphony-repo.yaml` 与 `.symphony-constitution.md`。
 
-`WORKFLOW.md` is not committed because it is environment-specific. Start from `WORKFLOW.md.example`.
+The `SYMPHONY_*` prefix and `.symphony-*` filenames are internal contracts. Keep them stable even though the product name is `symphonyness`.
+
+`SYMPHONY_*` 前缀和 `.symphony-*` 文件名是内部兼容契约。即使产品名是 `symphonyness`，这些名字也应保持稳定。
 
 Repository routing is explicit. The key under `repositories.routing` must match the Linear `project_slug`:
+
+仓库路由必须显式配置。`repositories.routing` 下的 key 必须匹配 Linear 的 `project_slug`：
 
 ```yaml
 repositories:
@@ -118,11 +118,50 @@ repositories:
       github_repo: demo-app
 ```
 
-Replace the sample values with the Linear project and GitHub repository you want symphonyness to operate.
+If a project is not routed, symphonyness fails closed and will not create a workspace or dispatch an agent.
 
-## Telegram Setup
+如果项目没有配置路由，symphonyness 会 fail closed，不会创建 workspace，也不会派发 agent。
 
-Minimum Telegram settings:
+## Telegram Supervisor / Telegram Supervisor
+
+Telegram is the primary conversational surface. A normal request flows like this:
+
+Telegram 是主要对话入口。一次正常请求大致这样流转：
+
+1. The user sends a natural-language request in Telegram.
+   用户在 Telegram 发送自然语言请求。
+2. The bot routes the message into the Supervisor.
+   Bot 将消息交给 Supervisor。
+3. Supervisor inspects runtime, conversation, tracker, and repo context.
+   Supervisor 查看 runtime、会话、tracker、仓库上下文。
+4. It answers directly, asks for clarification, shows a Plan Card, or requests confirmation for risky writes.
+   它会直接回答、追问细节、展示 Plan Card，或对高风险写操作请求确认。
+5. After approval, it creates or updates work and lets the Orchestrator execute.
+   批准后，它创建或更新工作，并交由 Orchestrator 执行。
+6. Telegram edits the lifecycle card instead of posting noisy duplicate messages.
+   Telegram 会编辑同一张生命周期卡片，而不是刷出大量重复消息。
+
+Linear and GitHub are records and delivery surfaces. They are not the main clarification or approval surfaces.
+
+Linear 和 GitHub 是记录与交付界面，不是主要澄清或审批界面。
+
+## Required Local Values / 本地必填项
+
+Minimum `.env` values for a real local run:
+
+一次真实本地运行通常至少需要：
+
+```dotenv
+SYMPHONY_TRACKER_KIND=linear
+SYMPHONY_TRACKER_API_KEY=...
+SYMPHONY_TRACKER_PROJECT_SLUG=sample-project
+GITHUB_TOKEN=...
+ANTHROPIC_API_KEY=...
+```
+
+Minimum Telegram values:
+
+Telegram 最小配置：
 
 ```dotenv
 SYMPHONY_TELEGRAM_BOT_TOKEN=...
@@ -130,75 +169,49 @@ SYMPHONY_TELEGRAM_WEBHOOK_SECRET=...
 SYMPHONY_TELEGRAM_OPERATOR_IDS=123456789
 ```
 
-If you have a public URL:
+Recommended bot and supervisor LLM values:
+
+推荐的 Bot 与 Supervisor LLM 配置：
 
 ```dotenv
-SYMPHONY_PUBLIC_BASE_URL=https://your-public-host
+SYMPHONY_BOT_LLM_PROVIDER=anthropic
+SYMPHONY_BOT_LLM_MODEL=claude-3-5-sonnet-latest
+SYMPHONY_BOT_LLM_API_KEY=...
+SYMPHONY_BOT_LLM_HTTP_TRANSPORT=fetch
+SYMPHONY_SUPERVISOR_LLM_TIMEOUT_MS=45000
 ```
 
-If you do not have one, symphonyness tries to start `cloudflared tunnel --url <local-server> --protocol http2` automatically. To disable this:
+The Supervisor has two repo-understanding paths:
 
-```dotenv
-SYMPHONY_TELEGRAM_BOOTSTRAP=off
-```
+Supervisor 有两条仓库理解路径：
 
-Check bot health:
+- LLM planning settings: `SYMPHONY_SUPERVISOR_LLM_*`, with fallback to `SYMPHONY_BOT_LLM_*`.
+  计划模型：`SYMPHONY_SUPERVISOR_LLM_*`，未配置时回退到 `SYMPHONY_BOT_LLM_*`。
+- Read-only Claude Code advisor: `SYMPHONY_SUPERVISOR_READONLY_ADVISOR_COMMAND` and `SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_COMMAND`, both defaulting to `node scripts/claude-adapter.cjs`.
+  只读 Claude Code 顾问：`SYMPHONY_SUPERVISOR_READONLY_ADVISOR_COMMAND` 与 `SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_COMMAND`，默认都是 `node scripts/claude-adapter.cjs`。
+
+## Health And Verification / 健康检查与验证
+
+Health check:
+
+健康检查：
 
 ```bash
 bun run health
 ```
 
-The runtime manifest should also show the current public/Mini App base URL when Telegram bootstrap has a public HTTPS URL or tunnel:
+Key endpoints:
 
-```bash
-curl http://localhost:3000/api/v1/runtime/manifest
-```
-
-## LLM Configuration
-
-Bot natural-language parsing, Supervisor planning, and Supervisor execution oversight all read from `.env`.
-
-Common local setup:
-
-```dotenv
-ANTHROPIC_API_KEY=...
-SYMPHONY_BOT_LLM_PROVIDER=anthropic
-SYMPHONY_BOT_LLM_MODEL=claude-3-5-sonnet-latest
-SYMPHONY_BOT_LLM_API_KEY=...
-SYMPHONY_BOT_LLM_TIMEOUT_MS=15000
-SYMPHONY_BOT_LLM_HTTP_TRANSPORT=fetch
-```
-
-Supervisor planning defaults to `SYMPHONY_BOT_LLM_*`, with a separate timeout:
-
-```dotenv
-SYMPHONY_SUPERVISOR_LLM_TIMEOUT_MS=45000
-```
-
-Execution oversight defaults to supervisor LLM settings, then bot LLM settings:
-
-```dotenv
-SYMPHONY_SUPERVISOR_OVERSEER_TIMEOUT_MS=30000
-```
-
-If a model call times out or returns unusable JSON, symphonyness falls back to deterministic routing/planning. It should not block Telegram webhook ACKs.
-
-## Live Verification
-
-For live verification, choose a repository/project where it is acceptable for symphonyness to create issues, branches, PRs, and comments. The examples below use placeholder values:
+关键端点：
 
 ```text
-Linear project slug: sample-project
-GitHub repo: acme/demo-app
+http://localhost:3000/api/v1/runtime/manifest
+http://localhost:3000/api/v1/bots/manifest
 ```
 
-Lifecycle verifier:
+For live Telegram verification, start the service first, then run:
 
-```bash
-bun --env-file=.env run src/cli/index.ts verify-live-lifecycle --project-slug sample-project
-```
-
-Telegram-first Supervisor verifier against a running server:
+实时 Telegram 验证需要先启动服务，然后运行：
 
 ```bash
 bun --env-file=.env run src/cli/index.ts verify-live-supervisor \
@@ -208,32 +221,21 @@ bun --env-file=.env run src/cli/index.ts verify-live-supervisor \
   --matrix
 ```
 
-The attach-mode supervisor verifier must enter through Telegram webhook/session behavior. It should not create issues directly through the runtime API.
+Use a project/repository where automated issues, branches, PRs, comments, and cleanup are safe.
 
-## Repair And Cleanup
+请使用允许自动创建 issue、branch、PR、comment 和清理动作的项目/仓库。
 
-Repair stale bot state and orphan GitHub delivery artifacts:
-
-```bash
-bun src/cli/index.ts repair all
-```
-
-Stop all local processes:
-
-```bash
-bun run stop
-```
-
-If a previous run left active sessions, the startup repair path cancels stale pre-materialization sessions and folds old follow-up state back into the current root thread. Startup cleanup is intentionally delayed by default so `bun run start` becomes responsive before heavier orphan repair runs.
-
-## Development
+## Development / 开发检查
 
 ```bash
 bun run test
 bun run build
+git diff --check
 ```
 
-Useful targeted suites:
+Useful focused suites:
+
+常用定向测试：
 
 ```bash
 bun test src/bots/gateway.test.ts src/bots/followups.test.ts
@@ -242,10 +244,13 @@ bun test src/orchestrator/index.test.ts
 bun test src/verification/attachedLiveSupervisorVerifier.test.ts
 ```
 
-## Safety Notes
+## Safety Notes / 安全说明
 
 - Do not commit `.env`.
+  不要提交 `.env`。
 - Do not commit local `WORKFLOW.md` unless the team intentionally changes policy for this checkout.
-- For live verification, use a target repository/project that is safe for automated issues, branches, PRs, and cleanup.
+  除非团队明确要改变本 checkout 的策略，否则不要提交本地 `WORKFLOW.md`。
 - Do not bypass Telegram when validating Telegram-first Supervisor behavior.
-- Do not interpret proof/evidence success as delivery success. Delivery may still fail on PR, branch, tracker, or merge state.
+  验证 Telegram-first Supervisor 时，不要绕过 Telegram 入口。
+- Treat runtime proof/evidence success and delivery success separately.
+  Runtime 证据成功不等于 PR、branch、tracker 或 merge 交付成功。

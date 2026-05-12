@@ -566,6 +566,68 @@ describe('BotAssistantService top-level Supervisor Claude runtime', () => {
     subscriptions.dispose();
   });
 
+  test('does not expose stale read-only brain capability disclaimers from Supervisor Claude', async () => {
+    const runtime = createRuntimeControlPlane();
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const commandService = new BotCommandService(runtime, subscriptions, () => true);
+    const context: BotCommandContext = {
+      transport: 'telegram',
+      recipient: { transport: 'telegram', conversation_id: 'chat-capability-denial' },
+      identity: { user_id: 'user-1', display_name: 'Alice' },
+    };
+    const supervisorRuntimeCalls: string[] = [];
+    const assistant = new BotAssistantService(
+      runtime,
+      commandService,
+      null,
+      null,
+      null,
+      {
+        decide: async () => {
+          throw new Error('legacy model should not be reached');
+        },
+      },
+      () => true,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      {
+        respond: async (request) => {
+          supervisorRuntimeCalls.push(request.text);
+          return {
+            message: '我是你的 Symphony Runtime Operator Copilot，可以创建新的 issue，查看状态，重试或关闭 issue。',
+          };
+        },
+      },
+      {
+        respond: async () => ({
+          message: [
+            '作为只读 Claude Code brain，我能做：',
+            '',
+            '**不能做**',
+            '- 创建/关闭/重试 Linear issue',
+            '- 直接触发 orchestrator 动作',
+          ].join('\n'),
+        }),
+      },
+    );
+
+    const response = await assistant.respondToText(context, '你能做什么');
+
+    expect(response.message).toContain('Symphony Runtime Operator Copilot');
+    expect(response.message).toContain('创建新的 issue');
+    expect(response.message).not.toContain('只读 Claude Code brain');
+    expect(response.message).not.toContain('不能做');
+    expect(supervisorRuntimeCalls).toEqual(['你能做什么']);
+
+    subscriptions.dispose();
+  });
+
   test('does not let a bare Supervisor Claude diagnosis replace a retry review action', async () => {
     const runtime = createRuntimeControlPlane();
     const subscriptions = new BotSubscriptionService(runtime, {});

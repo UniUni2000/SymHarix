@@ -769,6 +769,22 @@ describe('Telegram Mini App issue presentation', () => {
     expect(html).toContain("el.hero.addEventListener('click'");
   });
 
+  test('uses real phone Mini App proportions with a bottom tab bar', () => {
+    const html = renderRuntimeMiniAppPage('INT-155');
+
+    expect(html).toContain('--miniapp-width: 430px;');
+    expect(html).toContain('max-width: var(--miniapp-width);');
+    expect(html).toContain('min-height: 100svh;');
+    expect(html).toContain('padding-bottom: calc(96px + env(safe-area-inset-bottom));');
+    expect(html).toContain('position: fixed;');
+    expect(html).toContain('bottom: calc(8px + env(safe-area-inset-bottom));');
+    expect(html).toContain('width: min(calc(100vw - 24px), calc(var(--miniapp-width) - 24px));');
+    expect(html).toContain('.hero {');
+    expect(html).toContain('grid-template-columns: minmax(0, 1fr);');
+    expect(html).toContain('.progress-value {');
+    expect(html).toContain('font-size: 34px;');
+  });
+
   test('renders expandable controls for long Mini App summaries', () => {
     const html = renderRuntimeMiniAppPage('INT-155');
 

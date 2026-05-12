@@ -215,7 +215,7 @@ type TelegramCallbackKind =
   | 'supervisor_action'
   | 'runtime_action'
   | 'unknown';
-type TelegramRuntimeAction = 'refresh' | 'retry' | 'stop' | 'close';
+type TelegramRuntimeAction = 'refresh' | 'retry' | 'stop' | 'close' | 'open';
 type TelegramCallbackDeliveryMode = 'edited' | 'sent_fallback' | 'kept_original';
 
 function telegramCallbackDeliveryResult(mode: TelegramCallbackDeliveryMode): TelegramCallbackAuditRecord['result'] {
@@ -288,6 +288,23 @@ function resolveTelegramActionUrl(url: string, publicBaseUrl: string | null): st
   return null;
 }
 
+function runtimeWebAppFallbackCallbackData(url: string): string | null {
+  const match = url.trim().match(/^\/runtime\/issues\/([^/?#]+)\/app(?:[?#].*)?$/i);
+  if (!match?.[1]) {
+    return null;
+  }
+  let issueIdentifier = match[1];
+  try {
+    issueIdentifier = decodeURIComponent(issueIdentifier);
+  } catch {
+    return null;
+  }
+  if (!/^[A-Z][A-Z0-9]+-\d+$/i.test(issueIdentifier)) {
+    return null;
+  }
+  return `rt|${issueIdentifier.toUpperCase()}|open`;
+}
+
 function buildTelegramInlineKeyboard(
   message: BotTransportMessage,
   publicBaseUrl: string | null = null,
@@ -318,6 +335,11 @@ function buildTelegramInlineKeyboard(
           const url = resolveTelegramActionUrl(action.web_app.url, publicBaseUrl);
           if (url) {
             button.web_app = { url };
+            return button;
+          }
+          const fallbackCallbackData = runtimeWebAppFallbackCallbackData(action.web_app.url);
+          if (fallbackCallbackData) {
+            button.callback_data = fallbackCallbackData;
             return button;
           }
         }
@@ -1649,6 +1671,33 @@ export class DefaultBotGateway implements BotGateway {
       };
 
       try {
+        if (parsedCallback.kind === 'runtime_action' && parsedCallback.runtimeAction === 'open') {
+          const appUrl = parsedCallback.issueIdentifier
+            ? resolveTelegramActionUrl(
+                `/runtime/issues/${encodeURIComponent(parsedCallback.issueIdentifier)}/app`,
+                this.telegramPublicBaseUrl,
+              )
+            : null;
+          await this.telegramNotifier.answerCallbackQuery(
+            callbackQuery.id || 'unknown-callback',
+            appUrl
+              ? textForIssueLocale(callbackIssue, '运行视图地址已恢复，请刷新卡片后打开。', 'Runtime view URL is ready. Refresh the card, then open it again.')
+              : textForIssueLocale(callbackIssue, 'Mini App 暂时不可用：未配置 SYMPHONY_PUBLIC_BASE_URL。启动 start:local/tunnel 后刷新卡片。', 'Mini App unavailable: SYMPHONY_PUBLIC_BASE_URL is not configured. Start the local tunnel, then refresh the card.'),
+          );
+          this.recordTelegramCallbackAudit({
+            ...auditBase,
+            result: 'acked',
+            error_message: null,
+            timestamp: new Date().toISOString(),
+          });
+          this.telegramDiagnostics.recordCallbackSuccess();
+          return {
+            ok: true,
+            status: 200,
+            body: { ok: true },
+          };
+        }
+
         if (parsedCallback.kind === 'supervisor_action') {
           const recipient = {
             transport: 'telegram' as const,
@@ -2269,7 +2318,7 @@ export class DefaultBotGateway implements BotGateway {
       };
     }
 
-    const runtimeSelection = data.match(/^rt\|([A-Z][A-Z0-9]+-\d+)\|(refresh|retry|stop|close)$/i);
+    const runtimeSelection = data.match(/^rt\|([A-Z][A-Z0-9]+-\d+)\|(refresh|retry|stop|close|open)$/i);
     if (runtimeSelection?.[1] && runtimeSelection?.[2]) {
       return {
         kind: 'runtime_action',

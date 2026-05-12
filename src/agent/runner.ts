@@ -43,6 +43,7 @@ export interface AgentRunnerOptions {
   threadSandbox?: string | null;
   turnSandboxPolicy?: string | null;
   mcpConfig?: string | null;
+  tools?: string[] | null;
   allowedTools?: string[] | null;
   systemPrompt?: string | null;
   turnTimeoutMs: number;
@@ -694,6 +695,7 @@ export class AgentRunner extends EventEmitter {
                 sandbox: this.options.threadSandbox || 'workspace-write',
                 cwd: String(workspacePath || ''),
                 ...(this.options.mcpConfig ? { mcpConfig: this.options.mcpConfig } : {}),
+                ...(this.options.tools?.length ? { tools: this.options.tools } : {}),
                 ...(this.options.allowedTools?.length ? { allowedTools: this.options.allowedTools } : {}),
                 ...(this.options.systemPrompt ? { systemPrompt: this.options.systemPrompt } : {}),
               }
@@ -788,6 +790,7 @@ export class AgentRunner extends EventEmitter {
           sandbox: threadSandbox || 'trusted',
           cwd: String(workspacePath || ''),
           ...(this.options.mcpConfig ? { mcpConfig: this.options.mcpConfig } : {}),
+          ...(this.options.tools?.length ? { tools: this.options.tools } : {}),
           ...(this.options.allowedTools?.length ? { allowedTools: this.options.allowedTools } : {}),
           ...(this.options.systemPrompt ? { systemPrompt: this.options.systemPrompt } : {}),
         }
