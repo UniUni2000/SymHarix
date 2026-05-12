@@ -49,6 +49,7 @@ describe('AgentRunner timeline events', () => {
           },
         },
       }),
+      tools: ['Read', 'Grep', 'Glob', 'LS', 'TodoRead'],
       allowedTools: ['Read', 'Grep', 'Glob', 'LS', 'mcp__supervisor-context__list_context_sources', 'mcp__supervisor-orchestrator__show_issue_card'],
       systemPrompt: 'You are the top-level Supervisor Claude Code runtime.',
       turnTimeoutMs: 5000,
@@ -78,6 +79,7 @@ describe('AgentRunner timeline events', () => {
       approvalPolicy: 'on-request',
       sandbox: 'workspace-read',
       mcpConfig: expect.any(String),
+      tools: ['Read', 'Grep', 'Glob', 'LS', 'TodoRead'],
       allowedTools: ['Read', 'Grep', 'Glob', 'LS', 'mcp__supervisor-context__list_context_sources', 'mcp__supervisor-orchestrator__show_issue_card'],
       systemPrompt: 'You are the top-level Supervisor Claude Code runtime.',
     });

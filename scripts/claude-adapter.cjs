@@ -56,6 +56,11 @@ function buildClaudeCliArgs(options = {}) {
     args.push('--mcp-config', options.mcpConfig.trim());
   }
 
+  const tools = normalizeStringArray(options.tools);
+  if (tools.length > 0) {
+    args.push('--tools', tools.join(','));
+  }
+
   const allowedTools = normalizeStringArray(options.allowedTools);
   if (allowedTools.length > 0) {
     args.push('--allowedTools', allowedTools.join(','));
@@ -960,6 +965,7 @@ function startAdapter({
         const cliPath = path.resolve(__dirname, '../claude-code/bin/claude-haha');
         const args = buildClaudeCliArgs({
           mcpConfig: msg.params?.mcpConfig,
+          tools: msg.params?.tools,
           allowedTools: msg.params?.allowedTools,
           systemPrompt: msg.params?.systemPrompt,
         });

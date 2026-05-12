@@ -1,5 +1,6 @@
 import type { ChildProcess } from 'child_process';
 import { randomUUID } from 'crypto';
+import path from 'path';
 import { AgentRunner } from '../agent/runner';
 import type { BotCommandContext, BotCommandResponse } from '../bots/types';
 import {
@@ -74,12 +75,16 @@ export const SUPERVISOR_ORCHESTRATOR_MCP_TOOL_NAMES = SUPERVISOR_ORCHESTRATOR_TO
   `mcp__supervisor-orchestrator__${name}`
 ) as Array<`mcp__supervisor-orchestrator__${SupervisorOrchestratorToolName}`>;
 
-export const SUPERVISOR_CLAUDE_ALLOWED_TOOLS = [
+export const SUPERVISOR_CLAUDE_BUILTIN_TOOLS = [
   'Read',
   'Glob',
   'Grep',
   'LS',
   'TodoRead',
+] as const;
+
+export const SUPERVISOR_CLAUDE_ALLOWED_TOOLS = [
+  ...SUPERVISOR_CLAUDE_BUILTIN_TOOLS,
   ...SUPERVISOR_CONTEXT_TOOL_NAMES,
   ...SUPERVISOR_ORCHESTRATOR_MCP_TOOL_NAMES,
 ];
@@ -87,11 +92,19 @@ export const SUPERVISOR_CLAUDE_ALLOWED_TOOLS = [
 export function buildSupervisorClaudeSystemPrompt(): string {
   return [
     'You are the top-level Supervisor Claude Code runtime for Telegram.',
-    'You are the assistant brain, not a parser or a thin status formatter. Decide which context sources to inspect before answering.',
+    'You are the repository steward for the active repo: an assistant brain, not a parser or a thin status formatter. Decide which context sources to inspect before answering.',
+    'Optimize for long-term repository health and user trust, not just command completion.',
+    'Act as a governance advisor: notice missing tests, weak acceptance criteria, oversized work, risky cleanup, unclear delivery evidence, stale cards, and blocked runtime states.',
+    'Treat a vague issue request as design material. Help the user turn it into a repository fit issue with a clear title, goal, scope, acceptance criteria, risks, evidence, and why-now rationale before calling create_issue.',
+    'For repo direction, planning, and quality conversations, be a choiceful advisor: make one clear recommendation and at most 1-2 alternatives.',
+    'When essential context is missing, ask one focused question. Otherwise make a conservative recommendation with compact evidence.',
+    'For a high-leverage repo recommendation, inspect repo route/source/profile/understanding, memory, governance, and runtime signals before recommending.',
     'Your job is to maintain situational awareness across runtime, tracker, delivery, PR, repo, memory, plan/session, governance, and conversation context.',
     'Repository access is read-only. Never edit files, run installs, create commits, or mutate a checkout.',
+    'Do not call yourself a read-only brain. Your repository/file access is read-only, but your assistant role includes orchestrator business tools.',
     'Use supervisor-context tools for facts. Use supervisor-orchestrator tools for business actions, card delivery, approval state, and issue/orchestrator control.',
     'Business actions such as create, watch, unwatch, retry, stop, close, supersede, override, rewrite, and split must stay behind supervisor-orchestrator tools and confirmation policy.',
+    'For capability questions, call list_orchestrator_capabilities when available and explain that you can create, retry, stop, close, supersede, watch, show cards, and inspect issues through supervisor-orchestrator tools. Never list those orchestrator actions under "cannot do".',
     'When the user asks for a card, call show_issue_card or show_plan_card. Do not describe an internal card protocol.',
     'When the user asks you to create/propose/open an issue, gather needed evidence, then call create_issue. The broker will produce the real confirmation UI when required.',
     'When unsure what action surface exists, call list_orchestrator_capabilities before guessing.',
@@ -105,17 +118,24 @@ export function buildSupervisorClaudeSystemPrompt(): string {
   ].join('\n');
 }
 
-function buildSupervisorMcpConfig(
+function supervisorMcpScriptPath(projectRoot: string, fileName: string): string {
+  return path.join(path.resolve(projectRoot), 'src', 'supervisor', fileName);
+}
+
+export function buildSupervisorMcpConfig(
   workspace: SupervisorClaudeWorkspace,
   contextEndpoint: string | null,
   orchestratorEndpoint: string | null,
   contextToken: string,
+  projectRoot: string = process.cwd(),
 ): string {
+  const contextServerPath = supervisorMcpScriptPath(projectRoot, 'contextMcpServer.ts');
+  const orchestratorServerPath = supervisorMcpScriptPath(projectRoot, 'orchestratorMcpServer.ts');
   return JSON.stringify({
     mcpServers: {
       'supervisor-context': {
         command: 'bun',
-        args: ['run', 'src/supervisor/contextMcpServer.ts'],
+        args: ['run', contextServerPath],
         env: {
           ...(contextEndpoint ? { SYMPHONY_SUPERVISOR_CONTEXT_ENDPOINT: contextEndpoint } : {}),
           SYMPHONY_SUPERVISOR_CONTEXT_TOKEN: contextToken,
@@ -126,7 +146,7 @@ function buildSupervisorMcpConfig(
       },
       'supervisor-orchestrator': {
         command: 'bun',
-        args: ['run', 'src/supervisor/orchestratorMcpServer.ts'],
+        args: ['run', orchestratorServerPath],
         env: {
           ...(orchestratorEndpoint ? { SYMPHONY_SUPERVISOR_ORCHESTRATOR_ENDPOINT: orchestratorEndpoint } : {}),
           SYMPHONY_SUPERVISOR_ORCHESTRATOR_TOKEN: contextToken,
@@ -161,6 +181,14 @@ function contextSourceMap(): string {
     '- show_issue_card/show_plan_card: deliver the real Telegram card UI.',
     '- watch_issue/unwatch_issue/retry_issue/stop_issue/set_default_project: low-risk writes, direct only when policy validates the target.',
     '- create_issue/close_issue/supersede_issue/governance tools: confirmation-gated writes.',
+    '',
+    'Intent routing guide:',
+    '- repo direction / next issue: use prepare_repo_source, get_repo_profile, get_repo_understanding, search_supervisor_memory, get_governance_signals, recommend_repo_issue, and runtime context before recommending.',
+    '- vague issue request: gather repo evidence, improve the title/goal/scope/acceptance criteria/risks/repository fit, ask one focused question only if needed, then call create_issue when the user wants to proceed.',
+    '- card / UI request: use get_conversation_state to find focus when needed, then call show_issue_card or show_plan_card.',
+    '- issue status / blocked / retry request: use diagnose_issue and issue timeline/runtime evidence; call retry_issue only when policy and can_retry allow it.',
+    '- pending approval question: use get_pending_action and answer directly; confirm/cancel text is handled outside Claude.',
+    '- capability confusion: call list_orchestrator_capabilities before saying what you can or cannot do.',
   ].join('\n');
 }
 
@@ -288,7 +316,9 @@ export class SupervisorClaudeRuntimeService {
         this.contextEndpoint,
         this.orchestratorEndpoint,
         this.contextToken,
+        this.options.projectRoot ?? process.cwd(),
       ),
+      tools: [...SUPERVISOR_CLAUDE_BUILTIN_TOOLS],
       allowedTools: SUPERVISOR_CLAUDE_ALLOWED_TOOLS,
       systemPrompt: buildSupervisorClaudeSystemPrompt(),
       turnTimeoutMs: this.options.timeoutMs ?? 120_000,

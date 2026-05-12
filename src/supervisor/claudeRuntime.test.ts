@@ -3,6 +3,7 @@ import type { BotCommandContext } from '../bots/types';
 import {
   SUPERVISOR_CLAUDE_ALLOWED_TOOLS,
   SupervisorClaudeRuntimeService,
+  buildSupervisorMcpConfig,
   buildSupervisorClaudeSystemPrompt,
 } from './claudeRuntime';
 
@@ -78,5 +79,86 @@ describe('SupervisorClaudeRuntimeService', () => {
     expect(prompt).toContain('list_orchestrator_capabilities');
     expect(prompt).toContain('show_issue_card');
     expect(prompt).toContain('create_issue');
+    expect(prompt).toContain('Do not call yourself a read-only brain');
+    expect(prompt).toContain('For capability questions');
+    expect(prompt).toContain('create, retry, stop, close, supersede');
+  });
+
+  test('frames the supervisor as a repo steward that improves vague issue ideas', () => {
+    const prompt = buildSupervisorClaudeSystemPrompt();
+
+    expect(prompt).toContain('repository steward');
+    expect(prompt).toContain('long-term repository health');
+    expect(prompt).toContain('governance advisor');
+    expect(prompt).toContain('vague issue');
+    expect(prompt).toContain('acceptance criteria');
+    expect(prompt).toContain('repository fit');
+    expect(prompt).toContain('one clear recommendation');
+    expect(prompt).toContain('1-2 alternatives');
+    expect(prompt).toContain('ask one focused question');
+    expect(prompt).toContain('high-leverage repo recommendation');
+  });
+
+  test('includes an intent routing guide so Claude can choose the right context and business tools', async () => {
+    const turns: string[] = [];
+    const service = new SupervisorClaudeRuntimeService({
+      resolveWorkspace: async () => ({
+        repoRef: 'UniUni2000/test2',
+        localPath: '/tmp/source-cache/test2',
+      }),
+      createSession: async () => ({
+        ask: async (prompt) => {
+          turns.push(prompt);
+          return { message: '我会先把模糊需求整理成更贴合仓库的 issue 草案。' };
+        },
+        dispose: async () => undefined,
+      }),
+    });
+
+    await service.respond({ context, text: '帮我提个能提升仓库质量的 issue', canWrite: true });
+
+    expect(turns[0]).toContain('Intent routing guide');
+    expect(turns[0]).toContain('repo direction / next issue');
+    expect(turns[0]).toContain('prepare_repo_source');
+    expect(turns[0]).toContain('get_repo_understanding');
+    expect(turns[0]).toContain('get_governance_signals');
+    expect(turns[0]).toContain('recommend_repo_issue');
+    expect(turns[0]).toContain('vague issue request');
+    expect(turns[0]).toContain('acceptance criteria');
+    expect(turns[0]).toContain('create_issue');
+    expect(turns[0]).toContain('card / UI request');
+    expect(turns[0]).toContain('show_issue_card');
+    expect(turns[0]).toContain('blocked / retry request');
+    expect(turns[0]).toContain('diagnose_issue');
+  });
+
+  test('builds MCP server entrypoints from the orchestrator project root, not the target repo cwd', () => {
+    const config = JSON.parse(buildSupervisorMcpConfig(
+      {
+        transport: 'telegram',
+        conversationId: 'chat-1',
+        repoRef: 'jasperLiuzhipei/symphony-e2e-sandbox',
+        localPath: '/tmp/source-cache/symphony-e2e-sandbox',
+      },
+      'http://127.0.0.1:3000/api/v1/bots/supervisor-context/call',
+      'http://127.0.0.1:3000/api/v1/bots/supervisor-orchestrator/call',
+      'token-1',
+      '/srv/symphonyness',
+    ));
+
+    expect(config.mcpServers['supervisor-context'].args).toEqual([
+      'run',
+      '/srv/symphonyness/src/supervisor/contextMcpServer.ts',
+    ]);
+    expect(config.mcpServers['supervisor-orchestrator'].args).toEqual([
+      'run',
+      '/srv/symphonyness/src/supervisor/orchestratorMcpServer.ts',
+    ]);
+    expect(config.mcpServers['supervisor-orchestrator'].env).toMatchObject({
+      SYMPHONY_SUPERVISOR_ORCHESTRATOR_ENDPOINT:
+        'http://127.0.0.1:3000/api/v1/bots/supervisor-orchestrator/call',
+      SYMPHONY_SUPERVISOR_ORCHESTRATOR_REPO_REF:
+        'jasperLiuzhipei/symphony-e2e-sandbox',
+    });
   });
 });
