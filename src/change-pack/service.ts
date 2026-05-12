@@ -1114,6 +1114,7 @@ export async function evaluateChangePackState(params: {
   const handover = await readText(path.join(params.workspacePath, '.symphony', 'HANDOVER.md'));
   const developmentLog = await readText(path.join(params.workspacePath, '.symphony', 'DEVELOPMENT_LOG.md'));
   const reviewReport = await readText(path.join(params.workspacePath, '.symphony', 'REVIEW_REPORT.md'));
+  const parsedReviewReport = reviewReport ? parseCanonicalReviewReport(reviewReport) : null;
   const commandRuns = normalizeEvidenceCommandRuns(evidence.command_runs);
   const successfulCommandRuns = commandRuns.filter((run) => run.status === 'satisfied');
   const failedCommandRuns = commandRuns.filter((run) => run.status === 'failed');
@@ -1165,8 +1166,15 @@ export async function evaluateChangePackState(params: {
         observation.status === 'satisfied'
       ));
     }
-    if (item.key === 'review_report' && reviewReport && parseCanonicalReviewReport(reviewReport)) {
+    if (item.key === 'review_report' && parsedReviewReport) {
       satisfied = true;
+    }
+    if (item.key === 'review_decision' && parsedReviewReport) {
+      const expectedDecisionValue = (item as Record<string, unknown>).decision;
+      const expectedDecision = typeof expectedDecisionValue === 'string'
+        ? expectedDecisionValue.trim().toUpperCase()
+        : null;
+      satisfied = !expectedDecision || parsedReviewReport.decision === expectedDecision;
     }
 
     requirements.push({
