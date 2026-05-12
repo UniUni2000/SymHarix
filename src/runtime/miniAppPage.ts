@@ -726,19 +726,21 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
       :root {
-        --bg: #061018;
-        --panel: rgba(12, 22, 34, 0.9);
-        --panel-strong: rgba(15, 29, 43, 0.98);
-        --panel-gradient-start: rgba(17, 31, 45, 0.92);
-        --panel-gradient-end: rgba(8, 17, 27, 0.92);
-        --header-gradient: linear-gradient(180deg, rgba(6, 16, 24, 0.98) 0%, rgba(6, 16, 24, 0.92) 72%, rgba(6, 16, 24, 0) 100%);
+        --miniapp-width: 390px;
+        --bottom-nav-height: 56px;
+        --glass-radius: 12px;
+        --bg: #0b0f14;
+        --panel: rgba(17, 23, 31, 0.84);
+        --panel-strong: rgba(13, 18, 25, 0.98);
+        --panel-gradient-start: rgba(17, 23, 31, 0.88);
+        --panel-gradient-end: rgba(11, 16, 23, 0.86);
+        --header-gradient: linear-gradient(180deg, rgba(11, 15, 20, 0.98) 0%, rgba(11, 15, 20, 0.9) 76%, rgba(11, 15, 20, 0) 100%);
         --body-bg:
-          radial-gradient(circle at 82% 8%, rgba(86, 227, 159, 0.16), transparent 24%),
-          radial-gradient(circle at 8% 18%, rgba(107, 180, 255, 0.16), transparent 28%),
-          linear-gradient(180deg, #08131d 0%, #040b12 100%);
-        --ring-core: #071018;
-        --line: rgba(156, 179, 204, 0.18);
-        --line-strong: rgba(156, 179, 204, 0.28);
+          linear-gradient(180deg, rgba(20, 28, 38, 0.72) 0%, rgba(12, 17, 24, 0.9) 44%, rgba(8, 12, 18, 0.98) 100%),
+          #0b0f14;
+        --ring-core: #0d1117;
+        --line: rgba(148, 163, 184, 0.16);
+        --line-strong: rgba(148, 163, 184, 0.24);
         --ink: #f3f7fb;
         --muted: #94a7ba;
         --soft: #c9d5e1;
@@ -759,10 +761,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         --panel-gradient-start: rgba(255, 255, 255, 0.96);
         --panel-gradient-end: rgba(246, 249, 253, 0.94);
         --header-gradient: linear-gradient(180deg, rgba(246, 248, 251, 0.98) 0%, rgba(246, 248, 251, 0.92) 72%, rgba(246, 248, 251, 0) 100%);
-        --body-bg:
-          radial-gradient(circle at 82% 8%, rgba(32, 183, 111, 0.13), transparent 24%),
-          radial-gradient(circle at 8% 18%, rgba(35, 130, 224, 0.13), transparent 28%),
-          linear-gradient(180deg, #ffffff 0%, #eef3f8 100%);
+        --body-bg: linear-gradient(180deg, #ffffff 0%, #eef3f8 100%);
         --ring-core: #ffffff;
         --line: rgba(40, 58, 79, 0.14);
         --line-strong: rgba(40, 58, 79, 0.24);
@@ -783,7 +782,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       html { min-height: 100%; background: var(--bg); }
       body {
         margin: 0;
-        min-height: 100vh;
+        min-height: 100svh;
         color: var(--ink);
         font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Segoe UI", sans-serif;
         background: var(--body-bg);
@@ -791,65 +790,61 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
 
       button { font: inherit; border: 0; }
       .shell {
-        width: min(100%, 1080px);
-        min-height: 100vh;
+        width: min(100%, var(--miniapp-width));
+        max-width: var(--miniapp-width);
+        min-height: 100svh;
         margin: 0 auto;
-        padding: calc(14px + env(safe-area-inset-top)) 12px calc(18px + env(safe-area-inset-bottom));
+        padding: calc(12px + env(safe-area-inset-top)) 23px calc(86px + env(safe-area-inset-bottom));
+        padding-bottom: calc(86px + env(safe-area-inset-bottom));
+        overflow-x: hidden;
       }
       .fixed-header {
         position: sticky;
         top: 0;
         z-index: 20;
-        margin: -2px -2px 14px;
-        padding: 8px 2px 10px;
+        margin: -2px -2px 12px;
+        padding: 8px 2px 8px;
         background: var(--header-gradient);
         backdrop-filter: blur(18px);
       }
       .preference-controls {
+        position: absolute;
+        top: 40px;
+        right: 7px;
         display: flex;
         justify-content: flex-end;
         gap: 8px;
-        margin-bottom: 8px;
+        margin-bottom: 0;
       }
       .segmented-control {
         position: relative;
-        display: grid;
-        grid-template-columns: repeat(2, minmax(38px, 1fr));
-        min-width: 86px;
-        min-height: 36px;
-        padding: 3px;
-        border: 1px solid var(--line);
-        border-radius: 999px;
-        background: color-mix(in srgb, var(--panel) 82%, transparent);
+        display: inline-grid;
+        place-items: center;
+        width: 32px;
+        min-width: 32px;
+        height: 32px;
+        min-height: 32px;
+        padding: 0;
+        overflow: hidden;
+        border: 1px solid rgba(42, 59, 76, 0.85);
+        border-radius: 9px;
+        background: rgba(21, 29, 40, 0.82);
         box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.12);
       }
       .segmented-control::before {
-        content: "";
-        position: absolute;
-        top: 3px;
-        bottom: 3px;
-        left: 3px;
-        width: calc((100% - 6px) / 2);
-        border-radius: 999px;
-        background: var(--blue-soft);
-        border: 1px solid rgba(107, 180, 255, 0.16);
-        box-shadow: 0 3px 12px rgba(0, 0, 0, 0.12);
-        transition: transform 180ms ease, background 180ms ease;
-      }
-      .segmented-control[data-value="dark"]::before,
-      .segmented-control[data-value="en"]::before {
-        transform: translateX(100%);
+        content: none;
       }
       .segmented-option {
-        position: relative;
-        z-index: 1;
+        grid-area: 1 / 1;
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        min-height: 28px;
-        padding: 3px 8px;
-        border-radius: 999px;
-        color: var(--muted);
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        padding: 0;
+        border-radius: 9px;
+        color: #d9e4f2;
         background: transparent;
         cursor: pointer;
         font-size: 12px;
@@ -857,8 +852,12 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         line-height: 1;
         transition: color 180ms ease;
       }
+      .segmented-option[aria-pressed="false"] {
+        pointer-events: none;
+        opacity: 0;
+      }
       .segmented-option[aria-pressed="true"] {
-        color: var(--ink);
+        color: #d9e4f2;
       }
       .theme-icon {
         font-size: 16px;
@@ -866,10 +865,14 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       }
       .hero {
         display: grid;
-        grid-template-columns: minmax(0, 5.1fr) minmax(96px, 1.9fr);
-        gap: 12px;
-        align-items: stretch;
-        padding: 12px 10px 13px;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 22px;
+        align-items: start;
+        padding: 36px 8px 12px;
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        box-shadow: none;
         cursor: pointer;
       }
       .hero:focus-visible {
@@ -883,19 +886,28 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         display: flex;
         align-items: center;
         gap: 10px;
-        margin-bottom: 14px;
+        min-height: 34px;
+        margin-bottom: 18px;
         color: var(--ink);
         font-weight: 760;
-        font-size: 18px;
+        font-size: 15px;
       }
       .wave {
-        width: 42px;
-        height: 30px;
+        width: 36px;
+        height: 24px;
+      }
+      .issue-eyebrow {
+        margin: 0 0 4px;
+        color: #2f94ff;
+        font-size: 12px;
+        line-height: 16px;
+        font-weight: 720;
       }
       .issue-title {
         margin: 0 0 10px;
-        font-size: clamp(23px, 5.8vw, 34px);
-        line-height: 1.12;
+        padding-right: 6px;
+        font-size: clamp(22px, 5.9vw, 24px);
+        line-height: 1.16;
         font-weight: 820;
         letter-spacing: 0;
         overflow-wrap: anywhere;
@@ -908,10 +920,13 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       }
       .hero-details {
         display: grid;
-        gap: 10px;
+        gap: 0;
         margin-top: 12px;
       }
       .hero.collapsed .hero-details {
+        display: grid;
+      }
+      .repo-line {
         display: none;
       }
       .repo-line,
@@ -924,6 +939,9 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         margin-top: 8px;
         color: var(--soft);
         font-size: 14px;
+      }
+      .hero .repo-line {
+        display: none;
       }
       .github-mark {
         width: 18px;
@@ -940,15 +958,21 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       }
       .chip {
         display: inline-flex;
-        min-height: 30px;
+        min-height: 24px;
         align-items: center;
         gap: 6px;
+        max-width: 100%;
         padding: 5px 10px;
         border: 1px solid var(--line);
-        border-radius: 9px;
+        border-radius: 7px;
         background: rgba(255, 255, 255, 0.045);
         color: var(--soft);
-        font-weight: 620;
+        font-size: 10.5px;
+        font-weight: 650;
+        line-height: 1.2;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
       }
       .chip.green { color: var(--green); background: var(--green-soft); border-color: rgba(86, 227, 159, 0.2); }
       .chip.blue { color: var(--blue); background: var(--blue-soft); border-color: rgba(107, 180, 255, 0.22); }
@@ -960,12 +984,13 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       }
       .progress-summary {
         width: 100%;
-        max-width: 112px;
-        margin-left: -4px;
-        padding-top: 10px;
+        max-width: none;
+        display: block;
+        margin-left: 0;
+        padding-top: 0;
       }
       .progress-kicker {
-        display: block;
+        display: none;
         color: var(--muted);
         font-size: 10px;
         font-weight: 800;
@@ -974,33 +999,82 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       }
       .progress-value {
         display: block;
-        margin-top: 10px;
-        font-size: 48px;
-        line-height: 0.9;
+        margin: 0 0 18px;
+        font-size: 34px;
+        line-height: 0.95;
         font-weight: 620;
         letter-spacing: -0.06em;
       }
       .progress-copy {
-        display: block;
-        margin-top: 8px;
+        display: none;
+        margin: 0 0 3px;
         color: var(--muted);
-        font-size: 15px;
+        font-size: 13px;
         font-weight: 720;
       }
       .progress-track {
-        width: 82px;
-        height: 10px;
-        margin-top: 16px;
+        grid-column: 1 / -1;
+        width: 100%;
+        height: 4px;
+        margin-top: 0;
         border-radius: 999px;
         background: color-mix(in srgb, var(--line-strong) 72%, transparent);
-        overflow: hidden;
+        overflow: visible;
       }
       .progress-fill {
         width: 0%;
         height: 100%;
         border-radius: 999px;
         background: linear-gradient(90deg, #56e39f 0%, #6bb4ff 100%);
-        transition: width 220ms ease, background 220ms ease;
+        transition: background 220ms ease;
+      }
+      .progress-steps {
+        grid-column: 1 / -1;
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0;
+        margin-top: 9px;
+      }
+      .progress-step {
+        position: relative;
+        min-width: 0;
+        padding-top: 17px;
+        color: #aab6c4;
+        font-size: 10px;
+        line-height: 13px;
+        text-align: center;
+      }
+      .progress-step::before {
+        content: "";
+        position: absolute;
+        top: -20px;
+        left: 50%;
+        width: 16px;
+        height: 16px;
+        border: 2px solid rgba(78, 93, 111, 0.8);
+        border-radius: 50%;
+        background: var(--bg);
+        transform: translateX(-50%);
+      }
+      .progress-step.done::before,
+      .progress-step.active::before {
+        border-color: #2f94ff;
+        background: #2f94ff;
+        box-shadow: 0 0 0 4px rgba(47, 148, 255, 0.12);
+      }
+      .progress-step.done::after {
+        content: "";
+        position: absolute;
+        top: -20px;
+        left: 50%;
+        width: 16px;
+        height: 16px;
+        background: url("data:image/svg+xml,%3Csvg%20width%3D%2716%27%20height%3D%2716%27%20viewBox%3D%270%200%2016%2016%27%20fill%3D%27none%27%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%3E%3Cpath%20d%3D%27M4.2%208.1L6.8%2010.7L11.9%205.3%27%20stroke%3D%27white%27%20stroke-width%3D%272.1%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27/%3E%3C/svg%3E") center / 13px 13px no-repeat;
+        transform: translateX(-50%);
+      }
+      .progress-step.active {
+        color: #2490ff;
+        font-weight: 750;
       }
       .judgment {
         display: grid;
@@ -1009,27 +1083,71 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         margin: 0;
       }
       .tabbar {
+        position: fixed;
+        left: 50%;
+        bottom: calc(8px + env(safe-area-inset-bottom));
+        z-index: 30;
         display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        width: min(calc(100vw - 34px), calc(var(--miniapp-width) - 34px));
+        min-height: var(--bottom-nav-height);
         gap: 6px;
-        margin-top: 10px;
+        margin-top: 0;
+        padding: 6px 12px;
+        border: 1px solid var(--line);
+        border-radius: 28px;
+        background: rgba(5, 13, 22, 0.86);
+        box-shadow: 0 18px 46px rgba(0, 0, 0, 0.32);
+        backdrop-filter: blur(22px);
+        transform: translateX(-50%);
       }
       .tab-button {
-        min-height: 42px;
-        padding: 8px 5px;
-        border: 1px solid var(--line);
-        border-radius: 10px;
+        display: grid;
+        place-items: center;
+        gap: 3px;
+        min-height: 44px;
+        padding: 6px 5px 5px;
+        border: 1px solid transparent;
+        border-radius: 22px;
         color: var(--muted);
-        background: rgba(255, 255, 255, 0.045);
+        background: transparent;
         cursor: pointer;
-        font-size: 12px;
+        font-size: 11px;
         font-weight: 780;
         line-height: 1.1;
+        letter-spacing: 0;
       }
       .tab-button.active {
         color: var(--ink);
-        background: var(--blue-soft);
-        border-color: rgba(107, 180, 255, 0.32);
+        background: linear-gradient(180deg, rgba(38, 120, 255, 0.42), rgba(28, 98, 218, 0.28));
+        border-color: rgba(107, 180, 255, 0.3);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 10px 22px rgba(26, 99, 220, 0.22);
+      }
+      html[data-theme="light"] .tabbar {
+        background: rgba(255, 255, 255, 0.9);
+        border-color: rgba(40, 58, 79, 0.16);
+        box-shadow: 0 16px 42px rgba(18, 31, 51, 0.16);
+      }
+      html[data-theme="light"] .tab-button {
+        color: #64748b;
+      }
+      html[data-theme="light"] .tab-button.active {
+        color: #ffffff;
+        background: linear-gradient(180deg, #2f8cff, #1769e8);
+        border-color: rgba(23, 105, 194, 0.26);
+        box-shadow: 0 10px 22px rgba(23, 105, 194, 0.22);
+      }
+      .tab-icon {
+        width: 16px;
+        height: 16px;
+        color: currentColor;
+      }
+      .tab-label {
+        display: block;
+        max-width: 100%;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
       }
       .tab-panel {
         display: none;
@@ -1044,9 +1162,9 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       }
       .panel {
         border: 1px solid var(--line);
-        border-radius: 12px;
+        border-radius: var(--glass-radius);
         background: linear-gradient(145deg, var(--panel-gradient-start), var(--panel-gradient-end));
-        box-shadow: 0 18px 46px rgba(0, 0, 0, 0.24);
+        box-shadow: none;
       }
       .panel.pad { padding: 15px; }
       .panel-title {
@@ -1069,6 +1187,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       .signal-panel {
         display: grid;
         gap: 12px;
+        padding: 14px 12px;
       }
       .signal-pills {
         display: flex;
@@ -1106,12 +1225,12 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       }
       .signal-row {
         display: grid;
-        grid-template-columns: 56px minmax(0, 1fr);
-        gap: 12px;
+        grid-template-columns: 74px minmax(0, 1fr);
+        gap: 14px;
         align-items: start;
-        padding: 11px 12px;
+        padding: 13px 14px;
         border: 1px solid var(--line);
-        border-radius: 12px;
+        border-radius: 14px;
         background: rgba(255, 255, 255, 0.04);
       }
       .signal-row strong {
@@ -1474,7 +1593,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       .history-panel[hidden] {
         display: none;
       }
-      .panel-title .text-button {
+      .text-button {
         min-height: 30px;
         padding: 4px 9px;
         border: 1px solid var(--line);
@@ -1484,6 +1603,30 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         cursor: pointer;
         font-size: 12px;
         font-weight: 720;
+      }
+      #diff-drawer-close-button {
+        position: absolute;
+        top: 32px;
+        right: 17px;
+        width: 32px;
+        height: 32px;
+        min-height: 32px;
+        padding: 0;
+        overflow: hidden;
+        border-radius: 50%;
+        color: transparent;
+        background: rgba(15, 23, 42, 0.08);
+        border-color: rgba(15, 23, 42, 0.1);
+      }
+      #diff-drawer-close-button::after {
+        content: "×";
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        color: #1f2937;
+        font-size: 22px;
+        line-height: 1;
       }
       .history-entry {
         display: grid;
@@ -1519,27 +1662,41 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       .diff-drawer-backdrop {
         position: fixed;
         inset: 0;
-        z-index: 24;
-        background: rgba(3, 10, 22, 0.34);
-        backdrop-filter: blur(6px);
+        z-index: 40;
+        background: rgba(15, 23, 42, 0.22);
+        backdrop-filter: blur(5px);
       }
       .diff-drawer-backdrop[hidden] {
         display: none;
       }
       .diff-drawer {
         position: fixed;
-        top: 86px;
-        right: 14px;
-        bottom: 14px;
-        z-index: 25;
-        width: min(420px, calc(100vw - 28px));
-        padding: 16px;
-        border: 1px solid rgba(156, 179, 204, 0.2);
-        border-radius: 24px;
-        background:
-          linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(246, 250, 255, 0.98));
-        box-shadow: 0 26px 56px rgba(18, 31, 51, 0.26);
+        top: auto;
+        left: 50%;
+        right: auto;
+        bottom: 0;
+        z-index: 41;
+        width: min(100vw, var(--miniapp-width));
+        height: min(660px, calc(100svh - 184px));
+        padding: 40px 17px calc(88px + env(safe-area-inset-bottom));
+        border: 1px solid rgba(203, 213, 225, 0.9);
+        border-bottom: 0;
+        border-radius: 28px 28px 0 0;
+        background: rgba(255, 255, 255, 0.98);
+        box-shadow: 0 -18px 46px rgba(15, 23, 42, 0.16);
         overflow: hidden;
+        transform: translateX(-50%);
+      }
+      .diff-drawer::before {
+        content: "";
+        position: absolute;
+        top: 14px;
+        left: 50%;
+        width: 58px;
+        height: 4px;
+        border-radius: 3px;
+        background: rgba(15, 23, 42, 0.24);
+        transform: translateX(-50%);
       }
       .diff-drawer[hidden] {
         display: none;
@@ -1563,7 +1720,8 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         margin-top: 7px;
         color: var(--ink);
         font-family: "SF Mono", "Menlo", "Consolas", monospace;
-        font-size: 13px;
+        font-size: 20px;
+        font-weight: 850;
         line-height: 1.45;
         overflow-wrap: anywhere;
         word-break: break-word;
@@ -1585,7 +1743,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       }
       .diff-drawer-note {
         display: block;
-        margin-top: 10px;
+        margin-top: 12px;
         color: var(--muted);
         font-size: 12px;
         line-height: 1.45;
@@ -1595,20 +1753,20 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       }
       .diff-drawer-body {
         margin-top: 14px;
-        height: calc(100% - 116px);
+        height: calc(100% - 190px);
         padding: 12px 12px 14px;
-        border: 1px solid rgba(156, 179, 204, 0.14);
-        border-radius: 18px;
-        background: rgba(246, 250, 255, 0.92);
+        border: 1px solid rgba(203, 213, 225, 0.78);
+        border-radius: 10px;
+        background: rgba(248, 251, 255, 0.96);
         overflow: auto;
       }
       .diff-drawer-code {
         margin: 0;
         white-space: pre-wrap;
         font-family: "SF Mono", "Menlo", "Consolas", monospace;
-        font-size: 11px;
-        line-height: 1.58;
-        color: var(--ink);
+        font-size: 10.5px;
+        line-height: 1.65;
+        color: #172033;
         overflow-wrap: anywhere;
         word-break: break-word;
       }
@@ -1616,36 +1774,52 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         display: block;
       }
       .diff-drawer-line.add {
-        color: #17844e;
+        color: #147a47;
       }
       .diff-drawer-line.context {
-        color: var(--ink);
+        color: #27364a;
       }
       .diff-drawer-line.del {
-        color: #c23f66;
+        color: #b4234f;
       }
       .diff-drawer-line.hunk {
         margin: 8px 0 6px;
-        color: var(--muted);
+        color: #64748b;
         font-size: 10px;
         font-weight: 780;
         letter-spacing: 0.12em;
         text-transform: uppercase;
       }
       .diff-drawer-line.meta {
-        color: var(--muted);
+        color: #64748b;
       }
       html[data-theme="dark"] .diff-drawer-backdrop {
-        background: rgba(2, 6, 14, 0.52);
+        background: rgba(0, 0, 0, 0.5);
       }
       html[data-theme="dark"] .diff-drawer {
         border-color: rgba(134, 161, 191, 0.22);
-        background:
-          linear-gradient(180deg, rgba(12, 22, 34, 0.98), rgba(8, 16, 27, 0.98));
+        background: rgba(7, 17, 29, 0.98);
+        box-shadow: 0 -18px 46px rgba(0, 0, 0, 0.34);
+      }
+      html[data-theme="dark"] .diff-drawer::before {
+        background: rgba(255, 255, 255, 0.56);
       }
       html[data-theme="dark"] .diff-drawer-body {
         border-color: rgba(134, 161, 191, 0.14);
         background: rgba(6, 13, 23, 0.86);
+      }
+      html[data-theme="dark"] #diff-drawer-close-button {
+        background: rgba(255, 255, 255, 0.1);
+        border-color: rgba(255, 255, 255, 0.08);
+      }
+      html[data-theme="dark"] #diff-drawer-close-button::after {
+        color: #d9e6f3;
+      }
+      html[data-theme="dark"] .diff-drawer-header strong {
+        color: #f4f8ff;
+      }
+      html[data-theme="dark"] .diff-drawer-code {
+        color: #dbe6f5;
       }
       html[data-theme="dark"] .diff-drawer-line.add {
         color: #56e39f;
@@ -1658,18 +1832,14 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       }
       @media (max-width: 720px) {
         .diff-drawer {
-          top: auto;
-          right: 0;
-          bottom: 0;
-          width: 100%;
+          width: min(100%, var(--miniapp-width));
           max-width: 100%;
           border-right: 0;
           border-bottom: 0;
           border-left: 0;
-          border-radius: 24px 24px 0 0;
         }
         .diff-drawer-body {
-          height: calc(100% - 122px);
+          height: calc(100% - 190px);
         }
       }
       .actions {
@@ -1710,16 +1880,16 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         color: var(--muted);
       }
       @media (min-width: 720px) {
-        .shell { padding-left: 22px; padding-right: 22px; }
-        .hero { grid-template-columns: minmax(0, 5.2fr) minmax(108px, 1.8fr); padding: 18px 20px 18px; }
-        .progress-summary { max-width: 132px; margin-left: -6px; }
-        .progress-value { font-size: 58px; }
-        .progress-track { width: 96px; }
-        .judgment { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .layout { grid-template-columns: minmax(0, 1.5fr) minmax(320px, 0.88fr); align-items: stretch; }
-        .layout > .panel:first-child { min-height: 430px; }
-        .issue-title { font-size: 36px; }
-        .actions { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+        .shell { padding-left: 12px; padding-right: 12px; }
+        .hero { grid-template-columns: minmax(0, 1fr); padding: 15px 14px 14px; }
+        .progress-summary { max-width: none; margin-left: 0; }
+        .progress-value { font-size: 34px; }
+        .progress-track { width: 100%; }
+        .judgment { grid-template-columns: minmax(0, 1fr); }
+        .layout { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
+        .layout > .panel:first-child { min-height: 0; }
+        .issue-title { font-size: 28px; }
+        .actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       }
       @keyframes tabIn {
         from { opacity: 0; transform: translateY(6px); }
@@ -1740,14 +1910,15 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             <button class="segmented-option" type="button" data-lang-choice="en" aria-pressed="false">EN</button>
           </div>
         </div>
-        <section id="hero" class="hero panel collapsed" role="button" tabindex="0" aria-expanded="false">
+        <section id="hero" class="hero collapsed" role="button" tabindex="0" aria-expanded="false">
           <div class="hero-main">
             <div class="brand">
               <svg class="wave" viewBox="0 0 70 42" aria-hidden="true">
-                <path d="M4 23 C12 5 26 8 27 24 C29 42 47 39 50 19 C53 2 63 9 66 21" fill="none" stroke="#56e39f" stroke-width="6" stroke-linecap="round"/>
+                <path d="M4 23 C12 5 26 8 27 24 C29 42 47 39 50 19 C53 2 63 9 66 21" fill="none" stroke="#2c93ff" stroke-width="6" stroke-linecap="round"/>
               </svg>
               <span>symphonyness</span>
             </div>
+            <p id="issue-eyebrow" class="issue-eyebrow">${escapedIssueId}</p>
             <h1 id="issue-title" class="issue-title">${escapedIssueId}</h1>
             <div id="hero-details" class="hero-details">
               <div id="repo-line" class="repo-line">
@@ -1768,17 +1939,32 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
               <div class="progress-track">
                 <div id="progress-fill" class="progress-fill"></div>
               </div>
+              <div id="progress-steps" class="progress-steps" aria-hidden="true">
+                <span class="progress-step done">Plan</span>
+                <span class="progress-step done">Dev</span>
+                <span class="progress-step active">Review</span>
+                <span class="progress-step">Delivery</span>
+              </div>
             </div>
           </div>
         </section>
 
-        <div class="tabbar" role="tablist" aria-label="Issue views">
-          <button class="tab-button active" type="button" role="tab" aria-selected="true" data-tab="overview">Overview</button>
-          <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab="activity">Activity</button>
-          <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab="changes">Changes</button>
-          <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab="delivery">Delivery</button>
-        </div>
       </header>
+
+      <div class="tabbar" role="tablist" aria-label="Issue views">
+        <button class="tab-button active" type="button" role="tab" aria-selected="true" data-tab="overview">
+          <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4h10a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm2 4h6M9 12h6M9 16h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          <span class="tab-label">Issue</span>
+        </button>
+        <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab="changes">
+          <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 7h8M8 12h8M8 17h5M5 5v14M19 5v14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          <span class="tab-label">Changes</span>
+        </button>
+        <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab="delivery">
+          <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 13l4 4L19 7M6 20h12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span class="tab-label">Delivery</span>
+        </button>
+      </div>
 
       <section id="tab-overview" class="tab-panel active" role="tabpanel">
         <div class="tab-stack">
@@ -1811,17 +1997,12 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           </section>
 
           <section id="stage-row" class="panel stage-row" aria-label="阶段进度"></section>
-        </div>
-      </section>
-
-      <section id="tab-activity" class="tab-panel" role="tabpanel">
-        <div class="layout">
           <section class="panel pad">
             <h2 class="panel-title"><span id="timeline-title">实时事件流</span> <span id="live-badge" class="chip green">Live</span></h2>
             <div id="timeline-list" class="timeline"><div class="loading">Loading timeline...</div></div>
           </section>
 
-          <aside class="side-stack">
+          <section class="side-stack">
             <section class="panel pad">
               <h2 class="panel-title"><span data-i18n="agentProgress">Agent 进度</span> <span class="chip green" data-i18n="latestThree">最近 3 条</span></h2>
               <div id="agent-list"></div>
@@ -1830,7 +2011,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
               <h2 class="panel-title"><span data-i18n="milestones">关键节点</span> <span class="chip yellow">milestones</span></h2>
               <div id="milestone-list"></div>
             </section>
-          </aside>
+          </section>
         </div>
       </section>
 
@@ -1851,7 +2032,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       <section id="tab-delivery" class="tab-panel" role="tabpanel">
         <div class="tab-stack">
           <section class="panel pad">
-            <h2 class="panel-title">PR / Delivery</h2>
+            <h2 class="panel-title" data-i18n="deliveryClosure">交付闭环</h2>
             <div id="delivery-list"></div>
           </section>
 
@@ -1940,12 +2121,14 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           heroDetails: document.getElementById('hero-details'),
           themeToggle: document.getElementById('theme-toggle'),
           languageToggle: document.getElementById('language-toggle'),
+          issueEyebrow: document.getElementById('issue-eyebrow'),
           issueTitle: document.getElementById('issue-title'),
           repoLine: document.getElementById('repo-line'),
           statusLine: document.getElementById('status-line'),
           progressValue: document.getElementById('progress-value'),
           progressCopy: document.getElementById('progress-copy'),
           progressFill: document.getElementById('progress-fill'),
+          progressSteps: document.getElementById('progress-steps'),
           signalStateBadge: document.getElementById('signal-state-badge'),
           signalPills: document.getElementById('signal-pills'),
           overviewSignal: document.getElementById('overview-signal'),
@@ -1996,7 +2179,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             themeLight: '日间',
             langLabel: '中文',
             overallProgress: '整体进度',
-            overviewSignal: 'Overview Signal',
+            overviewSignal: '状态概览',
             currentJudgment: '当前判断',
             nextRecommendation: '下一步推荐',
             roundGoalTitle: '当前轮次目标',
@@ -2007,6 +2190,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             recent: '最近',
             codeChanges: '代码改动',
             acceptanceCriteria: '验收标准',
+            deliveryClosure: '交付闭环',
             deliverySummaryTitle: '交付总结',
             childQueue: '子任务队列',
             fullLog: '完整日志',
@@ -2117,6 +2301,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             recent: 'Recent',
             codeChanges: 'Code Changes',
             acceptanceCriteria: 'Acceptance Criteria',
+            deliveryClosure: 'Delivery',
             deliverySummaryTitle: 'Delivery Summary',
             childQueue: 'Child Queue',
             fullLog: 'Full Log',
@@ -3046,7 +3231,14 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             diffFiles.length ? signalPill(changedLabel, 'blue') : '',
           ].filter(Boolean).join('');
           el.overviewSignal.innerHTML = [
-            signalRow(t('nowLabel'), nowTitle, isEnglish() ? 'The task is actively moving forward.' : '用户第一眼知道任务正在推进。', pillTone),
+          signalRow(
+            t('nowLabel'),
+            nowTitle,
+            presentation.mode === 'completed'
+              ? (isEnglish() ? 'Delivery has closed cleanly.' : '交付已经闭环，可以放心回看。')
+              : (isEnglish() ? 'The task is actively moving forward.' : '任务正在推进，关键状态保持可见。'),
+            pillTone,
+          ),
             signalRow(t('latestLabel'), latestTitle, latestCopy, 'blue'),
             signalRow(t('nextLabel'), nextTitle, nextCopy, presentation.mode === 'completed' ? 'green' : 'yellow'),
           ].join('');
@@ -3079,26 +3271,40 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           const presentation = getPresentation(issue);
           const identifier = issue.identifier || issueId;
           const rawTitle = issue.title || 'Issue';
-          const displayTitle = String(rawTitle).startsWith(identifier)
-            ? rawTitle
-            : identifier + ' · ' + rawTitle;
+          let displayTitle = String(rawTitle);
+          if (displayTitle.indexOf(identifier) === 0) {
+            displayTitle = displayTitle.slice(identifier.length).replace(/^\\s*[·:-]?\\s*/, '') || String(rawTitle);
+          }
           document.body.classList.toggle('is-completed', presentation.mode === 'completed');
           setHeroExpanded(state.heroExpanded);
+          el.issueEyebrow.textContent = identifier;
           el.issueTitle.textContent = displayTitle;
           el.repoLine.innerHTML = githubMark() + '<span>' + escapeHtml(t('repository')) + '</span><span class="repo-name">' + escapeHtml(issue.github_repo || 'repo pending') + '</span>';
           const child = issue.governance_current_child || (Array.isArray(issue.governance_child_queue) ? issue.governance_child_queue.find((item) => item.queue_state === 'current') : null);
           el.statusLine.innerHTML = [
             chip(presentation.stateLabel, presentation.stateTone),
-            chip(t('phase') + ' ' + (issue.phase || 'unknown'), 'blue'),
-            chip(issue.complexity || 'L?', 'blue'),
-            chip(issue.round ? 'Round ' + issue.round.index + '/' + issue.round.total : 'Round ?', 'green'),
-            chip(isCompletedIssue(issue) ? t('deliveryDone') : child ? t('childRunning') : t('rootIssue'), 'yellow'),
-            chip(isCompletedIssue(issue) ? t('supervisorDone') : issue.session ? 'Claude Running' : 'Supervisor', 'blue')
+            chip(issue.active_pr_number ? 'PR #' + issue.active_pr_number : t('prPending'), 'blue'),
+            chip(issue.branch_name || (child && child.issue_identifier) || t('rootIssue'), 'blue')
           ].join('');
           const progress = presentation.progress;
           el.progressValue.textContent = progress + '%';
           el.progressFill.style.width = Math.max(0, Math.min(100, progress)) + '%';
           el.progressFill.style.background = progressRailGradient(issue);
+          if (el.progressSteps) {
+            const completed = isCompletedIssue(issue);
+            const reviewActive = issue.phase === 'REVIEW' || issue.orchestrator_state === 'review_running';
+            const steps = Array.from(el.progressSteps.querySelectorAll('.progress-step'));
+            const states = completed
+              ? ['done', 'done', 'done', 'done']
+              : reviewActive
+                ? ['done', 'done', 'active', '']
+                : (issue.session || issue.orchestrator_state === 'dev_running')
+                  ? ['done', 'active', '', '']
+                  : ['active', '', '', ''];
+            steps.forEach((step, index) => {
+              step.className = 'progress-step ' + states[index];
+            });
+          }
           renderExpandableText(el.judgmentCopy, presentation.judgmentSummary, '', 180);
           renderExpandableText(el.nextCopy, presentation.nextRecommendation, '', 180);
           el.rootLabel.textContent = 'Root: ' + (issue.governance_root_issue_identifier || identifier);
@@ -3375,14 +3581,21 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         }
         function renderDelivery(issue) {
           const presentation = getPresentation(issue);
-          const rows = [
-            ['PR', issue.active_pr_number ? '#' + issue.active_pr_number : 'pending'],
-            ['Review', presentation.reviewDeliveryStatus],
-            ['Linear', isCompletedIssue(issue) ? 'Done' : issue.tracker_state || 'In Progress'],
-            [t('restore'), isRetryableDeliveryFailure(issue) ? t('restorable') : t('noRestore')]
-          ];
+          const completed = isCompletedIssue(issue);
+          const rows = completed
+            ? [
+                [isEnglish() ? 'Review approved' : 'Review 已批准', presentation.reviewDeliveryStatus],
+                [isEnglish() ? 'CI passed' : 'CI 已通过', issue.evidence_summary ? String(issue.evidence_summary.satisfied) + '/' + String(issue.evidence_summary.total_requirements) : 'checks'],
+                [isEnglish() ? 'Merged to main' : '已合并到 main', issue.active_pr_number ? 'PR #' + issue.active_pr_number : 'done']
+              ]
+            : [
+                ['PR', issue.active_pr_number ? '#' + issue.active_pr_number : 'pending'],
+                ['Review', presentation.reviewDeliveryStatus],
+                ['Linear', issue.tracker_state || 'In Progress'],
+                [t('restore'), isRetryableDeliveryFailure(issue) ? t('restorable') : t('noRestore')]
+              ];
           el.deliveryList.innerHTML = rows.map(([label, value]) => (
-            '<div class="delivery-row"><div><strong>' + escapeHtml(label) + '</strong><span>' + escapeHtml(value) + '</span></div><span>›</span></div>'
+            '<div class="delivery-row"><div><strong>' + escapeHtml(label) + '</strong><span>' + escapeHtml(value) + '</span></div>' + chip(completed ? '✓' : '›', completed ? 'green' : '') + '</div>'
           )).join('');
           renderExpandableText(el.deliverySummary, issue.delivery_summary || presentation.judgmentSummary, t('waitingDelivery'), 220);
           if (issue.github_repo && issue.active_pr_number) {
@@ -3403,7 +3616,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             ? missing.map((item) => [item.label || item.id || t('missingRequirement'), item.status || 'missing'])
             : [[t('acceptanceProgress'), satisfied], [t('status'), isCompletedIssue(issue) ? t('completed') : t('validating')]];
           el.acceptanceList.innerHTML = rows.map(([label, value]) => (
-            '<div class="delivery-row"><div><strong>' + escapeHtml(label) + '</strong><span>' + escapeHtml(value) + '</span></div>' + chip(String(value).toLowerCase().includes('missing') ? 'todo' : 'check', String(value).toLowerCase().includes('missing') ? 'yellow' : 'green') + '</div>'
+            '<div class="delivery-row"><div><strong>' + escapeHtml(label) + '</strong><span>' + escapeHtml(value) + '</span></div>' + chip(String(value).toLowerCase().includes('missing') ? '待补' : '✓', String(value).toLowerCase().includes('missing') ? 'yellow' : 'green') + '</div>'
           )).join('');
         }
         function renderChildren(issue) {
@@ -3576,13 +3789,13 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           }
         });
         el.themeToggle.addEventListener('click', (event) => {
-          const button = event.target && event.target.closest ? event.target.closest('[data-theme-choice]') : null;
-          state.theme = button ? button.getAttribute('data-theme-choice') : (state.theme === 'light' ? 'dark' : 'light');
+          event.preventDefault();
+          state.theme = state.theme === 'light' ? 'dark' : 'light';
           applyPreferences();
         });
         el.languageToggle.addEventListener('click', (event) => {
-          const button = event.target && event.target.closest ? event.target.closest('[data-lang-choice]') : null;
-          state.lang = button ? button.getAttribute('data-lang-choice') : (state.lang === 'en' ? 'zh' : 'en');
+          event.preventDefault();
+          state.lang = state.lang === 'en' ? 'zh' : 'en';
           applyPreferences();
           render();
         });
