@@ -94,6 +94,60 @@ describe('changePackService', () => {
     expect(state.missing_requirements.some((item) => item.key === 'handover')).toBe(false);
   });
 
+  test('treats a canonical review report as satisfying persisted review decision evidence', async () => {
+    workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-change-pack-review-decision-'));
+    fs.mkdirSync(path.join(workspacePath, '.symphony'), { recursive: true });
+
+    const issue = makeIssue({
+      identifier: 'INT-166',
+      title: '完善代码细节：docstring、消除重复常数、边界测试',
+      state: 'In Review',
+    });
+
+    await initializeChangePack({
+      workspacePath,
+      issue,
+      profile: 'review',
+      mode: 'review',
+      governanceSummary: 'No governance blockers detected.',
+    });
+
+    const evidencePath = path.join(workspacePath, '.symphony', 'change-pack', 'evidence.json');
+    const evidence = JSON.parse(fs.readFileSync(evidencePath, 'utf8'));
+    evidence.requirements.push({
+      key: 'review_decision',
+      label: 'REVIEW_REPORT.md written with APPROVE',
+      reason: 'Reviewer must produce review report with decision.',
+      kind: 'artifact',
+      status: 'done',
+      decision: 'APPROVE',
+    });
+    fs.writeFileSync(evidencePath, JSON.stringify(evidence, null, 2), 'utf8');
+    fs.writeFileSync(
+      path.join(workspacePath, '.symphony', 'REVIEW_REPORT.md'),
+      [
+        '## Review Decision: APPROVE',
+        '',
+        '## Review Summary',
+        'INT-166 review passed with sufficient verification evidence.',
+      ].join('\n'),
+      'utf8',
+    );
+
+    const state = await evaluateChangePackState({
+      workspacePath,
+      issue,
+      mode: 'review',
+    });
+
+    expect(state.missing_requirements).toEqual([]);
+    expect(state.evidence_summary).toMatchObject({
+      total_requirements: 2,
+      satisfied: 2,
+      missing: 0,
+    });
+  });
+
   test('treats agent-written PASS evidence as satisfied and tolerates legacy command fields', async () => {
     workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-change-pack-pass-evidence-'));
     fs.mkdirSync(path.join(workspacePath, '.symphony', 'change-pack'), { recursive: true });
