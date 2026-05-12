@@ -463,7 +463,10 @@ function shouldRequireOrchestratorBackedResponse(text: string): boolean {
 }
 
 function isSupervisorClaudeBusinessToolDenial(message: string): boolean {
-  return /(?:无法|不能|没法).{0,24}(?:直接)?(?:操作|调用|触发).{0,24}(?:orchestrator|控制台|工具|tool)|(?:需要|请).{0,24}(?:通过|到).{0,24}(?:orchestrator|控制台|Linear|GitHub).{0,24}(?:手动|触发|操作)/i.test(message);
+  return /(?:只读\s*(?:Claude\s*Code\s*)?(?:brain|大脑)|read-only\s+(?:Claude\s+Code\s+)?brain)/i.test(message) ||
+    /(?:不能做|无法|不能|没法)[\s\S]{0,160}(?:创建|新建|关闭|重试|retry|close|create)[\s\S]{0,80}(?:issue|Linear|orchestrator|动作|工具|tool)/i.test(message) ||
+    /(?:无法|不能|没法)[\s\S]{0,80}(?:直接)?(?:操作|调用|触发)[\s\S]{0,80}(?:orchestrator|控制台|工具|tool)/i.test(message) ||
+    /(?:需要|请)[\s\S]{0,80}(?:通过|到)[\s\S]{0,80}(?:orchestrator|控制台|Linear|GitHub)[\s\S]{0,80}(?:手动|触发|操作)/i.test(message);
 }
 
 function shouldFallbackToOrchestratorBackedRuntime(params: {

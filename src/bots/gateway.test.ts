@@ -1753,6 +1753,89 @@ describe('DefaultBotGateway', () => {
     gateway.dispose();
   });
 
+  test('keeps the runtime view button visible when the Mini App public base URL is missing', async () => {
+    delete process.env.SYMPHONY_PUBLIC_BASE_URL;
+    const requests: Array<{ url: string; body: FormData }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: init?.body as FormData,
+      });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 334 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        assistantModel: {
+          decide: async () => null,
+          getDiagnostics: () => ({
+            provider: null,
+            model: null,
+            configured: false,
+            health: 'unconfigured',
+            fallback_available: true,
+            last_error_code: 'unconfigured',
+          }),
+        },
+      },
+    );
+
+    await (gateway as any).telegramNotifier.sendMessage(
+      {
+        transport: 'telegram',
+        conversation_id: '42',
+      },
+      {
+        text: 'Issue Card · INT-1',
+        caption: '<b>INT-1 · Gateway test</b>',
+        format: 'telegram_html',
+        media_key: 'issue-card|INT-1|open-fallback',
+        photo: {
+          bytes: new Uint8Array([137, 80, 78, 71]),
+          filename: 'INT-1-card.png',
+          content_type: 'image/png',
+        },
+        action_rows: [
+          [{ label: '停止', style: 'danger', callback_data: 'rt|INT-1|stop' }],
+          [
+            { label: '刷新卡片', callback_data: 'rt|INT-1|refresh' },
+            { label: '打开运行视图', style: 'primary', web_app: { url: '/runtime/issues/INT-1/app' } },
+          ],
+        ],
+      },
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(JSON.parse(String(requests[0]?.body.get('reply_markup')))).toEqual({
+      inline_keyboard: [
+        [{ text: '停止', style: 'danger', callback_data: 'rt|INT-1|stop' }],
+        [
+          { text: '刷新卡片', callback_data: 'rt|INT-1|refresh' },
+          { text: '打开运行视图', style: 'primary', callback_data: 'rt|INT-1|open' },
+        ],
+      ],
+    });
+
+    gateway.dispose();
+  });
+
   test('handles runtime issue card buttons by refreshing the same Telegram card through supervisor runtime', async () => {
     const db = new Database(':memory:');
     initializeSchema(db);
@@ -1854,6 +1937,77 @@ describe('DefaultBotGateway', () => {
 
     gateway.dispose();
     db.close();
+  });
+
+  test('answers the fallback runtime view button without editing the card when Mini App is unavailable', async () => {
+    delete process.env.SYMPHONY_PUBLIC_BASE_URL;
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body || '{}')),
+      });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 101 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(['9']),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        assistantModel: {
+          decide: async () => null,
+          getDiagnostics: () => ({
+            provider: null,
+            model: null,
+            configured: false,
+            health: 'unconfigured',
+            fallback_available: true,
+            last_error_code: 'unconfigured',
+          }),
+        },
+      },
+    );
+
+    const result = await gateway.handleTelegramWebhook(
+      {
+        callback_query: {
+          id: 'callback-runtime-open',
+          data: 'rt|INT-1|open',
+          message: {
+            chat: { id: 42 },
+            message_id: 101,
+            caption: 'issue card',
+          },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(result.status).toBe(200);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toContain('answerCallbackQuery');
+    expect(String(requests[0]?.body.text)).toContain('Mini App');
+    expect(String(requests[0]?.body.text)).toContain('SYMPHONY_PUBLIC_BASE_URL');
+
+    gateway.dispose();
   });
 
   test('edits Telegram visual issue cards with editMessageMedia instead of text edits', async () => {

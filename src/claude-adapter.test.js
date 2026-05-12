@@ -3,6 +3,7 @@ const childProcess = require('child_process');
 const { EventEmitter } = require('events');
 const { PassThrough } = require('stream');
 const {
+  buildClaudeCliArgs,
   buildToolResultTimelineEvents,
   collectTimelineEventsFromClaudeMessage,
   createTimelineState,
@@ -144,6 +145,20 @@ describe('claude-adapter timeline helpers', () => {
   test('formats turn completion summaries for user-facing logs', () => {
     const message = formatTurnCompletedMessage(3, { input: 1200, output: 400, total: 1600 });
     expect(message).toBe('Turn 3 completed · in 1.2k / out 400');
+  });
+
+  test('passes available built-in tools separately from allowed permission tools', () => {
+    const args = buildClaudeCliArgs({
+      tools: ['Read', 'Grep', 'Glob', 'LS', 'TodoRead'],
+      allowedTools: ['Read', 'Grep', 'mcp__supervisor-orchestrator__create_issue'],
+    });
+
+    expect(args).toContain('--tools');
+    expect(args[args.indexOf('--tools') + 1]).toBe('Read,Grep,Glob,LS,TodoRead');
+    expect(args).toContain('--allowedTools');
+    expect(args[args.indexOf('--allowedTools') + 1]).toBe(
+      'Read,Grep,mcp__supervisor-orchestrator__create_issue',
+    );
   });
 
   test('does not complete a turn on assistant thinking or tool_use messages before the final result', async () => {
