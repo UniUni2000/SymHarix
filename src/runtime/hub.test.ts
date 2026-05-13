@@ -1041,6 +1041,36 @@ describe('RuntimeHub', () => {
     hub.dispose();
   });
 
+  test('projects halted merge conflicts as delivery failures for the Mini App', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workItemRepository = new WorkItemRepository(db);
+    workItemRepository.create({
+      id: 'issue-merge-blocked',
+      linear_issue_id: 'issue-merge-blocked',
+      linear_identifier: 'VAR-48',
+      linear_title: '新增 furry fighting games 文档',
+      linear_state: 'In Review',
+      github_repo: 'varisnow-jeff/vj-sym',
+      orchestrator_state: 'halted',
+      delivery_code: 'merge_blocked',
+      delivery_summary: 'Merge blocked: PR #64 has conflicts in furry_fighting_games.md.',
+      active_pr_number: 64,
+      branch_name: 'feature/var-48',
+    });
+
+    const hub = new RuntimeHub(db, new FakeController());
+    const issue = hub.getIssue('VAR-48');
+
+    expect(issue?.delivery_state).toBe('delivery_failed');
+    expect(issue?.delivery_code).toBe('merge_blocked');
+    expect(issue?.delivery_summary).toContain('PR #64');
+    expect(issue?.orchestrator_state).toBe('halted');
+
+    hub.dispose();
+  });
+
   test('falls back to persisted supervisor execution intent when no supervisor session row exists', () => {
     db = new Database(':memory:');
     initializeSchema(db);

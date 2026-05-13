@@ -1680,6 +1680,22 @@ export class RuntimeHub implements RuntimeControlPlane {
       };
     }
 
+    if (workItem.delivery_code && workItem.delivery_code !== 'manual_stop') {
+      return {
+        state: 'delivery_failed',
+        code: workItem.delivery_code ?? null,
+        summary: normalizeSummary(
+          workItem.delivery_summary ?? (englishOutput
+            ? `Delivery is blocked: ${workItem.delivery_code}.`
+            : `交付已阻塞：${workItem.delivery_code}。`),
+          englishOutput
+            ? 'Delivery is blocked and needs user attention.'
+            : '交付已阻塞，需要用户处理。',
+          260,
+        ),
+      };
+    }
+
     if (proofSatisfied) {
       return {
         state: 'proof_satisfied',

@@ -2396,10 +2396,14 @@ describe('Orchestrator Stability', () => {
     expect(ctx.agentRunner.forceStopSession).toHaveBeenCalledWith(child);
   });
 
-  it('treats merge blocked as needs_rework and records a MERGE_BLOCKED review event', async () => {
+  it('halts merge blocked work and records a MERGE_BLOCKED delivery failure', async () => {
     const issue = makeIssue({ state: 'In Review' });
     const ctx = createOrchestrator(issue);
     orchestrator = ctx.orchestrator;
+    const failedEvents: string[] = [];
+    orchestrator.on('issue:failed', (_issue, error) => {
+      failedEvents.push(String(error));
+    });
 
     (orchestrator as any).runCliCommand = mock(async (command: string) => {
       if (command === 'dispatch') {
@@ -2408,10 +2412,12 @@ describe('Orchestrator Stability', () => {
       return {
         success: true,
         result: makeCliResult({
-          final_state: 'In Progress',
+          final_state: 'Error',
           review_decision: 'MERGE_BLOCKED',
           feedback: 'Merge blocked by conflicts',
-          retry_hint: 'retry_dev',
+          delivery_code: 'merge_blocked',
+          delivery_summary: 'Merge blocked: conflicts need manual resolution',
+          retry_hint: 'stop',
         }),
       };
     });
@@ -2434,16 +2440,21 @@ describe('Orchestrator Stability', () => {
     const latestReview = ctx.reviewEventRepository.findLatestByWorkItemId(issue.id);
     const state = (orchestrator as any).state;
 
-    expect(workItem?.linear_state).toBe('In Progress');
+    expect(workItem?.linear_state).toBe('In Review');
+    expect(workItem?.orchestrator_state).toBe('halted');
+    expect(workItem?.delivery_code).toBe('merge_blocked');
+    expect(workItem?.delivery_summary).toContain('manual resolution');
     expect(workItem?.last_review_decision).toBe('MERGE_BLOCKED');
     expect(latestReview?.decision).toBe('MERGE_BLOCKED');
     expect(String(latestReview?.merge_block_reason || '')).toContain('Merge blocked by conflicts');
     expect(ctx.tracker.postComment).toHaveBeenCalledWith(
       issue.id,
-      expect.stringContaining('Review passed, but the merge failed'),
+      expect.stringContaining('The orchestrator stopped this task'),
     );
-    expect(ctx.tracker.updateIssueState).toHaveBeenCalledWith(issue.id, 'In Progress');
-    expect(state.retry_attempts.get(issue.id)?.attempt).toBe(1);
+    expect(ctx.tracker.updateIssueState).not.toHaveBeenCalledWith(issue.id, 'In Progress');
+    expect(state.retry_attempts.get(issue.id)).toBeUndefined();
+    expect(state.running.has(issue.id)).toBe(false);
+    expect(failedEvents.some((error) => error.includes('manual resolution'))).toBe(true);
   });
 
   it('writes structured review follow-up steps into HANDOVER for non-approval decisions', async () => {
