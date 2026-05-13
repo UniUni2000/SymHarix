@@ -5721,6 +5721,7 @@ export class Orchestrator extends EventEmitter {
     return [
       'review_submit_failed',
       'dirty_workspace_no_commit',
+      'product_staging_failed',
       'tracker_state_conflict',
       'no_actionable_diff',
     ].includes((code ?? '').trim());
