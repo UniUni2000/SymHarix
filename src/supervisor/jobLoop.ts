@@ -206,13 +206,15 @@ export class SupervisorJobLoop {
       issue.delivery_code ?? '',
     ].join('|');
     const shouldIssueDevInstruction = session.state !== 'awaiting_user_decision' && !internalDeliveryFailure;
+    const userVisibleDeliveryFailure =
+      !internalDeliveryFailure && (issue.delivery_state === 'delivery_failed' || Boolean(issue.delivery_code));
     const kinds = [
       ...(shouldIssueDevInstruction ? ['issue_dev_instruction' as const] : []),
       'sync_runtime_state',
       'assess_milestone',
       'verify_handoff',
       'summarize_memory',
-      ...(session.active_decision_kind || (!internalDeliveryFailure && issue.delivery_state === 'delivery_failed') || issue.orchestrator_state === 'failed'
+      ...(session.active_decision_kind || userVisibleDeliveryFailure || issue.orchestrator_state === 'failed'
         ? ['notify_user' as const]
         : []),
     ] as const;
@@ -348,7 +350,10 @@ export class SupervisorJobLoop {
         jobs.complete(job.id, {
           result: {
             milestone_kind: milestoneKind,
-            needs_user: Boolean(session.active_decision_kind || (!internalDeliveryFailure && issue.delivery_state === 'delivery_failed')),
+            needs_user: Boolean(
+              session.active_decision_kind ||
+              (!internalDeliveryFailure && (issue.delivery_state === 'delivery_failed' || Boolean(issue.delivery_code)))
+            ),
           },
           now: this.now(),
         });

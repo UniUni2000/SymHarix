@@ -2263,6 +2263,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             completed: '已完成',
             validating: '持续验证中',
             missingRequirement: '未满足验收项',
+            acceptanceMissingBadge: '待补',
             noChildQueue: '这是单 issue 执行，没有必要拆分子任务。',
             noHistory: '这条 issue 暂时还没有可回放的完整日志。',
             noCheckpoints: '暂无历史检查点。',
@@ -2381,6 +2382,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             completed: 'Completed',
             validating: 'Validating',
             missingRequirement: 'Unsatisfied requirement',
+            acceptanceMissingBadge: 'Missing',
             noChildQueue: 'Single-issue execution. No child tasks are needed.',
             noHistory: 'This issue has no replayable full log yet.',
             noCheckpoints: 'No history checkpoints yet.',
@@ -3685,7 +3687,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             ? missing.map((item) => [item.label || item.id || t('missingRequirement'), item.status || 'missing'])
             : [[t('acceptanceProgress'), satisfied], [t('status'), isCompletedIssue(issue) ? t('completed') : t('validating')]];
           el.acceptanceList.innerHTML = rows.map(([label, value]) => (
-            '<div class="delivery-row"><div><strong>' + escapeHtml(label) + '</strong><span>' + escapeHtml(value) + '</span></div>' + chip(String(value).toLowerCase().includes('missing') ? '待补' : '✓', String(value).toLowerCase().includes('missing') ? 'yellow' : 'green') + '</div>'
+            '<div class="delivery-row"><div><strong>' + escapeHtml(label) + '</strong><span>' + escapeHtml(value) + '</span></div>' + chip(String(value).toLowerCase().includes('missing') ? t('acceptanceMissingBadge') : '✓', String(value).toLowerCase().includes('missing') ? 'yellow' : 'green') + '</div>'
           )).join('');
         }
         function renderChildren(issue) {
