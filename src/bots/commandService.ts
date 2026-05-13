@@ -1,6 +1,9 @@
 import type { CreateIssueRequest, RuntimeControlPlane, RuntimeIssueView } from '../runtime/types';
 import { BotConversationPreferenceRepository, type BotIssueFollowupRepository } from '../database';
-import { TrackerProjectResolutionService } from '../tracker/projectResolution';
+import {
+  resolveRepositoryRouteReference,
+  TrackerProjectResolutionService,
+} from '../tracker/projectResolution';
 import { inferRuntimeLocaleFromText, type RuntimeLocale } from '../i18n/locale';
 import { BotSubscriptionService } from './subscriptions';
 import { buildIssueCardActionRows } from './issueCardActions';
@@ -35,7 +38,7 @@ function listCommands(): string {
     'clear [all]',
     'status [ISSUE-ID]',
     'new <title> (add description on the next line for Telegram)',
-    'project [PROJECT-SLUG|clear]',
+    'project [PROJECT-SLUG|REPO|clear]',
     'watch [default|verbose|failures|status] <ISSUE-ID>',
     'unwatch <ISSUE-ID>',
     'stop <ISSUE-ID>',
@@ -359,6 +362,17 @@ export class BotCommandService {
     return this.execute(context, parseTextCommand(text));
   }
 
+  private normalizeProjectSlugReference(projectSlug?: string | null): string | null {
+    const normalized = projectSlug?.trim() || null;
+    if (!normalized) {
+      return null;
+    }
+    const routes = typeof this.projectResolver?.listConfiguredRoutes === 'function'
+      ? this.projectResolver.listConfiguredRoutes()
+      : [];
+    return resolveRepositoryRouteReference(routes, normalized)?.route.project_slug ?? normalized;
+  }
+
   private async handleStatus(issueId?: string | null): Promise<BotCommandResponse> {
     if (!issueId) {
       return { message: formatOverview(this.runtime) };
@@ -416,7 +430,9 @@ export class BotCommandService {
       transport: context.transport,
       conversation_id: context.recipient.conversation_id,
     })?.default_project_slug ?? null;
-    const requestedProjectSlug = input?.project_slug?.trim() || defaultProjectSlug;
+    const requestedProjectSlug = this.normalizeProjectSlugReference(
+      input?.project_slug?.trim() || defaultProjectSlug,
+    );
 
     if (!requestedProjectSlug && !input?.project_id) {
       const availableProjects = this.projectResolver?.listConfiguredProjectSlugs() ?? [];
@@ -479,7 +495,7 @@ export class BotCommandService {
         photo: visual.photo,
         show_caption_above_media: false,
         action_rows: buildIssueCardActionRows(issue),
-        issue_id: result.issue_id,
+        issue_id: result.issue_id ?? issue.issue_id,
       };
     }
 
@@ -504,7 +520,7 @@ export class BotCommandService {
       conversation_id: context.recipient.conversation_id,
     } as const;
     const current = this.preferences.findByConversation(key);
-    const normalized = projectSlug?.trim() || null;
+    const normalized = this.normalizeProjectSlugReference(projectSlug);
 
     if (!normalized) {
       const available = this.projectResolver?.listConfiguredProjectSlugs() ?? [];
@@ -628,6 +644,20 @@ export class BotCommandService {
 
     const result = await this.runtime.stopIssue(issueId);
     this.registerOriginFollowup(context, result);
+    const issue = (result.issue_id ? this.runtime.getIssue(result.issue_id) : null) ?? resolveIssue(this.runtime, issueId);
+    if (issue) {
+      const visual = buildSupervisorIssueVisualCard(issue);
+      return {
+        message: result.message,
+        caption: visual.caption,
+        format: 'telegram_html',
+        media_key: visual.media_key,
+        photo: visual.photo,
+        show_caption_above_media: false,
+        action_rows: buildIssueCardActionRows(issue),
+        issue_id: result.issue_id,
+      };
+    }
     return {
       message: result.message,
       issue_id: result.issue_id,

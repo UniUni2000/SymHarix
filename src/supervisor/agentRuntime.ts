@@ -8,7 +8,10 @@ import type {
 } from '../database';
 import type { RuntimeControlPlane, RuntimeIssueView } from '../runtime/types';
 import type { SupervisorPendingActionRecord } from '../database/types';
-import type { TrackerProjectResolutionService } from '../tracker/projectResolution';
+import {
+  resolveRepositoryRouteReference,
+  type TrackerProjectResolutionService,
+} from '../tracker/projectResolution';
 import type { BotCommandContext, BotCommandResponse, BotTransportAction } from '../bots/types';
 import type {
   BotAssistantDecision,
@@ -142,6 +145,7 @@ export interface SupervisorAgentRuntimeServiceOptions {
   supervisorAgentService?: SupervisorAgentService | null;
   onProgress?: SupervisorProgressHandler;
   progressThrottleMs?: number;
+  modelTimeoutMs?: number;
   maxSteps?: number;
 }
 
@@ -153,6 +157,17 @@ export interface SupervisorRuntimeRespondRequest {
 
 const CONFIRM_WORDS = new Set(['确认', '批准', '是的', '是', '对', '对的', '没错', 'yes', 'y', 'ok', 'okay', '好', '执行', '继续', 'confirm']);
 const CANCEL_WORDS = new Set(['取消', 'cancel', 'no', 'n', '停止']);
+const DEFAULT_MODEL_TIMEOUT_MS = 12_000;
+const MAX_MODEL_TIMEOUT_MS = 60_000;
+
+function parsePositiveInteger(value: string | null | undefined): number | null {
+  const normalized = value?.trim();
+  if (!normalized) {
+    return null;
+  }
+  const parsed = Number.parseInt(normalized, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
 
 function compact(value: string, maxLength = 320): string {
   const normalized = value.replace(/\s+/g, ' ').trim();
@@ -309,7 +324,8 @@ function isContextualIssueReference(text: string): boolean {
 }
 
 function isSetProjectRequest(text: string): boolean {
-  return /(?:set|switch|切换|设置|默认).{0,16}(?:project|项目)|(?:project|项目).{0,16}(?:to|为|成|设为|设置|切换|默认)/i.test(text);
+  return /(?:set|switch|切换|设置|默认).{0,16}(?:project|项目|repo|repository|仓库)|(?:project|项目|repo|repository|仓库).{0,16}(?:to|为|成|设为|设置|切换|默认)/i.test(text) ||
+    /(?:默认用|切到|切换到|换到|换成|切仓库到|切仓库为)\s*[A-Za-z0-9_.:/-]+/i.test(text);
 }
 
 function isRuntimeControlActionText(text: string): boolean {
@@ -325,9 +341,11 @@ function isRuntimeControlActionText(text: string): boolean {
 
 function extractProjectSlug(text: string): string | null {
   const patterns = [
-    /(?:set|switch)\s+(?:default\s+)?project\s*(?:to)?\s*([A-Za-z0-9_.:-]+)/i,
-    /(?:切换|设置|默认).{0,8}(?:project|项目).{0,4}(?:为|成|到|设为|设置为)?\s*([A-Za-z0-9_.:-]+)/i,
-    /(?:project|项目)\s*(?:to|为|成|设为|设置为|切换到|默认(?:为|到)?)\s*([A-Za-z0-9_.:-]+)/i,
+    /(?:set|switch)\s+(?:default\s+)?project\s*(?:to)?\s*([A-Za-z0-9_.:/-]+)/i,
+    /(?:set|switch)\s+(?:default\s+)?(?:repo|repository)\s*(?:to)?\s*([A-Za-z0-9_.:/-]+)/i,
+    /(?:切换|设置|默认).{0,8}(?:project|项目|repo|repository|仓库).{0,4}(?:为|成|到|设为|设置为)?\s*([A-Za-z0-9_.:/-]+)/i,
+    /(?:project|项目|repo|repository|仓库)\s*(?:to|为|成|设为|设置为|切换到|默认(?:为|到)?)\s*([A-Za-z0-9_.:/-]+)/i,
+    /(?:默认用|切到|切换到|换到|换成|切仓库到|切仓库为)\s*([A-Za-z0-9_.:/-]+)/i,
   ];
   for (const pattern of patterns) {
     const match = text.match(pattern);
@@ -351,7 +369,14 @@ function isReadOnlyText(text: string): boolean {
     isIssueListQuestion(text) ||
     isStatusQuestion(text) ||
     isShowCardRequest(text) ||
-    shouldUseReadOnlyClaudeForText(text) ||
+    isRepositoryUnderstandingRequest(text);
+}
+
+function isRepositoryUnderstandingRequest(text: string): boolean {
+  if (isRuntimeControlActionText(text)) {
+    return false;
+  }
+  return shouldUseReadOnlyClaudeForText(text) ||
     /readme|仓库|代码|文件|repo|repository/i.test(text);
 }
 
@@ -396,6 +421,10 @@ function supervisorAgentResultToTurn(result: SupervisorAgentResult): SupervisorT
 
 function firstString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function formatIssueLine(issue: RuntimeIssueView, options: { includeExternal?: boolean } = {}): string {
@@ -513,6 +542,27 @@ function summarizeControlPlane(context: SupervisorToolContext): string {
   ].filter(Boolean).join('\n');
 }
 
+function summarizeRepositoryRoutes(context: SupervisorToolContext): string {
+  const routes = context.projectResolver?.listConfiguredRoutes() ?? [];
+  const defaultProject = context.preferences?.findByConversation({
+    transport: context.context.transport,
+    conversation_id: context.context.recipient.conversation_id,
+  })?.default_project_slug ?? null;
+
+  if (routes.length === 0) {
+    return '当前没有配置可用仓库。';
+  }
+
+  return [
+    `当前配置了 ${routes.length} 个仓库：`,
+    ...routes.map((route) => [
+      `- ${route.github_repo_full}`,
+      `project=${route.project_slug}`,
+      route.project_slug === defaultProject ? '当前默认' : null,
+    ].filter(Boolean).join(' · ')),
+  ].join('\n');
+}
+
 export function buildConfirmActions(locale: RuntimeLocale | null | undefined = null): BotTransportAction[] {
   return [
     {
@@ -533,6 +583,7 @@ function routeRepoRef(params: {
   projectResolver: TrackerProjectResolutionService | null;
   context: BotCommandContext;
   issue: RuntimeIssueView | null;
+  repoReference?: string | null;
 }): {
   repoRef: string | null;
   localPath: string | null;
@@ -543,15 +594,17 @@ function routeRepoRef(params: {
     transport: params.context.transport,
     conversation_id: params.context.recipient.conversation_id,
   })?.default_project_slug ?? null;
+  const hasExplicitRepoReference = Boolean(params.repoReference?.trim());
+  const explicitRoute = resolveRepositoryRouteReference(routes, params.repoReference)?.route ?? null;
   const route = (
     params.issue?.github_repo
       ? routes.find((item) => item.github_repo_full === params.issue?.github_repo) ?? null
       : null
-  ) || (
+  ) || explicitRoute || (hasExplicitRepoReference ? null : (
     defaultProjectSlug
       ? routes.find((item) => item.project_slug === defaultProjectSlug) ?? null
       : null
-  ) || (routes[0] ?? null);
+  )) || (hasExplicitRepoReference ? null : (routes[0] ?? null));
 
   return {
     repoRef: params.issue?.github_repo ?? route?.github_repo_full ?? null,
@@ -614,6 +667,35 @@ function coerceToolRouterIntent(value: Record<string, unknown> | null): BotAssis
   }
 
   switch (kind) {
+    case 'list_issues':
+      return {
+        kind,
+        active_only: typeof intent.active_only === 'boolean' ? intent.active_only : null,
+        state_filter: typeof intent.state_filter === 'string' && intent.state_filter.trim()
+          ? intent.state_filter.trim()
+          : null,
+        repo_ref: typeof intent.repo_ref === 'string' && intent.repo_ref.trim()
+          ? intent.repo_ref.trim()
+          : null,
+        project_slug: typeof intent.project_slug === 'string' && intent.project_slug.trim()
+          ? intent.project_slug.trim()
+          : null,
+      };
+    case 'list_repositories':
+      return { kind };
+    case 'read_repo_with_claude':
+      return {
+        kind,
+        question: typeof intent.question === 'string' && intent.question.trim()
+          ? intent.question.trim()
+          : null,
+        repo_ref: typeof intent.repo_ref === 'string' && intent.repo_ref.trim()
+          ? intent.repo_ref.trim()
+          : null,
+        project_slug: typeof intent.project_slug === 'string' && intent.project_slug.trim()
+          ? intent.project_slug.trim()
+          : null,
+      };
     case 'create_issue':
       return typeof intent.title === 'string' && intent.title.trim()
         ? {
@@ -663,6 +745,18 @@ function coerceToolRouterIntent(value: Record<string, unknown> | null): BotAssis
     case 'set_default_project':
       return {
         kind,
+        project_slug: typeof intent.project_slug === 'string' && intent.project_slug.trim()
+          ? intent.project_slug.trim()
+          : null,
+      };
+    case 'switch_repository':
+      return {
+        kind,
+        repo_ref: typeof intent.repo_ref === 'string' && intent.repo_ref.trim()
+          ? intent.repo_ref.trim()
+          : typeof intent.project_slug === 'string' && intent.project_slug.trim()
+            ? intent.project_slug.trim()
+            : null,
         project_slug: typeof intent.project_slug === 'string' && intent.project_slug.trim()
           ? intent.project_slug.trim()
           : null,
@@ -727,6 +821,36 @@ function botIntentToSupervisorTurn(
   input: Parameters<SupervisorModelLoop>[0],
 ): SupervisorTurn | null {
   switch (intent.kind) {
+    case 'list_issues':
+      return {
+        type: 'tool_call',
+        tool: 'list_issues',
+        args: {
+          active_only: intent.active_only,
+          state_filter: intent.state_filter,
+          repo_ref: intent.repo_ref,
+          project_slug: intent.project_slug,
+        },
+        reason: 'LLM router selected issue listing.',
+      };
+    case 'list_repositories':
+      return {
+        type: 'tool_call',
+        tool: 'list_repositories',
+        args: {},
+        reason: 'LLM router selected repository route listing.',
+      };
+    case 'read_repo_with_claude':
+      return {
+        type: 'tool_call',
+        tool: 'read_repo_with_claude',
+        args: {
+          question: intent.question ?? input.text,
+          repo_ref: intent.repo_ref,
+          project_slug: intent.project_slug,
+        },
+        reason: 'LLM router selected read-only repository analysis.',
+      };
     case 'show_issue_card': {
       const issueId = issueIdFromIntent({ intentIssueId: intent.issue_id, context: input.context });
       return issueId
@@ -824,6 +948,16 @@ function botIntentToSupervisorTurn(
         args: { project_slug: intent.project_slug },
         reason: 'LLM router selected default project update.',
       };
+    case 'switch_repository':
+      return {
+        type: 'tool_call',
+        tool: 'switch_repository',
+        args: {
+          repo_ref: intent.repo_ref,
+          project_slug: intent.project_slug,
+        },
+        reason: 'LLM router selected repository switch.',
+      };
     case 'override':
       return {
         type: 'tool_call',
@@ -882,6 +1016,7 @@ export function buildConfirmationSummary(
   args: Record<string, unknown>,
   reason: string,
   locale: RuntimeLocale | null | undefined = null,
+  options: { repoRef?: string | null } = {},
 ): string {
   const issueId = firstString(args.issue_id);
   const successorIssueId = firstString(args.successor_issue_id);
@@ -892,6 +1027,7 @@ export function buildConfirmationSummary(
     issueId ? `Issue: ${issueId}` : null,
     successorIssueId ? `Successor: ${successorIssueId}` : null,
     project ? `Project: ${project}` : null,
+    options.repoRef ? `Repo: ${options.repoRef}` : null,
     title ? `Title: ${title}` : null,
     `Reason: ${reason}`,
     textForLocale(locale, 'Reply with: 确认 / 取消', 'Reply with: Confirm / Cancel'),
@@ -1079,13 +1215,16 @@ export class SupervisorActionPolicy {
     args: Record<string, unknown>,
     context: SupervisorToolContext,
   ): string | null {
-    if (toolName === 'set_default_project') {
-      const projectSlug = firstString(args.project_slug);
+    if (toolName === 'set_default_project' || toolName === 'switch_repository') {
+      const projectSlug = firstString(args.project_slug) ?? firstString(args.repo_ref);
       if (!projectSlug) {
-        return 'Project slug is missing.';
+        return 'Repository or project slug is missing.';
       }
-      const routes = context.projectResolver?.listConfiguredProjectSlugs() ?? [];
-      return routes.length === 0 || routes.includes(projectSlug) ? null : `Project ${projectSlug} is not configured.`;
+      const routes = context.projectResolver?.listConfiguredRoutes() ?? [];
+      if (routes.length === 0) {
+        return null;
+      }
+      return resolveRepositoryRouteReference(routes, projectSlug) ? null : `Project ${projectSlug} is not configured.`;
     }
 
     const issueId = firstString(args.issue_id);
@@ -1126,12 +1265,123 @@ export class SupervisorAgentRuntimeService {
   private readonly tools: Map<string, SupervisorToolDefinition>;
   private readonly maxSteps: number;
   private readonly progressThrottleMs: number;
+  private readonly modelTimeoutMs: number;
 
   constructor(private readonly options: SupervisorAgentRuntimeServiceOptions) {
     this.actionPolicy = options.actionPolicy ?? new SupervisorActionPolicy();
     this.tools = new Map(createSupervisorToolDefinitions().map((tool) => [tool.name, tool]));
     this.maxSteps = options.maxSteps ?? 16;
     this.progressThrottleMs = Math.max(0, options.progressThrottleMs ?? 8_000);
+    this.modelTimeoutMs = Math.min(
+      MAX_MODEL_TIMEOUT_MS,
+      Math.max(
+        1,
+        options.modelTimeoutMs
+          ?? parsePositiveInteger(process.env.SYMPHONY_SUPERVISOR_TOOL_ROUTER_TIMEOUT_MS)
+          ?? DEFAULT_MODEL_TIMEOUT_MS,
+      ),
+    );
+  }
+
+  private resolveConfiguredRouteReference(reference: string | null | undefined) {
+    const routes = this.options.projectResolver?.listConfiguredRoutes() ?? [];
+    return resolveRepositoryRouteReference(routes, reference);
+  }
+
+  private resolveRouteMentionedInText(text: string) {
+    const routes = this.options.projectResolver?.listConfiguredRoutes() ?? [];
+    const normalizedText = text.trim();
+    for (const route of routes) {
+      const identifiers = [
+        route.github_repo_full,
+        route.github_repo,
+        route.project_slug,
+      ].filter(Boolean);
+      for (const identifier of identifiers) {
+        const pattern = new RegExp(`(^|[^a-zA-Z0-9_/-])${escapeRegExp(identifier)}([^a-zA-Z0-9_/-]|$)`, 'i');
+        if (pattern.test(normalizedText)) {
+          return route;
+        }
+      }
+    }
+    return null;
+  }
+
+  private normalizeToolArgs(
+    toolName: string,
+    args: Record<string, unknown>,
+    request?: SupervisorRuntimeRespondRequest,
+  ): Record<string, unknown> {
+    if (
+      (toolName === 'list_issues' || toolName === 'summarize_issue_list' || toolName === 'read_repo_with_claude') &&
+      !firstString(args.repo_ref) &&
+      !firstString(args.project_slug)
+    ) {
+      const mentionedRoute = request ? this.resolveRouteMentionedInText(request.text) : null;
+      return mentionedRoute
+        ? {
+            ...args,
+            repo_ref: mentionedRoute.github_repo_full,
+            project_slug: mentionedRoute.project_slug,
+          }
+        : args;
+    }
+
+    if (toolName !== 'set_default_project' && toolName !== 'switch_repository' && toolName !== 'create_issue') {
+      return args;
+    }
+
+    const projectSlug = firstString(args.project_slug) ?? firstString(args.repo_ref);
+    if (!projectSlug) {
+      return args;
+    }
+
+    const route = this.resolveConfiguredRouteReference(projectSlug)?.route ?? null;
+    return route
+      ? {
+          ...args,
+          repo_ref: toolName === 'switch_repository' ? route.github_repo_full : args.repo_ref,
+          project_slug: route.project_slug,
+        }
+      : { ...args, project_slug: projectSlug };
+  }
+
+  private repoRefForTool(
+    toolName: string,
+    args: Record<string, unknown>,
+    request: SupervisorRuntimeRespondRequest,
+  ): string | null {
+    if (toolName === 'create_issue' || toolName === 'set_default_project' || toolName === 'switch_repository') {
+      const explicitProjectSlug = firstString(args.project_slug);
+      const explicitRepoRef = firstString(args.repo_ref);
+      const defaultProjectSlug = toolName === 'create_issue'
+        ? this.options.preferences?.findByConversation({
+            transport: request.context.transport,
+            conversation_id: request.context.recipient.conversation_id,
+          })?.default_project_slug ?? null
+        : null;
+      const route = this.resolveConfiguredRouteReference(explicitProjectSlug ?? explicitRepoRef ?? defaultProjectSlug)?.route ?? null;
+      return route?.github_repo_full ?? null;
+    }
+
+    const issueId = firstString(args.issue_id);
+    const issue = issueId ? this.options.runtime.getIssue(issueId) : null;
+    return issue?.github_repo ?? null;
+  }
+
+  private buildToolConfirmationSummary(
+    toolName: string,
+    args: Record<string, unknown>,
+    reason: string,
+    request: SupervisorRuntimeRespondRequest,
+  ): string {
+    return buildConfirmationSummary(
+      toolName,
+      args,
+      reason,
+      inferRuntimeLocaleFromText(request.text),
+      { repoRef: this.repoRefForTool(toolName, args, request) },
+    );
   }
 
   recoverStartupState(): number {
@@ -1297,7 +1547,56 @@ export class SupervisorAgentRuntimeService {
       }
     }
 
-    return this.completeRun(run.id, response, result.ok ? 'completed' : 'failed');
+    const finalState = result.ok ? 'completed' : 'failed';
+    this.options.events.create({
+      run_id: pending.run_id,
+      event_kind: result.ok ? 'confirmation_completed' : 'confirmation_failed',
+      message: result.ok
+        ? `Completed confirmed ${pending.tool_name}.`
+        : `Confirmed ${pending.tool_name} failed.`,
+      payload: {
+        pending_action_id: pending.id,
+        confirmation_run_id: run.id,
+      },
+    });
+    this.options.runs.update({
+      id: pending.run_id,
+      state: finalState,
+      final_message: response.message,
+    });
+
+    return this.completeRun(run.id, response, finalState);
+  }
+
+  private async requestModelTurn(
+    input: Parameters<SupervisorModelLoop>[0],
+  ): Promise<Awaited<ReturnType<SupervisorModelLoop>> | null> {
+    if (!this.options.model) {
+      return null;
+    }
+
+    let timedOut = false;
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    const modelTurn = this.options.model(input).catch((error) => {
+      if (timedOut) {
+        return null;
+      }
+      throw error;
+    });
+    const timeoutTurn = new Promise<null>((resolve) => {
+      timeoutHandle = setTimeout(() => {
+        timedOut = true;
+        resolve(null);
+      }, this.modelTimeoutMs);
+    });
+
+    try {
+      return await Promise.race([modelTurn, timeoutTurn]);
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+    }
   }
 
   private async executeRun(request: SupervisorRuntimeRespondRequest): Promise<BotCommandResponse> {
@@ -1322,7 +1621,7 @@ export class SupervisorAgentRuntimeService {
 
       const rawTurn = useDeterministicFallback
         ? (await getDeterministicTurns())[deterministicIndex++]
-        : await this.options.model?.({
+        : await this.requestModelTurn({
             runId: run.id,
             text: request.text,
             availableTools: [...this.tools.values()],
@@ -1388,22 +1687,30 @@ export class SupervisorAgentRuntimeService {
 
       if (turn.type === 'confirm_action') {
         const locale = inferRuntimeLocaleFromText(request.text);
+        const normalizedArgs = this.normalizeToolArgs(turn.action.tool, turn.action.args, request);
         return this.requestConfirmation({
           runId: run.id,
           request,
           toolName: turn.action.tool,
-          args: turn.action.args,
+          args: normalizedArgs,
           policy: {
             allowed: true,
             requires_confirmation: true,
             risk: this.tools.get(turn.action.tool)?.risk ?? 'high_write',
             reason: turn.action.reason ?? 'Confirmation requested by supervisor model.',
           },
-          summary: turn.summary || buildConfirmationSummary(turn.action.tool, turn.action.args, turn.action.reason ?? 'Confirmation requested by supervisor model.', locale),
+          summary: turn.summary || buildConfirmationSummary(
+            turn.action.tool,
+            normalizedArgs,
+            turn.action.reason ?? 'Confirmation requested by supervisor model.',
+            locale,
+            { repoRef: this.repoRefForTool(turn.action.tool, normalizedArgs, request) },
+          ),
         });
       }
 
-      const hash = argsHash(turn.args);
+      const normalizedArgs = this.normalizeToolArgs(turn.tool, turn.args, request);
+      const hash = argsHash(normalizedArgs);
       const previous = this.options.toolCalls.findLatestByRunToolArgs(run.id, turn.tool, hash);
       if (previous) {
         const previousResult = [...toolResults].reverse().find((result) => result.tool === turn.tool);
@@ -1425,7 +1732,7 @@ export class SupervisorAgentRuntimeService {
 
       const result = await this.executeTool({
         runId: run.id,
-        turn,
+        turn: { ...turn, args: normalizedArgs },
         request,
         canWrite: request.canWrite ?? true,
       });
@@ -1538,7 +1845,8 @@ export class SupervisorAgentRuntimeService {
       };
     }
 
-    const validationError = validateToolArgs(definition, params.turn.args);
+    const toolArgs = this.normalizeToolArgs(definition.name, params.turn.args, params.request);
+    const validationError = validateToolArgs(definition, toolArgs);
     if (validationError) {
       this.options.events.create({
         run_id: params.runId,
@@ -1546,7 +1854,7 @@ export class SupervisorAgentRuntimeService {
         message: validationError,
         payload: {
           tool: definition.name,
-          args: params.turn.args,
+          args: toolArgs,
         },
       });
       return {
@@ -1560,7 +1868,7 @@ export class SupervisorAgentRuntimeService {
     const policyContext = this.buildToolContext(params.runId, params.request);
     const policy = this.actionPolicy.evaluate({
       definition,
-      args: params.turn.args,
+      args: toolArgs,
       context: policyContext,
       canWrite: params.canWrite,
       text: params.request.text,
@@ -1582,19 +1890,19 @@ export class SupervisorAgentRuntimeService {
           runId: params.runId,
           request: params.request,
           toolName: definition.name,
-          args: params.turn.args,
+          args: toolArgs,
           policy,
-          summary: buildConfirmationSummary(definition.name, params.turn.args, policy.reason, inferRuntimeLocaleFromText(params.request.text)),
+          summary: this.buildToolConfirmationSummary(definition.name, toolArgs, policy.reason, params.request),
         }),
       };
     }
 
-    const hash = argsHash(params.turn.args);
+    const hash = argsHash(toolArgs);
     const call = this.options.toolCalls.create({
       run_id: params.runId,
       tool_name: definition.name,
       args_hash: hash,
-      args: params.turn.args,
+      args: toolArgs,
       risk: definition.risk,
       status: 'started',
       idempotency_key: `${params.runId}|${definition.name}|${hash}`,
@@ -1604,14 +1912,14 @@ export class SupervisorAgentRuntimeService {
       event_kind: 'tool_call_started',
       message: definition.name,
       payload: {
-        args: params.turn.args,
+        args: toolArgs,
         reason: params.turn.reason,
       },
     });
 
     const started = Date.now();
     try {
-      const result = await definition.execute(params.turn.args, policyContext);
+      const result = await definition.execute(toolArgs, policyContext);
       this.options.toolCalls.update({
         id: call.id,
         status: result.ok ? 'completed' : 'failed',
@@ -2113,6 +2421,16 @@ export class SupervisorAgentRuntimeService {
         },
       ];
     }
+    if (
+      !issueId &&
+      isContextualIssueReference(text) &&
+      (isShowCardRequest(text) || isRetryRequest(text) || isStopRequest(text) || isCloseRequest(text) || isStatusQuestion(text))
+    ) {
+      return [{
+        type: 'clarify',
+        question: '你想操作哪个 issue？请告诉我 issue 编号（如 INT-169）。',
+      }];
+    }
     if (isSetProjectRequest(text)) {
       const projectSlug = extractProjectSlug(text);
       return [{
@@ -2197,6 +2515,40 @@ export function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
 
   return [
     {
+      name: 'list_repositories',
+      description: 'List repositories configured for this conversation, including the current default repository.',
+      input_schema: {
+        type: 'object',
+        properties: {},
+      },
+      risk: 'read',
+      direct_execution_policy: 'always',
+      execute: async (_args, context) => {
+        const routes = context.projectResolver?.listConfiguredRoutes() ?? [];
+        const defaultProject = context.preferences?.findByConversation({
+          transport: context.context.transport,
+          conversation_id: context.context.recipient.conversation_id,
+        })?.default_project_slug ?? null;
+        const message = summarizeRepositoryRoutes(context);
+        return {
+          tool: 'list_repositories',
+          ok: true,
+          summary: message,
+          message,
+          data: {
+            default_project_slug: defaultProject,
+            repositories: routes.map((route) => ({
+              project_slug: route.project_slug,
+              project_name: route.project_name,
+              github_repo_full: route.github_repo_full,
+              local_path: route.local_path,
+              is_default: route.project_slug === defaultProject,
+            })),
+          },
+        };
+      },
+    },
+    {
       name: 'list_issues',
       description: 'List current runtime issues as a concise summary. Set active_only=true for active/running issue questions.',
       input_schema: {
@@ -2204,13 +2556,35 @@ export function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
         properties: {
           active_only: { type: 'boolean' },
           state_filter: { type: 'string' },
+          repo_ref: { type: 'string' },
+          project_slug: { type: 'string' },
         },
       },
       risk: 'read',
       direct_execution_policy: 'always',
       execute: async (args, context) => {
-        const issues = context.runtime.getOverview().issues;
         const record = args as Record<string, unknown>;
+        const route = routeRepoRef({
+          preferences: context.preferences,
+          projectResolver: context.projectResolver,
+          context: context.context,
+          issue: null,
+          repoReference: firstString(record.repo_ref) ?? firstString(record.project_slug),
+        });
+        const repoRef = firstString(record.repo_ref) || firstString(record.project_slug)
+          ? route.repoRef
+          : null;
+        if ((firstString(record.repo_ref) || firstString(record.project_slug)) && !repoRef) {
+          return {
+            tool: 'list_issues',
+            ok: false,
+            summary: 'No repository route matched the requested repository.',
+            message: '我没有找到这个仓库对应的路由。你可以先问我当前有哪些仓库。',
+          };
+        }
+        const issues = repoRef
+          ? context.runtime.getOverview().issues.filter((issue) => issue.github_repo === repoRef)
+          : context.runtime.getOverview().issues;
         const activeOnly = record.active_only === true;
         const stateFilter = typeof record.state_filter === 'string'
           ? record.state_filter as IssueStateFilter
@@ -2218,13 +2592,20 @@ export function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
             ? 'active'
             : null;
         const visibleIssues = issues.filter((issue) => issueMatchesStateFilter(issue, stateFilter));
-        const message = summarizeIssues(issues, { activeOnly, stateFilter });
+        const issueSummary = summarizeIssues(issues, { activeOnly, stateFilter });
+        const message = repoRef ? `Repo: ${repoRef}\n${issueSummary}` : issueSummary;
         return {
           tool: 'list_issues',
           ok: true,
           summary: message,
           message,
-          data: { issue_count: visibleIssues.length, active_only: activeOnly, state_filter: stateFilter },
+          data: {
+            issue_count: visibleIssues.length,
+            active_only: activeOnly,
+            state_filter: stateFilter,
+            repo_ref: repoRef,
+            issue_identifier: visibleIssues.length === 1 ? visibleIssues[0]!.identifier : null,
+          },
         };
       },
     },
@@ -2434,18 +2815,24 @@ export function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
       input_schema: {
         type: 'object',
         required: ['question'],
-        properties: { question: { type: 'string' } },
+        properties: {
+          question: { type: 'string' },
+          repo_ref: { type: 'string' },
+          project_slug: { type: 'string' },
+        },
       },
       risk: 'read',
       direct_execution_policy: 'always',
       execute: async (args, context) => {
         const issueId = extractIssueIdentifiers(context.text)[0] ?? null;
         const issue = issueId ? context.runtime.getIssue(issueId) : null;
+        const record = args as Record<string, unknown>;
         const route = routeRepoRef({
           preferences: context.preferences,
           projectResolver: context.projectResolver,
           context: context.context,
           issue,
+          repoReference: firstString(record.repo_ref) ?? firstString(record.project_slug),
         });
         if (!route.repoRef) {
           return {
@@ -2455,7 +2842,7 @@ export function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
             message: '这个聊天还没有默认项目或仓库路由。请先设置 /project <slug>。',
           };
         }
-        const question = firstString((args as Record<string, unknown>).question) ?? context.text;
+        const question = firstString(record.question) ?? context.text;
         const result = await context.supervisorAgentService?.respond({
           localPath: route.localPath,
           repoRef: route.repoRef,
@@ -2523,6 +2910,34 @@ export function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
           ok: true,
           summary: `Cleared ${cleared} repo Claude conversations.`,
           message: cleared > 0 ? `已清空 ${cleared} 个仓库 Claude 会话。` : '当前没有可清空的仓库 Claude 会话。',
+        };
+      },
+    },
+    {
+      name: 'switch_repository',
+      description: 'Switch the default repository for this Telegram conversation. Accepts a configured project slug, owner/repo, or repository basename.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          repo_ref: { type: 'string' },
+          project_slug: { type: 'string' },
+        },
+      },
+      risk: 'low_write',
+      direct_execution_policy: 'high_confidence',
+      execute: async (args, context) => {
+        const record = args as Record<string, unknown>;
+        const projectReference = firstString(record.project_slug) ?? firstString(record.repo_ref);
+        const response = await context.commandService.execute(context.context, {
+          command: 'project',
+          project_slug: projectReference,
+        });
+        return {
+          tool: 'switch_repository',
+          ok: true,
+          summary: response.message,
+          message: response.message,
+          response,
         };
       },
     },
