@@ -289,6 +289,34 @@ describe('WorkspaceManager', () => {
     expect(fs.readFileSync(path.join(workspacePath, 'LATEST.txt'), 'utf8')).toBe('remote v2\n');
   });
 
+  it('migrates an existing local-origin source cache back to GitHub when local_path is cleared', async () => {
+    const localRoute = makeRoute({
+      local_path: path.join(projectRoot, 'sample-repo'),
+    });
+    const first = await manager.createForIssue({
+      identifier: 'INT-109',
+      project_slug: 'sample-repo',
+      project_name: 'sample-repo',
+    }, localRoute);
+
+    expect(first.success).toBe(true);
+
+    const sourcePath = manager.getRepoSourcePath(localRoute);
+    expect(run('git remote get-url origin', sourcePath)).toBe(path.join(projectRoot, 'sample-repo'));
+
+    const githubRoute = makeRoute({
+      local_path: null,
+    });
+    const second = await manager.createForIssue({
+      identifier: 'INT-110',
+      project_slug: 'sample-repo',
+      project_name: 'sample-repo',
+    }, githubRoute);
+
+    expect(second.success).toBe(true);
+    expect(run('git remote get-url origin', sourcePath)).toBe('https://github.com/acme/sample-repo.git');
+  });
+
   it('copies legacy workflow artifacts into .symphony without deleting tracked root files', async () => {
     const seedRepoPath = path.join(projectRoot, 'sample-repo');
     const route = makeRoute({
