@@ -155,6 +155,11 @@ interface PendingTelegramTextResponse {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface QueuedTelegramTextResponse {
+  context: BotCommandContext;
+  texts: string[];
+}
+
 function getPendingActionRequestIssueId(
   pendingAction: NonNullable<ReturnType<BotPendingActionRepository['findByConversationIssue']>>,
 ): string | null {
@@ -979,6 +984,8 @@ export class DefaultBotGateway implements BotGateway {
   private readonly telegramTextProcessingAckDelayMs: number;
   private readonly telegramTextCoalesceDelayMs: number;
   private readonly pendingTelegramTextResponses = new Map<string, PendingTelegramTextResponse>();
+  private readonly activeTelegramTextResponseKeys = new Set<string>();
+  private readonly queuedTelegramTextResponses = new Map<string, QueuedTelegramTextResponse>();
   private readonly seenTelegramUpdateIds = new Set<string>();
   private readonly seenTelegramUpdateOrder: string[] = [];
   private telegramPublicBaseUrl: string | null = normalizePublicBaseUrl(process.env.SYMPHONY_PUBLIC_BASE_URL || null);
@@ -1395,6 +1402,8 @@ export class DefaultBotGateway implements BotGateway {
       clearTimeout(pending.timer);
     }
     this.pendingTelegramTextResponses.clear();
+    this.activeTelegramTextResponseKeys.clear();
+    this.queuedTelegramTextResponses.clear();
     this.subscriptions.dispose();
     this.followups?.dispose();
     this.supervisorWorker?.dispose();
@@ -3156,18 +3165,77 @@ export class DefaultBotGateway implements BotGateway {
   }
 
   private scheduleTelegramTextResponse(context: BotCommandContext, text: string, messageCount: number): void {
+    const isCommand = text.startsWith('/');
+    const queueKey = isCommand ? null : this.getTelegramTextCoalesceKey(context);
+    if (queueKey && this.activeTelegramTextResponseKeys.has(queueKey)) {
+      this.queueTelegramTextResponseBehindActiveTurn(queueKey, context, text);
+      return;
+    }
+    if (queueKey) {
+      this.activeTelegramTextResponseKeys.add(queueKey);
+    }
+
     const preemptedSessions = this.supervisorSessionService?.preemptActiveSessionsForNewThread(context, text) ?? 0;
     logger.info('Telegram text webhook queued', {
       chat_id: context.recipient.conversation_id,
       user_id: context.identity.user_id,
-      is_command: text.startsWith('/'),
+      is_command: isCommand,
       message_count: messageCount,
       preempted_supervisor_sessions: preemptedSessions,
     });
 
     setTimeout(() => {
-      void this.processTelegramTextResponse(context, text);
+      void this.runScheduledTelegramTextResponse(queueKey, context, text);
     }, 0);
+  }
+
+  private queueTelegramTextResponseBehindActiveTurn(
+    key: string,
+    context: BotCommandContext,
+    text: string,
+  ): void {
+    const existing = this.queuedTelegramTextResponses.get(key);
+    if (existing) {
+      existing.context = context;
+      existing.texts.push(text);
+      logger.info('Telegram text webhook queued behind active turn', {
+        chat_id: context.recipient.conversation_id,
+        user_id: context.identity.user_id,
+        message_count: existing.texts.length,
+      });
+      return;
+    }
+
+    this.queuedTelegramTextResponses.set(key, {
+      context,
+      texts: [text],
+    });
+    logger.info('Telegram text webhook queued behind active turn', {
+      chat_id: context.recipient.conversation_id,
+      user_id: context.identity.user_id,
+      message_count: 1,
+    });
+  }
+
+  private async runScheduledTelegramTextResponse(
+    queueKey: string | null,
+    context: BotCommandContext,
+    text: string,
+  ): Promise<void> {
+    try {
+      await this.processTelegramTextResponse(context, text);
+    } finally {
+      if (!queueKey) {
+        return;
+      }
+      this.activeTelegramTextResponseKeys.delete(queueKey);
+      const queued = this.queuedTelegramTextResponses.get(queueKey);
+      if (!queued) {
+        return;
+      }
+      this.queuedTelegramTextResponses.delete(queueKey);
+      this.scheduleTelegramTextResponse(queued.context, queued.texts.join('\n'), queued.texts.length);
+    }
   }
 
   private async sendTelegramFinalMessageWithRetry(

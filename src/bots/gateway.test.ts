@@ -751,6 +751,115 @@ describe('DefaultBotGateway', () => {
     gateway.dispose();
   });
 
+  test('serializes consecutive Telegram natural language messages while a prior assistant turn is running', async () => {
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const modelInputs: string[] = [];
+    let releaseFirstTurn: (() => void) | null = null;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body || '{}')),
+      });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: requests.length + 300 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        assistantModel: {
+          decide: async (input) => {
+            modelInputs.push(input.text);
+            if (input.text === '这个仓库现在怎么样') {
+              await new Promise<void>((resolve) => {
+                releaseFirstTurn = resolve;
+              });
+            }
+            return {
+              intent: {
+                kind: 'answer_question',
+                answer: `回复：${input.text}`,
+              },
+            };
+          },
+          getDiagnostics: () => ({
+            provider: 'test',
+            model: 'test-model',
+            configured: true,
+            health: 'healthy',
+            fallback_available: true,
+            last_error_code: null,
+          }),
+        },
+      },
+    );
+
+    await gateway.handleTelegramWebhook(
+      {
+        update_id: 9101,
+        message: {
+          message_id: 401,
+          text: '这个仓库现在怎么样',
+          chat: { id: 42 },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(modelInputs).toEqual(['这个仓库现在怎么样']);
+
+    await gateway.handleTelegramWebhook(
+      {
+        update_id: 9102,
+        message: {
+          message_id: 402,
+          text: '昨天我们聊了啥',
+          chat: { id: 42 },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(modelInputs).toEqual(['这个仓库现在怎么样']);
+    expect(requests).toHaveLength(0);
+
+    releaseFirstTurn?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(modelInputs).toEqual(['这个仓库现在怎么样', '昨天我们聊了啥']);
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.body.reply_to_message_id).toBe(401);
+    expect(requests[1]?.body.reply_to_message_id).toBe(402);
+    expect(String(requests[0]?.body.text)).toContain('回复：这个仓库现在怎么样');
+    expect(String(requests[1]?.body.text)).toContain('回复：昨天我们聊了啥');
+
+    gateway.dispose();
+  });
+
   test('sends Telegram natural language replies as native replies to the inbound message', async () => {
     const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
