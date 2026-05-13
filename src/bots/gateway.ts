@@ -169,7 +169,7 @@ function getPendingActionRequestIssueId(
   return request.issue_id?.trim() || null;
 }
 
-function hasPendingConfirmationButtons(response: BotCommandResponse): boolean {
+function hasPendingConfirmationButtons(response: Pick<BotCommandResponse, 'actions' | 'action_rows'>): boolean {
   const actions = [
     ...(response.actions ?? []),
     ...((response.action_rows ?? []).flat()),
@@ -178,6 +178,18 @@ function hasPendingConfirmationButtons(response: BotCommandResponse): boolean {
     action.callback_data === 'pending|confirm' ||
     action.callback_data === 'pending|cancel'
   ));
+}
+
+function runtimeIssueCardStateForResponse(
+  response: Pick<BotCommandResponse, 'actions' | 'action_rows'>,
+  issue: RuntimeIssueView | null,
+): 'open' | 'confirming' | 'waiting_on_child' {
+  if (hasPendingConfirmationButtons(response)) {
+    return 'confirming';
+  }
+  return issue?.governance_thread_state === 'waiting_on_child'
+    ? 'waiting_on_child'
+    : 'open';
 }
 
 interface DiscordInteractionOption {
@@ -2068,11 +2080,7 @@ export class DefaultBotGateway implements BotGateway {
             : english ? 'Got it. Processing' : '已收到，正在处理',
         issue: responseIssue,
         cardKind: 'runtime_issue',
-        cardState: hasPendingConfirmationButtons(response)
-          ? 'confirming'
-          : responseIssue?.governance_thread_state === 'waiting_on_child'
-            ? 'waiting_on_child'
-            : 'open',
+        cardState: runtimeIssueCardStateForResponse(response, responseIssue),
         cardKey: response.media_key ?? `runtime_issue_card|${parsed.issueIdentifier}|${parsed.runtimeAction ?? 'action'}`,
         executeAfterAck: null,
       };
@@ -2294,6 +2302,7 @@ export class DefaultBotGateway implements BotGateway {
     outbound: BotTransportMessage;
     toastText: string;
     issue: RuntimeIssueView | null;
+    cardKind?: BotFollowupCardKind;
     cardState: 'open' | 'confirming' | 'executing' | 'waiting_on_child' | 'resolved' | 'failed';
     cardKey: string;
     executeAfterAck: null;
@@ -2327,6 +2336,7 @@ export class DefaultBotGateway implements BotGateway {
     }
     const issueId = response.issue_id ?? pendingIssueId;
     const issue = issueId ? this.runtime.getIssue(issueId) : pendingIssue;
+    const isRuntimeIssueCard = Boolean(response.photo && response.media_key && issue);
     return {
       outbound: {
         text: response.message,
@@ -2342,8 +2352,13 @@ export class DefaultBotGateway implements BotGateway {
         ? textForIssueLocale(issue, '已执行', 'Executed')
         : textForIssueLocale(issue, '已取消', 'Cancelled'),
       issue,
-      cardState: action === 'confirm' ? 'resolved' : 'open',
-      cardKey: `supervisor_runtime_${action === 'confirm' ? 'confirmed' : 'cancelled'}`,
+      cardKind: isRuntimeIssueCard ? 'runtime_issue' : undefined,
+      cardState: isRuntimeIssueCard
+        ? runtimeIssueCardStateForResponse(response, issue)
+        : action === 'confirm'
+          ? 'resolved'
+          : 'open',
+      cardKey: response.media_key ?? `supervisor_runtime_${action === 'confirm' ? 'confirmed' : 'cancelled'}`,
       executeAfterAck: null,
     };
   }
@@ -3518,11 +3533,7 @@ export class DefaultBotGateway implements BotGateway {
             issue,
             deliveredMessageId: sent.provider_message_id,
             cardKind: 'runtime_issue',
-            cardState: hasPendingConfirmationButtons(response)
-              ? 'confirming'
-              : issue.governance_thread_state === 'waiting_on_child'
-                ? 'waiting_on_child'
-                : 'open',
+            cardState: runtimeIssueCardStateForResponse(response, issue),
             cardKey: outbound.media_key,
             existingCardState: this.followupMessageStates?.findByConversationIssue({
               transport: 'telegram',
