@@ -439,7 +439,7 @@ describe('Telegram Mini App issue presentation', () => {
       orchestrator_state: 'review_running',
     }));
 
-    expect(running.stateLabel).toBe('Running');
+    expect(running.stateLabel).toBe('Dev running');
     expect(review.stateLabel).toBe('Review running');
     expect(running.stateLabel).not.toContain('dev_running');
     expect(review.stateLabel).not.toContain('review_running');
@@ -770,6 +770,11 @@ describe('Telegram Mini App issue presentation', () => {
 
     expect(html).toContain('id="progress-fill"');
     expect(html).toContain('class="progress-value"');
+    expect(html).toContain('id="stage-badge"');
+    expect(html).toContain('class="stage-badge blue"');
+    expect(html).toContain("function stageBadgeInfo(issue, presentation)");
+    expect(html).toContain("t('stageDev')");
+    expect(html).toContain("t('stageReview')");
     expect(html).toContain('id="overview-signal"');
     expect(html).toContain('id="signal-pills"');
     expect(html).toContain("function renderOverviewSignal(issue)");
