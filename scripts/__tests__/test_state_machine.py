@@ -26,6 +26,10 @@ def test_valid_transition_in_review_to_in_progress():
     sm = StateMachine()
     assert sm.can_transition(State.IN_REVIEW, State.IN_PROGRESS) == True
 
+def test_valid_transition_in_review_to_error():
+    sm = StateMachine()
+    assert sm.can_transition(State.IN_REVIEW, State.ERROR) == True
+
 def test_valid_transition_in_progress_to_cancelled():
     sm = StateMachine()
     assert sm.can_transition(State.IN_PROGRESS, State.CANCELLED) == True

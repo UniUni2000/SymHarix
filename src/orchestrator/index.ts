@@ -5569,7 +5569,7 @@ export class Orchestrator extends EventEmitter {
     const mergeBlockedContext =
       decision === 'MERGE_BLOCKED'
         ? [
-            'Review passed, but the merge failed, so the issue is being sent back to development.',
+            'Review passed, but the merge failed. The orchestrator stopped this task for manual conflict resolution.',
             '',
           ].join('\n')
         : '';
@@ -5629,7 +5629,12 @@ export class Orchestrator extends EventEmitter {
 
   private async handleReviewFeedback(workspacePath: string, cliResult: CliCommandResult): Promise<void> {
     const reviewDecision = this.normalizeReviewDecision(cliResult.review_decision);
-    if (!reviewDecision || reviewDecision === 'APPROVE' || reviewDecision === 'APPROVE_MINOR') {
+    if (
+      !reviewDecision ||
+      reviewDecision === 'APPROVE' ||
+      reviewDecision === 'APPROVE_MINOR' ||
+      reviewDecision === 'MERGE_BLOCKED'
+    ) {
       return;
     }
 
@@ -5692,7 +5697,7 @@ export class Orchestrator extends EventEmitter {
     if (
       command === 'review' &&
       normalizedReviewDecision &&
-      ['REQUEST_CHANGES', 'REQUEST_TESTS', 'REJECT', 'MERGE_BLOCKED'].includes(normalizedReviewDecision)
+      ['REQUEST_CHANGES', 'REQUEST_TESTS', 'REJECT'].includes(normalizedReviewDecision)
     ) {
       return {
         ...baseResult,
@@ -5701,6 +5706,16 @@ export class Orchestrator extends EventEmitter {
         completed: false,
         cleanup_workspace: false,
         retry_delay_ms: 1000,
+      };
+    }
+
+    if (command === 'review' && normalizedReviewDecision === 'MERGE_BLOCKED') {
+      return {
+        ...baseResult,
+        outcome: 'halted',
+        next_action: 'stop',
+        completed: false,
+        cleanup_workspace: false,
       };
     }
 
@@ -5724,6 +5739,7 @@ export class Orchestrator extends EventEmitter {
       'product_staging_failed',
       'tracker_state_conflict',
       'no_actionable_diff',
+      'merge_blocked',
     ].includes((code ?? '').trim());
   }
 
@@ -6612,18 +6628,69 @@ export class Orchestrator extends EventEmitter {
     }
 
     const finalState = result.final_state || runningEntry.issue.state;
+    const reviewDecision = this.normalizeReviewDecision(result.cli_result?.review_decision);
+    const mergeBlocked = reviewDecision === 'MERGE_BLOCKED';
     const nextState = finalState.toLowerCase() === 'cancelled' || finalState.toLowerCase() === 'canceled'
       ? 'cancelled'
       : (this.isTerminalTrackerState(finalState) ? 'completed' : 'halted');
+    const synced = await this.syncWorkItemFromWorkspaceState(
+      result.work_item_id,
+      runningEntry.issue,
+      result.workspace_path,
+      nextState
+    );
+    const workItem = synced ?? this.workItemRepository.findById(result.work_item_id);
+    const nextRound = workItem ? workItem.review_round + 1 : 1;
+    const haltedSummary = result.cli_result?.delivery_summary
+      ?? result.cli_result?.feedback
+      ?? result.error
+      ?? null;
+    const reviewSummary = result.cli_result?.feedback ?? haltedSummary;
+
+    if (mergeBlocked && workItem?.active_pr_number) {
+      this.reviewEventRepository.create({
+        id: crypto.randomUUID(),
+        work_item_id: workItem.id,
+        pr_number: workItem.active_pr_number,
+        review_round: nextRound,
+        decision: 'MERGE_BLOCKED',
+        summary_md: reviewSummary || `Merge blocked for ${runningEntry.issue.identifier}`,
+        requested_changes_md: null,
+        merge_block_reason: reviewSummary || 'Review passed, but merge failed.',
+      });
+    }
+
+    if (mergeBlocked && this.config.reviewPolicy.notifyLinearOnReview) {
+      await this.postLinearComment(
+        runningEntry.issue.id,
+        this.buildLinearReviewComment(runningEntry.issue, 'MERGE_BLOCKED', reviewSummary)
+      );
+    }
 
     this.workItemRepository.update({
       id: result.work_item_id,
-      linear_state: finalState,
+      linear_state: mergeBlocked ? runningEntry.issue.state : finalState,
       orchestrator_state: nextState,
-      delivery_code: result.cli_result?.delivery_code ?? null,
-      delivery_summary: result.cli_result?.delivery_summary ?? result.cli_result?.feedback ?? result.error ?? null,
+      delivery_code: result.cli_result?.delivery_code ?? (mergeBlocked ? 'merge_blocked' : null),
+      delivery_summary: haltedSummary,
+      last_review_decision: mergeBlocked ? 'MERGE_BLOCKED' : undefined,
+      last_review_summary: mergeBlocked ? reviewSummary : undefined,
+      review_round: mergeBlocked ? nextRound : undefined,
       cancelled_at: nextState === 'cancelled' ? new Date() : undefined,
     });
+    const refreshedWorkItem = this.workItemRepository.findById(result.work_item_id);
+    if (mergeBlocked && refreshedWorkItem) {
+      this.governanceMemoryService.recordDebtOutcome(refreshedWorkItem.id, {
+        signal_code: 'merge_blocked',
+        summary: `Review passed but merge blocked for ${runningEntry.issue.identifier}.`,
+        severity: 'high',
+      });
+      this.refreshRepoGovernanceIntelligence(
+        runningEntry.issue,
+        refreshedWorkItem.id,
+        refreshedWorkItem.github_repo,
+      );
+    }
   }
 
   private async handleNoOpGovernanceChildCompletion(
@@ -6942,6 +7009,16 @@ export class Orchestrator extends EventEmitter {
         } catch (err) {
           console.warn('[orchestrator] Failed to clean branches on halt:', err);
         }
+      }
+      if (!(result.final_state && this.isTerminalTrackerState(result.final_state))) {
+        this.emit(
+          'issue:failed',
+          runningEntry.issue,
+          result.cli_result?.delivery_summary
+            || result.cli_result?.feedback
+            || result.error
+            || 'Worker halted and needs user attention'
+        );
       }
     } else {
       const workItemForFailure =

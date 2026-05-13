@@ -61,7 +61,7 @@ class StateMachine:
     Valid state transitions (from -> [to states]):
     - TODO -> IN_PROGRESS
     - IN_PROGRESS -> IN_REVIEW, IN_PROGRESS (retry), CANCELLED
-    - IN_REVIEW -> DONE, IN_PROGRESS (reject), IN_REVIEW (retry)
+    - IN_REVIEW -> DONE, IN_PROGRESS (reject), IN_REVIEW (retry), ERROR
     - ERROR -> IN_PROGRESS (manual retry)
     - DONE -> (terminal, no transitions)
     - CANCELLED -> (terminal, no transitions)
@@ -70,7 +70,7 @@ class StateMachine:
     TRANSITIONS: dict[State, list[State]] = {
         State.TODO: [State.IN_PROGRESS],
         State.IN_PROGRESS: [State.IN_REVIEW, State.IN_PROGRESS, State.CANCELLED],
-        State.IN_REVIEW: [State.DONE, State.IN_PROGRESS, State.IN_REVIEW],
+        State.IN_REVIEW: [State.DONE, State.IN_PROGRESS, State.IN_REVIEW, State.ERROR],
         State.ERROR: [State.IN_PROGRESS],
         State.DONE: [],
         State.CANCELLED: [],

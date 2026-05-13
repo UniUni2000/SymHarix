@@ -1230,4 +1230,11 @@ describe('Telegram Mini App issue presentation', () => {
     expect(livePresentation.roundGoal).toContain('Acceptance: hello.py appends one character; `python3 -m compileall .` verifies.');
     expect(livePresentation.roundGoal).toContain('History reminders: ## Review Decision: APPROVE.');
   });
+
+  test('localizes the missing acceptance badge for English mini app sessions', () => {
+    const html = renderRuntimeMiniAppPage('INT-143');
+
+    expect(html).toContain("acceptanceMissingBadge: 'Missing'");
+    expect(html).toContain("chip(String(value).toLowerCase().includes('missing') ? t('acceptanceMissingBadge') : '✓'");
+  });
 });

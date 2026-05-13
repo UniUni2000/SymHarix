@@ -404,7 +404,7 @@ def review(ctx, issue_id, workspace_path_opt):
         if review_decision in ("REQUEST_CHANGES", "REQUEST_TESTS", "REJECT"):
             retry_hint = "retry_dev"
         elif review_decision == "MERGE_BLOCKED":
-            retry_hint = "retry_dev"
+            retry_hint = "stop"
 
         state_name = final_state.value if final_state else "unknown"
         final_state_label = {

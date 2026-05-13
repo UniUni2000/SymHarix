@@ -365,7 +365,7 @@ class ReviewHook:
         base_report = (self.last_review_report or "").strip()
         sections = [
             "## Merge Blocked",
-            "Review passed, but the merge failed, so the issue is returning to development.",
+            "Review passed, but the merge failed. The orchestrator has stopped this task for manual conflict resolution.",
             "",
             f"Reason: {reason}",
         ]
@@ -379,7 +379,7 @@ class ReviewHook:
         1. Read .symphony/REVIEW_REPORT.md for the reviewer decision
         2. If approved -> merge PR
         3. If changes requested -> move local state back to IN_PROGRESS
-        4. If merge is blocked -> move local state back to IN_PROGRESS
+        4. If merge is blocked -> move local state to ERROR and stop automatic retries
         """
         current = self.store.get_current_state_enum()
         if current != State.IN_REVIEW:
@@ -468,7 +468,7 @@ class ReviewHook:
             self.last_pr_status = "merge_blocked"
             self.last_review_decision = "MERGE_BLOCKED"
             self.last_review_report = self._build_merge_blocked_feedback(error_msg)
-            return self._handle_changes_requested(linear_issue_id, f"Merge blocked: {error_msg}")
+            return self._handle_merge_blocked(error_msg)
 
         if not merge_result.get("merged"):
             error_msg = merge_result.get("message", "Merge failed")
@@ -476,13 +476,38 @@ class ReviewHook:
             self.last_pr_status = "merge_blocked"
             self.last_review_decision = "MERGE_BLOCKED"
             self.last_review_report = self._build_merge_blocked_feedback(error_msg)
-            return self._handle_changes_requested(linear_issue_id, f"Merge blocked: {error_msg}")
+            return self._handle_merge_blocked(error_msg)
 
         self.last_pr_status = "merged"
         print("[REVIEW] PR merged successfully")
 
         # Now treat as merged
         return self._handle_merged(pr_number, linear_issue_id)
+
+    def _handle_merge_blocked(self, reason: str) -> bool:
+        """Stop automatic work when review passed but GitHub cannot merge."""
+        current = self.store.get_current_state_enum()
+        if current != State.IN_REVIEW:
+            print(f"[REVIEW] ERROR: Invalid state for merge blocked halt: {current}")
+            return False
+
+        error_message = f"Merge blocked: {reason}"
+        self._set_delivery_failure("merge_blocked", error_message)
+        self.store.update_state(
+            from_state=State.IN_REVIEW,
+            to_state=State.ERROR,
+            trigger="merge_blocked",
+            actor="review-hook",
+            reason=error_message,
+            metadata_updates={
+                "merge_blocked": True,
+                "merge_block_reason": reason,
+            },
+        )
+        self.store.set_error(error_message)
+
+        print("[REVIEW] Issue stopped because merge is blocked")
+        return True
 
     def _handle_changes_requested(self, linear_issue_id: Optional[str], reason: Optional[str] = None) -> bool:
         """Handle changes requested - send back to IN_PROGRESS."""
