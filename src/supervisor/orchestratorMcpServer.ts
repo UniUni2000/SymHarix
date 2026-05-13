@@ -21,6 +21,7 @@ const TOOL_DESCRIPTIONS: Record<SupervisorOrchestratorToolName, string> = {
   unwatch_issue: 'Remove this Telegram conversation from issue progress updates. This is a low-risk user-control action.',
   retry_issue: 'Retry a retryable issue through the orchestrator policy layer.',
   stop_issue: 'Stop a running issue through the orchestrator policy layer.',
+  switch_repository: 'Switch the default repository for this Telegram conversation. Accepts project slug, owner/repo, or repo basename.',
   set_default_project: 'Set the default project for this Telegram conversation.',
   create_issue: 'Create a new issue through the orchestrator. This is confirmation-gated by default.',
   close_issue: 'Close or discard an issue through the orchestrator. This is confirmation-gated by default.',
@@ -80,7 +81,11 @@ function buildInputSchema(toolName: SupervisorOrchestratorToolName): Record<stri
     },
     project_slug: {
       type: 'string',
-      description: 'Configured project slug for create_issue or set_default_project.',
+      description: 'Configured project slug for create_issue, set_default_project, or switch_repository.',
+    },
+    repo_ref: {
+      type: 'string',
+      description: 'Repository reference for switch_repository. Can be owner/repo or a repo basename.',
     },
     title: {
       type: 'string',
@@ -112,6 +117,8 @@ function buildInputSchema(toolName: SupervisorOrchestratorToolName): Record<stri
     ? ['title']
     : toolName === 'set_default_project'
       ? ['project_slug']
+      : toolName === 'switch_repository'
+        ? ['repo_ref']
       : [];
 
   return {

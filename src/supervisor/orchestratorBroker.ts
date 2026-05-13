@@ -36,6 +36,7 @@ export const SUPERVISOR_ORCHESTRATOR_TOOL_NAMES = [
   'unwatch_issue',
   'retry_issue',
   'stop_issue',
+  'switch_repository',
   'set_default_project',
   'create_issue',
   'close_issue',

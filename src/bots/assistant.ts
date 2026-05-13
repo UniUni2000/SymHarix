@@ -584,6 +584,20 @@ function coerceIntent(value: Record<string, unknown> | null): BotAssistantIntent
             ? intent.project_slug.trim()
             : null,
       };
+    case 'switch_repository':
+      return {
+        kind,
+        repo_ref:
+          typeof intent.repo_ref === 'string' && intent.repo_ref.trim()
+            ? intent.repo_ref.trim()
+            : typeof intent.project_slug === 'string' && intent.project_slug.trim()
+              ? intent.project_slug.trim()
+              : null,
+        project_slug:
+          typeof intent.project_slug === 'string' && intent.project_slug.trim()
+            ? intent.project_slug.trim()
+            : null,
+      };
     case 'execute_governance_suggestion':
     case 'dismiss_governance_suggestion':
       return {
@@ -697,6 +711,11 @@ function toPendingRequest(intent: BotAssistantIntent): BotCommandRequest | null 
       return {
         command: 'project',
         project_slug: intent.project_slug || 'clear',
+      };
+    case 'switch_repository':
+      return {
+        command: 'project',
+        project_slug: intent.repo_ref || intent.project_slug || null,
       };
     case 'execute_governance_suggestion':
       return {
@@ -1279,8 +1298,8 @@ function buildHeuristicDecision(
   if (/默认项目设为|以后都建到|默认用/i.test(trimmed) && explicitProject) {
     return {
       intent: {
-        kind: 'set_default_project',
-        project_slug: explicitProject,
+        kind: 'switch_repository',
+        repo_ref: explicitProject,
       },
     };
   }

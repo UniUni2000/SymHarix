@@ -287,6 +287,9 @@ export type SupervisorIntakeSource =
   | 'inline_action';
 
 export type BotAssistantIntentKind =
+  | 'list_issues'
+  | 'list_repositories'
+  | 'read_repo_with_claude'
   | 'create_issue'
   | 'status'
   | 'show_issue_card'
@@ -301,6 +304,7 @@ export type BotAssistantIntentKind =
   | 'split'
   | 'execute_governance_suggestion'
   | 'dismiss_governance_suggestion'
+  | 'switch_repository'
   | 'set_default_project'
   | 'show_default_project'
   | 'help'
@@ -308,6 +312,22 @@ export type BotAssistantIntentKind =
   | 'clarify';
 
 export type BotAssistantIntent =
+  | {
+      kind: 'list_issues';
+      active_only: boolean | null;
+      state_filter: string | null;
+      repo_ref?: string | null;
+      project_slug?: string | null;
+    }
+  | {
+      kind: 'list_repositories';
+    }
+  | {
+      kind: 'read_repo_with_claude';
+      question: string | null;
+      repo_ref?: string | null;
+      project_slug?: string | null;
+    }
   | {
       kind: 'create_issue';
       title: string;
@@ -337,6 +357,11 @@ export type BotAssistantIntent =
       suggestion_id: string | null;
       suggestion_type: string | null;
       ordinal: number | null;
+    }
+  | {
+      kind: 'switch_repository';
+      repo_ref: string | null;
+      project_slug?: string | null;
     }
   | {
       kind: 'set_default_project';

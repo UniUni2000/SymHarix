@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { LinearClient } from './linear-client';
-import { TrackerProjectResolutionService } from './projectResolution';
+import {
+  TrackerProjectResolutionService,
+  resolveRepositoryRouteReference,
+} from './projectResolution';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -102,5 +105,30 @@ describe('TrackerProjectResolutionService', () => {
     expect(result.project).toBeNull();
     expect(result.error).toContain('test2');
     expect(result.error).toContain('Linear');
+  });
+
+  test('resolves repository aliases to the configured project route', () => {
+    const tracker = new LinearClient({
+      endpoint: 'https://linear.test/graphql',
+      apiKey: 'token',
+      projectSlugs: [],
+    });
+    const service = new TrackerProjectResolutionService(tracker, {
+      'slug-test3': {
+        github_owner: 'UniUni2000',
+        github_repo: 'test3',
+        local_path: null,
+      },
+      'slug-test4': {
+        github_owner: 'UniUni2000',
+        github_repo: 'test4',
+        local_path: null,
+      },
+    });
+    const routes = service.listConfiguredRoutes();
+
+    expect(resolveRepositoryRouteReference(routes, 'slug-test4')?.route.project_slug).toBe('slug-test4');
+    expect(resolveRepositoryRouteReference(routes, 'UniUni2000/test4')?.route.project_slug).toBe('slug-test4');
+    expect(resolveRepositoryRouteReference(routes, 'test4')?.route.project_slug).toBe('slug-test4');
   });
 });

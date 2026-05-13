@@ -144,6 +144,7 @@ describe('SupervisorOrchestratorBroker', () => {
 
     expect(capabilities.map((capability) => capability.name)).toContain('watch_issue');
     expect(capabilities.map((capability) => capability.name)).toContain('unwatch_issue');
+    expect(capabilities.map((capability) => capability.name)).toContain('switch_repository');
     expect(capabilities.map((capability) => capability.name)).toContain('create_issue');
     const watchCapability = capabilities.find((capability) => capability.name === 'watch_issue');
     expect(watchCapability?.risk).toBe('low_write');

@@ -63,6 +63,7 @@ describe('SupervisorClaudeRuntimeService', () => {
     expect(SUPERVISOR_CLAUDE_ALLOWED_TOOLS).toContain('mcp__supervisor-orchestrator__list_orchestrator_capabilities');
     expect(SUPERVISOR_CLAUDE_ALLOWED_TOOLS).toContain('mcp__supervisor-orchestrator__show_issue_card');
     expect(SUPERVISOR_CLAUDE_ALLOWED_TOOLS).toContain('mcp__supervisor-orchestrator__create_issue');
+    expect(SUPERVISOR_CLAUDE_ALLOWED_TOOLS).toContain('mcp__supervisor-orchestrator__switch_repository');
     expect(SUPERVISOR_CLAUDE_ALLOWED_TOOLS).toContain('mcp__supervisor-orchestrator__watch_issue');
     expect(SUPERVISOR_CLAUDE_ALLOWED_TOOLS).toContain('mcp__supervisor-orchestrator__unwatch_issue');
     expect(SUPERVISOR_CLAUDE_ALLOWED_TOOLS).not.toContain('Bash');
@@ -79,9 +80,10 @@ describe('SupervisorClaudeRuntimeService', () => {
     expect(prompt).toContain('list_orchestrator_capabilities');
     expect(prompt).toContain('show_issue_card');
     expect(prompt).toContain('create_issue');
+    expect(prompt).toContain('switch_repository');
     expect(prompt).toContain('Do not call yourself a read-only brain');
     expect(prompt).toContain('For capability questions');
-    expect(prompt).toContain('create, retry, stop, close, supersede');
+    expect(prompt).toContain('create, switch repositories, retry, stop, close, supersede');
   });
 
   test('frames the supervisor as a repo steward that improves vague issue ideas', () => {
