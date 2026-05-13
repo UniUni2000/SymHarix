@@ -1009,6 +1009,59 @@ describe('BotFollowupService', () => {
     db.close();
   });
 
+  test('bootstraps merge-blocked delivery failures to the Telegram operations chat as a conversation message', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const ordinaryIssue = runtime.getIssue('issue-1');
+    if (!ordinaryIssue) {
+      throw new Error('Expected issue-1 to exist');
+    }
+    ordinaryIssue.title = 'Merge conflict issue';
+    ordinaryIssue.tracker_state = 'In Review';
+    ordinaryIssue.orchestrator_state = 'halted';
+    ordinaryIssue.delivery_state = 'delivery_failed';
+    ordinaryIssue.delivery_code = 'merge_blocked';
+    ordinaryIssue.delivery_summary = 'Merge blocked: PR #64 has conflicts in furry_fighting_games.md.';
+    ordinaryIssue.governance_status = null;
+    ordinaryIssue.governance_decision = null;
+    ordinaryIssue.governance_summary = null;
+    ordinaryIssue.active_governance_suggestions = [];
+    ordinaryIssue.branch_name = 'feature/var-48';
+    ordinaryIssue.active_pr_number = 64;
+    ordinaryIssue.actions = {
+      can_stop: false,
+      can_retry: true,
+      can_override_governance: false,
+      can_rewrite_governance: false,
+      can_split_governance: false,
+      can_open_pr: true,
+    };
+
+    const notifier = new MemoryNotifier();
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, messageStates, {
+      telegramOperationsChatId: 'chat-ops',
+      bootstrapCurrentGovernanceCards: false,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const conversationMessages = notifier.messages.filter((entry) => !entry.message.photo);
+    expect(conversationMessages.some((entry) => (
+      entry.recipient.conversation_id === 'chat-ops' &&
+      entry.message.text?.includes('Symphony 交付阻塞 · INT-1') &&
+      entry.message.text?.includes('merge_blocked') &&
+      entry.message.text?.includes('PR #64')
+    ))).toBe(true);
+
+    service.dispose();
+    db.close();
+  });
+
   test('persists lifecycle dedupe across service restarts and records outbound delivery audits', async () => {
     const db = new Database(':memory:');
     initializeSchema(db);
