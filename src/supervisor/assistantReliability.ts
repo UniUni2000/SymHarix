@@ -12,8 +12,8 @@ export function isAcknowledgementOnlyText(text: string): boolean {
   return /^(?:好的?|好吧|嗯+|行|可以|收到|没事(?:儿)?|没事(?:儿)?[，,\s]*先这样(?:吧)?|先这样(?:吧)?|不用了?|不用管|算了|先放着|ok|okay|sure|never\s*mind|all\s*good|随便你看看|你看着办)[!！,.，。?？\s]*$/i.test(text.trim());
 }
 
-function isCapabilityQuestion(text: string): boolean {
-  return /(?:你能|可以|会).{0,12}(?:做什么|干什么|帮我什么|能力|功能)|(?:what|which).{0,12}(?:can|could).{0,12}you.{0,12}(?:do|help)|what\s+are\s+your\s+(?:capabilities|features)|help\b|capabilities\b/i.test(text.trim());
+export function isCapabilityQuestion(text: string): boolean {
+  return /(?:你能|可以|会).{0,12}(?:做什么|干什么|帮我什么|能力|功能)|(?:what|which).{0,12}(?:can|could).{0,12}(?:you|u).{0,12}(?:do|help)|what\s+are\s+your\s+(?:capabilities|features)|help\b|capabilities\b/i.test(text.trim());
 }
 
 function buildCapabilityReply(locale: RuntimeLocale | null | undefined): string {
