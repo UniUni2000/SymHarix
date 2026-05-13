@@ -140,7 +140,7 @@ function runtimeMiniAppStateLabel(issue: RuntimeIssueView): string {
     return englishOutput ? 'Review running' : 'Review 进行中';
   }
   if (issue.session || issue.orchestrator_state === 'dev_running') {
-    return englishOutput ? 'Running' : '运行中';
+    return englishOutput ? 'Dev running' : 'Dev 进行中';
   }
   if (issue.orchestrator_state === 'retry_scheduled') {
     return englishOutput ? 'Retry scheduled' : '等待重试';
@@ -890,11 +890,51 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         height: 24px;
       }
       .issue-eyebrow {
-        margin: 0 0 4px;
+        margin: 0;
         color: #2f94ff;
         font-size: 12px;
         line-height: 16px;
         font-weight: 720;
+      }
+      .issue-topline {
+        display: flex;
+        min-width: 0;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        margin: 0 0 7px;
+      }
+      .stage-badge {
+        display: inline-flex;
+        min-height: 28px;
+        align-items: center;
+        justify-content: center;
+        padding: 5px 11px;
+        border: 1px solid rgba(107, 180, 255, 0.24);
+        border-radius: 999px;
+        color: var(--blue);
+        background: var(--blue-soft);
+        font-size: 11px;
+        font-weight: 860;
+        line-height: 1;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+      }
+      .stage-badge.green {
+        color: var(--green);
+        border-color: rgba(86, 227, 159, 0.28);
+        background: var(--green-soft);
+      }
+      .stage-badge.blue {
+        color: var(--blue);
+        border-color: rgba(107, 180, 255, 0.3);
+        background: var(--blue-soft);
+      }
+      .stage-badge.yellow {
+        color: var(--yellow);
+        border-color: rgba(255, 209, 102, 0.3);
+        background: var(--yellow-soft);
       }
       .issue-title {
         margin: 0 0 10px;
@@ -1911,7 +1951,10 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
               </svg>
               <span>symphonyness</span>
             </div>
-            <p id="issue-eyebrow" class="issue-eyebrow">${escapedIssueId}</p>
+            <div class="issue-topline">
+              <p id="issue-eyebrow" class="issue-eyebrow">${escapedIssueId}</p>
+              <span id="stage-badge" class="stage-badge blue">阶段 · DEV 中</span>
+            </div>
             <h1 id="issue-title" class="issue-title">${escapedIssueId}</h1>
             <div id="hero-details" class="hero-details">
               <div id="repo-line" class="repo-line">
@@ -2116,6 +2159,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           languageToggle: document.getElementById('language-toggle'),
           issueEyebrow: document.getElementById('issue-eyebrow'),
           issueTitle: document.getElementById('issue-title'),
+          stageBadge: document.getElementById('stage-badge'),
           repoLine: document.getElementById('repo-line'),
           statusLine: document.getElementById('status-line'),
           progressValue: document.getElementById('progress-value'),
@@ -2238,6 +2282,13 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             dispatchActive: '已进入运行通道，等待最近执行信号刷新。',
             dispatchReady: '已准备进入运行通道。',
             proofSatisfied: '证据已满足，正在等待最终交付。',
+            stageDev: '阶段 · DEV 中',
+            stageReview: '阶段 · REVIEW 中',
+            stageDone: '阶段 · 已完成',
+            stageNeedsAction: '阶段 · 需处理',
+            stageDevNeedsAction: '阶段 · DEV 需处理',
+            stageReviewNeedsAction: '阶段 · REVIEW 需处理',
+            stagePreparing: '阶段 · 准备中',
             reviewRunning: 'Review 正在检查交付质量。',
             devRunning: 'Dev agent 正在推进当前轮次。',
             readingIssue: '正在读取当前 issue 状态。',
@@ -2349,6 +2400,13 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             dispatchActive: 'The run is active and waiting for the next execution signal.',
             dispatchReady: 'Ready to enter the execution channel.',
             proofSatisfied: 'Evidence is satisfied and final delivery is pending.',
+            stageDev: 'STAGE · DEV',
+            stageReview: 'STAGE · REVIEW',
+            stageDone: 'STAGE · DONE',
+            stageNeedsAction: 'STAGE · NEEDS ACTION',
+            stageDevNeedsAction: 'STAGE · DEV NEEDS ACTION',
+            stageReviewNeedsAction: 'STAGE · REVIEW NEEDS ACTION',
+            stagePreparing: 'STAGE · PREPARING',
             reviewRunning: 'Review is checking delivery quality.',
             devRunning: 'The dev agent is advancing this round.',
             readingIssue: 'Loading the current issue state.',
@@ -2600,7 +2658,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             return isEnglish() ? 'Review running' : 'Review 进行中';
           }
           if (issue.session || issue.orchestrator_state === 'dev_running') {
-            return t('runningShort');
+            return isEnglish() ? 'Dev running' : 'Dev 进行中';
           }
           if (issue.orchestrator_state === 'retry_scheduled') {
             return isEnglish() ? 'Retry scheduled' : '等待重试';
@@ -3157,10 +3215,25 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           if (issue.phase === 'REVIEW' || issue.orchestrator_state === 'review_running') {
             return 'linear-gradient(90deg, #56e39f 0%, #6bb4ff 60%, #6e6bff 100%)';
           }
-          if (issue.session || issue.orchestrator_state === 'dev_running') {
+          if (issue.phase === 'DEV' || issue.session || issue.orchestrator_state === 'dev_running') {
             return 'linear-gradient(90deg, #56e39f 0%, #6bb4ff 100%)';
           }
           return 'linear-gradient(90deg, #56e39f 0%, #56e39f 100%)';
+        }
+        function stageBadgeInfo(issue, presentation) {
+          if (!issue) return { label: t('stagePreparing'), tone: 'blue' };
+          if (isCompletedIssue(issue)) return { label: t('stageDone'), tone: 'green' };
+          const review = issue.phase === 'REVIEW' || issue.orchestrator_state === 'review_running';
+          const dev = issue.phase === 'DEV' || issue.session || issue.orchestrator_state === 'dev_running';
+          const needsAction = isRetryableDeliveryFailure(issue) || issue.orchestrator_state === 'failed' || (presentation && presentation.stateTone === 'yellow');
+          if (needsAction) {
+            if (review) return { label: t('stageReviewNeedsAction'), tone: 'yellow' };
+            if (dev) return { label: t('stageDevNeedsAction'), tone: 'yellow' };
+            return { label: t('stageNeedsAction'), tone: 'yellow' };
+          }
+          if (review) return { label: t('stageReview'), tone: 'blue' };
+          if (dev) return { label: t('stageDev'), tone: 'yellow' };
+          return { label: t('stagePreparing'), tone: 'blue' };
         }
         function latestChangedFile(issue, diffFiles) {
           const files = issue && issue.session && Array.isArray(issue.session.recent_files) ? issue.session.recent_files.slice() : [];
@@ -3272,6 +3345,9 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           setHeroExpanded(state.heroExpanded);
           el.issueEyebrow.textContent = identifier;
           el.issueTitle.textContent = displayTitle;
+          const stage = stageBadgeInfo(issue, presentation);
+          el.stageBadge.className = 'stage-badge ' + escapeHtml(stage.tone);
+          el.stageBadge.textContent = stage.label;
           el.repoLine.innerHTML = githubMark() + '<span>' + escapeHtml(t('repository')) + '</span><span class="repo-name">' + escapeHtml(issue.github_repo || 'repo pending') + '</span>';
           const child = issue.governance_current_child || (Array.isArray(issue.governance_child_queue) ? issue.governance_child_queue.find((item) => item.queue_state === 'current') : null);
           el.statusLine.innerHTML = [
@@ -3291,7 +3367,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
               ? ['done', 'done', 'done', 'done']
               : reviewActive
                 ? ['done', 'done', 'active', '']
-                : (issue.session || issue.orchestrator_state === 'dev_running')
+                : (issue.phase === 'DEV' || issue.session || issue.orchestrator_state === 'dev_running')
                   ? ['done', 'active', '', '']
                   : ['active', '', '', ''];
             steps.forEach((step, index) => {

@@ -76,6 +76,7 @@ describe('issue visual cards', () => {
     expect(svg).toContain('状态概览');
     expect(svg).toContain('Telegram 预览');
     expect(svg).toContain('实时进度');
+    expect(svg).toContain('阶段 · REVIEW 中');
     expect(svg).toContain('Review 进行中');
     expect(svg).toContain('PR #112');
     expect(svg).toContain('改了 README.md');
@@ -96,6 +97,7 @@ describe('issue visual cards', () => {
     expect(svg).toContain('Status Overview');
     expect(svg).toContain('Telegram Preview');
     expect(svg).toContain('Live progress');
+    expect(svg).toContain('STAGE · CANCELLED');
     expect(svg).toContain('Cancelled');
     expect(svg).not.toContain('状态概览');
     expect(svg).not.toContain('打开 Mini App');
