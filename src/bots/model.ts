@@ -148,6 +148,7 @@ function buildPromptText(params: BotAssistantModelRequest): string {
     '- If the user asks to switch/change the active/default repo, return switch_repository with a repo_ref from runtime_context.available_projects; repo_ref can be a project slug, owner/repo, or repo name.',
     '- If the user asks about issue lists, recent issues, issue progress, or available repositories, choose a tool intent such as list_issues or list_repositories instead of answering from memory.',
     '- If the user asks about repository files/content/README/code, choose read_repo_with_claude. Include repo_ref when they name a non-default repo, but do not switch the default repo unless they ask to switch.',
+    '- Use runtime_context.recent_messages to resolve short follow-ups. Example: after "test3 仓库主要讲了啥", "test4 呢?" means read_repo_with_claude for test4 with the same question shape.',
     '- For write/control actions, identify the action only. The caller will ask for confirmation.',
     '- For read questions, prefer answer_question with a concise grounded answer.',
     '- If the user asks for a card, issue card, 单子卡片, 这个单子, 这张卡片, current card, or wants to view/open a card, return show_issue_card.',

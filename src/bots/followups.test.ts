@@ -380,6 +380,64 @@ describe('BotFollowupService', () => {
     db.close();
   });
 
+  test('includes delivery summary in ordinary failed lifecycle updates', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const issue = runtime.getIssue('issue-1')!;
+    Object.assign(issue, {
+      title: '多仓库路由 smoke',
+      phase: 'DEV',
+      tracker_state: 'In Progress',
+      orchestrator_state: 'failed',
+      governance_status: null,
+      governance_decision: null,
+      governance_summary: null,
+      active_governance_suggestions: [],
+      delivery_state: 'delivery_failed',
+      delivery_summary: 'Issue INT-169 already in state IN_REVIEW; Issue not in valid state for dev.',
+      actions: {
+        can_stop: false,
+        can_retry: true,
+        can_override_governance: false,
+        can_rewrite_governance: false,
+        can_split_governance: false,
+        can_open_pr: true,
+      },
+    });
+    const notifier = new MemoryNotifier();
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+
+    followups.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      user_id: 'user-1',
+      role: 'origin',
+    });
+
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, messageStates, {
+      bootstrapCurrentGovernanceCards: false,
+    });
+
+    runtime.emit({
+      type: 'issue',
+      data: issue,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(notifier.messages).toHaveLength(1);
+    expect(notifier.messages[0]?.message.text).toContain('失败原因');
+    expect(notifier.messages[0]?.message.text).toContain('IN_REVIEW');
+
+    service.dispose();
+    db.close();
+  });
+
   test('does not post textual governance cards for supervisor-managed child queues', async () => {
     const db = new Database(':memory:');
     initializeSchema(db);

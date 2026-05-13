@@ -1134,6 +1134,11 @@ export class Orchestrator extends EventEmitter {
       };
     }
 
+    const workspaceReviewReconcile = await this.reconcileWorkspaceAlreadyInReview(issue, workItem);
+    if (workspaceReviewReconcile) {
+      return workspaceReviewReconcile;
+    }
+
     if (this.hasAvailableSlots() && this.shouldDispatch(issue)) {
       if (workItem) {
         this.workItemRepository.update({
@@ -4267,6 +4272,73 @@ export class Orchestrator extends EventEmitter {
     } catch {
       return null;
     }
+  }
+
+  private getWorkspaceLifecycleState(state: Record<string, unknown> | null): string | null {
+    const currentState = state?.current_state;
+    return typeof currentState === 'string' ? currentState.trim().toUpperCase() : null;
+  }
+
+  private async reconcileWorkspaceAlreadyInReview(
+    issue: Issue,
+    workItem: WorkItem | null | undefined,
+  ): Promise<RuntimeActionResult | null> {
+    if (issue.state.trim().toLowerCase() === 'in review') {
+      return null;
+    }
+    if (!workItem?.workspace_path) {
+      return null;
+    }
+
+    const workspaceState = await this.readWorkspaceStateFile(workItem.workspace_path);
+    if (this.getWorkspaceLifecycleState(workspaceState) !== 'IN_REVIEW') {
+      return null;
+    }
+
+    await this.syncWorkItemFromWorkspaceState(
+      workItem.id,
+      issue,
+      workItem.workspace_path,
+      'workspace_ready',
+    );
+    const trackerSync = await this.syncLinearState(issue, 'In Review');
+    if (!trackerSync.success) {
+      this.workItemRepository.update({
+        id: workItem.id,
+        linear_state: issue.state,
+        orchestrator_state: 'failed',
+        delivery_code: 'tracker_state_conflict',
+        delivery_summary: trackerSync.error || `${issue.identifier} 已经在本地进入 In Review，但同步 Linear 状态失败。`,
+      });
+      this.emit('state:changed', this.getStateSnapshot());
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: `Retry blocked for ${issue.identifier}: workspace already reached In Review, but Linear could not be synced`,
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        delivery_code: 'tracker_state_conflict',
+      };
+    }
+
+    this.workItemRepository.update({
+      id: workItem.id,
+      linear_state: trackerSync.currentState ?? 'In Review',
+      orchestrator_state: 'workspace_ready',
+      delivery_code: null,
+      delivery_summary: null,
+    });
+    this.state.completed.delete(issue.id);
+    this.emit('state:changed', this.getStateSnapshot());
+    this.scheduleTick(0);
+
+    return {
+      accepted: true,
+      status: 'completed',
+      message: `${issue.identifier} already reached In Review locally; reconciled tracker/runtime state instead of retrying DEV`,
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+    };
   }
 
   private async readWorkspaceFile(workspacePath: string, filename: string): Promise<string | null> {

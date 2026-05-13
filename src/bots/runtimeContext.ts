@@ -287,6 +287,7 @@ export class BotRuntimeContextService {
     return {
       default_project_slug: defaultProjectSlug,
       available_projects: availableProjects,
+      recent_messages: [],
       repo_profile: repoProfile,
       repo_understanding: repoUnderstanding,
       watch_subscriptions: this.subscriptions?.listByConversation({

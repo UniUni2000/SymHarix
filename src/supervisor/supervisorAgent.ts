@@ -385,6 +385,34 @@ function parseResult(
   return null;
 }
 
+function repoProfileFallbackAnswer(
+  repoRef: string | null,
+  profile: RepoProfile | null,
+): SupervisorAgentResult | null {
+  if (!repoRef || !profile) {
+    return null;
+  }
+
+  const details = [
+    profile.signals.readme_title ? `README: ${profile.signals.readme_title}` : null,
+    profile.project_type !== 'unknown' ? `类型：${profile.project_type}` : null,
+    profile.tech_stack.length > 0 ? `技术栈：${profile.tech_stack.join(', ')}` : null,
+    profile.key_paths.length > 0 ? `关键路径：${profile.key_paths.slice(0, 5).join(', ')}` : null,
+  ].filter(Boolean);
+
+  return {
+    mode: 'repo_answer',
+    repoRef,
+    answer: [
+      `${repoRef} 主要是：${profile.summary}`,
+      ...details,
+    ].join('\n'),
+    citations: profile.key_paths.length > 0
+      ? profile.key_paths.slice(0, 5)
+      : undefined,
+  };
+}
+
 export class DefaultSupervisorAgentService implements SupervisorAgentService {
   constructor(private readonly options: DefaultSupervisorAgentServiceOptions) {}
 
@@ -476,10 +504,17 @@ export class DefaultSupervisorAgentService implements SupervisorAgentService {
       }),
     };
 
-    const rawResult = needsReadOnlyClaude && this.options.adviseWithReadOnlyClaude
+    const usedReadOnlyAdvisor = Boolean(needsReadOnlyClaude && this.options.adviseWithReadOnlyClaude);
+    const rawResult = usedReadOnlyAdvisor
       ? await this.options.adviseWithReadOnlyClaude(normalizedInput)
       : await this.options.analyze(normalizedInput);
-    return parseResult(rawResult, resolvedRepoRef);
+    const parsedResult = parseResult(rawResult, resolvedRepoRef);
+    if (parsedResult) {
+      return parsedResult;
+    }
+    return usedReadOnlyAdvisor
+      ? repoProfileFallbackAnswer(resolvedRepoRef, repoProfile)
+      : null;
   }
 }
 
