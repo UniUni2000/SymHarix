@@ -44,6 +44,13 @@ class DevHook:
         "*.pyc",
         "**/*.pyc",
     )
+    PRODUCT_COMMIT_ADD_EXCLUDED_PATHS = (
+        "DEVELOPMENT_LOG.md",
+        "HANDOVER.md",
+        "REVIEW_REPORT.md",
+        ".symphony",
+        ".symphony/**",
+    )
 
     def __init__(
         self,
@@ -414,10 +421,12 @@ Agent completed the task for issue [{self.issue_id}](https://linear.app/inteliwa
         )
         if add_result.returncode != 0:
             message = (add_result.stderr or add_result.stdout or "").strip()
+            self._set_delivery_failure("product_staging_failed", message or "Failed to stage product changes")
             raise RuntimeError(
                 f"Failed to stage product changes for {self.branch}: {message or 'unknown git error'}"
             )
 
+        self._git("reset", "--", *self.PRODUCT_COMMIT_EXCLUDED_PATHS, check=False)
         staged_paths = self._git_path_list("diff", "--cached", "--name-only")
         product_paths = [
             path
@@ -450,7 +459,7 @@ Agent completed the task for issue [{self.issue_id}](https://linear.app/inteliwa
             ".",
             *(
                 f":(exclude){path}"
-                for path in self.PRODUCT_COMMIT_EXCLUDED_PATHS
+                for path in self.PRODUCT_COMMIT_ADD_EXCLUDED_PATHS
             ),
         )
 
