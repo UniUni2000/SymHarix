@@ -118,6 +118,7 @@ describe('SupervisorOrchestratorBroker', () => {
       },
     });
     const commandService = new BotCommandService(runtime, subscriptions, () => true, preferences);
+    const pendingActions = new SupervisorPendingActionRepository(db);
     const broker = new SupervisorOrchestratorBroker({
       runtime,
       commandService,
@@ -126,14 +127,14 @@ describe('SupervisorOrchestratorBroker', () => {
       runs: new SupervisorRunRepository(db),
       events: new SupervisorRunEventRepository(db),
       toolCalls: new SupervisorToolCallRepository(db),
-      pendingActions: new SupervisorPendingActionRepository(db),
+      pendingActions,
     });
     const context: BotCommandContext = {
       transport: 'telegram',
       recipient: { transport: 'telegram', conversation_id: 'chat-1' },
       identity: { user_id: 'user-1', display_name: 'Alice' },
     };
-    return { broker, runtime, context, subscriptions };
+    return { broker, runtime, context, subscriptions, pendingActions };
   }
 
   test('lists the orchestrator business tool surface with schemas for Claude to inspect', async () => {
@@ -176,6 +177,34 @@ describe('SupervisorOrchestratorBroker', () => {
     expect(result.response?.actions?.[0]?.callback_data).toBe('pending|confirm');
     expect(captured?.message).toContain('Action: create issue');
     expect(captured?.message).toContain('添加 pre-commit hooks');
+    expect(runtime.createIssueCalls).toHaveLength(0);
+  });
+
+  test('uses English confirmation copy and buttons for English high-risk issue creation', async () => {
+    const { broker, runtime, context, pendingActions } = createHarness();
+    broker.beginTurn({
+      context,
+      text: 'Create an issue and conduct a smoke test, requiring the consumption of as few tokens as possible.',
+      repoRef: 'DingfangHu/my-symphony-test',
+      canWrite: true,
+    });
+
+    const result = await broker.callTool('create_issue', {
+      title: 'Create an issue and conduct a smoke test',
+      description: 'Use as few tokens as possible.',
+      project_slug: 'test2',
+    }, { context });
+    const captured = broker.consumeTurnResponse({ context, repoRef: 'DingfangHu/my-symphony-test' });
+
+    expect(result.response?.message).toContain('Reply with: Confirm / Cancel');
+    expect(result.response?.message).not.toContain('确认');
+    expect(result.response?.message).not.toContain('取消');
+    expect(result.response?.actions?.map((action) => action.label)).toEqual(['Confirm', 'Cancel']);
+    expect(captured?.message).toContain('Reply with: Confirm / Cancel');
+    expect(pendingActions.findOpenByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    })?.summary_message).toContain('Reply with: Confirm / Cancel');
     expect(runtime.createIssueCalls).toHaveLength(0);
   });
 
