@@ -571,6 +571,13 @@ export interface BotFocusedIssueContext {
 export interface BotRuntimeCopilotContext {
   default_project_slug: string | null;
   available_projects: BotProjectRouteView[];
+  recent_messages?: Array<{
+    user_message: string;
+    final_message: string | null;
+    repo_ref: string | null;
+    active_issue_id: string | null;
+    state: string;
+  }>;
   repo_profile: BotRepoProfileView | null;
   repo_understanding: BotRepoUnderstandingView | null;
   watch_subscriptions: BotWatchStateView[];

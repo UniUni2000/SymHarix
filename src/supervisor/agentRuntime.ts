@@ -36,6 +36,10 @@ import {
   type SupervisorAgentService,
 } from './supervisorAgent';
 import {
+  DefaultRepoProfileService,
+  type RepoProfile,
+} from './repoProfileService';
+import {
   buildNoActionAssistantReply,
   formatDuplicateToolRecovery,
   formatPendingActionReminder,
@@ -159,6 +163,7 @@ const CONFIRM_WORDS = new Set(['确认', '批准', '是的', '是', '对', '对�
 const CANCEL_WORDS = new Set(['取消', 'cancel', 'no', 'n', '停止']);
 const DEFAULT_MODEL_TIMEOUT_MS = 12_000;
 const MAX_MODEL_TIMEOUT_MS = 60_000;
+const repoProfileFallbackService = new DefaultRepoProfileService();
 
 function parsePositiveInteger(value: string | null | undefined): number | null {
   const normalized = value?.trim();
@@ -323,9 +328,18 @@ function isContextualIssueReference(text: string): boolean {
   return /这个\s*(?:issue|单|任务)?|当前这个|上面这个|刚才(?:那个|这个)|this\s+issue|\bit\b/i.test(text);
 }
 
+function isRepositoryRouteQuestion(text: string): boolean {
+  if (isRuntimeControlActionText(text)) {
+    return false;
+  }
+  return /(?:当前|现在|默认).{0,16}(?:仓库|repo|repository)|(?:仓库|repo|repository).{0,16}(?:当前|现在|默认|有哪些|列表|配置|绑定)|(?:有哪些|列(?:一下|出)?|list).{0,16}(?:仓库|repo|repository)/i.test(text);
+}
+
 function isSetProjectRequest(text: string): boolean {
-  return /(?:set|switch|切换|设置|默认).{0,16}(?:project|项目|repo|repository|仓库)|(?:project|项目|repo|repository|仓库).{0,16}(?:to|为|成|设为|设置|切换|默认)/i.test(text) ||
-    /(?:默认用|切到|切换到|换到|换成|切仓库到|切仓库为)\s*[A-Za-z0-9_.:/-]+/i.test(text);
+  return Boolean(extractProjectSlug(text)) && (
+    /(?:set|switch|切换|设置|设为|设置为).{0,16}(?:project|项目|repo|repository|仓库)|(?:project|项目|repo|repository|仓库).{0,16}(?:to|为|成|设为|设置|切换)/i.test(text) ||
+    /(?:默认用|切到|切换到|换到|换成|切仓库到|切仓库为)\s*[A-Za-z0-9_.:/-]+/i.test(text)
+  );
 }
 
 function isRuntimeControlActionText(text: string): boolean {
@@ -404,6 +418,20 @@ function formatSupervisorAgentResult(result: SupervisorAgentResult): string {
     case 'handoff_to_session':
       return result.handoffMessage;
   }
+}
+
+function formatRepoProfileFallback(repoRef: string, profile: RepoProfile): string {
+  const details = [
+    profile.signals.readme_title ? `README: ${profile.signals.readme_title}` : null,
+    profile.project_type !== 'unknown' ? `类型：${profile.project_type}` : null,
+    profile.tech_stack.length > 0 ? `技术栈：${profile.tech_stack.join(', ')}` : null,
+    profile.key_paths.length > 0 ? `关键路径：${profile.key_paths.slice(0, 5).join(', ')}` : null,
+  ].filter(Boolean);
+
+  return [
+    `${repoRef} 主要是：${profile.summary}`,
+    ...details,
+  ].join('\n');
 }
 
 function supervisorAgentResultToTurn(result: SupervisorAgentResult): SupervisorTurn {
@@ -1307,6 +1335,90 @@ export class SupervisorAgentRuntimeService {
     return null;
   }
 
+  private stripRouteReference(text: string, route: ReturnType<TrackerProjectResolutionService['listConfiguredRoutes']>[number]): string {
+    let stripped = text;
+    const identifiers = [
+      route.github_repo_full,
+      route.github_repo,
+      route.project_slug,
+    ].filter(Boolean);
+    for (const identifier of identifiers) {
+      stripped = stripped.replace(new RegExp(escapeRegExp(identifier), 'ig'), ' ');
+    }
+    return stripped.replace(/[，。！？!?：:\s]/g, '').trim();
+  }
+
+  private isEllipticalRepositoryFollowup(
+    text: string,
+    route: ReturnType<TrackerProjectResolutionService['listConfiguredRoutes']>[number],
+  ): boolean {
+    const remainder = this.stripRouteReference(text, route).toLowerCase();
+    return remainder.length === 0 || /^(?:呢|那|这个|这个呢|whatabout|and|it|this|that)$/.test(remainder);
+  }
+
+  private replaceRouteReferences(
+    text: string,
+    route: ReturnType<TrackerProjectResolutionService['listConfiguredRoutes']>[number],
+  ): string {
+    const routes = this.options.projectResolver?.listConfiguredRoutes() ?? [];
+    let replaced = text;
+    for (const candidate of routes) {
+      for (const identifier of [candidate.github_repo_full, candidate.github_repo, candidate.project_slug].filter(Boolean)) {
+        replaced = replaced.replace(new RegExp(escapeRegExp(identifier), 'ig'), route.github_repo);
+      }
+    }
+    return replaced === text ? `${route.github_repo} ${text}` : replaced;
+  }
+
+  private findLatestRepoReadRun(request: SupervisorRuntimeRespondRequest, currentRunId: string) {
+    const runs = this.options.runs.listByConversation({
+      transport: request.context.transport,
+      conversation_id: request.context.recipient.conversation_id,
+    });
+    for (const candidate of runs) {
+      if (candidate.id === currentRunId) {
+        continue;
+      }
+      const readCall = this.options.toolCalls.findByRun(candidate.id)
+        .slice()
+        .reverse()
+        .find((call) => call.tool_name === 'read_repo_with_claude');
+      if (readCall || isRepositoryUnderstandingRequest(candidate.user_message)) {
+        return {
+          run: candidate,
+          readCall: readCall ?? null,
+        };
+      }
+    }
+    return null;
+  }
+
+  private planEllipticalRepoFollowupTurn(
+    text: string,
+    run: ReturnType<SupervisorRunRepository['create']>,
+    request: SupervisorRuntimeRespondRequest,
+  ): Extract<SupervisorTurn, { type: 'tool_call' }> | null {
+    const route = this.resolveRouteMentionedInText(text);
+    if (!route || !this.isEllipticalRepositoryFollowup(text, route)) {
+      return null;
+    }
+    const previous = this.findLatestRepoReadRun(request, run.id);
+    if (!previous) {
+      return null;
+    }
+    const previousQuestion = firstString(previous.readCall?.args.question) ?? previous.run.user_message;
+    return {
+      type: 'tool_call',
+      tool: 'read_repo_with_claude',
+      args: {
+        question: this.replaceRouteReferences(previousQuestion, route),
+        repo_ref: route.github_repo_full,
+        project_slug: route.project_slug,
+      },
+      reason: 'User asked a short repository follow-up that refers to the previous repo-read question.',
+    };
+  }
+
   private normalizeToolArgs(
     toolName: string,
     args: Record<string, unknown>,
@@ -1934,6 +2046,7 @@ export class SupervisorAgentRuntimeService {
       });
       if (result.ok) {
         this.rememberRunIssueFocus(params.runId, result.response?.issue_id ?? result.data?.issue_identifier ?? null);
+        this.rememberRunRepoFocus(params.runId, result.data?.repo_ref ?? null);
       }
       return result;
     } catch (error) {
@@ -2043,6 +2156,37 @@ export class SupervisorAgentRuntimeService {
     });
   }
 
+  private rememberRunRepoFocus(runId: string, repoRef: unknown): void {
+    const normalizedRepoRef = firstString(repoRef);
+    if (!normalizedRepoRef) {
+      return;
+    }
+    this.options.runs.update({
+      id: runId,
+      repo_ref: normalizedRepoRef,
+    });
+  }
+
+  private buildRecentConversationContext(
+    request: SupervisorRuntimeRespondRequest,
+    currentRunId: string,
+  ): NonNullable<BotRuntimeCopilotContext['recent_messages']> {
+    return this.options.runs.listByConversation({
+      transport: request.context.transport,
+      conversation_id: request.context.recipient.conversation_id,
+    })
+      .filter((candidate) => candidate.id !== currentRunId)
+      .slice(0, 6)
+      .reverse()
+      .map((candidate) => ({
+        user_message: candidate.user_message,
+        final_message: candidate.final_message,
+        repo_ref: candidate.repo_ref,
+        active_issue_id: candidate.active_issue_id,
+        state: candidate.state,
+      }));
+  }
+
   private buildRuntimeCopilotContext(
     request: SupervisorRuntimeRespondRequest,
     run: ReturnType<SupervisorRunRepository['create']>,
@@ -2078,6 +2222,7 @@ export class SupervisorAgentRuntimeService {
         project_slug: route.project_slug,
         github_repo_full: route.github_repo_full,
       })),
+      recent_messages: this.buildRecentConversationContext(request, run.id),
       repo_profile: null,
       repo_understanding: null,
       watch_subscriptions: [],
@@ -2328,6 +2473,11 @@ export class SupervisorAgentRuntimeService {
       return supervisorAdvisoryTurns;
     }
 
+    const repoFollowupTurn = this.planEllipticalRepoFollowupTurn(text, run, request);
+    if (repoFollowupTurn) {
+      return [repoFollowupTurn];
+    }
+
     if (isCreateIssueRequest(text)) {
       return [{
         type: 'tool_call',
@@ -2429,6 +2579,14 @@ export class SupervisorAgentRuntimeService {
       return [{
         type: 'clarify',
         question: '你想操作哪个 issue？请告诉我 issue 编号（如 INT-169）。',
+      }];
+    }
+    if (isRepositoryRouteQuestion(text)) {
+      return [{
+        type: 'tool_call',
+        tool: 'list_repositories',
+        args: {},
+        reason: 'User asked for the current repository route.',
       }];
     }
     if (isSetProjectRequest(text)) {
@@ -2843,6 +3001,7 @@ export function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
           };
         }
         const question = firstString(record.question) ?? context.text;
+        let supervisorError: unknown = null;
         const result = await context.supervisorAgentService?.respond({
           localPath: route.localPath,
           repoRef: route.repoRef,
@@ -2858,20 +3017,43 @@ export function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
             defaultProjectSlug: route.route?.project_slug ?? null,
             activeIssueId: issue?.identifier ?? null,
           },
+        }).catch((error) => {
+          supervisorError = error;
+          return null;
         });
+        const fallbackProfile = result
+          ? null
+          : await repoProfileFallbackService.resolve({
+              repoRef: route.repoRef,
+              localPath: route.localPath,
+            }).catch(() => null);
         context.repoConversations?.upsert({
           transport: context.context.transport,
           conversation_id: context.context.recipient.conversation_id,
           repo_ref: route.repoRef,
           backend_session_id: null,
-          status: result ? 'active' : 'failed',
+          status: result || fallbackProfile ? 'active' : 'failed',
         });
         if (!result) {
+          if (fallbackProfile) {
+            const message = formatRepoProfileFallback(route.repoRef, fallbackProfile);
+            return {
+              tool: 'read_repo_with_claude',
+              ok: true,
+              summary: compact(message),
+              message,
+              data: { repo_ref: route.repoRef },
+            };
+          }
           return {
             tool: 'read_repo_with_claude',
             ok: false,
-            summary: 'Read-only Claude Code did not return an answer.',
-            message: '仓库只读分析暂时没有返回结果。',
+            summary: supervisorError
+              ? `Read-only Claude Code failed: ${supervisorError instanceof Error ? supervisorError.message : String(supervisorError)}`
+              : 'Read-only Claude Code did not return an answer.',
+            message: supervisorError
+              ? formatToolFailureRecovery('read_repo_with_claude', inferRuntimeLocaleFromText(context.text))
+              : '仓库只读分析暂时没有返回结果。',
           };
         }
         const message = formatSupervisorAgentResult(result);

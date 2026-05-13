@@ -141,6 +141,17 @@ function hasSupervisorRuntimeProjection(issue: RuntimeIssueView | null | undefin
   );
 }
 
+function compactLifecycleText(value: string | null | undefined, maxLength: number): string | null {
+  const compacted = value?.replace(/\s+/g, ' ').trim();
+  if (!compacted) {
+    return null;
+  }
+  if (compacted.length <= maxLength) {
+    return compacted;
+  }
+  return `${compacted.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
 function buildLifecycleMessage(issue: RuntimeIssueView, notificationClass: LifecycleNotificationClass): BotTransportMessage {
   const headline = notificationClass === 'retrying'
     ? `Symphony 重试中 · ${issue.identifier}`
@@ -156,10 +167,14 @@ function buildLifecycleMessage(issue: RuntimeIssueView, notificationClass: Lifec
       : notificationClass === 'cancelled'
         ? '这张单已经结束，不会再继续自动推进。'
         : '这张单已经进入终态，当前主链处理完成。';
+  const failureReason = notificationClass === 'failed'
+    ? compactLifecycleText(issue.delivery_summary, 260)
+    : null;
   const lines = [
     headline,
     `${issue.title}`,
     summary,
+    failureReason ? `失败原因：${failureReason}` : null,
     `phase ${issue.phase} · tracker ${issue.tracker_state} · orchestrator ${issue.orchestrator_state || 'unknown'}`,
     issue.github_repo ? `repo ${issue.github_repo}` : null,
     issue.branch_name ? `branch ${issue.branch_name}` : null,

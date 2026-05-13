@@ -4388,6 +4388,92 @@ describe('Orchestrator Stability', () => {
     expect(ctx.workspaceManager.removeWorkspace).toHaveBeenCalledWith('/tmp/symphony-tests/repo/INT-1');
   });
 
+  it('retryIssue reconciles a failed DEV work item when the workspace already reached review', async () => {
+    const issue = makeIssue({ state: 'In Progress' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+    const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-in-review-'));
+    fs.mkdirSync(path.join(workspacePath, '.symphony'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspacePath, '.symphony', 'state.json'),
+      JSON.stringify({
+        issue_id: issue.identifier,
+        current_state: 'IN_REVIEW',
+        metadata: {
+          branch: 'symharix-demo/int-169-smoke',
+          pr_number: 2,
+        },
+      }),
+      'utf8',
+    );
+
+    const workItem = ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: 'In Progress',
+      github_repo: 'owner/repo',
+      workspace_path: workspacePath,
+      orchestrator_state: 'failed',
+      delivery_summary: 'Issue already in state IN_REVIEW',
+    });
+
+    const result = await orchestrator.retryIssue(issue.id);
+    const updatedWorkItem = ctx.workItemRepository.findById(workItem.id);
+
+    expect(result.accepted).toBe(true);
+    expect(result.status).toBe('completed');
+    expect(result.message).toContain('already reached In Review locally');
+    expect(ctx.tracker.updateIssueState).toHaveBeenCalledWith(issue.id, 'In Review');
+    expect(ctx.workspaceManager.createForIssue).not.toHaveBeenCalled();
+    expect(ctx.agentRunner.runTurn).not.toHaveBeenCalled();
+    expect(updatedWorkItem?.linear_state).toBe('In Review');
+    expect(updatedWorkItem?.orchestrator_state).toBe('workspace_ready');
+    expect(updatedWorkItem?.branch_name).toBe('symharix-demo/int-169-smoke');
+    expect(updatedWorkItem?.active_pr_number).toBe(2);
+    expect(updatedWorkItem?.delivery_summary).toBeNull();
+    expect((orchestrator as any).state.retry_attempts.has(issue.id)).toBe(false);
+  });
+
+  it('retryIssue does not treat an already in-review tracker issue as a DEV reconciliation', async () => {
+    const issue = makeIssue({ state: 'In Review' });
+    const ctx = createOrchestrator(issue, { maxConcurrentAgents: 0 });
+    orchestrator = ctx.orchestrator;
+    const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symphony-review-retry-'));
+    fs.mkdirSync(path.join(workspacePath, '.symphony'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspacePath, '.symphony', 'state.json'),
+      JSON.stringify({
+        issue_id: issue.identifier,
+        current_state: 'IN_REVIEW',
+      }),
+      'utf8',
+    );
+
+    const workItem = ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: 'In Review',
+      github_repo: 'owner/repo',
+      workspace_path: workspacePath,
+      orchestrator_state: 'failed',
+      delivery_summary: 'Review failed and needs retry.',
+    });
+
+    const result = await orchestrator.retryIssue(issue.id);
+    const updatedWorkItem = ctx.workItemRepository.findById(workItem.id);
+
+    expect(result.accepted).toBe(true);
+    expect(result.status).toBe('queued');
+    expect(ctx.tracker.updateIssueState).not.toHaveBeenCalledWith(issue.id, 'In Review');
+    expect(updatedWorkItem?.linear_state).toBe('In Review');
+    expect(updatedWorkItem?.orchestrator_state).toBe('retry_scheduled');
+    expect((orchestrator as any).state.retry_attempts.has(issue.id)).toBe(true);
+  });
+
   it('stopIssue cancels a queued retry without leaving the claim reserved', async () => {
     const issue = makeIssue({ state: 'Todo' });
     const ctx = createOrchestrator(issue);
