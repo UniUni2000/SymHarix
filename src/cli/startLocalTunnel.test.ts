@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   buildTelegramStartupSummary,
+  getStartLocalTunnelProbeRecoveryReason,
   getStartLocalTunnelRecoveryReason,
   resolveStartLocalPort,
   shouldEmitTelegramStartupSummary,
@@ -176,5 +177,27 @@ describe('startLocalTunnel', () => {
       webhook_pending_update_count: 1,
       public_base_url: 'https://bot.example.test',
     }, 'https://bot.example.test')).toBeNull();
+  });
+
+  test('requests local tunnel recovery when the public trycloudflare probe returns 530', () => {
+    expect(getStartLocalTunnelProbeRecoveryReason({
+      expectedPublicBaseUrl: 'https://fresh.trycloudflare.com',
+      status: 530,
+    })).toBe('public tunnel unreachable: status 530');
+  });
+
+  test('does not request probe recovery for reachable or stable non-tunnel URLs', () => {
+    expect(getStartLocalTunnelProbeRecoveryReason({
+      expectedPublicBaseUrl: 'https://fresh.trycloudflare.com',
+      status: 200,
+    })).toBeNull();
+    expect(getStartLocalTunnelProbeRecoveryReason({
+      expectedPublicBaseUrl: 'https://fresh.trycloudflare.com',
+      status: 404,
+    })).toBeNull();
+    expect(getStartLocalTunnelProbeRecoveryReason({
+      expectedPublicBaseUrl: 'https://bot.example.test',
+      status: 530,
+    })).toBeNull();
   });
 });
