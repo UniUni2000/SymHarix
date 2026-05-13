@@ -509,6 +509,91 @@ describe('DefaultSupervisorAgentService', () => {
     expect(analyzeCalls).toBe(0);
   });
 
+  test('falls back to repo profile when read-only Claude returns unstructured output after resolving source cache', async () => {
+    let analyzeCalls = 0;
+    let sourceCalls = 0;
+    let advisorCalls = 0;
+    const agent = new DefaultSupervisorAgentService({
+      resolveRepoProfile: async ({ repoRef, localPath }) => {
+        expect(repoRef).toBe('UniUni2000/test2');
+        expect(localPath).toBe('/tmp/workspaces/uniuni2000__test2/source');
+        return {
+          ...repoProfile,
+          repo_ref: 'UniUni2000/test2',
+          summary: 'Stellar mass-luminosity calculator with Python tests.',
+          project_type: 'python',
+          tech_stack: ['Python'],
+          key_paths: ['README.md', 'stellar_mass_luminosity.py', 'tests'],
+          signals: {
+            ...repoProfile.signals,
+            readme_title: 'Stellar Mass Luminosity',
+          },
+        };
+      },
+      resolveRepoSource: async () => {
+        sourceCalls += 1;
+        return {
+          project_slug: 'test2',
+          repo_ref: 'UniUni2000/test2',
+          configured_local_path: null,
+          analysis_path: '/tmp/workspaces/uniuni2000__test2/source',
+          source_path: '/tmp/workspaces/uniuni2000__test2/source',
+          commit_sha: 'abc123',
+          status: 'ready',
+          last_sync_error: null,
+          updated_at: '2026-05-07T00:00:00.000Z',
+        };
+      },
+      adviseWithReadOnlyClaude: async () => {
+        advisorCalls += 1;
+        return '这个仓库是普通文本，不是结构化 JSON';
+      },
+      analyze: async () => {
+        analyzeCalls += 1;
+        return null;
+      },
+    });
+
+    const result = await agent.respond({
+      localPath: null,
+      repoRef: null,
+      defaultRepoRef: 'UniUni2000/test2',
+      userText: 'test2 仓库是干啥的呢？',
+      projectContext: 'default_project=test2',
+      runtimeContext: {
+        source: 'telegram_chat',
+        defaultProjectSlug: 'test2',
+        activeIssueId: null,
+      },
+      route: {
+        project_slug: 'test2',
+        project_name: null,
+        github_owner: 'UniUni2000',
+        github_repo: 'test2',
+        github_repo_full: 'UniUni2000/test2',
+        local_path: null,
+        cache_key: 'uniuni2000__test2',
+        require_repo_harness: false,
+      },
+    });
+
+    expect(result).toEqual({
+      mode: 'repo_answer',
+      repoRef: 'UniUni2000/test2',
+      answer: [
+        'UniUni2000/test2 主要是：Stellar mass-luminosity calculator with Python tests.',
+        'README: Stellar Mass Luminosity',
+        '类型：python',
+        '技术栈：Python',
+        '关键路径：README.md, stellar_mass_luminosity.py, tests',
+      ].join('\n'),
+      citations: ['README.md', 'stellar_mass_luminosity.py', 'tests'],
+    });
+    expect(sourceCalls).toBe(1);
+    expect(advisorCalls).toBe(1);
+    expect(analyzeCalls).toBe(0);
+  });
+
   test('ordinary chat does not resolve source cache or invoke read-only Claude Code', async () => {
     let sourceCalls = 0;
     let advisorCalls = 0;
