@@ -1919,6 +1919,104 @@ describe('BotAssistantService', () => {
     subscriptions.dispose();
   });
 
+  test('routes capability questions to supervisor runtime before read-only Claude', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    const projectResolver = new TrackerProjectResolutionService(
+      {
+        listProjects: async () => ({
+          projects: [
+            { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' },
+          ],
+        }),
+        findProjectBySlug: async (projectSlug: string) => ({
+          project: projectSlug === 'test2'
+            ? { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' }
+            : null,
+        }),
+      } as any,
+      {
+        test2: {
+          github_owner: 'UniUni2000',
+          github_repo: 'test2',
+          local_path: null,
+        },
+      },
+    );
+    preferences.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-capability-denial',
+      default_project_slug: 'test2',
+    });
+
+    let supervisorRuntimeCalls = 0;
+    let supervisorClaudeCalls = 0;
+    const assistant = new BotAssistantService(
+      runtime,
+      new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver),
+      preferences,
+      pending,
+      projectResolver,
+      { decide: async () => null },
+      () => true,
+      subscriptions,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      {
+        respond: async () => {
+          supervisorRuntimeCalls += 1;
+          return {
+            message: [
+              "I'm your Symphony Runtime Operator Copilot. I can help you manage issues and workflows within the Symphony runtime.",
+              '- Create issues with a title, description, and target project.',
+              '- Stop, retry, close, override, rewrite, or split issues.',
+            ].join('\n'),
+          };
+        },
+      },
+      {
+        respond: async () => {
+          supervisorClaudeCalls += 1;
+          return {
+            message: [
+              'Right now, just **Read** — I can inspect any file in the repo.',
+              "Bash and Edit are both blocked, and orchestrator tools (create_issue, show_card, etc.) aren't reachable.",
+              "Only tool available: **Read**. Can't edit, create issues, run commands, or use orchestrator tools.",
+            ].join('\n'),
+          };
+        },
+      },
+    );
+
+    const response = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-capability-denial' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      'What can u do?',
+    );
+
+    expect(response.message).toContain('Create issues');
+    expect(response.message).toContain('retry, close');
+    expect(response.message).not.toContain('Only tool available');
+    expect(response.message).not.toContain("orchestrator tools (create_issue, show_card, etc.) aren't reachable");
+    expect(supervisorRuntimeCalls).toBe(1);
+    expect(supervisorClaudeCalls).toBe(0);
+
+    subscriptions.dispose();
+  });
+
   test('routes natural-language supersede commands through confirmation before read-only repo Claude', async () => {
     db = new Database(':memory:');
     initializeSchema(db);
@@ -5697,6 +5795,7 @@ describe('BotAssistantService', () => {
     const pending = new BotPendingActionRepository(db);
     const commandService = new BotCommandService(runtime, subscriptions, () => true, preferences);
     const runtimeCalls: string[] = [];
+    const supervisorClaudeCalls: string[] = [];
     const supervisorAgentRuntime = {
       respond: async ({ text }: { text: string }) => {
         runtimeCalls.push(text);
@@ -5726,6 +5825,14 @@ describe('BotAssistantService', () => {
       null,
       null,
       supervisorAgentRuntime as any,
+      {
+        respond: async ({ text }: { text: string }) => {
+          supervisorClaudeCalls.push(text);
+          return {
+            message: `read-only Claude handled: ${text}`,
+          };
+        },
+      },
     );
 
     const response = await assistant.respondToText(
@@ -5749,9 +5856,21 @@ describe('BotAssistantService', () => {
       'Hello',
     );
 
-    expect(greeting.message).toContain('Hello.');
-    expect(greeting.message).not.toContain('你好');
-    expect(runtimeCalls).toEqual(['what can you do?']);
+    expect(greeting.message).toBe('runtime handled: Hello');
+    expect(runtimeCalls).toEqual(['what can you do?', 'Hello']);
+
+    const repoQuestion = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-runtime' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      '这个项目是做什么的？',
+    );
+
+    expect(repoQuestion.message).toBe('runtime handled: 这个项目是做什么的？');
+    expect(runtimeCalls).toEqual(['what can you do?', 'Hello', '这个项目是做什么的？']);
+    expect(supervisorClaudeCalls).toEqual([]);
 
     const slash = await assistant.respondToText(
       {
@@ -5763,7 +5882,8 @@ describe('BotAssistantService', () => {
     );
 
     expect(slash.message).toContain('INT-31');
-    expect(runtimeCalls).toEqual(['what can you do?']);
+    expect(runtimeCalls).toEqual(['what can you do?', 'Hello', '这个项目是做什么的？']);
+    expect(supervisorClaudeCalls).toEqual([]);
 
     subscriptions.dispose();
     db.close();
