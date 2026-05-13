@@ -163,9 +163,14 @@ def test_review_hook_reports_merge_blocked_feedback_without_faking_rejection(tmp
     assert hook.last_review_decision == "MERGE_BLOCKED"
     assert hook.last_pr_status == "merge_blocked"
     assert hook.last_review_report is not None
-    assert "Review passed, but the merge failed" in hook.last_review_report
+    assert "The orchestrator has stopped this task" in hook.last_review_report
     assert "Branch protection blocked merge" in hook.last_review_report
-    assert hook.store.get_current_state_enum().value == "IN_PROGRESS"
+    assert hook.last_delivery_code == "merge_blocked"
+    assert hook.store.get_current_state_enum().value == "ERROR"
+    state = hook.store.get_state()
+    assert state["metadata"]["merge_blocked"] is True
+    assert state["metadata"]["merge_block_reason"] == "Branch protection blocked merge"
+    assert "Merge blocked: Branch protection blocked merge" in state["error"]
 
 
 def test_review_hook_runs_review_checks_before_submitting_native_review(tmp_path, monkeypatch):
