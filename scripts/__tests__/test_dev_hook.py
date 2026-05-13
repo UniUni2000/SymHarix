@@ -236,6 +236,70 @@ def test_dev_hook_commits_uncommitted_product_changes_before_pr(tmp_path, monkey
     hook.github.create_pull_request.assert_called_once()
     assert ("commit", "--no-verify", "-m", "feat(INT-25): prepare product changes for review") in git_calls
     assert ("push", "-u", "origin", "HEAD:feature/int-25") in git_calls
+    assert ("add", "--all", "--", ".github/workflows/test.yml") in git_calls
+
+
+def test_dev_hook_stages_only_product_paths_when_runtime_dir_is_ignored(tmp_path, monkeypatch):
+    hook = make_hook(tmp_path)
+    hook.github.pr_exists.return_value = None
+    hook.github.create_pull_request.return_value = {
+        "html_url": "https://github.com/owner/repo/pull/25",
+        "number": 25,
+    }
+
+    git_calls: list[tuple[str, ...]] = []
+    committed = False
+
+    def fake_run(cmd, cwd, capture_output, text, check):
+        nonlocal committed
+        assert cwd == hook.store.symphony_dir.path.parent
+        assert cmd[0] == "git"
+        git_calls.append(tuple(cmd[1:]))
+
+        result = MagicMock()
+        result.returncode = 0
+        result.stderr = ""
+        result.stdout = ""
+
+        command = tuple(cmd[1:])
+        if command == ("rev-parse", "--verify", "refs/remotes/origin/main"):
+            result.stdout = "origin-main-sha\n"
+        elif command == WORKFLOW_DIFF_COMMAND:
+            result.stdout = ""
+        elif command[0:2] == ("reset", "--"):
+            result.stdout = ""
+        elif command[0:3] == ("add", "--all", "--"):
+            if "." in command[3:] or any(path.startswith(".symphony") for path in command[3:]):
+                result.returncode = 1
+                result.stderr = "The following paths are ignored by one of your .gitignore files:\n.symphony\n"
+            else:
+                result.stdout = ""
+        elif command == ("diff", "--cached", "--name-only"):
+            result.stdout = "test.py\n"
+        elif command == ("commit", "--no-verify", "-m", "feat(INT-25): prepare product changes for review"):
+            committed = True
+            result.stdout = "[feature/int-25 commit-sha] feat(INT-25): prepare product changes for review\n"
+        elif command == ("rev-list", "--count", "refs/remotes/origin/main..HEAD"):
+            result.stdout = "1\n" if committed else "0\n"
+        elif command == ("rev-parse", "HEAD"):
+            result.stdout = "committed-head-sha\n"
+        elif command == ("rev-parse", "--verify", "refs/remotes/origin/feature/int-25"):
+            result.returncode = 128
+            result.stderr = "fatal: Needed a single revision\n"
+        elif command == ("push", "-u", "origin", "HEAD:feature/int-25"):
+            result.stdout = "branch set up to track origin/feature/int-25\n"
+        elif command == ("status", "--short"):
+            result.stdout = "?? test.py\n?? .symphony/state.json\n"
+        else:
+            raise AssertionError(f"Unexpected git command: {cmd}")
+
+        return result
+
+    monkeypatch.setattr("scripts.hooks.dev.subprocess.run", fake_run)
+
+    assert hook.run() is True
+    hook.github.create_pull_request.assert_called_once()
+    assert ("add", "--all", "--", "test.py") in git_calls
 
 
 def test_dev_hook_commits_gitignore_when_ignored_cache_dirs_exist(tmp_path):
