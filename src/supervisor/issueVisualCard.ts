@@ -222,44 +222,6 @@ function detailChips(issue: RuntimeIssueView): string[] {
   ].filter((item): item is string => Boolean(item));
 }
 
-function stageBadgeLabel(issue: RuntimeIssueView, locale: RuntimeLocale): string {
-  if (isCanceled(issue)) return textForLocale(locale, '阶段 · 已取消', 'STAGE · CANCELLED');
-  if (isDone(issue)) return textForLocale(locale, '阶段 · 交付完成', 'STAGE · DONE');
-  const review = issue.phase === 'REVIEW' || /review/i.test(issue.tracker_state) || issue.orchestrator_state === 'review_running';
-  const dev = issue.phase === 'DEV' || issue.session || issue.orchestrator_state === 'dev_running';
-  if (isFailed(issue) || issue.actions.can_retry) {
-    if (review) return textForLocale(locale, '阶段 · REVIEW 需处理', 'STAGE · REVIEW NEEDS ACTION');
-    if (dev) return textForLocale(locale, '阶段 · DEV 需处理', 'STAGE · DEV NEEDS ACTION');
-    return textForLocale(locale, '阶段 · 需处理', 'STAGE · NEEDS ACTION');
-  }
-  if (review) return textForLocale(locale, '阶段 · REVIEW 中', 'STAGE · REVIEW');
-  if (dev) return textForLocale(locale, '阶段 · DEV 中', 'STAGE · DEV');
-  return textForLocale(locale, '阶段 · 准备中', 'STAGE · PREPARING');
-}
-
-function stageBadgeTone(issue: RuntimeIssueView): 'green' | 'blue' | 'yellow' | 'neutral' {
-  if (isDone(issue)) return 'green';
-  if (isFailed(issue) || issue.actions.can_retry) return 'yellow';
-  if (issue.phase === 'REVIEW' || /review/i.test(issue.tracker_state) || issue.orchestrator_state === 'review_running') return 'blue';
-  if (issue.phase === 'DEV' || issue.session || issue.orchestrator_state === 'dev_running') return 'yellow';
-  return 'neutral';
-}
-
-function stageBadgeSvg(label: string, tone: 'green' | 'blue' | 'yellow' | 'neutral', x: number, y: number): string {
-  const colors = tone === 'green'
-    ? { fill: '#0D382A', stroke: '#1D6D4B', text: '#69E6A3' }
-    : tone === 'blue'
-      ? { fill: '#102B44', stroke: '#2B5D85', text: '#89CFFF' }
-      : tone === 'yellow'
-        ? { fill: '#3B3420', stroke: '#75612C', text: '#FFD166' }
-        : { fill: '#141C25', stroke: '#2A3949', text: '#B8C7D5' };
-  const width = Math.max(236, Math.min(430, Math.round(visualTextUnits(label) * 18 + 56)));
-  return `
-    <rect x="${x}" y="${y}" width="${width}" height="54" rx="17" fill="${colors.fill}" stroke="${colors.stroke}" stroke-width="2.4"/>
-    <text x="${x + 28}" y="${y + 35}" fill="${colors.text}" font-size="23" font-weight="880">${escapeXml(label)}</text>
-  `;
-}
-
 function fileDisplayName(path: string | null | undefined): string {
   const normalized = (path ?? '').split(/[\\/]/).filter(Boolean);
   return normalized.at(-1) ?? path ?? '';
@@ -383,15 +345,49 @@ function signalRowSvg(params: {
   `;
 }
 
-function chipSvg(chip: string, x: number, y: number, width: number, tone: 'green' | 'blue' | 'neutral'): string {
-  const colors = tone === 'green'
-    ? { fill: '#0D382A', stroke: '#1D6D4B', text: '#59E69B' }
-    : tone === 'blue'
-      ? { fill: '#102B44', stroke: '#2B5D85', text: '#6BB4FF' }
-      : { fill: '#141C25', stroke: '#2A3949', text: '#B8C7D5' };
+type ChipTone = 'green' | 'blue' | 'yellow' | 'neutral';
+
+function chipColors(tone: ChipTone): { fill: string; stroke: string; text: string } {
+  if (tone === 'green') {
+    return { fill: '#0D382A', stroke: '#1D6D4B', text: '#59E69B' };
+  }
+  if (tone === 'blue') {
+    return { fill: '#102B44', stroke: '#2B5D85', text: '#6BB4FF' };
+  }
+  if (tone === 'yellow') {
+    return { fill: '#332B16', stroke: '#6F5C25', text: '#FFD166' };
+  }
+  return { fill: '#141C25', stroke: '#2A3949', text: '#B8C7D5' };
+}
+
+function statusChipTone(issue: RuntimeIssueView): ChipTone {
+  if (isDone(issue)) return 'green';
+  if (isFailed(issue) || issue.actions.can_retry || issue.active_decision_kind || issue.governance_status === 'blocked') return 'yellow';
+  if (issue.phase === 'REVIEW' || /review/i.test(issue.tracker_state)) return 'blue';
+  if (issue.phase === 'DEV' || issue.session || issue.orchestrator_state === 'dev_running') return 'green';
+  return 'neutral';
+}
+
+function chipSvg(chip: string, x: number, y: number, width: number, tone: ChipTone): string {
+  const colors = chipColors(tone);
   return `
     <rect x="${x}" y="${y}" width="${width}" height="54" rx="16" fill="${colors.fill}" stroke="${colors.stroke}" stroke-width="2"/>
     <text x="${x + 24}" y="${y + 35}" fill="${colors.text}" font-size="22" font-weight="820">${escapeXml(compact(chip, Math.max(8, Math.floor(width / 15))))}</text>
+  `;
+}
+
+function statusChipSvg(chip: string, x: number, y: number, width: number, tone: ChipTone): string {
+  const colors = tone === 'green'
+    ? { fill: '#0C3F2C', stroke: '#2EBA74', text: '#72F0AA', dot: '#56E39F' }
+    : tone === 'blue'
+      ? { fill: '#102F4D', stroke: '#2F94FF', text: '#9BD5FF', dot: '#2F94FF' }
+      : tone === 'yellow'
+        ? { fill: '#3A2D14', stroke: '#F3B53F', text: '#FFD166', dot: '#FFD166' }
+        : { fill: '#141C25', stroke: '#3A4B5C', text: '#D0DCE7', dot: '#94A3B8' };
+  return `
+    <rect x="${x}" y="${y - 2}" width="${width}" height="58" rx="18" fill="${colors.fill}" stroke="${colors.stroke}" stroke-width="3"/>
+    <circle cx="${x + 30}" cy="${y + 27}" r="7" fill="${colors.dot}"/>
+    <text x="${x + 52}" y="${y + 35}" fill="${colors.text}" font-size="23" font-weight="880">${escapeXml(compact(chip, Math.max(8, Math.floor((width - 32) / 14))))}</text>
   `;
 }
 
@@ -459,9 +455,8 @@ export function buildSupervisorIssueVisualCardSvg(issue: RuntimeIssueView): stri
   const next = nextSignal(issue);
   const evidence = evidenceSignal(issue, locale);
   const status = statusLabel(issue, locale);
-  const stage = stageBadgeLabel(issue, locale);
   const chipRow = [
-    chipSvg(status, 82, chipY, 196, isDone(issue) ? 'green' : issue.phase === 'REVIEW' ? 'blue' : 'neutral'),
+    statusChipSvg(status, 82, chipY, 196, statusChipTone(issue)),
     chips[0] ? chipSvg(chips[0], 300, chipY, 180, 'blue') : '',
     chips[1] ? chipSvg(chips[1], 502, chipY, 252, 'blue') : '',
     chipSvg(evidence, 776, chipY, 222, isDone(issue) ? 'green' : 'neutral'),
@@ -498,7 +493,6 @@ export function buildSupervisorIssueVisualCardSvg(issue: RuntimeIssueView): stri
   <text x="899" y="132" text-anchor="middle" fill="#6BB4FF" font-size="22" font-weight="820">${escapeXml(textForLocale(locale, '打开 Mini App', 'Open Mini App'))}</text>
 
   <text x="82" y="226" fill="#2F94FF" font-size="34" font-weight="850">${escapeXml(issue.identifier)}</text>
-  ${stageBadgeSvg(stage, stageBadgeTone(issue), 226, 189)}
   ${textLines({
     x: 82,
     y: titleY,
@@ -564,7 +558,7 @@ export function buildSupervisorIssueVisualCard(issue: RuntimeIssueView): Supervi
     issue.active_pr_number,
   ].filter(Boolean).join('|');
   const repo = issue.github_repo ? ` · ${compact(issue.github_repo, 34)}` : '';
-  const status = `${stageBadgeLabel(issue, locale)} · ${statusLabel(issue, locale)} · ${progressValue(issue)}%${repo}`;
+  const status = `${statusLabel(issue, locale)} · ${progressValue(issue)}%${repo}`;
   const latest = `${textForLocale(locale, '最新', 'Latest')}: ${compact(latestSignal(issue), 70)}`;
   const next = `${textForLocale(locale, '下一步', 'Next')}: ${compact(nextSignal(issue), 70)}`;
   return {
