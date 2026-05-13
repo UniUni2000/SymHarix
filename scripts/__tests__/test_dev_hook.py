@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -137,6 +138,46 @@ def test_dev_hook_reports_dirty_workspace_when_product_changes_cannot_be_staged(
     )
 
 
+def test_dev_hook_marks_product_staging_failure_with_delivery_code(tmp_path, monkeypatch):
+    hook = make_hook(tmp_path)
+    hook.github.pr_exists.return_value = None
+
+    def fake_run(cmd, cwd, capture_output, text, check):
+        assert cwd == hook.store.symphony_dir.path.parent
+        assert cmd[0] == "git"
+
+        result = MagicMock()
+        result.returncode = 0
+        result.stderr = ""
+        result.stdout = ""
+
+        command = tuple(cmd[1:])
+        if command == ("rev-parse", "--verify", "refs/remotes/origin/main"):
+            result.stdout = "origin-main-sha\n"
+        elif command == WORKFLOW_DIFF_COMMAND:
+            result.stdout = ""
+        elif command == ("rev-list", "--count", "refs/remotes/origin/main..HEAD"):
+            result.stdout = "0\n"
+        elif command == ("status", "--short"):
+            result.stdout = "?? .gitignore\n?? physics.py\n"
+        elif command[0:2] == ("reset", "--"):
+            result.stdout = ""
+        elif command[0:3] == ("add", "--all", "--"):
+            result.returncode = 1
+            result.stderr = "The following paths are ignored by one of your .gitignore files:\n.mypy_cache\n"
+        else:
+            raise AssertionError(f"Unexpected git command: {cmd}")
+
+        return result
+
+    monkeypatch.setattr("scripts.hooks.dev.subprocess.run", fake_run)
+
+    assert hook.run() is False
+    assert hook.last_delivery_code == "product_staging_failed"
+    assert "Failed to stage product changes for feature/int-25" in hook.store.get_state()["error"]
+    assert ".mypy_cache" in (hook.last_delivery_summary or "")
+
+
 def test_dev_hook_commits_uncommitted_product_changes_before_pr(tmp_path, monkeypatch):
     hook = make_hook(tmp_path)
     hook.github.pr_exists.return_value = None
@@ -195,6 +236,48 @@ def test_dev_hook_commits_uncommitted_product_changes_before_pr(tmp_path, monkey
     hook.github.create_pull_request.assert_called_once()
     assert ("commit", "--no-verify", "-m", "feat(INT-25): prepare product changes for review") in git_calls
     assert ("push", "-u", "origin", "HEAD:feature/int-25") in git_calls
+
+
+def test_dev_hook_commits_gitignore_when_ignored_cache_dirs_exist(tmp_path):
+    hook = make_hook(tmp_path)
+    repo = hook.store.symphony_dir.path.parent
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    git("init", "-b", "main")
+    git("config", "user.name", "Symphony Test")
+    git("config", "user.email", "symphony-test@example.com")
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    git("add", "README.md")
+    git("commit", "-m", "Initial commit")
+
+    (repo / ".gitignore").write_text(".mypy_cache/\n.pytest_cache/\n", encoding="utf-8")
+    (repo / "physics.py").write_text("__all__ = ['luminosity']\n", encoding="utf-8")
+    (repo / ".mypy_cache").mkdir()
+    (repo / ".mypy_cache" / "cache.json").write_text("{}", encoding="utf-8")
+    (repo / ".pytest_cache").mkdir()
+    (repo / ".pytest_cache" / "nodeids").write_text("[]", encoding="utf-8")
+
+    assert hook._commit_product_changes_if_needed() is True
+
+    committed_paths = set(git("show", "--name-only", "--format=", "HEAD").stdout.splitlines())
+    assert ".gitignore" in committed_paths
+    assert "physics.py" in committed_paths
+    assert ".mypy_cache/cache.json" not in committed_paths
+    assert ".pytest_cache/nodeids" not in committed_paths
+    assert not any(path.startswith(".symphony/") for path in committed_paths)
+
+    status = git("status", "--short", "--ignored").stdout
+    assert "!! .mypy_cache/" in status
+    assert "!! .pytest_cache/" in status
+    assert "?? .symphony/" in status
 
 
 def test_dev_hook_ignores_private_runtime_and_cache_changes_when_no_product_diff(tmp_path, monkeypatch):
