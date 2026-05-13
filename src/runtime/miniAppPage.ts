@@ -5,6 +5,11 @@ import type {
   RuntimeToolActivity,
 } from './types';
 import { localizeKnownRuntimeText, type RuntimeLocale } from '../i18n/locale';
+import {
+  isRuntimeIssueCompleted,
+  isRuntimeIssueRetryableFailure,
+  runtimeIssueBaseProgress,
+} from './issueProgress';
 
 export interface RuntimeMiniAppActivityFeedItem {
   kind: 'tool' | 'file' | 'summary';
@@ -107,17 +112,11 @@ function compactText(value: string | null | undefined, maxLength = 520): string 
 }
 
 function isRetryableRuntimeMiniAppFailure(issue: RuntimeIssueView): boolean {
-  return Boolean(
-    issue.actions?.can_retry &&
-    (issue.delivery_state === 'delivery_failed' || issue.delivery_code || issue.orchestrator_state === 'failed'),
-  );
+  return isRuntimeIssueRetryableFailure(issue);
 }
 
 export function isRuntimeMiniAppIssueCompleted(issue: RuntimeIssueView): boolean {
-  return issue.delivery_state === 'completed' ||
-    issue.orchestrator_state === 'completed' ||
-    /^(done|completed)$/i.test(issue.tracker_state || '') ||
-    issue.supervisor_session_state === 'completed';
+  return isRuntimeIssueCompleted(issue);
 }
 
 function runtimeMiniAppStateLabel(issue: RuntimeIssueView): string {
@@ -648,13 +647,7 @@ export function buildRuntimeMiniAppIssuePresentation(issue: RuntimeIssueView): R
     };
   }
 
-  const progress = issue.phase === 'REVIEW' || issue.orchestrator_state === 'review_running'
-    ? 72
-    : issue.session || issue.orchestrator_state === 'dev_running'
-      ? 42
-      : issue.governance_thread_state === 'waiting_on_child'
-        ? 34
-        : 18;
+  const progress = runtimeIssueBaseProgress(issue);
   const reviewActive = issue.phase === 'REVIEW' || issue.orchestrator_state === 'review_running';
   return {
     mode: 'live',

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { buildRuntimeMiniAppIssuePresentation } from '../runtime/miniAppPage';
 import type { RuntimeIssueView } from '../runtime/types';
 import { buildSupervisorIssueVisualCardSvg } from './issueVisualCard';
 
@@ -112,6 +113,54 @@ describe('issue visual cards', () => {
     expect(svg).toContain('100%');
     expect(svg).toContain('font-size="58"');
     expect(svg).toContain('x="252"');
+  });
+
+  test('keeps preview card progress aligned with the Mini App presentation', () => {
+    const cases: Array<Partial<RuntimeIssueView>> = [
+      {
+        phase: 'DEV',
+        tracker_state: 'Todo',
+        orchestrator_state: 'mapping',
+        delivery_state: null,
+        session: null,
+      },
+      {
+        phase: 'DEV',
+        tracker_state: 'In Progress',
+        orchestrator_state: 'dev_running',
+        delivery_state: null,
+        session: null,
+      },
+      {
+        phase: 'REVIEW',
+        tracker_state: 'In Progress',
+        orchestrator_state: 'review_running',
+        delivery_state: null,
+        session: null,
+      },
+      {
+        phase: 'DEV',
+        tracker_state: 'In Progress',
+        orchestrator_state: 'failed',
+        delivery_state: 'delivery_failed',
+        session: null,
+        actions: {
+          can_stop: false,
+          can_retry: true,
+          can_override_governance: false,
+          can_rewrite_governance: false,
+          can_split_governance: false,
+          can_open_pr: false,
+        },
+      },
+    ];
+
+    for (const overrides of cases) {
+      const view = issue(overrides);
+      const expectedProgress = buildRuntimeMiniAppIssuePresentation(view).progress;
+      const svg = buildSupervisorIssueVisualCardSvg(view);
+      expect(svg).toContain(`>${expectedProgress}%</text>`);
+    }
   });
 
   test('omits row detail when the latest signal wraps to two lines', () => {
