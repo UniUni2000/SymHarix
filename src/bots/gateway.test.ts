@@ -6,6 +6,7 @@ import type { RuntimeControlPlane } from '../runtime/types';
 import {
   BotTransportEventRepository,
   BotConversationPreferenceRepository,
+  BotIssueFollowupRepository,
   BotFollowupMessageStateRepository,
   BotPendingActionRepository,
   SupervisorPendingActionRepository,
@@ -152,6 +153,7 @@ describe('DefaultBotGateway', () => {
   const originalFetch = globalThis.fetch;
   const originalRepair = BotFollowupRepairService.prototype.repair;
   const originalPublicBaseUrl = process.env.SYMPHONY_PUBLIC_BASE_URL;
+  const originalTelegramDisableProxy = process.env.SYMPHONY_TELEGRAM_DISABLE_PROXY;
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
@@ -160,6 +162,11 @@ describe('DefaultBotGateway', () => {
       delete process.env.SYMPHONY_PUBLIC_BASE_URL;
     } else {
       process.env.SYMPHONY_PUBLIC_BASE_URL = originalPublicBaseUrl;
+    }
+    if (originalTelegramDisableProxy === undefined) {
+      delete process.env.SYMPHONY_TELEGRAM_DISABLE_PROXY;
+    } else {
+      process.env.SYMPHONY_TELEGRAM_DISABLE_PROXY = originalTelegramDisableProxy;
     }
   });
 
@@ -202,6 +209,270 @@ describe('DefaultBotGateway', () => {
     );
 
     expect(repairCalls).toBe(0);
+    gateway.dispose();
+  });
+
+  test('treats an active Supervisor session card as an active runtime panel', () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const sessions = new SupervisorSessionRepository(db);
+    sessions.create({
+      id: 'session-1',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'executing',
+      repo_ref: 'test2',
+      intake_mode: 'plan_then_approve',
+      approval_mode: 'explicit_user_approval',
+      plan_card: null,
+      root_issue_id: 'issue-1',
+      last_message_id: 'msg-1',
+      last_card_key: 'session|session-1|v1|executing',
+    });
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: null,
+        webhookSecret: null,
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        supervisorSessionRepository: sessions,
+        startupRepairDelayMs: 10_000,
+      },
+    );
+
+    expect((gateway as any).hasActiveRuntimePanel('chat-1')).toBe(true);
+
+    gateway.dispose();
+    db.close();
+  });
+
+  test('holds the runtime issue card conversation lock until the Telegram user-reply card is delivered', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const preferences = new BotConversationPreferenceRepository(db);
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+    preferences.upsert({
+      transport: 'telegram',
+      conversation_id: '42',
+      default_project_slug: 'test2',
+    });
+
+    const baseRuntime = createRuntimeControlPlane();
+    const listeners = new Set<(event: { type: 'issue'; data: any }) => void>();
+    const createdIssue = {
+      ...baseRuntime.getOverview().issues[0]!,
+      issue_id: 'issue-2',
+      work_item_id: 'issue-2',
+      identifier: 'INT-2',
+      title: 'Add smoke test',
+      tracker_state: 'In Progress',
+      orchestrator_state: 'dev_running',
+      github_repo: 'acme/repo',
+      github_issue_number: 12,
+      updated_at: '2026-01-01T00:00:00.000Z',
+      actions: {
+        can_stop: true,
+        can_retry: false,
+        can_override_governance: false,
+        can_rewrite_governance: false,
+        can_split_governance: false,
+        can_open_pr: false,
+      },
+    };
+    const runtime: RuntimeControlPlane & { emitIssue: () => void } = {
+      ...baseRuntime,
+      getOverview: () => ({
+        ...baseRuntime.getOverview(),
+        issues: [createdIssue],
+      }),
+      getIssue: (id: string) => ['issue-2', 'INT-2'].includes(id) ? createdIssue as any : baseRuntime.getIssue(id),
+      createIssue: async (input) => ({
+        accepted: true,
+        status: 'accepted',
+        message: `Created ${input.title}`,
+        issue_id: 'issue-2',
+        issue_identifier: 'INT-2',
+        issue: {
+          ...createdIssue,
+          title: input.title,
+        } as any,
+      }),
+      subscribe: (listener) => {
+        listeners.add(listener as (event: { type: 'issue'; data: any }) => void);
+        return () => listeners.delete(listener as (event: { type: 'issue'; data: any }) => void);
+      },
+      emitIssue: () => {
+        for (const listener of listeners) {
+          listener({ type: 'issue', data: createdIssue });
+        }
+      },
+    };
+
+    const requests: Array<{ url: string; body: BodyInit | null | undefined }> = [];
+    let releaseFirstPhoto: (() => void) | null = null;
+    let markFirstPhotoStarted: (() => void) | null = null;
+    const firstPhotoStarted = new Promise<void>((resolve) => {
+      markFirstPhotoStarted = resolve;
+    });
+    const firstPhotoGate = new Promise<void>((resolve) => {
+      releaseFirstPhoto = resolve;
+    });
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      requests.push({
+        url,
+        body: init?.body,
+      });
+      if (url.includes('sendPhoto')) {
+        markFirstPhotoStarted?.();
+        await firstPhotoGate;
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: requests.length } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    process.env.SYMPHONY_TELEGRAM_DISABLE_PROXY = '1';
+
+    const gateway = new DefaultBotGateway(
+      runtime,
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        preferencesRepository: preferences,
+        followupRepository: followups,
+        followupMessageStateRepository: messageStates,
+        startupRepairDelayMs: 10_000,
+      },
+    );
+
+    const result = await gateway.handleTelegramWebhook(
+      {
+        message: {
+          message_id: 101,
+          text: '/new Add smoke test',
+          chat: { id: 42 },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(result.status).toBe(200);
+    await Promise.race([
+      firstPhotoStarted,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(
+        `sendPhoto was not called: ${requests.map((request) => request.url).join(', ')}`,
+      )), 1_000)),
+    ]);
+    expect(requests.filter((request) => request.url.includes('sendPhoto'))).toHaveLength(1);
+
+    runtime.emitIssue();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(requests.filter((request) => request.url.includes('sendPhoto'))).toHaveLength(1);
+    releaseFirstPhoto?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(messageStates.findByConversationIssue({
+      transport: 'telegram',
+      conversation_id: '42',
+      issue_id: 'issue-2',
+    })).toEqual(expect.objectContaining({
+      message_id: '1',
+      card_kind: 'runtime_issue',
+      card_state: 'open',
+    }));
+
+    gateway.dispose();
+    db.close();
+  });
+
+  test('does not retry Telegram photo final sends because visible sends are not idempotent', async () => {
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: null,
+        webhookSecret: null,
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        startupRepairDelayMs: 10_000,
+      },
+    );
+    let attempts = 0;
+    (gateway as any).telegramNotifier = {
+      sendMessage: async () => {
+        attempts += 1;
+        throw new Error('network failed after visible send');
+      },
+    };
+
+    await expect((gateway as any).sendTelegramFinalMessageWithRetry(
+      {
+        transport: 'telegram',
+        conversation_id: '42',
+      },
+      {
+        text: 'Issue Card · INT-2',
+        photo: {
+          bytes: new Uint8Array([1]),
+          filename: 'issue-card.png',
+          content_type: 'image/png',
+        },
+      },
+      {
+        context: {
+          transport: 'telegram',
+          recipient: {
+            transport: 'telegram',
+            conversation_id: '42',
+          },
+          identity: {
+            user_id: '9',
+            display_name: 'alice',
+          },
+        },
+        isCommand: false,
+      },
+    )).rejects.toThrow('network failed after visible send');
+    expect(attempts).toBe(1);
+
     gateway.dispose();
   });
 
