@@ -1,5 +1,6 @@
 import { Resvg } from '@resvg/resvg-js';
 import type { BotTransportPhoto } from '../bots/types';
+import { runtimeIssueProgressValue } from '../runtime/issueProgress';
 import type { RuntimeIssueView } from '../runtime/types';
 import { inferRuntimeLocaleFromText, localizeKnownRuntimeText, type RuntimeLocale } from '../i18n/locale';
 
@@ -309,11 +310,7 @@ function nextSignal(issue: RuntimeIssueView): string {
 }
 
 function progressValue(issue: RuntimeIssueView): number {
-  if (isDone(issue) || isCanceled(issue)) return 100;
-  if (isFailed(issue)) return 76;
-  if (issue.phase === 'REVIEW' || /review/i.test(issue.tracker_state)) return 72;
-  if (issue.phase === 'DEV') return 66;
-  return 42;
+  return runtimeIssueProgressValue(issue);
 }
 
 function evidenceSignal(issue: RuntimeIssueView, locale: RuntimeLocale): string {
