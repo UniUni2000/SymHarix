@@ -107,6 +107,28 @@ export function getStartLocalTunnelRecoveryReason(telegram: {
   return null;
 }
 
+export function getStartLocalTunnelProbeRecoveryReason(params: {
+  expectedPublicBaseUrl?: string | null;
+  status?: number | null;
+  errorMessage?: string | null;
+}): string | null {
+  const expectedBaseUrl = normalizeEnvValue(params.expectedPublicBaseUrl ?? undefined);
+  if (!isEphemeralTryCloudflareUrl(expectedBaseUrl)) {
+    return null;
+  }
+
+  const errorMessage = normalizeEnvValue(params.errorMessage ?? undefined);
+  if (errorMessage) {
+    return `public tunnel unreachable: ${errorMessage}`;
+  }
+
+  if (typeof params.status === 'number' && params.status >= 500) {
+    return `public tunnel unreachable: status ${params.status}`;
+  }
+
+  return null;
+}
+
 export function shouldProvisionStartLocalTunnel(
   env: Record<string, string | undefined>,
 ): boolean {

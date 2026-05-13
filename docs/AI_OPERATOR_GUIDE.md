@@ -1,88 +1,114 @@
-# AI Operator Guide
+# AI Operator Guide / AI 操作者指南
 
-This guide is for AI agents or maintainers working inside the symphonyness repository. It states the operating rules that are easy to forget when debugging live Supervisor/Telegram flows.
+This guide is for maintainers and AI agents working inside this repository. It focuses on live Supervisor, Telegram, Runtime Deck, and delivery debugging.
 
-## Prime Directive
+这份指南面向在本仓库内工作的维护者和 AI agent，重点覆盖 Supervisor、Telegram、Runtime Deck 和交付链路的实时排障。
 
-Respect the operator's configured target. symphonyness can create issues, branches, PRs, comments, and tracker state transitions in the routed repository, so verify `.env` and `WORKFLOW.md` before any live test.
+## Prime Directive / 首要原则
 
-The examples in this guide use placeholder values:
+Respect the operator's configured target. symphonyness can create issues, branches, PRs, comments, and tracker state transitions in the routed repository.
+
+必须尊重操作者配置的目标仓库。symphonyness 可以在路由仓库中创建 issue、branch、PR、comment，并修改 tracker 状态。
+
+Before any live test, check:
+
+任何 live test 前先检查：
+
+```bash
+rg -n "SYMPHONY_TRACKER_PROJECT_SLUG|repositories:|routing:|github_owner|github_repo" .env WORKFLOW.md
+```
+
+Expected example:
+
+示例期望：
 
 ```text
 Linear project slug: sample-project
 GitHub repo: acme/demo-app
 ```
 
-Before any live test, check:
+Only run live verification against a repository where automated issues, branches, PRs, comments, and cleanup are allowed.
 
-```bash
-rg -n "SYMPHONY_TRACKER_PROJECT_SLUG|repositories:|routing:|github_owner|github_repo" .env WORKFLOW.md
-```
+只在允许自动创建 issue、branch、PR、comment 和清理动作的仓库上运行 live verification。
 
-Expected:
-
-- `.env` default project is `sample-project`.
-- `WORKFLOW.md -> repositories.routing` maps `sample-project` to `acme/demo-app`.
-- The route points to the repository the operator intends to use for this run.
-
-## What The System Is
+## What The System Is / 系统边界
 
 symphonyness is a local control plane with a Telegram-first Supervisor.
 
-The Supervisor is not simply a model call and not a Claude Code instance. It is a durable state machine plus an optional LLM brain:
+symphonyness 是一个带 Telegram-first Supervisor 的本地控制平面。
 
-- Session state and approvals live in SQLite.
-- Telegram is the clarification and approval surface.
-- Linear/GitHub are records and delivery surfaces.
-- Orchestrator still owns dispatch, retry, dev/review post-processing, delivery cleanup.
-- Claude Code does code edits through `scripts/claude-adapter.cjs`.
+- Telegram is the main clarification and approval surface.
+  Telegram 是主要澄清和审批入口。
+- Runtime Deck is the local diagnostics and control surface.
+  Runtime Deck 是本地诊断和控制界面。
+- Linear and GitHub are records and delivery surfaces.
+  Linear 和 GitHub 是记录与交付界面。
+- Orchestrator owns dispatch, retry, dev/review handoff, delivery cleanup, and repair.
+  Orchestrator 负责派发、重试、开发/评审交接、交付清理和修复。
+- Claude Code-compatible execution runs through `scripts/claude-adapter.cjs`.
+  Claude Code 兼容执行链路通过 `scripts/claude-adapter.cjs` 运行。
 
-## Safe Startup
+The Supervisor is not just a model call and not just a Claude Code process. It is durable session state plus optional LLM and read-only repo-understanding paths.
 
-Use:
+Supervisor 不是简单的模型调用，也不只是一个 Claude Code 进程。它是持久化 session 状态，加上可选的 LLM 与只读仓库理解路径。
+
+## Safe Startup / 安全启动
+
+Preferred local path:
+
+推荐本地路径：
 
 ```bash
 bun run setup:local
 bun run start:local
 ```
 
-`start:local` reruns the non-destructive setup guard before starting the server. Use plain `bun run start` only when you intentionally want to skip that guard.
-
 Stop:
+
+停止：
 
 ```bash
 bun run stop
 ```
 
-Use another port only when `3000` is already occupied:
+Use another port only when `3000` is busy:
+
+只有 `3000` 被占用时才换端口：
 
 ```bash
-PORT=4000 bun run start
+PORT=4000 bun run start:local
 ```
 
 If startup behaves strangely, inspect before changing code:
 
+启动异常时，先诊断再改代码：
+
 ```bash
 bun run health
 curl http://localhost:3000/api/v1/runtime/overview
+curl http://localhost:3000/api/v1/bots/manifest
 ```
 
-For Telegram specifically, verify that `/api/v1/bots/manifest` reports:
+For Telegram, verify:
 
-- `data.transports.telegram.health = healthy`
-- a non-empty `data.transports.telegram.webhook_url`
-- `data.transports.telegram.mini_app_base_url` matching the public HTTPS base URL
+验证 Telegram 时检查：
 
-If Telegram replies but this manifest has an empty webhook URL, the reply is coming from another bot process or deployment that is using the same token.
+- `data.transports.telegram.health`
+- `data.transports.telegram.webhook_url`
+- `data.transports.telegram.public_base_url`
+- `data.transports.telegram.mini_app_base_url`
+- `data.transports.telegram.webhook_pending_update_count`
+- `data.transports.telegram.webhook_last_error_message`
 
-For natural-language failures, distinguish provider config from Telegram ingress:
+If Telegram replies but the local manifest has an empty webhook URL, another bot process or deployment may be answering with the same token.
 
-- `HTTP 401: invalid access token or token expired` with a healthy local webhook means `SYMPHONY_BOT_LLM_API_KEY`, `SYMPHONY_BOT_LLM_BASE_URL`, or `SYMPHONY_BOT_LLM_MODEL` is wrong for the configured provider.
-- The same error while local `webhook_url` is empty usually means a stale remote process or polling worker is answering instead of this local server.
+如果 Telegram 有回复但本地 manifest 的 webhook URL 为空，可能是另一个 bot 进程或部署正在使用同一个 token 回复。
 
-## Live E2E Rules
+## Live E2E Rules / Live E2E 规则
 
 For Telegram-first Supervisor behavior, use attach mode:
+
+验证 Telegram-first Supervisor 行为时，使用 attach mode：
 
 ```bash
 bun --env-file=.env run src/cli/index.ts verify-live-supervisor \
@@ -92,37 +118,59 @@ bun --env-file=.env run src/cli/index.ts verify-live-supervisor \
   --matrix
 ```
 
-The verifier must enter through Telegram webhook/session logic. If a verifier creates issues directly through the runtime API, it is not validating Telegram-first Supervisor behavior.
+The verifier must enter through Telegram webhook/session logic. Creating issues directly through Runtime API does not validate Telegram-first behavior.
+
+验证器必须进入 Telegram webhook/session 逻辑。直接通过 Runtime API 创建 issue 不能验证 Telegram-first 行为。
 
 Expected live flow:
 
+预期 live flow：
+
 1. Telegram request arrives.
+   Telegram 请求进入。
 2. Bot quickly ACKs.
-3. Supervisor creates or updates one root session for the chat.
-4. Plan Card appears.
-5. Approval materializes work.
+   Bot 快速 ACK。
+3. Supervisor creates or resumes one root session for the chat.
+   Supervisor 为 chat 创建或恢复一个 root session。
+4. Plan Card or direct answer appears.
+   出现 Plan Card 或直接回复。
+5. Approval materializes work when needed.
+   需要审批时，批准后才物化任务。
 6. Root issue remains the user-facing thread.
-7. Child issues run sequentially.
-8. Supervisor writes directives after dev/review milestones.
-9. Telegram receives high-signal updates only.
+   root issue 保持为面向用户的主线程。
+7. Child issues run sequentially when a split plan is approved.
+   拆分计划获批后，child issues 顺序执行。
+8. Telegram receives high-signal updates only.
+   Telegram 只收到高信号更新。
 
-## Do Not Reintroduce These Bugs
+## Failure Classification / 失败分类
 
-Do not:
+When something breaks, classify the layer before patching:
 
-- Send ordinary lifecycle digests while a Supervisor root card is active.
-- Create descendant Telegram cards that steal focus from the root session.
-- Treat proof/evidence success as delivery success.
-- Let a stale active session block new work without offering clear `continue / cancel / new thread` choices.
-- Let `message is not modified` trigger Telegram fallback sends.
-- Let old retry/failed notifications replay after restart because only in-memory dedupe was used.
-- Create live verifier issues outside the dedicated test repo.
+出现问题时，先分层定位，再写补丁：
 
-## Common Failure Modes
+- Process/lease: stale local service, occupied port, primary lease conflict.
+  进程/租约：旧本地服务、端口占用、primary lease 冲突。
+- Webhook ingress: Telegram did not reach local service.
+  Webhook 入口：Telegram 没有进入本地服务。
+- Telegram transport: callback ACK, card edit, sendPhoto/sendMessage, Mini App URL.
+  Telegram 传输：callback ACK、卡片编辑、sendPhoto/sendMessage、Mini App URL。
+- Supervisor session: stale active session, missing approval, wrong repo context.
+  Supervisor session：旧 active session、审批缺失、仓库上下文错误。
+- Orchestrator: issue materialization, dispatch, retry, governance.
+  Orchestrator：issue 物化、派发、重试、治理。
+- Dev agent: adapter startup, workspace path, Anthropic key, branch drift.
+  Dev agent：adapter 启动、workspace path、Anthropic key、分支漂移。
+- Delivery: PR, tracker transition, issue close, cleanup.
+  交付：PR、tracker 状态流转、issue close、清理。
 
-### Telegram button appears dead
+## Common Checks / 常用检查
+
+### Telegram Button Appears Dead / Telegram 按钮像是没反应
 
 Check:
+
+检查：
 
 - `/api/v1/bots/manifest`
 - webhook diagnostics
@@ -130,16 +178,20 @@ Check:
 - callback audit logs
 - `bot_transport_events`
 
-Classify the failure:
+Classify:
 
-- webhook did not arrive
-- callback parsed but ACK failed
-- ACK succeeded but async execution failed
-- execution succeeded but card edit failed
+分类：
 
-### Duplicate Telegram messages
+- webhook did not arrive / webhook 没到
+- callback parsed but ACK failed / callback 解析成功但 ACK 失败
+- ACK succeeded but async execution failed / ACK 成功但异步执行失败
+- execution succeeded but card edit failed / 执行成功但卡片编辑失败
+
+### Duplicate Telegram Messages / Telegram 重复消息
 
 Inspect:
+
+检查：
 
 ```bash
 sqlite3 symphony.db "select source, action, result, message_id, material_key, created_at from bot_transport_events order by id desc limit 30;"
@@ -147,50 +199,66 @@ sqlite3 symphony.db "select * from bot_followup_delivery_states order by updated
 sqlite3 symphony.db "select * from bot_followup_message_states order by updated_at desc limit 20;"
 ```
 
-Prefer fixing persistent material-key/delivery-state logic over adding another in-memory guard.
+Prefer fixing persisted material-key or delivery-state logic over adding another in-memory guard.
 
-### Supervisor session blocks new work
+优先修复持久化的 material-key 或 delivery-state 逻辑，不要只叠加新的内存 guard。
+
+### Supervisor Session Blocks New Work / Supervisor Session 阻塞新任务
 
 Inspect:
+
+检查：
 
 ```bash
 sqlite3 symphony.db "select id, state, transport, conversation_id, repo_ref, root_issue_id, updated_at from supervisor_sessions order by updated_at desc limit 20;"
 ```
 
-For user-facing UX, the bot should offer clear options:
+The user-facing UX should offer clear choices:
 
-- continue current thread
-- cancel current thread
-- new thread
+面向用户的 UX 应给出明确选择：
 
-### Supervisor answers feel shallow
+- continue current thread / 继续当前线程
+- cancel current thread / 取消当前线程
+- new thread / 新开线程
 
-Check whether the repo understanding cache exists for the configured repo and current commit:
+### Supervisor Answers Feel Shallow / Supervisor 回答浅
+
+Check repo understanding:
+
+检查仓库理解缓存：
 
 ```bash
 sqlite3 symphony.db "select repo_ref, local_path, commit_sha, status, summary, error, updated_at from supervisor_repo_understandings order by updated_at desc limit 20;"
 ```
 
-If the row is missing or failed, verify:
+If missing or failed, verify:
 
-- the chat has a default project
-- `WORKFLOW.md -> repositories.routing` includes that project
-- the route has a local path
-- `SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_COMMAND` points to `node scripts/claude-adapter.cjs` or another Claude Code-compatible runner
-- `claude-code/bin/claude-haha --help` works from this checkout
-- the repository path is readable and has a valid Git `HEAD`
+如果缺失或失败，检查：
 
-Repo understanding is read-only. It should improve conversation, repo answers, and artifact recommendations, but it must not create issues or edit code before a Supervisor Plan Card is approved.
+- chat default project / chat 默认项目
+- `WORKFLOW.md -> repositories.routing` / `WORKFLOW.md -> repositories.routing`
+- route local path or source cache / 路由 local path 或 source cache
+- `SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_COMMAND` / `SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_COMMAND`
+- `claude-code/bin/claude-haha --help` from this checkout / 在本 checkout 中运行 `claude-code/bin/claude-haha --help`
+- readable repository path and valid Git `HEAD` / 仓库路径可读且 Git `HEAD` 有效
 
-### Dev agent fails immediately
+Repo understanding is read-only. It should improve conversation and recommendations, but must not create issues or edit code before a Plan Card is approved.
 
-Check the true runner path:
+仓库理解是只读的。它应改善对话和建议，但不能在 Plan Card 获批前创建 issue 或编辑代码。
+
+### Dev Agent Fails Immediately / Dev Agent 立即失败
+
+True runner path:
+
+真实 runner 路径：
 
 ```text
 Orchestrator -> AgentRunner -> scripts/claude-adapter.cjs -> claude-code/bin/claude-haha
 ```
 
-Look for:
+Check:
+
+检查：
 
 - `codex.command` in `WORKFLOW.md`
 - `ANTHROPIC_API_KEY`
@@ -199,9 +267,15 @@ Look for:
 - compact dev context size
 - Claude process startup stderr
 
-### PR or issue does not close
+### PR Or Issue Does Not Close / PR 或 Issue 没关闭
 
-Do not assume code evidence means delivery completed. Check:
+Do not assume code evidence means delivery completed.
+
+不要把代码证据成功等同于交付完成。
+
+Check:
+
+检查：
 
 - `delivery_code`
 - `delivery_summary`
@@ -211,9 +285,11 @@ Do not assume code evidence means delivery completed. Check:
 - tracker state conflict recovery
 - orphan repair logs
 
-## Repair Commands
+## Repair Commands / 修复命令
 
-Stop everything first if the run is confused:
+Stop first when a run is confused:
+
+运行状态混乱时先停止：
 
 ```bash
 bun run stop
@@ -221,45 +297,31 @@ bun run stop
 
 Repair local bot/GitHub residue:
 
+修复本地 bot/GitHub 残留：
+
 ```bash
 bun src/cli/index.ts repair all
 ```
 
 If a test repo was polluted by live verification, clean it deliberately:
 
-- close open PRs and issues
-- delete non-main branches
-- remove local workspaces for that repo
-- cancel corresponding Linear test issues
-- cancel or archive local Supervisor sessions and jobs for that repo
+如果 live verification 污染了测试仓库，要有意识地清理：
+
+- close open PRs and issues / 关闭 open PR 和 issue
+- delete non-main branches / 删除非 main 分支
+- remove local workspaces for that repo / 删除该 repo 的本地 workspace
+- cancel corresponding Linear test issues / 取消对应 Linear 测试 issue
+- cancel or archive local Supervisor sessions/jobs for that repo / 取消或归档本地 Supervisor sessions/jobs
 
 Never run destructive cleanup against the wrong repository.
 
-## Context Budget Rules
+不要对错误仓库运行破坏性清理。
 
-The dev agent first turn must stay compact.
-
-Avoid injecting:
-
-- full child queue histories
-- full GitHub issue/PR histories
-- repeated timeline noise
-- stale governance boilerplate
-- broad repo scans
-
-Prefer:
-
-- root goal
-- current child goal
-- acceptance summary
-- latest supervisor directive
-- compact branch/PR facts
-- missing evidence summary
-- recent high-signal events
-
-## Before Claiming Success
+## Before Claiming Success / 声称完成前
 
 Run:
+
+运行：
 
 ```bash
 bun run test
@@ -267,7 +329,9 @@ bun run build
 git diff --check
 ```
 
-For Telegram/Supervisor changes, also run or schedule:
+For Telegram/Supervisor behavior, also run or schedule:
+
+Telegram/Supervisor 行为还需要运行或安排：
 
 ```bash
 bun --env-file=.env run src/cli/index.ts verify-live-supervisor \
@@ -277,10 +341,12 @@ bun --env-file=.env run src/cli/index.ts verify-live-supervisor \
   --matrix
 ```
 
-If live verification fails, summarize by evidence, not guesswork:
+If live verification fails, summarize by evidence:
 
-1. exact issue/session/message ids
-2. first failing transition
-3. observed logs/DB rows
-4. delivery code and summary
-5. whether failure is Telegram ingress, Supervisor session, orchestrator dispatch, dev agent, review, GitHub delivery, or cleanup
+如果 live verification 失败，按证据总结：
+
+- exact issue/session/message ids / 准确的 issue/session/message id
+- first failing transition / 第一个失败状态转换
+- observed logs or DB rows / 观察到的日志或 DB 行
+- delivery code and summary / delivery code 和 summary
+- failing layer / 失败层级

@@ -657,6 +657,100 @@ describe('DefaultBotGateway', () => {
     expect(String(requests[0]?.body.text)).toContain('INT-1');
   });
 
+  test('coalesces quick consecutive Telegram natural language messages into one assistant turn', async () => {
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const modelInputs: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body || '{}')),
+      });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 202 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        telegramTextCoalesceDelayMs: 15,
+        assistantModel: {
+          decide: async (input) => {
+            modelInputs.push(input.text);
+            return {
+              intent: {
+                kind: 'answer_question',
+                answer: `收到：${input.text}`,
+              },
+            };
+          },
+          getDiagnostics: () => ({
+            provider: 'test',
+            model: 'test-model',
+            configured: true,
+            health: 'healthy',
+            fallback_available: true,
+            last_error_code: null,
+          }),
+        },
+      },
+    );
+
+    await gateway.handleTelegramWebhook(
+      {
+        update_id: 9001,
+        message: {
+          message_id: 321,
+          text: '没事，随便聊聊',
+          chat: { id: 42 },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+    await gateway.handleTelegramWebhook(
+      {
+        update_id: 9002,
+        message: {
+          message_id: 322,
+          text: '这个仓库咋样',
+          chat: { id: 42 },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(modelInputs).toEqual(['没事，随便聊聊\n这个仓库咋样']);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.body.reply_to_message_id).toBe(322);
+    expect(String(requests[0]?.body.text)).toContain('没事，随便聊聊');
+    expect(String(requests[0]?.body.text)).toContain('这个仓库咋样');
+
+    gateway.dispose();
+  });
+
   test('sends Telegram natural language replies as native replies to the inbound message', async () => {
     const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {

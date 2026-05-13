@@ -51,10 +51,10 @@ repositories:
   routing:
     # Key must match Linear project_slug. symphonyness fails closed when a project is not routed.
     sample-project:
-      github_owner: your-github-owner
-      github_repo: your-target-repo
+      github_owner: acme
+      github_repo: demo-app
       # Optional. Relative paths resolve from the symphonyness repository root.
-      local_path: ./repos/your-target-repo
+      local_path: ./repos/demo-app
 codex:
   # The default adapter invokes the bundled Claude Code runtime.
   command: node ./scripts/claude-adapter.cjs
