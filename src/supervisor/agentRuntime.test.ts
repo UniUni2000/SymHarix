@@ -68,12 +68,12 @@ function issue(overrides: Partial<RuntimeIssueView> = {}): RuntimeIssueView {
   };
 }
 
-function createRuntimeControlPlane(): RuntimeControlPlane & {
+function createRuntimeControlPlane(seedIssues?: RuntimeIssueView[]): RuntimeControlPlane & {
   retryCalls: string[];
   closeCalls: Array<{ id: string; successor_issue_id: string | null }>;
 } {
   const listeners = new Set<(event: RuntimeStreamEvent) => void>();
-  const issues = [
+  const issues = seedIssues ?? [
     issue(),
     issue({
       issue_id: 'issue-157',
@@ -230,11 +230,14 @@ function createHarness(
   options: {
     onProgress?: ConstructorParameters<typeof SupervisorAgentRuntimeService>[0]['onProgress'];
     supervisorAgentService?: ConstructorParameters<typeof SupervisorAgentRuntimeService>[0]['supervisorAgentService'];
+    projectResolver?: ConstructorParameters<typeof SupervisorAgentRuntimeService>[0]['projectResolver'];
+    initialIssues?: RuntimeIssueView[];
+    modelTimeoutMs?: number;
   } = {},
 ) {
   const db = new Database(':memory:');
   initializeSchema(db);
-  const runtime = createRuntimeControlPlane();
+  const runtime = createRuntimeControlPlane(options.initialIssues);
   const preferences = new BotConversationPreferenceRepository(db);
   preferences.upsert({
     transport: 'telegram',
@@ -246,6 +249,7 @@ function createHarness(
     new BotSubscriptionService(runtime, {}),
     () => true,
     preferences,
+    options.projectResolver ?? undefined,
   );
   const runs = new SupervisorRunRepository(db);
   const events = new SupervisorRunEventRepository(db);
@@ -267,7 +271,7 @@ function createHarness(
     runtime,
     commandService,
     preferences,
-    projectResolver: {
+    projectResolver: options.projectResolver ?? {
       listConfiguredProjectSlugs: () => ['test2'],
       listConfiguredRoutes: () => [
         {
@@ -306,6 +310,7 @@ function createHarness(
     repoConversations,
     actionPolicy: new SupervisorActionPolicy(),
     model,
+    modelTimeoutMs: options.modelTimeoutMs,
     onProgress: options.onProgress,
     supervisorAgentService: options.supervisorAgentService ?? {
       respond: async (input) => ({
@@ -323,6 +328,7 @@ function createHarness(
     runtime,
     service,
     context,
+    preferences,
     runs,
     events,
     toolCalls,
@@ -560,10 +566,15 @@ describe('SupervisorAgentRuntimeService', () => {
 
     expect(pending.message).toContain('Action: create issue');
     expect(pending.message).toContain('Reply with: Confirm / Cancel');
+    expect(pending.message).toContain('Repo: UniUni2000/test2');
     expect(h.pendingActions.findOpenByConversation({
       transport: 'telegram',
       conversation_id: 'chat-1',
     })?.tool_name).toBe('create_issue');
+    const originalRun = h.runs.findLatestByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
 
     const confirmed = await h.service.respond({
       context: h.context,
@@ -584,11 +595,12 @@ describe('SupervisorAgentRuntimeService', () => {
       transport: 'telegram',
       conversation_id: 'chat-1',
     })).toBeNull();
+    expect(h.runs.findById(originalRun!.id)?.state).toBe('completed');
 
-    const run = h.runs.findLatestByConversation({
+    const run = h.runs.listByConversation({
       transport: 'telegram',
       conversation_id: 'chat-1',
-    });
+    }).find((item) => item.user_message === 'confirm create_issue');
     expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name)).toEqual([
       'create_issue',
       'show_issue_card',
@@ -1230,6 +1242,617 @@ describe('SupervisorAgentRuntimeService', () => {
       conversation_id: 'chat-1',
     });
     expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name)).toEqual(['set_default_project']);
+  });
+
+  test('sets the default project through a repository alias in runtime tool args', async () => {
+    const projectResolver = {
+      listConfiguredProjectSlugs: () => ['slug-test3', 'slug-test4'],
+      listConfiguredRoutes: () => [
+        {
+          project_slug: 'slug-test3',
+          project_name: 'Test Three',
+          github_owner: 'UniUni2000',
+          github_repo: 'test3',
+          github_repo_full: 'UniUni2000/test3',
+          local_path: null,
+          cache_key: 'uniuni2000__test3',
+          require_repo_harness: false,
+        },
+        {
+          project_slug: 'slug-test4',
+          project_name: 'Test Four',
+          github_owner: 'UniUni2000',
+          github_repo: 'test4',
+          github_repo_full: 'UniUni2000/test4',
+          local_path: null,
+          cache_key: 'uniuni2000__test4',
+          require_repo_harness: false,
+        },
+      ],
+      resolveProjectSlug: async (projectSlug: string) => ({
+        project: projectSlug === 'slug-test4'
+          ? {
+              project_id: 'project-4',
+              project_slug: 'slug-test4',
+              project_name: 'Test Four',
+            }
+          : null,
+        route: projectSlug === 'slug-test4'
+          ? {
+              project_slug: 'slug-test4',
+              project_name: 'Test Four',
+              github_owner: 'UniUni2000',
+              github_repo: 'test4',
+              github_repo_full: 'UniUni2000/test4',
+              local_path: null,
+              cache_key: 'uniuni2000__test4',
+              require_repo_harness: false,
+            }
+          : null,
+        error: projectSlug === 'slug-test4' ? undefined : `Project slug "${projectSlug}" is not configured.`,
+      }),
+    } as any;
+    const h = createHarness(async () => ({
+      type: 'tool_call',
+      tool: 'switch_repository',
+      args: { repo_ref: 'test4' },
+      reason: 'Use repository basename alias.',
+    }), { projectResolver });
+
+    const response = await h.service.respond({
+      context: h.context,
+      text: '默认用 test4',
+    });
+
+    expect(response.message).toContain('Default project set to slug-test4');
+    expect(response.message).toContain('UniUni2000/test4');
+    expect(h.toolCalls.findByRun(h.runs.findLatestByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    })!.id).map((call) => call.tool_name)).toEqual(['switch_repository']);
+
+    const deterministic = createHarness(undefined, { projectResolver });
+    const deterministicResponse = await deterministic.service.respond({
+      context: deterministic.context,
+      text: '默认用 test4',
+    });
+
+    expect(deterministicResponse.message).toContain('Default project set to slug-test4');
+    expect(deterministic.toolCalls.findByRun(deterministic.runs.findLatestByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    })!.id).map((call) => call.tool_name)).toEqual(['set_default_project']);
+  });
+
+  test('routes repository README questions through the model-selected read-only repo tool', async () => {
+    const h = createHarness(async (input) => {
+      if (input.toolResults.length > 0) {
+        return null;
+      }
+      return {
+        type: 'tool_call',
+        tool: 'read_repo_with_claude',
+        args: { question: input.text },
+        reason: 'The user asked about repository README content.',
+      };
+    }, {
+      supervisorAgentService: {
+        respond: async (input) => ({
+          mode: 'repo_answer',
+          repoRef: input.repoRef,
+          answer: `README Signature from ${input.repoRef}`,
+          citations: ['README.md'],
+        }),
+        getRepoConversationDiagnostics: () => [],
+      },
+    });
+
+    const response = await h.service.respond({
+      context: h.context,
+      text: '当前仓库 README 里的 Signature 是什么？',
+    });
+
+    expect(response.message).toContain('README Signature from UniUni2000/test2');
+    const run = h.runs.findLatestByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name)).toEqual(['read_repo_with_claude']);
+  });
+
+  test('lets the supervisor tool router choose control-plane tools for repo-looking natural language', async () => {
+    let modelCalls = 0;
+    const h = createHarness(async (input) => {
+      if (input.toolResults.length > 0) {
+        return null;
+      }
+      modelCalls += 1;
+      return {
+        type: 'tool_call',
+        tool: 'list_issues',
+        args: { active_only: false },
+        reason: 'The user asked for issues, so use the control plane.',
+      };
+    }, {
+      supervisorAgentService: {
+        respond: async () => ({
+          mode: 'repo_answer',
+          repoRef: 'UniUni2000/test2',
+          answer: 'wrong repo-only answer',
+        }),
+        getRepoConversationDiagnostics: () => [],
+      },
+    });
+
+    const response = await h.service.respond({
+      context: h.context,
+      text: '看看最近的 issue',
+    });
+
+    expect(modelCalls).toBe(1);
+    expect(response.message).toContain('tracked issues');
+    expect(response.message).toContain('INT-158');
+    expect(response.message).not.toContain('wrong repo-only answer');
+    const run = h.runs.findLatestByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name)).toEqual(['list_issues']);
+  });
+
+  test('reads an explicitly named non-default repository without changing the default project', async () => {
+    const projectResolver = {
+      listConfiguredProjectSlugs: () => ['slug-test3', 'slug-test4'],
+      listConfiguredRoutes: () => [
+        {
+          project_slug: 'slug-test3',
+          project_name: 'Test Three',
+          github_owner: 'UniUni2000',
+          github_repo: 'test3',
+          github_repo_full: 'UniUni2000/test3',
+          local_path: null,
+          cache_key: 'uniuni2000__test3',
+          require_repo_harness: false,
+        },
+        {
+          project_slug: 'slug-test4',
+          project_name: 'Test Four',
+          github_owner: 'UniUni2000',
+          github_repo: 'test4',
+          github_repo_full: 'UniUni2000/test4',
+          local_path: null,
+          cache_key: 'uniuni2000__test4',
+          require_repo_harness: false,
+        },
+      ],
+      resolveProjectSlug: async (projectSlug: string) => ({
+        project: {
+          project_id: `project-${projectSlug}`,
+          project_slug: projectSlug,
+          project_name: projectSlug,
+        },
+        route: null,
+      }),
+    } as any;
+    const h = createHarness(async () => ({
+      type: 'tool_call',
+      tool: 'read_repo_with_claude',
+      args: { question: 'README Signature?', repo_ref: 'test4' },
+      reason: 'The user asked about another repository explicitly.',
+    }), {
+      projectResolver,
+      supervisorAgentService: {
+        respond: async (input) => ({
+          mode: 'repo_answer',
+          repoRef: input.repoRef,
+          answer: `Signature from ${input.repoRef}`,
+        }),
+        getRepoConversationDiagnostics: () => [],
+      },
+    });
+    h.preferences.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      default_project_slug: 'slug-test3',
+    });
+
+    const response = await h.service.respond({
+      context: h.context,
+      text: '不用切仓库，test4 的 README Signature 是什么？',
+    });
+
+    expect(response.message).toContain('Signature from UniUni2000/test4');
+    expect(h.preferences.findByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    })?.default_project_slug).toBe('slug-test3');
+  });
+
+  test('lists configured repositories through the supervisor tool router', async () => {
+    const projectResolver = {
+      listConfiguredProjectSlugs: () => ['slug-test3', 'slug-test4'],
+      listConfiguredRoutes: () => [
+        {
+          project_slug: 'slug-test3',
+          project_name: 'Test Three',
+          github_owner: 'UniUni2000',
+          github_repo: 'test3',
+          github_repo_full: 'UniUni2000/test3',
+          local_path: null,
+          cache_key: 'uniuni2000__test3',
+          require_repo_harness: false,
+        },
+        {
+          project_slug: 'slug-test4',
+          project_name: 'Test Four',
+          github_owner: 'UniUni2000',
+          github_repo: 'test4',
+          github_repo_full: 'UniUni2000/test4',
+          local_path: null,
+          cache_key: 'uniuni2000__test4',
+          require_repo_harness: false,
+        },
+      ],
+      resolveProjectSlug: async (projectSlug: string) => ({
+        project: {
+          project_id: `project-${projectSlug}`,
+          project_slug: projectSlug,
+          project_name: projectSlug,
+        },
+        route: null,
+      }),
+    } as any;
+    const h = createHarness(async () => ({
+      type: 'tool_call',
+      tool: 'list_repositories',
+      args: {},
+      reason: 'The user asked which repositories are available.',
+    }), { projectResolver });
+    h.preferences.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      default_project_slug: 'slug-test3',
+    });
+
+    const response = await h.service.respond({
+      context: h.context,
+      text: '当前仓库是什么，还有哪些仓库？',
+    });
+
+    expect(response.message).toContain('当前配置了 2 个仓库');
+    expect(response.message).toContain('UniUni2000/test3');
+    expect(response.message).toContain('UniUni2000/test4');
+    expect(response.message).toContain('当前默认');
+    const run = h.runs.findLatestByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name)).toEqual(['list_repositories']);
+  });
+
+  test('filters issue lists for an explicitly named non-default repository', async () => {
+    const projectResolver = {
+      listConfiguredProjectSlugs: () => ['slug-test3', 'slug-test4'],
+      listConfiguredRoutes: () => [
+        {
+          project_slug: 'slug-test3',
+          project_name: 'Test Three',
+          github_owner: 'UniUni2000',
+          github_repo: 'test3',
+          github_repo_full: 'UniUni2000/test3',
+          local_path: null,
+          cache_key: 'uniuni2000__test3',
+          require_repo_harness: false,
+        },
+        {
+          project_slug: 'slug-test4',
+          project_name: 'Test Four',
+          github_owner: 'UniUni2000',
+          github_repo: 'test4',
+          github_repo_full: 'UniUni2000/test4',
+          local_path: null,
+          cache_key: 'uniuni2000__test4',
+          require_repo_harness: false,
+        },
+      ],
+      resolveProjectSlug: async (projectSlug: string) => ({
+        project: {
+          project_id: `project-${projectSlug}`,
+          project_slug: projectSlug,
+          project_name: projectSlug,
+        },
+        route: null,
+      }),
+    } as any;
+    const h = createHarness(async (input) => {
+      if (input.toolResults.length > 0) {
+        return null;
+      }
+      return {
+        type: 'tool_call',
+        tool: 'list_issues',
+        args: { repo_ref: 'test4', active_only: false },
+        reason: 'The user asked about issues in a non-default repository.',
+      };
+    }, { projectResolver });
+    h.preferences.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      default_project_slug: 'slug-test3',
+    });
+
+    const response = await h.service.respond({
+      context: h.context,
+      text: '不用切仓库，看看 test4 最近的 issue',
+    });
+
+    expect(response.message).toContain('Repo: UniUni2000/test4');
+    expect(response.message).toContain('当前没有 tracked issues');
+    expect(response.message).not.toContain('INT-158');
+    expect(h.preferences.findByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    })?.default_project_slug).toBe('slug-test3');
+  });
+
+  test('completes missing repo_ref for model-selected issue lists when the user names a configured repository', async () => {
+    const projectResolver = {
+      listConfiguredProjectSlugs: () => ['slug-test2', 'slug-test3'],
+      listConfiguredRoutes: () => [
+        {
+          project_slug: 'slug-test2',
+          project_name: 'Test Two',
+          github_owner: 'UniUni2000',
+          github_repo: 'test2',
+          github_repo_full: 'UniUni2000/test2',
+          local_path: null,
+          cache_key: 'uniuni2000__test2',
+          require_repo_harness: false,
+        },
+        {
+          project_slug: 'slug-test3',
+          project_name: 'Test Three',
+          github_owner: 'UniUni2000',
+          github_repo: 'test3',
+          github_repo_full: 'UniUni2000/test3',
+          local_path: null,
+          cache_key: 'uniuni2000__test3',
+          require_repo_harness: false,
+        },
+      ],
+      resolveProjectSlug: async (projectSlug: string) => ({
+        project: {
+          project_id: `project-${projectSlug}`,
+          project_slug: projectSlug,
+          project_name: projectSlug,
+        },
+        route: null,
+      }),
+    } as any;
+    const h = createHarness(async (input) => {
+      if (input.toolResults.length > 0) {
+        return null;
+      }
+      return {
+        type: 'tool_call',
+        tool: 'list_issues',
+        args: { active_only: false, state_filter: null },
+        reason: 'The user asked for an issue list.',
+      };
+    }, {
+      projectResolver,
+      initialIssues: [
+        issue({
+          issue_id: 'issue-test2',
+          identifier: 'INT-158',
+          title: 'Default repo issue',
+          github_repo: 'UniUni2000/test2',
+        }),
+        issue({
+          issue_id: 'issue-test3',
+          identifier: 'INT-169',
+          title: 'Multi repo routing smoke',
+          github_repo: 'UniUni2000/test3',
+          orchestrator_state: 'halted',
+          actions: {
+            can_stop: false,
+            can_retry: true,
+            can_override_governance: false,
+            can_rewrite_governance: false,
+            can_split_governance: false,
+            can_open_pr: false,
+          },
+        }),
+      ],
+    });
+    h.preferences.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      default_project_slug: 'slug-test2',
+    });
+
+    const response = await h.service.respond({
+      context: h.context,
+      text: '看一下 test3 有哪些 issue',
+    });
+
+    expect(response.message).toContain('Repo: UniUni2000/test3');
+    expect(response.message).toContain('INT-169');
+    expect(response.message).not.toContain('INT-158');
+    const run = h.runs.findLatestByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(h.toolCalls.findByRun(run!.id)[0]?.args).toMatchObject({ repo_ref: 'UniUni2000/test3' });
+  });
+
+  test('remembers the single issue from a repo-filtered list for contextual follow-up actions', async () => {
+    const test3Issue = issue({
+      issue_id: 'issue-169',
+      work_item_id: 'work-169',
+      identifier: 'INT-169',
+      title: 'Multi repo routing smoke',
+      phase: 'DEV',
+      tracker_state: 'In Progress',
+      orchestrator_state: 'halted',
+      github_repo: 'UniUni2000/test3',
+      github_issue_number: 169,
+      actions: {
+        can_stop: false,
+        can_retry: true,
+        can_override_governance: false,
+        can_rewrite_governance: false,
+        can_split_governance: false,
+        can_open_pr: false,
+      },
+    });
+    const projectResolver = {
+      listConfiguredProjectSlugs: () => ['slug-test2', 'slug-test3'],
+      listConfiguredRoutes: () => [
+        {
+          project_slug: 'slug-test2',
+          project_name: 'Test Two',
+          github_owner: 'UniUni2000',
+          github_repo: 'test2',
+          github_repo_full: 'UniUni2000/test2',
+          local_path: null,
+          cache_key: 'uniuni2000__test2',
+          require_repo_harness: false,
+        },
+        {
+          project_slug: 'slug-test3',
+          project_name: 'Test Three',
+          github_owner: 'UniUni2000',
+          github_repo: 'test3',
+          github_repo_full: 'UniUni2000/test3',
+          local_path: null,
+          cache_key: 'uniuni2000__test3',
+          require_repo_harness: false,
+        },
+      ],
+      resolveProjectSlug: async (projectSlug: string) => ({
+        project: {
+          project_id: `project-${projectSlug}`,
+          project_slug: projectSlug,
+          project_name: projectSlug,
+        },
+        route: null,
+      }),
+    } as any;
+    const h = createHarness(async (input) => {
+      if (input.toolResults.length > 0) {
+        return null;
+      }
+      if (input.text.includes('test3')) {
+        return {
+          type: 'tool_call',
+          tool: 'list_issues',
+          args: { repo_ref: 'test3', active_only: false },
+          reason: 'The user asked for test3 issues.',
+        };
+      }
+      return null;
+    }, {
+      initialIssues: [test3Issue],
+      projectResolver,
+    });
+    h.preferences.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      default_project_slug: 'slug-test2',
+    });
+
+    const list = await h.service.respond({
+      context: h.context,
+      text: '看一下 test3 有哪些 issue',
+    });
+
+    expect(list.message).toContain('INT-169');
+    const listRun = h.runs.findLatestByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(listRun?.active_issue_id).toBe('issue-169');
+
+    const retry = await h.service.respond({
+      context: h.context,
+      text: '重试下这个 issue',
+    });
+
+    expect(retry.message).toContain('Queued INT-169');
+    expect(h.runtime.retryCalls).toEqual(['INT-169']);
+
+    const card = await h.service.respond({
+      context: h.context,
+      text: '把这个 issue 的卡片也发我',
+    });
+
+    expect(card.message).toContain('Issue Card · INT-169');
+    const cardRun = h.runs.findLatestByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(h.toolCalls.findByRun(cardRun!.id).map((call) => call.tool_name)).toEqual(['show_issue_card']);
+  });
+
+  test('clarifies contextual issue actions without focus instead of falling into repo reading', async () => {
+    const h = createHarness(async () => null, {
+      initialIssues: [],
+      supervisorAgentService: {
+        respond: async () => ({
+          mode: 'repo_answer',
+          repoRef: 'UniUni2000/test2',
+          answer: 'wrong repo read',
+        }),
+        getRepoConversationDiagnostics: () => [],
+      },
+    });
+
+    const card = await h.service.respond({
+      context: h.context,
+      text: '把这个 issue 的卡片也发我',
+    });
+
+    expect(card.message).toContain('你想操作哪个 issue');
+    expect(card.message).not.toContain('wrong repo read');
+    const cardRun = h.runs.findLatestByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(h.toolCalls.findByRun(cardRun!.id).map((call) => call.tool_name)).toEqual([]);
+
+    const retry = await h.service.respond({
+      context: h.context,
+      text: '重试下这个 issue',
+    });
+
+    expect(retry.message).toContain('你想操作哪个 issue');
+    const retryRun = h.runs.findLatestByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(h.toolCalls.findByRun(retryRun!.id).map((call) => call.tool_name)).toEqual([]);
+  });
+
+  test('falls back quickly when the supervisor tool router model is slow', async () => {
+    const h = createHarness(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return {
+        type: 'final_answer',
+        message: 'late model answer',
+      };
+    }, {
+      initialIssues: [],
+      modelTimeoutMs: 5,
+    });
+
+    const response = await h.service.respond({
+      context: h.context,
+      text: '把这个 issue 的卡片也发我',
+    });
+
+    expect(response.message).toContain('你想操作哪个 issue');
+    expect(response.message).not.toContain('late model answer');
   });
 
   test('records progress events and prevents unchanged duplicate tool calls from looping forever', async () => {

@@ -419,6 +419,9 @@ describe('BotCommandService', () => {
 
     const stop = await service.executeText(context, '/stop INT-1');
     expect(stop.message).toBe('Stopping INT-1');
+    expect(stop.caption).toContain('INT-1');
+    expect(stop.media_key).toContain('issue-card|INT-1');
+    expect(stop.action_rows?.flat().map((action) => action.label)).toContain('Refresh Card');
 
     const retry = await service.executeText(context, '/retry INT-1');
     expect(retry.message).toBe('Queued INT-1');
@@ -446,6 +449,87 @@ describe('BotCommandService', () => {
     expect(unwatch.watch_registered).toBe(false);
 
     subscriptions.dispose();
+    db.close();
+  });
+
+  test('accepts repository aliases when setting the default project', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const preferences = new BotConversationPreferenceRepository(db);
+    const projectResolver = {
+      listConfiguredProjectSlugs: () => ['slug-test3', 'slug-test4'],
+      listConfiguredRoutes: () => [
+        {
+          project_slug: 'slug-test3',
+          project_name: 'Test Three',
+          github_owner: 'UniUni2000',
+          github_repo: 'test3',
+          github_repo_full: 'UniUni2000/test3',
+          local_path: null,
+          cache_key: 'uniuni2000__test3',
+          require_repo_harness: false,
+        },
+        {
+          project_slug: 'slug-test4',
+          project_name: 'Test Four',
+          github_owner: 'UniUni2000',
+          github_repo: 'test4',
+          github_repo_full: 'UniUni2000/test4',
+          local_path: null,
+          cache_key: 'uniuni2000__test4',
+          require_repo_harness: false,
+        },
+      ],
+      resolveProjectSlug: async (projectSlug: string) => {
+        if (projectSlug !== 'slug-test4') {
+          return {
+            project: null,
+            route: null,
+            error: `Project slug "${projectSlug}" is not configured in repositories.routing.`,
+          };
+        }
+        return {
+          project: {
+            project_id: 'project-4',
+            project_slug: 'slug-test4',
+            project_name: 'Test Four',
+          },
+          route: {
+            project_slug: 'slug-test4',
+            project_name: 'Test Four',
+            github_owner: 'UniUni2000',
+            github_repo: 'test4',
+            github_repo_full: 'UniUni2000/test4',
+            local_path: null,
+            cache_key: 'uniuni2000__test4',
+            require_repo_harness: false,
+          },
+        };
+      },
+    } as any;
+    const service = new BotCommandService(runtime, new BotSubscriptionService(runtime, {}), () => true, preferences, projectResolver);
+    const context = {
+      transport: 'telegram' as const,
+      recipient: {
+        transport: 'telegram' as const,
+        conversation_id: 'chat-1',
+      },
+      identity: {
+        user_id: 'user-1',
+        display_name: 'Alice',
+      },
+    };
+
+    const response = await service.executeText(context, '/project test4');
+
+    expect(response.message).toContain('Default project set to slug-test4');
+    expect(response.message).toContain('UniUni2000/test4');
+    expect(preferences.findByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    })?.default_project_slug).toBe('slug-test4');
+
     db.close();
   });
 

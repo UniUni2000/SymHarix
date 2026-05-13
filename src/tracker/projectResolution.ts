@@ -36,6 +36,47 @@ export interface TrackerProjectResolutionResult {
   error?: string;
 }
 
+export type RepositoryRouteReferenceKind =
+  | 'project_slug'
+  | 'github_repo_full'
+  | 'github_repo_name';
+
+export interface RepositoryRouteReferenceMatch {
+  route: ResolvedRepositoryRoute;
+  matched_by: RepositoryRouteReferenceKind;
+}
+
+export function resolveRepositoryRouteReference(
+  routes: readonly ResolvedRepositoryRoute[],
+  reference: string | null | undefined,
+): RepositoryRouteReferenceMatch | null {
+  const normalized = reference?.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const lower = normalized.toLowerCase();
+  const bySlug = routes.find((route) =>
+    route.project_slug === normalized || route.project_slug.toLowerCase() === lower
+  );
+  if (bySlug) {
+    return { route: bySlug, matched_by: 'project_slug' };
+  }
+
+  const byRepoFull = routes.find((route) => route.github_repo_full.toLowerCase() === lower);
+  if (byRepoFull) {
+    return { route: byRepoFull, matched_by: 'github_repo_full' };
+  }
+
+  const repoName = lower.includes('/') ? lower.split('/').filter(Boolean).at(-1) ?? lower : lower;
+  const byRepoName = routes.filter((route) => route.github_repo.toLowerCase() === repoName);
+  if (byRepoName.length === 1) {
+    return { route: byRepoName[0]!, matched_by: 'github_repo_name' };
+  }
+
+  return null;
+}
+
 export class TrackerProjectResolutionService {
   constructor(
     private readonly tracker: Pick<LinearClient, 'listProjects' | 'findProjectBySlug'>,
@@ -50,6 +91,12 @@ export class TrackerProjectResolutionService {
     return Object.entries(this.routes)
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([projectSlug, route]) => toResolvedRoute(projectSlug, null, route));
+  }
+
+  resolveConfiguredRouteReference(
+    reference: string | null | undefined,
+  ): RepositoryRouteReferenceMatch | null {
+    return resolveRepositoryRouteReference(this.listConfiguredRoutes(), reference);
   }
 
   async resolveProjectSlug(projectSlug: string): Promise<TrackerProjectResolutionResult> {
