@@ -11,6 +11,7 @@ import {
   applyProxyEnv,
   disableProxyEnv,
   ensureNoProxyForLocalhost,
+  getStartLocalTunnelProbeRecoveryReason,
   getStartLocalTunnelRecoveryReason,
   hasHttpProxyEnv,
   resolveStartLocalPort,
@@ -183,6 +184,31 @@ async function readTelegramManifestSnapshot(port: number): Promise<TelegramManif
     };
   };
   return payload.data?.transports?.telegram ?? null;
+}
+
+async function probePublicTunnelReachability(publicBaseUrl: string): Promise<{
+  status: number | null;
+  errorMessage: string | null;
+}> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5_000);
+  try {
+    const response = await fetch(publicBaseUrl, {
+      headers: { 'Cache-Control': 'no-cache' },
+      signal: controller.signal,
+    });
+    return {
+      status: response.status,
+      errorMessage: null,
+    };
+  } catch (error) {
+    return {
+      status: null,
+      errorMessage: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function printTelegramStartupSummary(
@@ -441,9 +467,17 @@ async function main(): Promise<void> {
         }
 
         const telegram = await readTelegramManifestSnapshot(requestedPort);
-        const recoveryReason = telegram
+        let recoveryReason = telegram
           ? getStartLocalTunnelRecoveryReason(telegram, expectedPublicBaseUrl)
           : null;
+        if (!recoveryReason) {
+          const tunnelProbe = await probePublicTunnelReachability(expectedPublicBaseUrl);
+          recoveryReason = getStartLocalTunnelProbeRecoveryReason({
+            expectedPublicBaseUrl,
+            status: tunnelProbe.status,
+            errorMessage: tunnelProbe.errorMessage,
+          });
+        }
         if (!recoveryReason) {
           degradedPolls = 0;
           return;

@@ -149,6 +149,12 @@ interface TelegramUpdate {
   };
 }
 
+interface PendingTelegramTextResponse {
+  context: BotCommandContext;
+  texts: string[];
+  timer: ReturnType<typeof setTimeout>;
+}
+
 function getPendingActionRequestIssueId(
   pendingAction: NonNullable<ReturnType<BotPendingActionRepository['findByConversationIssue']>>,
 ): string | null {
@@ -853,6 +859,15 @@ function parsePositiveInteger(value: string | null | undefined): number | null {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+function parseNonNegativeInteger(value: string | null | undefined): number | null {
+  const normalized = value?.trim();
+  if (!normalized) {
+    return null;
+  }
+  const parsed = Number.parseInt(normalized, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
 function isPureRepositoryQuestionText(text: string): boolean {
   const normalized = text.trim();
   if (!normalized || normalized.startsWith('/')) {
@@ -962,6 +977,8 @@ export class DefaultBotGateway implements BotGateway {
   private readonly repoClaudeConversations: RepoClaudeConversationRepository | null;
   private readonly botWriteAuthorizer: (context: BotCommandContext) => boolean;
   private readonly telegramTextProcessingAckDelayMs: number;
+  private readonly telegramTextCoalesceDelayMs: number;
+  private readonly pendingTelegramTextResponses = new Map<string, PendingTelegramTextResponse>();
   private readonly seenTelegramUpdateIds = new Set<string>();
   private readonly seenTelegramUpdateOrder: string[] = [];
   private telegramPublicBaseUrl: string | null = normalizePublicBaseUrl(process.env.SYMPHONY_PUBLIC_BASE_URL || null);
@@ -1009,6 +1026,7 @@ export class DefaultBotGateway implements BotGateway {
       telegramDiagnostics?: TelegramWebhookDiagnosticsService;
       telegramBootstrapService?: TelegramWebhookBootstrapService | null;
       telegramTextProcessingAckDelayMs?: number | null;
+      telegramTextCoalesceDelayMs?: number | null;
       startupRepairDelayMs?: number | null;
     } = {},
   ) {
@@ -1033,6 +1051,7 @@ export class DefaultBotGateway implements BotGateway {
         ?? parsePositiveInteger(process.env.SYMPHONY_TELEGRAM_TEXT_ACK_DELAY_MS)
         ?? 3_000,
     );
+    this.telegramTextCoalesceDelayMs = Math.max(0, options.telegramTextCoalesceDelayMs ?? 0);
     const supervisorMemories = options.supervisorMemoryRepository ?? null;
     const supervisorJobs = options.supervisorJobRepository ?? null;
     this.telegramNotifier = telegramConfig.botToken
@@ -1372,6 +1391,10 @@ export class DefaultBotGateway implements BotGateway {
       clearTimeout(this.startupRepairTimer);
       this.startupRepairTimer = null;
     }
+    for (const pending of this.pendingTelegramTextResponses.values()) {
+      clearTimeout(pending.timer);
+    }
+    this.pendingTelegramTextResponses.clear();
     this.subscriptions.dispose();
     this.followups?.dispose();
     this.supervisorWorker?.dispose();
@@ -3077,11 +3100,68 @@ export class DefaultBotGateway implements BotGateway {
   }
 
   private queueTelegramTextResponse(context: BotCommandContext, text: string): void {
+    if (this.shouldCoalesceTelegramTextResponse(text)) {
+      this.queueCoalescedTelegramTextResponse(context, text);
+      return;
+    }
+    this.scheduleTelegramTextResponse(context, text, 1);
+  }
+
+  private shouldCoalesceTelegramTextResponse(text: string): boolean {
+    return this.telegramTextCoalesceDelayMs > 0 && !text.startsWith('/');
+  }
+
+  private getTelegramTextCoalesceKey(context: BotCommandContext): string {
+    return [
+      context.recipient.transport,
+      context.recipient.conversation_id,
+      context.identity.user_id ?? 'anonymous',
+    ].join(':');
+  }
+
+  private queueCoalescedTelegramTextResponse(context: BotCommandContext, text: string): void {
+    const key = this.getTelegramTextCoalesceKey(context);
+    const existing = this.pendingTelegramTextResponses.get(key);
+    if (existing) {
+      clearTimeout(existing.timer);
+      existing.context = context;
+      existing.texts.push(text);
+      existing.timer = setTimeout(() => {
+        this.flushCoalescedTelegramTextResponse(key);
+      }, this.telegramTextCoalesceDelayMs);
+      logger.info('Telegram text webhook coalesced', {
+        chat_id: context.recipient.conversation_id,
+        user_id: context.identity.user_id,
+        message_count: existing.texts.length,
+      });
+      return;
+    }
+
+    this.pendingTelegramTextResponses.set(key, {
+      context,
+      texts: [text],
+      timer: setTimeout(() => {
+        this.flushCoalescedTelegramTextResponse(key);
+      }, this.telegramTextCoalesceDelayMs),
+    });
+  }
+
+  private flushCoalescedTelegramTextResponse(key: string): void {
+    const pending = this.pendingTelegramTextResponses.get(key);
+    if (!pending) {
+      return;
+    }
+    this.pendingTelegramTextResponses.delete(key);
+    this.scheduleTelegramTextResponse(pending.context, pending.texts.join('\n'), pending.texts.length);
+  }
+
+  private scheduleTelegramTextResponse(context: BotCommandContext, text: string, messageCount: number): void {
     const preemptedSessions = this.supervisorSessionService?.preemptActiveSessionsForNewThread(context, text) ?? 0;
     logger.info('Telegram text webhook queued', {
       chat_id: context.recipient.conversation_id,
       user_id: context.identity.user_id,
       is_command: text.startsWith('/'),
+      message_count: messageCount,
       preempted_supervisor_sessions: preemptedSessions,
     });
 
@@ -3566,5 +3646,7 @@ export function createBotGatewayFromEnv(
     supervisorAgentService: supervisorAgentService ?? null,
     repoUnderstandingService: repoUnderstandingService ?? null,
     telegramDiagnostics,
+    telegramTextCoalesceDelayMs: parseNonNegativeInteger(process.env.SYMPHONY_TELEGRAM_TEXT_COALESCE_DELAY_MS)
+      ?? 2_000,
   });
 }
