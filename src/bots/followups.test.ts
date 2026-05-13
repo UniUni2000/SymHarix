@@ -202,6 +202,60 @@ class FailingEditDeferredNotifier extends DeferredNotifier {
 }
 
 describe('BotFollowupService', () => {
+  test('localizes lifecycle digests to English for English issues', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const baseIssue = runtime.getIssue('issue-1');
+    if (!baseIssue) {
+      throw new Error('Expected issue-1 to exist');
+    }
+    const notifier = new MemoryNotifier();
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+
+    followups.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      user_id: 'user-1',
+      role: 'origin',
+    });
+
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, messageStates, {
+      bootstrapCurrentGovernanceCards: false,
+    });
+
+    runtime.emit({
+      type: 'issue',
+      data: {
+        ...baseIssue,
+        title: 'Smoke test',
+        tracker_state: 'Done',
+        orchestrator_state: 'completed',
+        delivery_state: 'completed',
+        delivery_summary: 'Issue is complete and final delivery is closed.',
+        governance_status: null,
+        governance_decision: null,
+        governance_summary: null,
+        active_governance_suggestions: [],
+        supervisor_locale: 'en',
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const lifecycleMessage = notifier.messages.find((item) => item.message.text.startsWith('Symphony completed'));
+    expect(lifecycleMessage?.message.text).toContain('Symphony completed · INT-1');
+    expect(lifecycleMessage?.message.text).toContain('This issue has reached a terminal state');
+    expect(lifecycleMessage?.message.text).not.toMatch(/[\u3400-\u9fff]/);
+
+    service.dispose();
+    db.close();
+  });
+
   test('deduplicates origin and ops recipients when they point to the same Telegram chat', async () => {
     const db = new Database(':memory:');
     initializeSchema(db);
