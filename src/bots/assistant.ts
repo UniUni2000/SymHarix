@@ -4,6 +4,7 @@ import {
   type BotFollowupMessageStateRepository,
   BotPendingActionRepository,
 } from '../database';
+import type { BotPendingActionRecord } from '../database/types';
 import { logger } from '../logging';
 import type { RuntimeControlPlane } from '../runtime/types';
 import { TrackerProjectResolutionService } from '../tracker/projectResolution';
@@ -39,13 +40,12 @@ import type { SupervisorRepoUnderstandingService } from '../supervisor/repoUnder
 import type { SupervisorClaudeRuntimeService } from '../supervisor/claudeRuntime';
 import { SupervisorSessionService } from '../supervisor/sessionService';
 import type { SupervisorAgentRuntimeService } from '../supervisor/agentRuntime';
-import { inferRuntimeLocaleFromText } from '../i18n/locale';
+import { inferRuntimeLocaleFromText, type RuntimeLocale } from '../i18n/locale';
 import { extractIssueIdentifier } from './issueIdentifier';
 import { isIssueListQuestion } from './issueQueryIntent';
 
 const CONFIRM_WORDS = new Set(['确认', '是的', '是', '对', '对的', '没错', 'yes', 'y', 'ok', 'okay', '好', '可以', '准了', '批准', '同意', '开始', '执行', '继续', 'confirm']);
 const CANCEL_WORDS = new Set(['取消', 'cancel', 'no', 'n', '停止']);
-const TRANSPARENT_FALLBACK_NOTICE = '当前自然语言模型暂不可用，已切换到简化理解模式。';
 const SUGGESTION_TYPE_ALIASES: Record<string, string[]> = {
   cleanup: ['cleanup', '清理'],
   consolidation: ['consolidation', '整合', '收口'],
@@ -142,22 +142,68 @@ function isSupervisorSessionFocusText(text: string): boolean {
 }
 
 function isGreetingLikeText(text: string): boolean {
-  const normalized = text.trim().toLowerCase();
-  return /^(你好|您好|hello|hi|hey|yo|在吗|在么|在不在)[!！,.，。?？\s]*$/i.test(normalized);
+  const normalized = text.trim().toLowerCase().replace(/\s+/g, ' ');
+  const compacted = normalized.replace(/[!！,.，。?？~\s'"`]+/g, '');
+  if (!normalized || normalized.length > 80) {
+    return false;
+  }
+  if (
+    extractIssueIdentifier(normalized) ||
+    /\b(?:issue|ticket|task|status|progress|repo|repository|project|branch|pr|pull request|create|update|fix|run|start|stop|retry|open|merge|review)\b/i.test(normalized) ||
+    /\b[a-z0-9_-]+\.(?:py|ts|tsx|js|jsx|json|md|yaml|yml|toml|go|rs|java|kt|swift)\b/i.test(normalized) ||
+    /(?:项目|进展|状态|仓库|分支|任务|工单|卡住|失败|中断|重试|创建|更新|修复|开始|停止|合并|评审|审核)/.test(normalized)
+  ) {
+    return false;
+  }
+  if (/^(你好|您好|哈喽|哈啰|嗨|早上好|上午好|中午好|下午好|晚上好|晚安|在吗|在么|在不在)$/.test(compacted)) {
+    return true;
+  }
+  if (/^(你|您)?(?:好吗|好么|怎么样|最近好吗)$/.test(compacted)) {
+    return true;
+  }
+  return /^(?:h+i+|h+e+y+|h+e+l+o+|yo+|hiya+|howdy+|sup+|morning|afternoon|evening|good morning|good afternoon|good evening|good night|what'?s up|wassup|how are you|how r you|how are u|how's it going|how is it going|how do you do)(?: there| again| ace| codex)?[!?.\s]*$/i.test(normalized);
+}
+
+function needsGreetingAttention(issue: BotIssueContextView): boolean {
+  const stateText = [
+    issue.tracker_state,
+    issue.orchestrator_state,
+    issue.delivery_state,
+    issue.delivery_code,
+    issue.governance_thread_state,
+    issue.supervisor_session_state,
+  ].filter(Boolean).join(' ');
+  return Boolean(
+    issue.delivery_state === 'delivery_failed' ||
+    issue.delivery_code ||
+    issue.governance_thread_state === 'blocked' ||
+    issue.governance_thread_state === 'confirming' ||
+    issue.governance_thread_state === 'child_failed' ||
+    /failed|blocked|halted|retry|awaiting_user_decision|needs?_decision/i.test(stateText),
+  );
 }
 
 function buildGreetingReply(context: BotRuntimeCopilotContext, text: string): string {
   const english = inferRuntimeLocaleFromText(text) === 'en';
-  const defaultProject = context.default_project_slug
+  const normalized = text.trim().toLowerCase();
+  const asksAboutAssistant = english
+    ? /\b(?:how are you|how r you|how are u|how's it going|how is it going|what'?s up|wassup)\b/i.test(normalized)
+    : /(?:你|您)?(?:好吗|好么|怎么样|最近好吗)/.test(normalized);
+  const attentionIssue = context.overview.active_issues.find(needsGreetingAttention) ?? null;
+  const attentionLine = attentionIssue
     ? english
-      ? `The current default project is ${context.default_project_slug}.`
-      : `当前默认项目是 ${context.default_project_slug}。`
+      ? `One note: ${attentionIssue.identifier} may need attention (${attentionIssue.delivery_code || attentionIssue.delivery_state || attentionIssue.orchestrator_state || attentionIssue.tracker_state}).`
+      : `顺带一提：${attentionIssue.identifier} 可能需要处理（${attentionIssue.delivery_code || attentionIssue.delivery_state || attentionIssue.orchestrator_state || attentionIssue.tracker_state}）。`
     : null;
   return [
     english
-      ? 'Hello. I can help you shape requirements, draft issues, check status, or adjust the current plan.'
-      : '你好，我可以帮你梳理需求、起草 issue、查状态，或者一起把当前计划改顺。',
-    defaultProject,
+      ? asksAboutAssistant
+        ? 'Doing well, thanks. What would you like to work on next?'
+        : 'Hello. What would you like to work on next?'
+      : asksAboutAssistant
+        ? '我很好，今天想处理什么？'
+        : '你好，今天想处理什么？',
+    attentionLine,
   ].filter(Boolean).join('\n');
 }
 
@@ -491,17 +537,60 @@ function shouldProbeActiveSupervisorSession(params: {
   return params.hasActiveSupervisorSession;
 }
 
-function buildConfirmActions() {
+function textForLocale(locale: RuntimeLocale | null | undefined, zh: string, en: string): string {
+  return locale === 'en' ? en : zh;
+}
+
+function confirmationReplyLine(locale: RuntimeLocale | null | undefined, trailingPeriod = false): string {
+  const line = textForLocale(locale, 'Reply with: 确认 / 取消', 'Reply with: Confirm / Cancel');
+  return trailingPeriod ? `${line}.` : line;
+}
+
+function buildConfirmActions(locale: RuntimeLocale | null | undefined = null) {
   return [
     {
-      label: '确认执行',
+      label: textForLocale(locale, '确认执行', 'Confirm'),
       callback_data: 'pending|confirm',
     },
     {
-      label: '取消',
+      label: textForLocale(locale, '取消', 'Cancel'),
       callback_data: 'pending|cancel',
     },
   ] as const;
+}
+
+function stripConfirmationReplyLines(value: string): string {
+  return value
+    .replace(/\n?Reply with:\s*确认\s*\/\s*取消\.?/gi, '')
+    .replace(/\n?Reply with\s*确认\s*\/\s*取消\.?/gi, '')
+    .replace(/\n?Reply with:\s*Confirm\s*\/\s*Cancel\.?/gi, '')
+    .replace(/\n?Reply with\s*Confirm\s*\/\s*Cancel\.?/gi, '')
+    .trim();
+}
+
+function inferPendingActionLocale(
+  pending: Pick<BotPendingActionRecord, 'normalized_payload' | 'summary_message'>,
+  fallbackText: string | null | undefined = null,
+): RuntimeLocale {
+  const payload = pending.normalized_payload as Partial<BotCommandRequest> | null;
+  const createIssue = payload?.create_issue;
+  const payloadText = [
+    createIssue?.title,
+    createIssue?.description,
+  ].filter(Boolean).join('\n');
+  if (payloadText.trim()) {
+    return inferRuntimeLocaleFromText(payloadText);
+  }
+  if (/Reply with:?\s*确认\s*\/\s*取消/i.test(pending.summary_message)) {
+    return 'zh';
+  }
+  if (/Reply with:?\s*Confirm\s*\/\s*Cancel/i.test(pending.summary_message)) {
+    return 'en';
+  }
+  return inferRuntimeLocaleFromText([
+    stripConfirmationReplyLines(pending.summary_message),
+    fallbackText,
+  ].filter(Boolean).join('\n'));
 }
 
 function coerceIntent(value: Record<string, unknown> | null): BotAssistantIntent | null {
@@ -1517,11 +1606,21 @@ function parseModelDecision(output: BotAssistantModelOutput): BotAssistantDecisi
   return null;
 }
 
-function prefixFallbackNotice(message: string, diagnostics: BotAssistantDiagnostics, usedFallback: boolean): string {
+function prefixFallbackNotice(
+  message: string,
+  diagnostics: BotAssistantDiagnostics,
+  usedFallback: boolean,
+  locale: RuntimeLocale,
+): string {
   if (!usedFallback || diagnostics.health === 'healthy') {
     return message;
   }
-  return `${TRANSPARENT_FALLBACK_NOTICE}\n${message}`;
+  const notice = textForLocale(
+    locale,
+    '当前自然语言模型暂不可用，已切换到简化理解模式。',
+    'The natural-language model is temporarily unavailable, so I switched to simplified understanding mode.',
+  );
+  return `${notice}\n${message}`;
 }
 
 function buildScopedHelp(context: BotRuntimeCopilotContext, originalText: string): string {
@@ -2101,9 +2200,11 @@ export class BotAssistantService {
         }
       }
 
+      const pendingLocale = inferPendingActionLocale(pending, text);
+      const pendingSummary = stripConfirmationReplyLines(pending.summary_message);
       return {
-        message: `${pending.summary_message}\nReply with 确认 / 取消.`,
-        actions: [...buildConfirmActions()],
+        message: [pendingSummary, confirmationReplyLine(pendingLocale, true)].filter(Boolean).join('\n'),
+        actions: [...buildConfirmActions(pendingLocale)],
       };
     }
 
@@ -2128,6 +2229,17 @@ export class BotAssistantService {
       return this.handleIntent(context, destructiveControlIntent, text, runtimeContext);
     }
 
+    if (isGreetingLikeText(text)) {
+      const runtimeContext = await this.runtimeContext.buildContext(
+        context,
+        text,
+        this.getDiagnostics(),
+      );
+      return {
+        message: buildGreetingReply(runtimeContext, text),
+      };
+    }
+
     const supervisorClaudeResponse = await this.respondWithSupervisorClaudeRuntime(context, text);
     if (supervisorClaudeResponse) {
       return supervisorClaudeResponse;
@@ -2150,12 +2262,6 @@ export class BotAssistantService {
         runtimeContext.focus_issue.issue,
         explicitIssueId ? 'explicit_issue' : 'runtime_issue',
       );
-    }
-
-    if (isGreetingLikeText(text)) {
-      return {
-        message: buildGreetingReply(runtimeContext, text),
-      };
     }
 
     if (context.transport === 'telegram' && this.supervisorAgentRuntime) {
@@ -2362,6 +2468,7 @@ export class BotAssistantService {
           buildScopedHelp(runtimeContext, text),
           modelDiagnostics,
           usedFallback,
+          inferRuntimeLocaleFromText(text),
         ),
       };
     }
@@ -2395,6 +2502,7 @@ export class BotAssistantService {
           buildScopedHelp(runtimeContext, text),
           modelDiagnostics,
           usedFallback,
+          inferRuntimeLocaleFromText(text),
         ),
       };
     }
@@ -2408,7 +2516,12 @@ export class BotAssistantService {
 
     return {
       ...response,
-      message: prefixFallbackNotice(response.message, modelDiagnostics, usedFallback),
+      message: prefixFallbackNotice(
+        response.message,
+        modelDiagnostics,
+        usedFallback,
+        inferRuntimeLocaleFromText(text),
+      ),
     };
   }
 
@@ -2476,7 +2589,7 @@ export class BotAssistantService {
           `Suggestion id: ${suggestion.id}`,
           `Title: ${suggestion.title}`,
           `Summary: ${compact(suggestion.summary, 160)}`,
-          'Reply with: 确认 / 取消',
+          confirmationReplyLine(inferRuntimeLocaleFromText(originalText)),
         ].filter(Boolean).join('\n');
 
         if (!this.pendingActions) {
@@ -2495,7 +2608,7 @@ export class BotAssistantService {
 
         return {
           message: summary,
-          actions: [...buildConfirmActions()],
+          actions: [...buildConfirmActions(inferRuntimeLocaleFromText(originalText))],
         };
       }
       case 'help':
@@ -2591,7 +2704,7 @@ export class BotAssistantService {
           }
         }
 
-        summary.push('Reply with: 确认 / 取消');
+        summary.push(confirmationReplyLine(inferRuntimeLocaleFromText(originalText)));
 
         const message = summary
           .filter(Boolean)
@@ -2609,7 +2722,7 @@ export class BotAssistantService {
 
         return {
           message,
-          actions: [...buildConfirmActions()],
+          actions: [...buildConfirmActions(inferRuntimeLocaleFromText(originalText))],
         };
       }
       case 'watch':
@@ -2655,7 +2768,7 @@ export class BotAssistantService {
           request.retry_successor ? 'Retry successor: yes' : null,
           request.project_slug ? `Project: ${request.project_slug}` : null,
           request.project_slug === 'clear' ? 'Project: clear default project' : null,
-          'Reply with: 确认 / 取消',
+          confirmationReplyLine(inferRuntimeLocaleFromText(originalText)),
         ]
           .filter(Boolean)
           .join('\n');
@@ -2673,7 +2786,7 @@ export class BotAssistantService {
 
         return {
           message: summary,
-          actions: [...buildConfirmActions()],
+          actions: [...buildConfirmActions(inferRuntimeLocaleFromText(originalText))],
         };
       }
       default:

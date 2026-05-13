@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import path from 'path';
 import { AgentRunner } from '../agent/runner';
 import type { BotCommandContext, BotCommandResponse } from '../bots/types';
+import { inferRuntimeLocaleFromText, type RuntimeLocale } from '../i18n/locale';
 import {
   SUPERVISOR_ORCHESTRATOR_TOOL_NAMES,
   type SupervisorOrchestratorBroker,
@@ -51,6 +52,26 @@ export interface SupervisorClaudeRuntimeRespondRequest {
   context: BotCommandContext;
   text: string;
   canWrite?: boolean;
+}
+
+function outputLanguageBlock(locale: RuntimeLocale): string {
+  if (locale === 'en') {
+    return [
+      '## Output Language',
+      'detected_user_language: English',
+      '- The latest user message is English. Write every user-facing sentence in English.',
+      '- Do not use Chinese in greetings, status summaries, recommendations, card explanations, or follow-up questions unless the user explicitly asks for Chinese.',
+      '- Keep repository names, issue IDs, PR numbers, commands, file paths, code symbols, and machine-readable labels unchanged.',
+    ].join('\n');
+  }
+
+  return [
+    '## Output Language',
+    'detected_user_language: Chinese',
+    '- The latest user message contains Chinese. Write every user-facing sentence in Chinese.',
+    '- Do not switch to English for greetings, status summaries, recommendations, card explanations, or follow-up questions unless the user explicitly asks for English.',
+    '- Keep repository names, issue IDs, PR numbers, commands, file paths, code symbols, and machine-readable labels unchanged.',
+  ].join('\n');
 }
 
 export const SUPERVISOR_CONTEXT_TOOL_NAMES = [
@@ -109,6 +130,7 @@ export function buildSupervisorClaudeSystemPrompt(): string {
     'When the user asks you to create/propose/open an issue, gather needed evidence, then call create_issue. The broker will produce the real confirmation UI when required.',
     'When unsure what action surface exists, call list_orchestrator_capabilities before guessing.',
     'Telegram text is user-facing. For ordinary answers, do not output raw JSON or internal protocol text.',
+    'Every turn includes an Output Language block. That block is mandatory and overrides prior session language, conversation history, repository content, and tool-result language.',
     'Use compact evidence in Telegram replies: name the high-signal sources checked, mention missing evidence, then give the answer or recommendation.',
     'Never answer by grabbing the first issue from an overview. Overview order can be distorted by sync or repair timestamps.',
     'For "latest", "recent", or "最近完成" questions, use get_recent_completed_issues or issue history/timeline evidence before answering.',
@@ -197,6 +219,7 @@ function buildTurnPrompt(input: {
   workspace: SupervisorClaudeWorkspace;
   canWrite: boolean;
 }): string {
+  const locale = inferRuntimeLocaleFromText(input.text);
   return [
     contextSourceMap(),
     '',
@@ -206,7 +229,9 @@ function buildTurnPrompt(input: {
     `local_path: ${input.workspace.localPath ?? 'null'}`,
     `can_use_business_write_tools: ${input.canWrite}`,
     '',
-    'Answer the user in their language. Use compact evidence by default.',
+    outputLanguageBlock(locale),
+    '',
+    'Use compact evidence by default.',
     `user_message: ${input.text}`,
   ].join('\n');
 }

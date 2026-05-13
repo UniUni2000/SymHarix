@@ -9,6 +9,7 @@ import type {
 } from '../database';
 import type { BotCommandService } from '../bots/commandService';
 import type { BotCommandContext, BotCommandResponse } from '../bots/types';
+import { inferRuntimeLocaleFromText } from '../i18n/locale';
 import type { RuntimeControlPlane } from '../runtime/types';
 import type { TrackerProjectResolutionService } from '../tracker/projectResolution';
 import {
@@ -396,10 +397,12 @@ export class SupervisorOrchestratorBroker {
     decision: SupervisorActionPolicyDecision;
     turn: SupervisorOrchestratorTurnState;
   }): SupervisorToolResult {
+    const locale = inferRuntimeLocaleFromText(input.turn.text);
     const summary = buildConfirmationSummary(
       input.definition.name,
       input.args,
       input.decision.reason,
+      locale,
     );
     const pending = this.options.pendingActions.create({
       run_id: input.runId,
@@ -434,7 +437,7 @@ export class SupervisorOrchestratorBroker {
     });
     const response: BotCommandResponse = {
       message: summary,
-      actions: buildConfirmActions(),
+      actions: buildConfirmActions(locale),
     };
     return {
       tool: input.definition.name,

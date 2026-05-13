@@ -1,4 +1,5 @@
 import type { ResolvedRepositoryRoute } from '../types';
+import { inferRuntimeLocaleFromText, type RuntimeLocale } from '../i18n/locale';
 import type { RepoProfile, RepoProfileService } from './repoProfileService';
 import type {
   SupervisorRepoUnderstandingService,
@@ -172,6 +173,28 @@ function normalizeUserText(value: string): string {
   return value.trim().replace(/\s+/g, ' ');
 }
 
+function outputLanguageBlock(locale: RuntimeLocale): string {
+  if (locale === 'en') {
+    return [
+      '## Output Language',
+      'detected_user_language: English',
+      '- The latest user message is English. Every user-facing JSON string field must be English.',
+      '- This includes message, answer, title, summary, next_step, handoff_message, question, recommendation, rationale, suggested_title, and suggested_body.',
+      '- Do not use Chinese in greetings, status summaries, recommendations, or follow-up questions unless the user explicitly asks for Chinese.',
+      '- Keep repository names, issue IDs, PR numbers, commands, file paths, code symbols, and machine-readable labels unchanged.',
+    ].join('\n');
+  }
+
+  return [
+    '## Output Language',
+    'detected_user_language: Chinese',
+    '- The latest user message contains Chinese. Every user-facing JSON string field must be Chinese.',
+    '- This includes message, answer, title, summary, next_step, handoff_message, question, recommendation, rationale, suggested_title, and suggested_body.',
+    '- Do not switch to English for greetings, status summaries, recommendations, or follow-up questions unless the user explicitly asks for English.',
+    '- Keep repository names, issue IDs, PR numbers, commands, file paths, code symbols, and machine-readable labels unchanged.',
+  ].join('\n');
+}
+
 export function shouldUseReadOnlyClaudeForText(value: string): boolean {
   if (isSupervisorControlPlaneQuestion(value)) {
     return false;
@@ -258,6 +281,7 @@ function buildPrompt(input: {
   repoSource: SupervisorRepoSourceSnapshot | null;
   allowExternalResearch: boolean;
 }): string {
+  const locale = inferRuntimeLocaleFromText(input.userText);
   return [
     'You are the top-level Supervisor Agent for Telegram supervisor chat.',
     'Bias toward natural conversation first, repo understanding second, and issue or workflow routing only when it is actually appropriate.',
@@ -265,6 +289,7 @@ function buildPrompt(input: {
     'Allowed modes: chat_reply, repo_answer, issue_recommendation, artifact_ideation, handoff_to_session, clarify.',
     'When the user asks to create art, UI, visual cards, demos, pages, or artifacts, use repo_understanding to recommend one concrete artifact path before creating work.',
     'Do not mutate the repository, create issues, or change session state.',
+    outputLanguageBlock(locale),
     `repo_ref: ${input.repoRef ?? 'null'}`,
     `local_path: ${input.localPath ?? 'null'}`,
     `project_context: ${input.projectContext ?? 'null'}`,
