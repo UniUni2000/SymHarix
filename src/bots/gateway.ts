@@ -15,6 +15,7 @@ import {
 import { resolveGovernanceQuickActionByOrdinal, type GovernanceQuickActionSpec } from './governanceQuickActions';
 import { BotSubscriptionService } from './subscriptions';
 import { isTerminalIssue } from './issueVisibility';
+import { RuntimeIssueCardLock } from './runtimeIssueCardLock';
 import {
   BotConversationFocusRepository,
   BotFollowupDeliveryStateRepository,
@@ -45,7 +46,7 @@ import {
 } from '../database';
 import type { RuntimeActionResult, RuntimeControlPlane, RuntimeIssueView } from '../runtime/types';
 import type { Database } from 'bun:sqlite';
-import type { BotFollowupCardKind, SupervisorRepoUnderstanding } from '../database/types';
+import type { BotFollowupCardKind, SupervisorRepoUnderstanding, SupervisorSessionState } from '../database/types';
 import type {
   BotManifest,
   BotCommandContext,
@@ -73,6 +74,7 @@ import { SupervisorSessionService, type SupervisorPlanBrain } from '../superviso
 import type { SupervisorRepoIntelligenceResolver } from '../supervisor/repoIntelligence';
 import { DefaultSupervisorRepoIntelligenceResolver } from '../supervisor/repoIntelligence';
 import { SupervisorWorker } from '../supervisor/worker';
+import { SupervisorSessionCardLock } from '../supervisor/sessionCardLock';
 import { SupervisorJobLoop } from '../supervisor/jobLoop';
 import { SupervisorDevConversationService } from '../supervisor/devConversation';
 import { SupervisorSessionRepairService } from '../supervisor/sessionRepair';
@@ -839,6 +841,25 @@ function buildDiscordCommandRequest(interaction: DiscordInteraction): BotCommand
   }
 }
 
+function isExplicitRuntimeIssueCardRequest(text: string): boolean {
+  const normalized = text.trim().replace(/\s+/g, ' ').toLowerCase();
+  return /^(?:卡片给我|卡片发我|把卡片发我|把当前卡片发我|发我卡片|发一下卡片|当前卡片|查看当前计划|看当前计划|当前计划|查看计划卡|看计划卡|计划卡给我)$/i.test(normalized)
+    || /^(?:发|给|看看|看一下|查看|刷新|打开|show|send|refresh|open).{0,16}(?:运行面板|运行卡片|runtime panel|runtime card|issue card|卡片|面板)$/i.test(normalized)
+    || /^(?:运行面板|运行卡片|runtime panel|runtime card|issue card|卡片|面板).{0,16}(?:发我|给我|看看|看一下|查看|刷新|打开|show|send|refresh|open)$/i.test(normalized)
+    || /^(?:给我看|查看|看一下|刷新).{0,12}(?:[A-Z]+-\d+|\d+).{0,12}(?:卡片|面板|issue card|runtime card)$/i.test(normalized);
+}
+
+const ACTIVE_SUPERVISOR_SESSION_CARD_STATES = new Set<SupervisorSessionState>([
+  'drafting',
+  'clarifying',
+  'plan_ready',
+  'awaiting_user_approval',
+  'approved_for_materialization',
+  'materialized',
+  'executing',
+  'awaiting_user_decision',
+]);
+
 function createBotWriteAuthorizer(params: {
   telegramOperatorIds: Set<string>;
   discordOperatorIds: Set<string>;
@@ -988,6 +1009,8 @@ export class DefaultBotGateway implements BotGateway {
   private readonly queuedTelegramTextResponses = new Map<string, QueuedTelegramTextResponse>();
   private readonly seenTelegramUpdateIds = new Set<string>();
   private readonly seenTelegramUpdateOrder: string[] = [];
+  private readonly runtimeIssueCardLock = new RuntimeIssueCardLock();
+  private readonly supervisorSessionCardLock = new SupervisorSessionCardLock();
   private telegramPublicBaseUrl: string | null = normalizePublicBaseUrl(process.env.SYMPHONY_PUBLIC_BASE_URL || null);
   private telegramWebhookUsedTunnel: boolean | null = null;
   private startupRepairTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1228,6 +1251,7 @@ export class DefaultBotGateway implements BotGateway {
           deliveryStateRepository: options.followupDeliveryStateRepository ?? null,
           transportEventRepository: options.transportEventRepository ?? null,
           supervisorSessionRepository: this.supervisorSessions,
+          runtimeIssueCardLock: this.runtimeIssueCardLock,
         })
       : null;
     this.supervisorWorker = this.supervisorSessions && this.supervisorSessionService
@@ -1240,6 +1264,7 @@ export class DefaultBotGateway implements BotGateway {
             telegram: this.telegramNotifier ?? undefined,
             discord: this.discordNotifier ?? undefined,
           },
+          sessionCardLock: this.supervisorSessionCardLock,
         })
       : null;
     this.supervisorJobLoop = this.supervisorSessions && this.supervisorSessionEvents && supervisorMemories && this.supervisorSessionService
@@ -1702,6 +1727,7 @@ export class DefaultBotGateway implements BotGateway {
         },
       };
 
+      let releaseRuntimeCallbackCardLock: (() => void) | null = null;
       try {
         if (parsedCallback.kind === 'runtime_action' && parsedCallback.runtimeAction === 'open') {
           const appUrl = parsedCallback.issueIdentifier
@@ -1778,6 +1804,12 @@ export class DefaultBotGateway implements BotGateway {
           };
         }
 
+        releaseRuntimeCallbackCardLock = parsedCallback.kind === 'confirm_pending'
+          ? this.runtimeIssueCardLock.acquireConversation({
+              transport: 'telegram',
+              conversation_id: conversationId,
+            })
+          : null;
         const callbackResult = await this.handleTelegramCallback(
           context,
           parsedCallback,
@@ -1856,7 +1888,11 @@ export class DefaultBotGateway implements BotGateway {
         }
 
         this.telegramDiagnostics.recordCallbackSuccess();
+        releaseRuntimeCallbackCardLock?.();
+        releaseRuntimeCallbackCardLock = null;
       } catch (error) {
+        releaseRuntimeCallbackCardLock?.();
+        releaseRuntimeCallbackCardLock = null;
         this.telegramDiagnostics.recordCallbackFailure(error instanceof Error ? error : null);
         this.recordTelegramCallbackAudit({
           ...auditBase,
@@ -2275,11 +2311,20 @@ export class DefaultBotGateway implements BotGateway {
     const text = action === 'confirm'
       ? textForIssueLocale(pendingIssue, '确认', 'Confirm')
       : textForIssueLocale(pendingIssue, '取消', 'Cancel');
-    const response = await this.supervisorAgentRuntime.respond({
-      context,
-      text,
-      canWrite: this.botWriteAuthorizer(context),
+    const releaseRuntimeConversationCardLock = this.runtimeIssueCardLock.acquireConversation({
+      transport: context.transport,
+      conversation_id: context.recipient.conversation_id,
     });
+    let response: BotCommandResponse;
+    try {
+      response = await this.supervisorAgentRuntime.respond({
+        context,
+        text,
+        canWrite: this.botWriteAuthorizer(context),
+      });
+    } finally {
+      releaseRuntimeConversationCardLock();
+    }
     const issueId = response.issue_id ?? pendingIssueId;
     const issue = issueId ? this.runtime.getIssue(issueId) : pendingIssue;
     return {
@@ -2861,6 +2906,26 @@ export class DefaultBotGateway implements BotGateway {
     });
   }
 
+  private hasActiveRuntimeIssueCard(conversationId: string): boolean {
+    return this.followupMessageStates?.findOpenByConversation({
+      transport: 'telegram',
+      conversation_id: conversationId,
+    }).some((record) => record.card_kind === 'runtime_issue') ?? false;
+  }
+
+  private hasActiveSupervisorSessionCard(conversationId: string): boolean {
+    return this.supervisorSessions?.findAll().some((session) => (
+      session.transport === 'telegram'
+      && session.conversation_id === conversationId
+      && ACTIVE_SUPERVISOR_SESSION_CARD_STATES.has(session.state)
+      && Boolean(session.last_message_id)
+    )) ?? false;
+  }
+
+  private hasActiveRuntimePanel(conversationId: string): boolean {
+    return this.hasActiveRuntimeIssueCard(conversationId) || this.hasActiveSupervisorSessionCard(conversationId);
+  }
+
   private describePendingAction(
     pendingAction: NonNullable<ReturnType<BotPendingActionRepository['findByConversationIssue']>>,
     issue: RuntimeIssueView,
@@ -3247,7 +3312,9 @@ export class DefaultBotGateway implements BotGateway {
       maxAttempts?: number;
     },
   ): Promise<BotTransportMessageRef> {
-    const maxAttempts = Math.max(1, params.maxAttempts ?? 3);
+    const maxAttempts = outbound.photo
+      ? 1
+      : Math.max(1, params.maxAttempts ?? 3);
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
@@ -3283,6 +3350,10 @@ export class DefaultBotGateway implements BotGateway {
     const runtimeLocale = inferRuntimeLocaleFromText(text);
     const isEnglish = runtimeLocale === 'en';
     const shouldSendProcessingAck = shouldSendTelegramProcessingAck(text);
+    const releaseRuntimeConversationCardLock = this.runtimeIssueCardLock.acquireConversation({
+      transport: 'telegram',
+      conversation_id: context.recipient.conversation_id,
+    });
     const processingAckTimer = shouldSendProcessingAck ? setTimeout(() => {
       if (processingFinished || !this.telegramNotifier) {
         return;
@@ -3343,41 +3414,48 @@ export class DefaultBotGateway implements BotGateway {
         transport: 'telegram' as const,
         conversation_id: context.recipient.conversation_id,
       };
+      const explicitRuntimeIssueCardRequest = isExplicitRuntimeIssueCardRequest(text);
+      const suppressRuntimeIssueCard = Boolean(response.photo && response.media_key)
+        && this.hasActiveRuntimePanel(context.recipient.conversation_id)
+        && !explicitRuntimeIssueCardRequest;
       const outbound = {
         text: response.message,
-        caption: response.caption,
+        caption: suppressRuntimeIssueCard ? undefined : response.caption,
         format: response.format,
-        media_key: response.media_key ?? undefined,
-        photo: response.photo,
-        show_caption_above_media: response.show_caption_above_media,
+        media_key: suppressRuntimeIssueCard ? undefined : response.media_key ?? undefined,
+        photo: suppressRuntimeIssueCard ? undefined : response.photo,
+        show_caption_above_media: suppressRuntimeIssueCard ? undefined : response.show_caption_above_media,
         reply_to_message_id: context.message_id ?? undefined,
-        actions: response.actions,
-        action_rows: response.action_rows,
+        actions: suppressRuntimeIssueCard ? undefined : response.actions,
+        action_rows: suppressRuntimeIssueCard ? undefined : response.action_rows,
       };
-      if (!processingAckRef && processingAckPromise) {
-        processingAckRef = await processingAckPromise;
-      }
-      let sent: BotTransportMessageRef;
-      const shouldEditProcessingAck = Boolean(processingAckRef);
-      if (processingAckRef) {
-        try {
-          sent = await this.telegramNotifier!.editMessage(
-            recipient,
-            processingAckRef,
-            outbound,
-          );
-          this.recordTransportEvent({
-            recipient,
-            issue: response.issue_id ? this.runtime.getIssue(response.issue_id) : null,
-            source: 'sync_ack',
-            action: 'edit',
-            result: 'success',
-            messageId: sent.provider_message_id,
-            materialKey: response.material_key ?? null,
-          });
-        } catch (error) {
-          if (getBotMessageEditFailureKind(error) === 'not_modified') {
-            sent = processingAckRef;
+      const releaseRuntimeIssueCardLock = response.issue_id && outbound.photo && outbound.media_key
+        ? this.runtimeIssueCardLock.acquire({
+            transport: 'telegram',
+            conversation_id: context.recipient.conversation_id,
+            issue_id: response.issue_id,
+          })
+        : null;
+      const releaseSupervisorSessionCardLock = response.session_id && outbound.photo && outbound.media_key
+        ? this.supervisorSessionCardLock.acquire({
+            transport: 'telegram',
+            conversation_id: context.recipient.conversation_id,
+            session_id: response.session_id,
+          })
+        : null;
+      try {
+        if (!processingAckRef && processingAckPromise) {
+          processingAckRef = await processingAckPromise;
+        }
+        let sent: BotTransportMessageRef;
+        const shouldEditProcessingAck = Boolean(processingAckRef);
+        if (processingAckRef) {
+          try {
+            sent = await this.telegramNotifier!.editMessage(
+              recipient,
+              processingAckRef,
+              outbound,
+            );
             this.recordTransportEvent({
               recipient,
               issue: response.issue_id ? this.runtime.getIssue(response.issue_id) : null,
@@ -3387,68 +3465,84 @@ export class DefaultBotGateway implements BotGateway {
               messageId: sent.provider_message_id,
               materialKey: response.material_key ?? null,
             });
-          } else {
-            logger.warn('Telegram text acknowledgement edit failed; sending final response separately', {
-              chat_id: context.recipient.conversation_id,
-              user_id: context.identity.user_id,
-            }, error instanceof Error ? error : undefined);
-            sent = await this.sendTelegramFinalMessageWithRetry(recipient, outbound, {
-              context,
-              isCommand: text.startsWith('/'),
-            });
-            this.recordTransportEvent({
-              recipient,
-              issue: response.issue_id ? this.runtime.getIssue(response.issue_id) : null,
-              source: 'sync_ack',
-              action: 'fallback',
-              result: 'success',
-              messageId: sent.provider_message_id,
-              materialKey: response.material_key ?? null,
-            });
+          } catch (error) {
+            if (getBotMessageEditFailureKind(error) === 'not_modified') {
+              sent = processingAckRef;
+              this.recordTransportEvent({
+                recipient,
+                issue: response.issue_id ? this.runtime.getIssue(response.issue_id) : null,
+                source: 'sync_ack',
+                action: 'edit',
+                result: 'success',
+                messageId: sent.provider_message_id,
+                materialKey: response.material_key ?? null,
+              });
+            } else {
+              logger.warn('Telegram text acknowledgement edit failed; sending final response separately', {
+                chat_id: context.recipient.conversation_id,
+                user_id: context.identity.user_id,
+              }, error instanceof Error ? error : undefined);
+              sent = await this.sendTelegramFinalMessageWithRetry(recipient, outbound, {
+                context,
+                isCommand: text.startsWith('/'),
+              });
+              this.recordTransportEvent({
+                recipient,
+                issue: response.issue_id ? this.runtime.getIssue(response.issue_id) : null,
+                source: 'sync_ack',
+                action: 'fallback',
+                result: 'success',
+                messageId: sent.provider_message_id,
+                materialKey: response.material_key ?? null,
+              });
+            }
           }
+        } else {
+          sent = await this.sendTelegramFinalMessageWithRetry(recipient, outbound, {
+            context,
+            isCommand: text.startsWith('/'),
+          });
         }
-      } else {
-        sent = await this.sendTelegramFinalMessageWithRetry(recipient, outbound, {
-          context,
-          isCommand: text.startsWith('/'),
-        });
-      }
-      this.bindPendingConfirmationToTelegramMessage(context, response, sent);
-      if (response.session_id) {
-        this.supervisorSessionService?.recordOutboundMessage(
-          response.session_id,
-          sent.provider_message_id,
-          response.material_key ?? null,
-        );
-      }
-      const issue = response.issue_id ? this.runtime.getIssue(response.issue_id) : null;
-      if (issue && response.photo && response.media_key) {
-        this.persistFollowupMessageState({
-          conversationId: context.recipient.conversation_id,
-          issue,
-          deliveredMessageId: sent.provider_message_id,
-          cardKind: 'runtime_issue',
-          cardState: hasPendingConfirmationButtons(response)
-            ? 'confirming'
-            : issue.governance_thread_state === 'waiting_on_child'
-              ? 'waiting_on_child'
-              : 'open',
-          cardKey: response.media_key,
-          existingCardState: this.followupMessageStates?.findByConversationIssue({
-            transport: 'telegram',
-            conversation_id: context.recipient.conversation_id,
-            issue_id: issue.issue_id,
-          }) ?? null,
-        });
-      }
-      if (!shouldEditProcessingAck) {
-        this.recordTransportEvent({
-          recipient,
-          issue,
-          source: 'sync_ack',
-          action: 'send',
-          result: 'success',
-        });
+        this.bindPendingConfirmationToTelegramMessage(context, response, sent);
+        if (response.session_id && outbound.photo && outbound.media_key) {
+          this.supervisorSessionService?.recordOutboundMessage(
+            response.session_id,
+            sent.provider_message_id,
+            response.material_key ?? null,
+          );
+        }
+        const issue = response.issue_id ? this.runtime.getIssue(response.issue_id) : null;
+        if (issue && outbound.photo && outbound.media_key) {
+          this.persistFollowupMessageState({
+            conversationId: context.recipient.conversation_id,
+            issue,
+            deliveredMessageId: sent.provider_message_id,
+            cardKind: 'runtime_issue',
+            cardState: hasPendingConfirmationButtons(response)
+              ? 'confirming'
+              : issue.governance_thread_state === 'waiting_on_child'
+                ? 'waiting_on_child'
+                : 'open',
+            cardKey: outbound.media_key,
+            existingCardState: this.followupMessageStates?.findByConversationIssue({
+              transport: 'telegram',
+              conversation_id: context.recipient.conversation_id,
+              issue_id: issue.issue_id,
+            }) ?? null,
+          });
+        }
+        if (!shouldEditProcessingAck) {
+          this.recordTransportEvent({
+            recipient,
+            issue,
+            source: 'sync_ack',
+            action: 'send',
+            result: 'success',
+          });
+        }
+      } finally {
+        releaseRuntimeIssueCardLock?.();
+        releaseSupervisorSessionCardLock?.();
       }
 
       logger.info('Telegram text outbound sent', {
@@ -3480,6 +3574,8 @@ export class DefaultBotGateway implements BotGateway {
         result: 'failed',
         errorMessage: message,
       });
+    } finally {
+      releaseRuntimeConversationCardLock();
     }
   }
 
