@@ -6,6 +6,7 @@ import type {
   SupervisorSessionRepository,
 } from '../database';
 import type { RuntimeControlPlane, RuntimeIssueView, RuntimeStreamEvent, RuntimeTimelineEvent } from '../runtime/types';
+import { buildSupervisorIssueVisualCard } from '../supervisor/issueVisualCard';
 import {
   buildGovernanceBlockedMessage,
   buildGovernanceCardKey,
@@ -20,6 +21,7 @@ import {
   type BotTransportMessage,
   type BotTransportNotifier,
 } from './types';
+import { buildIssueCardActionRows } from './issueCardActions';
 
 interface BotFollowupServiceOptions {
   telegramOperationsChatId?: string | null;
@@ -67,6 +69,47 @@ export function classifyLifecycleNotification(issue: RuntimeIssueView): Lifecycl
   }
 
   return null;
+}
+
+function shouldRefreshRuntimeIssueCard(issue: RuntimeIssueView): boolean {
+  const trackerState = issue.tracker_state.trim().toLowerCase();
+  const orchestratorState = (issue.orchestrator_state ?? '').trim().toLowerCase();
+
+  if (
+    trackerState === 'done' ||
+    trackerState === 'duplicate' ||
+    trackerState === 'cancelled' ||
+    trackerState === 'canceled' ||
+    orchestratorState === 'completed' ||
+    orchestratorState === 'failed' ||
+    orchestratorState === 'cancelled' ||
+    orchestratorState === 'retry_scheduled'
+  ) {
+    return false;
+  }
+
+  if (orchestratorState === 'dev_running' || orchestratorState === 'review_running') {
+    return true;
+  }
+
+  if (issue.phase === 'REVIEW' && /review|progress/i.test(issue.tracker_state)) {
+    return true;
+  }
+
+  return issue.phase === 'DEV' && Boolean(issue.session);
+}
+
+function buildRuntimeIssueCardMessage(issue: RuntimeIssueView): BotTransportMessage {
+  const visual = buildSupervisorIssueVisualCard(issue);
+  return {
+    text: visual.caption,
+    caption: visual.caption,
+    format: 'telegram_html',
+    media_key: visual.media_key,
+    photo: visual.photo,
+    show_caption_above_media: false,
+    action_rows: buildIssueCardActionRows(issue),
+  };
 }
 
 function isGovernanceThreadActive(issue: RuntimeIssueView | null | undefined): boolean {
@@ -144,6 +187,7 @@ export class BotFollowupService {
   private readonly governanceEventKeys = new Map<string, string>();
   private readonly lifecycleDigestsInFlight = new Set<string>();
   private readonly governanceCardsInFlight = new Set<string>();
+  private readonly runtimeIssueCardsInFlight = new Set<string>();
 
   constructor(
     private readonly runtime: RuntimeControlPlane,
@@ -166,6 +210,7 @@ export class BotFollowupService {
     this.issueLifecycleClasses.clear();
     this.governanceEventKeys.clear();
     this.governanceCardsInFlight.clear();
+    this.runtimeIssueCardsInFlight.clear();
   }
 
   registerOrigin(params: {
@@ -213,6 +258,8 @@ export class BotFollowupService {
       if (resolved) {
         return;
       }
+
+      await this.upsertRuntimeIssueCards(followupRecipients, threadIssue);
 
       if (threadIssue.issue_id !== event.data.issue_id) {
         return;
@@ -756,6 +803,141 @@ export class BotFollowupService {
         });
       } finally {
         this.governanceCardsInFlight.delete(inFlightKey);
+      }
+    }));
+  }
+
+  private async upsertRuntimeIssueCards(recipients: BotRecipient[], issue: RuntimeIssueView): Promise<void> {
+    if (!this.messageStates || !shouldRefreshRuntimeIssueCard(issue)) {
+      return;
+    }
+
+    const message = buildRuntimeIssueCardMessage(issue);
+    const materialKey = message.media_key ?? `runtime_issue_card|${issue.identifier}|${issue.updated_at}`;
+
+    await Promise.allSettled(recipients.map(async (recipient) => {
+      const notifier = this.notifiers[recipient.transport];
+      if (!notifier) {
+        return;
+      }
+      if (this.hasActiveGovernanceCard([recipient], issue.issue_id)) {
+        return;
+      }
+
+      const existing = this.messageStates?.findByConversationIssue({
+        transport: recipient.transport,
+        conversation_id: recipient.conversation_id,
+        issue_id: issue.issue_id,
+      }) ?? null;
+
+      if (
+        existing?.card_kind === 'runtime_issue' &&
+        existing.card_key === materialKey &&
+        existing.card_state === 'open'
+      ) {
+        return;
+      }
+
+      const inFlightKey = [
+        recipient.transport,
+        recipient.conversation_id,
+        issue.issue_id,
+        materialKey,
+      ].join(':');
+      if (this.runtimeIssueCardsInFlight.has(inFlightKey)) {
+        return;
+      }
+
+      this.runtimeIssueCardsInFlight.add(inFlightKey);
+      try {
+        if (existing?.card_kind === 'runtime_issue') {
+          try {
+            await notifier.editMessage(
+              recipient,
+              { provider_message_id: existing.message_id },
+              message,
+            );
+            this.messageStates?.updateState({
+              transport: recipient.transport,
+              conversation_id: recipient.conversation_id,
+              issue_id: issue.issue_id,
+              issue_identifier: issue.identifier,
+              card_kind: 'runtime_issue',
+              card_key: materialKey,
+              card_state: 'open',
+            });
+            this.recordTransportEvent({
+              recipient,
+              issue,
+              source: 'followup_card',
+              action: 'edit',
+              result: 'success',
+              messageId: existing.message_id,
+              materialKey,
+            });
+            return;
+          } catch (error) {
+            if (getBotMessageEditFailureKind(error) === 'not_modified') {
+              this.messageStates?.updateState({
+                transport: recipient.transport,
+                conversation_id: recipient.conversation_id,
+                issue_id: issue.issue_id,
+                issue_identifier: issue.identifier,
+                card_kind: 'runtime_issue',
+                card_key: materialKey,
+                card_state: 'open',
+              });
+              this.recordTransportEvent({
+                recipient,
+                issue,
+                source: 'followup_card',
+                action: 'edit',
+                result: 'success',
+                messageId: existing.message_id,
+                materialKey,
+              });
+              return;
+            }
+
+            this.recordTransportEvent({
+              recipient,
+              issue,
+              source: 'followup_card',
+              action: 'edit',
+              result: 'failed',
+              messageId: existing.message_id,
+              materialKey,
+              errorMessage: error instanceof Error ? error.message : String(error),
+            });
+
+            if (getBotMessageEditFailureKind(error) !== 'message_not_found') {
+              return;
+            }
+          }
+        }
+
+        const messageRef = await notifier.sendMessage(recipient, message);
+        this.messageStates?.upsert({
+          transport: recipient.transport,
+          conversation_id: recipient.conversation_id,
+          issue_id: issue.issue_id,
+          issue_identifier: issue.identifier,
+          message_id: messageRef.provider_message_id,
+          card_kind: 'runtime_issue',
+          card_key: materialKey,
+          card_state: 'open',
+        });
+        this.recordTransportEvent({
+          recipient,
+          issue,
+          source: 'followup_card',
+          action: existing?.card_kind === 'runtime_issue' ? 'fallback' : 'send',
+          result: 'success',
+          messageId: messageRef.provider_message_id,
+          materialKey,
+        });
+      } finally {
+        this.runtimeIssueCardsInFlight.delete(inFlightKey);
       }
     }));
   }
