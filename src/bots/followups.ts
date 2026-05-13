@@ -31,7 +31,7 @@ interface BotFollowupServiceOptions {
   supervisorSessionRepository?: SupervisorSessionRepository | null;
 }
 
-export type LifecycleNotificationClass = 'retrying' | 'failed' | 'done' | 'cancelled';
+export type LifecycleNotificationClass = 'retrying' | 'failed' | 'delivery_failed' | 'done' | 'cancelled';
 
 function shouldNotifyTimeline(event: RuntimeTimelineEvent): boolean {
   if (
@@ -58,6 +58,13 @@ export function classifyLifecycleNotification(issue: RuntimeIssueView): Lifecycl
 
   if (orchestratorState === 'failed') {
     return 'failed';
+  }
+
+  if (
+    issue.delivery_state === 'delivery_failed' ||
+    (issue.delivery_code && issue.delivery_code !== 'manual_stop')
+  ) {
+    return 'delivery_failed';
   }
 
   if (orchestratorState === 'retry_scheduled') {
@@ -146,6 +153,8 @@ function buildLifecycleMessage(issue: RuntimeIssueView, notificationClass: Lifec
     ? `Symphony 重试中 · ${issue.identifier}`
     : notificationClass === 'failed'
       ? `Symphony 失败 · ${issue.identifier}`
+      : notificationClass === 'delivery_failed'
+        ? `Symphony 交付阻塞 · ${issue.identifier}`
       : notificationClass === 'cancelled'
         ? `Symphony 已取消 · ${issue.identifier}`
         : `Symphony 完成 · ${issue.identifier}`;
@@ -153,6 +162,8 @@ function buildLifecycleMessage(issue: RuntimeIssueView, notificationClass: Lifec
     ? '这张单刚进入重试队列；我会继续盯高信号结果，不再推送同类抖动。'
     : notificationClass === 'failed'
       ? '这张单当前执行失败，等待你处理或下一次显式重试。'
+      : notificationClass === 'delivery_failed'
+        ? (issue.delivery_summary || issue.delivery_code || '这张单的最终交付被阻塞，需要你处理。')
       : notificationClass === 'cancelled'
         ? '这张单已经结束，不会再继续自动推进。'
         : '这张单已经进入终态，当前主链处理完成。';
@@ -161,6 +172,7 @@ function buildLifecycleMessage(issue: RuntimeIssueView, notificationClass: Lifec
     `${issue.title}`,
     summary,
     `phase ${issue.phase} · tracker ${issue.tracker_state} · orchestrator ${issue.orchestrator_state || 'unknown'}`,
+    issue.delivery_code ? `delivery ${issue.delivery_code}` : null,
     issue.github_repo ? `repo ${issue.github_repo}` : null,
     issue.branch_name ? `branch ${issue.branch_name}` : null,
   ].filter(Boolean);
@@ -202,6 +214,7 @@ export class BotFollowupService {
     if (this.options.bootstrapCurrentGovernanceCards !== false) {
       void this.syncCurrentGovernanceCards();
     }
+    void this.syncCurrentDeliveryFailures();
   }
 
   dispose(): void {
@@ -357,6 +370,33 @@ export class BotFollowupService {
       }
 
       await this.resolveGovernanceCards(recipients, threadIssue);
+    }
+  }
+
+  private async syncCurrentDeliveryFailures(): Promise<void> {
+    const overview = this.runtime.getOverview();
+
+    for (const issue of overview.issues) {
+      const threadIssue = this.buildThreadIssue(issue);
+      if (threadIssue.issue_id !== issue.issue_id) {
+        continue;
+      }
+      if (this.isSupervisorManagedIssue(threadIssue) || isGovernanceThreadActive(threadIssue)) {
+        continue;
+      }
+      const notificationClass = classifyLifecycleNotification(threadIssue);
+      if (notificationClass !== 'delivery_failed') {
+        continue;
+      }
+      const recipients = this.collectRecipients(threadIssue.issue_id);
+      if (recipients.length === 0) {
+        continue;
+      }
+      const followupRecipients = await this.upsertSupervisorSessionCards(recipients, threadIssue);
+      if (followupRecipients.length === 0) {
+        continue;
+      }
+      await this.sendLifecycleDigest(followupRecipients, threadIssue, notificationClass);
     }
   }
 

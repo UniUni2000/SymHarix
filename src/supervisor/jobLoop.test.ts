@@ -470,6 +470,97 @@ describe('SupervisorJobLoop', () => {
     expect(events.listBySession('session-internal-delivery-failed').map((event) => event.event_kind)).not.toContain('supervisor_user_notification_requested');
   });
 
+  test('notifies Telegram sessions when a halted task has merge_blocked delivery code', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const memories = new SupervisorMemoryRepository(db);
+    const jobs = new SupervisorJobRepository(db);
+    const issue = createIssue({
+      orchestrator_state: 'halted',
+      delivery_state: null,
+      delivery_code: 'merge_blocked',
+      delivery_summary: 'Review passed, but GitHub reported merge conflicts.',
+      next_recommended_action: '等待用户处理 PR 合并冲突。',
+    });
+    const runtime: RuntimeControlPlane = {
+      getOverview: () => ({
+        generated_at: '2026-01-01T01:00:00.000Z',
+        counts: { running: 0, retrying: 0, total: 1 },
+        issues: [issue],
+      }),
+      getIssue: () => issue,
+      getTimeline: () => [{
+        id: 'timeline-merge-blocked',
+        issue_id: issue.issue_id,
+        issue_identifier: issue.identifier,
+        timestamp: '2026-01-01T01:00:00.000Z',
+        type: 'message',
+        message: 'Review passed, but merge is blocked by conflicts.',
+      } as any],
+      getHistoryView: () => null,
+      subscribe: () => () => undefined,
+      createIssue: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null, issue: null }),
+      stopIssue: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null }),
+      retryIssue: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null }),
+      overrideGovernance: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null }),
+      rewriteGovernance: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null }),
+      splitGovernance: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null }),
+      executeGovernanceSuggestion: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null }),
+      dismissGovernanceSuggestion: async () => ({ accepted: false, status: 'rejected', message: 'no', issue_id: null, issue_identifier: null }),
+    };
+    sessions.create({
+      id: 'session-merge-blocked',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      state: 'executing',
+      repo_ref: 'UniUni2000/test2',
+      root_issue_id: issue.issue_id,
+      plan_card: {
+        title: '处理 PR 交付',
+        user_goal: '完成自动交付',
+        in_scope: ['审查并合并 PR'],
+        out_of_scope: [],
+        acceptance: ['PR 合并完成'],
+        known_risks: ['可能出现 merge conflict'],
+        execution_strategy: '自动审查后合并。',
+        needs_user_approval: false,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: { label: '自动执行', summary: '继续推进。' },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    const loop = new SupervisorJobLoop({
+      runtime,
+      sessionRepository: sessions,
+      eventRepository: events,
+      memoryRepository: memories,
+      jobRepository: jobs,
+      devConversationService: new SupervisorDevConversationService(),
+      workerId: 'test-loop',
+      syncIssue: () => undefined,
+    });
+
+    await loop.tick();
+    for (let index = 0; index < 7; index += 1) {
+      await loop.tick();
+    }
+
+    const sessionJobs = jobs.listBySession('session-merge-blocked');
+    const jobKinds = sessionJobs.map((job) => job.job_kind);
+    const assessJob = sessionJobs.find((job) => job.job_kind === 'assess_milestone');
+    expect(jobKinds).toContain('notify_user');
+    expect(assessJob?.result?.milestone_kind).toBe('delivery_failed');
+    expect(assessJob?.result?.needs_user).toBe(true);
+    expect(events.listBySession('session-merge-blocked').map((event) => event.event_kind)).toContain('supervisor_user_notification_requested');
+  });
+
   test('processes durable supervision jobs for sync, milestone assessment, notification, handoff verification, and memory summary', async () => {
     const db = new Database(':memory:');
     initializeSchema(db);
