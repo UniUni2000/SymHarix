@@ -3422,6 +3422,25 @@ export class DefaultBotGateway implements BotGateway {
         );
       }
       const issue = response.issue_id ? this.runtime.getIssue(response.issue_id) : null;
+      if (issue && response.photo && response.media_key) {
+        this.persistFollowupMessageState({
+          conversationId: context.recipient.conversation_id,
+          issue,
+          deliveredMessageId: sent.provider_message_id,
+          cardKind: 'runtime_issue',
+          cardState: hasPendingConfirmationButtons(response)
+            ? 'confirming'
+            : issue.governance_thread_state === 'waiting_on_child'
+              ? 'waiting_on_child'
+              : 'open',
+          cardKey: response.media_key,
+          existingCardState: this.followupMessageStates?.findByConversationIssue({
+            transport: 'telegram',
+            conversation_id: context.recipient.conversation_id,
+            issue_id: issue.issue_id,
+          }) ?? null,
+        });
+      }
       if (!shouldEditProcessingAck) {
         this.recordTransportEvent({
           recipient,

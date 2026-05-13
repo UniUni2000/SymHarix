@@ -940,10 +940,12 @@ describe('BotFollowupService', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(notifier.messages).toHaveLength(3);
-    expect(notifier.messages[0]?.message.text).toContain('INT-1');
-    expect(notifier.messages[1]?.message.text).toContain('INT-1');
-    expect(notifier.messages[2]?.message.text).toContain('INT-1');
+    expect(notifier.messages).toHaveLength(4);
+    const lifecycleMessages = notifier.messages.filter((entry) => !entry.message.photo);
+    expect(lifecycleMessages).toHaveLength(3);
+    expect(lifecycleMessages[0]?.message.text).toContain('INT-1');
+    expect(lifecycleMessages[1]?.message.text).toContain('INT-1');
+    expect(lifecycleMessages[2]?.message.text).toContain('INT-1');
 
     service.dispose();
     db.close();
@@ -1138,6 +1140,97 @@ describe('BotFollowupService', () => {
       }),
     ).toEqual(expect.objectContaining({
       last_notification_class: 'retrying',
+    }));
+
+    service.dispose();
+    db.close();
+  });
+
+  test('upserts runtime issue cards when ordinary issues enter dev and review', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const issue = runtime.getIssue('issue-1');
+    if (!issue) {
+      throw new Error('Expected issue-1 to exist');
+    }
+    issue.title = 'Add smoke test';
+    issue.tracker_state = 'In Progress';
+    issue.phase = 'DEV';
+    issue.orchestrator_state = 'dev_running';
+    issue.governance_status = null;
+    issue.governance_decision = null;
+    issue.governance_summary = null;
+    issue.active_governance_suggestions = [];
+    issue.actions = {
+      can_stop: true,
+      can_retry: false,
+      can_override_governance: false,
+      can_rewrite_governance: false,
+      can_split_governance: false,
+      can_open_pr: false,
+    };
+
+    const notifier = new MemoryNotifier();
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+
+    followups.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      user_id: 'user-1',
+      role: 'origin',
+    });
+
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, messageStates, {
+      bootstrapCurrentGovernanceCards: false,
+    });
+
+    runtime.emit({ type: 'issue', data: issue });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(notifier.messages).toHaveLength(1);
+    expect(notifier.messages[0]?.message.photo?.filename).toBe('INT-1-issue-card.png');
+    expect(notifier.messages[0]?.message.caption).toContain('Dev running');
+    expect(
+      messageStates.findByConversationIssue({
+        transport: 'telegram',
+        conversation_id: 'chat-origin',
+        issue_id: 'issue-1',
+      }),
+    ).toEqual(expect.objectContaining({
+      message_id: 'msg-1',
+      card_kind: 'runtime_issue',
+      card_state: 'open',
+    }));
+
+    issue.phase = 'REVIEW';
+    issue.orchestrator_state = 'review_running';
+    issue.active_pr_number = 120;
+    issue.updated_at = '2026-01-01T00:01:00.000Z';
+    runtime.emit({ type: 'issue', data: issue });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(notifier.edits).toHaveLength(1);
+    expect(notifier.edits[0]?.messageRef.provider_message_id).toBe('msg-1');
+    expect(notifier.edits[0]?.message.photo?.filename).toBe('INT-1-issue-card.png');
+    expect(notifier.edits[0]?.message.caption).toContain('In review');
+    expect(
+      messageStates.findByConversationIssue({
+        transport: 'telegram',
+        conversation_id: 'chat-origin',
+        issue_id: 'issue-1',
+      }),
+    ).toEqual(expect.objectContaining({
+      message_id: 'msg-1',
+      card_kind: 'runtime_issue',
+      card_state: 'open',
     }));
 
     service.dispose();
