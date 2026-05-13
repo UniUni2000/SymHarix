@@ -39,6 +39,7 @@ import type { SupervisorRepoUnderstandingService } from '../supervisor/repoUnder
 import type { SupervisorClaudeRuntimeService } from '../supervisor/claudeRuntime';
 import { SupervisorSessionService } from '../supervisor/sessionService';
 import type { SupervisorAgentRuntimeService } from '../supervisor/agentRuntime';
+import { buildNoActionAssistantReply, isCapabilityQuestion } from '../supervisor/assistantReliability';
 import { inferRuntimeLocaleFromText } from '../i18n/locale';
 import { extractIssueIdentifier } from './issueIdentifier';
 import { isIssueListQuestion } from './issueQueryIntent';
@@ -466,7 +467,10 @@ function isSupervisorClaudeBusinessToolDenial(message: string): boolean {
   return /(?:只读\s*(?:Claude\s*Code\s*)?(?:brain|大脑)|read-only\s+(?:Claude\s+Code\s+)?brain)/i.test(message) ||
     /(?:不能做|无法|不能|没法)[\s\S]{0,160}(?:创建|新建|关闭|重试|retry|close|create)[\s\S]{0,80}(?:issue|Linear|orchestrator|动作|工具|tool)/i.test(message) ||
     /(?:无法|不能|没法)[\s\S]{0,80}(?:直接)?(?:操作|调用|触发)[\s\S]{0,80}(?:orchestrator|控制台|工具|tool)/i.test(message) ||
-    /(?:需要|请)[\s\S]{0,80}(?:通过|到)[\s\S]{0,80}(?:orchestrator|控制台|Linear|GitHub)[\s\S]{0,80}(?:手动|触发|操作)/i.test(message);
+    /(?:需要|请)[\s\S]{0,80}(?:通过|到)[\s\S]{0,80}(?:orchestrator|控制台|Linear|GitHub)[\s\S]{0,80}(?:手动|触发|操作)/i.test(message) ||
+    /(?:can(?:not|'t)|unable|not able|only)[\s\S]{0,160}(?:create|close|retry|stop|run|use|call|trigger)[\s\S]{0,80}(?:issues?|orchestrator|tools?|actions?|governance|commands?)/i.test(message) ||
+    /(?:orchestrator tools?|supervisor-orchestrator|create_issue|show_card|show_issue_card)[\s\S]{0,100}(?:not reachable|unreachable|unavailable|not available|aren't reachable|are not reachable|can't|cannot)/i.test(message) ||
+    /only tool available:\s*(?:\*\*)?Read(?:\*\*)?/i.test(message);
 }
 
 function shouldFallbackToOrchestratorBackedRuntime(params: {
@@ -2080,6 +2084,13 @@ export class BotAssistantService {
         shouldBypassPendingForReadOnlyIssueQuestion(normalized) ||
         isSupervisorSessionFocusText(normalized)
       )) {
+        if (context.transport === 'telegram' && this.supervisorAgentRuntime) {
+          return this.supervisorAgentRuntime.respond({
+            context,
+            text,
+            canWrite: this.canWrite(context),
+          });
+        }
         const supervisorClaudeResponse = await this.respondWithSupervisorClaudeRuntime(context, text, {
           allowStructuredIntent: false,
         });
@@ -2109,6 +2120,20 @@ export class BotAssistantService {
 
     if (isSlashCommandText(text)) {
       return this.commandService.execute(context, parseTextCommand(text));
+    }
+
+    if (context.transport === 'telegram' && this.supervisorAgentRuntime) {
+      return this.supervisorAgentRuntime.respond({
+        context,
+        text,
+        canWrite: this.canWrite(context),
+      });
+    }
+
+    if (isCapabilityQuestion(normalized)) {
+      return {
+        message: buildNoActionAssistantReply(text),
+      };
     }
 
     const destructiveControlIntent = detectIssueCloseIntent(normalized);
