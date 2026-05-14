@@ -267,8 +267,8 @@ function isCloseRequest(text: string): boolean {
 }
 
 function isCreateIssueRequest(text: string): boolean {
-  return /(?:创建|新建).{0,24}issue/i.test(text) ||
-    /(?:帮我|请你|请|麻烦|我要|我想|直接|给我).{0,16}(?:建|开|提|创建|新建).{0,24}issue/i.test(text) ||
+  return /(?:创建|新建|新增).{0,24}issue/i.test(text) ||
+    /(?:帮我|请你|请|麻烦|我要|我想|直接|给我).{0,16}(?:建|开|提|创建|新建|新增).{0,24}issue/i.test(text) ||
     /(?:^|[\s，。！？!?])(?:建|开|提)(?:一个|个|一条|条)?\s*issue\b/i.test(text) ||
     /\bcreate\s+(?:(?:an?|the|new|a\s+new)\s+)?issue\b/i.test(text) ||
     /\bopen\s+(?:(?:an?|new|a\s+new)\s+)issue\b/i.test(text) ||
@@ -277,6 +277,27 @@ function isCreateIssueRequest(text: string): boolean {
 
 function isSupervisorAdvisoryQuestion(text: string): boolean {
   return /(?:建议|推荐).{0,32}(?:issue|任务|工单|单子)|(?:issue|任务|工单|单子).{0,32}(?:建议|推荐|最能提升|最值得|最应该|应该提|做什么|提什么)|做什么\s*(?:issue|任务|工单|单子).{0,32}(?:提升|最好|最值)|(?:让你|你来|由你|给你).{0,16}(?:提|建|开).{0,8}(?:issue|任务|工单|单子).{0,48}(?:什么|哪个|哪一个|最应该|最值得|提升)|what\s+(?:issue|task|ticket).{0,48}(?:recommend|improve|best|valuable)|(?:recommend|suggest).{0,48}(?:issue|task|ticket)/i.test(text);
+}
+
+function isSupervisorRuntimeModeQuestion(text: string): boolean {
+  const normalized = text.trim();
+  return /(?:如何|怎么|怎样|为什么|为啥).{0,24}(?:切换|开启|打开|进入|变成).{0,16}(?:agent\s*模式|agent模式|代理模式|写入权限|写权限|只读模式)|(?:agent\s*模式|agent模式|代理模式|写入权限|写权限|只读模式).{0,24}(?:如何|怎么|怎样|为什么|为啥|切换|开启|打开|进入)/i.test(normalized);
+}
+
+function buildSupervisorRuntimeModeAnswer(text: string): string {
+  const locale = inferRuntimeLocaleFromText(text);
+  return [
+    textForLocale(
+      locale,
+      '这里不需要手动切换 agent 模式。',
+      'You do not need to switch agent modes manually here.',
+    ),
+    textForLocale(
+      locale,
+      '直接说“创建/新增 issue ……”这类明确动作时，我会走写入工具并先给确认；仓库问答和推荐才会走只读分析路径。',
+      'When you ask for a concrete action such as creating an issue, I will use the write tool and ask for confirmation first; repository Q&A and recommendations use the read-only analysis path.',
+    ),
+  ].join('\n');
 }
 
 function isIssueRecommendationFollowup(text: string): boolean {
@@ -288,6 +309,8 @@ function isIssueRecommendationFollowup(text: string): boolean {
     /按(?:你的|你刚才|刚才|上面|上次|这个|那个)?(?:建议|推荐).{0,24}(?:来|做|建|创建|开|提|issue|任务|工单|单子)?/i.test(normalized) ||
     /(?:建|创建|开|提).{0,24}(?:这个|那个|上个|刚才|上面|建议|推荐).{0,24}(?:issue|任务|工单|单子)/i.test(normalized) ||
     /(?:这个|那个|上个|刚才|上面|建议|推荐).{0,24}(?:issue|任务|工单|单子).{0,24}(?:建|创建|开|提)/i.test(normalized) ||
+    /(?:做|执行|开始|推进|开跑).{0,12}(?:这个|那个|上个|刚才|上面).{0,12}(?:issue|任务|工单|单子)/i.test(normalized) ||
+    /(?:这个|那个|上个|刚才|上面).{0,12}(?:issue|任务|工单|单子).{0,12}(?:做|执行|开始|推进|开跑)/i.test(normalized) ||
     /^(?:需要|可以|行|批准|yes|yep|sure)$/i.test(normalized) ||
     /(?:可以|行|好|好的|没问题).{0,16}(?:帮我|给我|替我|你).{0,12}(?:建|创建|新建|开|提)/i.test(normalized) ||
     /\b(?:go ahead|do it|create it|create that|create this|open it|open that|make it)\b/i.test(normalized);
@@ -336,6 +359,9 @@ function isRepositoryRouteQuestion(text: string): boolean {
 }
 
 function isSetProjectRequest(text: string): boolean {
+  if (isSupervisorRuntimeModeQuestion(text)) {
+    return false;
+  }
   return Boolean(extractProjectSlug(text)) && (
     /(?:set|switch|切换|设置|设为|设置为).{0,16}(?:project|项目|repo|repository|仓库)|(?:project|项目|repo|repository|仓库).{0,16}(?:to|为|成|设为|设置|切换)/i.test(text) ||
     /(?:默认用|切到|切换到|换到|换成|切仓库到|切仓库为)\s*[A-Za-z0-9_.:/-]+/i.test(text)
@@ -2587,6 +2613,12 @@ export class SupervisorAgentRuntimeService {
         tool: 'list_repositories',
         args: {},
         reason: 'User asked for the current repository route.',
+      }];
+    }
+    if (isSupervisorRuntimeModeQuestion(text)) {
+      return [{
+        type: 'final_answer',
+        message: buildSupervisorRuntimeModeAnswer(text),
       }];
     }
     if (isSetProjectRequest(text)) {
