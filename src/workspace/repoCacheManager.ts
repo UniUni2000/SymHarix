@@ -62,6 +62,7 @@ export class RepoCacheManager {
         if (sourceMismatch) {
           await fs.promises.rm(sourcePath, { recursive: true, force: true });
         } else {
+          await this.ensureSourceOriginMatchesRoute(sourcePath, route);
           await this.refreshRepoSource(sourcePath);
           return { success: true, githubRepoFull: route.github_repo_full, repoRoot, sourcePath };
         }
@@ -80,10 +81,7 @@ export class RepoCacheManager {
 
         await execAsync(`git clone "${route.local_path}" "${sourcePath}"`, { maxBuffer: 10 * 1024 * 1024 });
       } else {
-        const cloneUrl = this.githubToken
-          ? `https://${this.githubToken}@github.com/${route.github_repo_full}.git`
-          : `https://github.com/${route.github_repo_full}.git`;
-        await execAsync(`git clone "${cloneUrl}" "${sourcePath}"`, { maxBuffer: 10 * 1024 * 1024 });
+        await execAsync(`git clone "${this.cloneUrlForRoute(route)}" "${sourcePath}"`, { maxBuffer: 10 * 1024 * 1024 });
       }
 
       const clonedSourceMismatch = await this.getRouteMismatch(sourcePath, expectedRepo);
@@ -108,6 +106,34 @@ export class RepoCacheManager {
         error: `Failed to ensure repo source for ${route.github_repo_full}: ${error.message}`
       };
     }
+  }
+
+  private cloneUrlForRoute(route: ResolvedRepositoryRoute): string {
+    if (route.local_path) {
+      return route.local_path;
+    }
+
+    return this.githubToken
+      ? `https://${this.githubToken}@github.com/${route.github_repo_full}.git`
+      : `https://github.com/${route.github_repo_full}.git`;
+  }
+
+  private async ensureSourceOriginMatchesRoute(
+    sourcePath: string,
+    route: ResolvedRepositoryRoute,
+  ): Promise<void> {
+    const desiredOrigin = this.cloneUrlForRoute(route);
+    const currentOrigin = await this.getOriginRemoteUrl(sourcePath);
+    if (currentOrigin === desiredOrigin) {
+      return;
+    }
+
+    if (currentOrigin) {
+      await execAsync(`git -C "${sourcePath}" remote set-url origin "${desiredOrigin}"`);
+      return;
+    }
+
+    await execAsync(`git -C "${sourcePath}" remote add origin "${desiredOrigin}"`);
   }
 
   private async getRouteMismatch(repoPath: string, expectedRepo: string): Promise<string | null> {
