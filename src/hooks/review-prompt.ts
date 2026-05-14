@@ -247,7 +247,7 @@ export function formatLinearComment(report: ReviewReport): string {
     comment += `\n### Test Requirements\n${report.testRequirements}\n`;
   }
 
-  comment += `\n---\n*Automated review by Symphony Agent*\n`;
+  comment += `\n---\n*Automated review by SymHarix Agent*\n`;
 
   return comment;
 }

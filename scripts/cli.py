@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Symphony CLI - Unified entry point for all commands."""
+"""SymHarix CLI - Unified entry point for all commands."""
 
 import json
 import os
@@ -27,6 +27,17 @@ WORKFLOW_ARTIFACT_FILES = (
 )
 
 
+def get_symharix_env(env: Dict[str, str], name: str) -> Optional[str]:
+    """Read SYMHARIX_* first, then fall back to legacy SYMPHONY_*."""
+    if not name.startswith("SYMPHONY_"):
+        raise ValueError(f"Expected SYMPHONY_ environment variable name, got {name}")
+    current_name = "SYMHARIX_" + name[len("SYMPHONY_"):]
+    current_value = (env.get(current_name) or "").strip()
+    if current_value:
+        return current_value
+    return env.get(name)
+
+
 def sanitize_repo_cache_key(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", value)
 
@@ -39,20 +50,21 @@ def resolve_dispatch_github_repo(
     env: Optional[Dict[str, str]] = None,
 ) -> Tuple[str, str, str]:
     env = env or os.environ
-    github_repo_full = (env.get("SYMPHONY_GITHUB_REPO_FULL") or "").strip()
+    github_repo_full = (get_symharix_env(env, "SYMPHONY_GITHUB_REPO_FULL") or "").strip()
     if github_repo_full:
         if "/" not in github_repo_full:
-            raise ValueError("SYMPHONY_GITHUB_REPO_FULL must be in owner/repo format")
+            raise ValueError("SYMHARIX_GITHUB_REPO_FULL/SYMPHONY_GITHUB_REPO_FULL must be in owner/repo format")
         owner, repo = github_repo_full.split("/", 1)
         return owner, repo, github_repo_full
 
-    owner = (env.get("SYMPHONY_GITHUB_OWNER") or default_owner or "").strip()
-    repo = (env.get("SYMPHONY_GITHUB_REPO") or default_repo or "").strip()
+    owner = (get_symharix_env(env, "SYMPHONY_GITHUB_OWNER") or default_owner or "").strip()
+    repo = (get_symharix_env(env, "SYMPHONY_GITHUB_REPO") or default_repo or "").strip()
     if not owner or not repo:
         issue_identifier = issue.get("identifier", "unknown issue")
         raise ValueError(
             f"Dispatch for {issue_identifier} requires an explicit repository route via "
-            "SYMPHONY_GITHUB_REPO_FULL or SYMPHONY_GITHUB_OWNER/SYMPHONY_GITHUB_REPO",
+            "SYMHARIX_GITHUB_REPO_FULL or SYMHARIX_GITHUB_OWNER/SYMHARIX_GITHUB_REPO "
+            "(legacy SYMPHONY_* names are still accepted)",
         )
 
     return owner, repo, f"{owner}/{repo}"
@@ -112,7 +124,7 @@ def reset_workspace_artifacts(_workspace_path: Path, symphony_path: Path) -> Non
 @click.group()
 @click.pass_context
 def cli(ctx):
-    """symphonyness - Issue workflow automation."""
+    """symharix - Issue workflow automation."""
     try:
         ctx.ensure_object(dict)
         ctx.obj["config"] = load_config()

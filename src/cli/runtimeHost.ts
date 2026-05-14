@@ -2,7 +2,7 @@ import type { Database } from 'bun:sqlite';
 import { Orchestrator, type OrchestratorStateSnapshot } from '../orchestrator';
 import { createBotGatewayFromEnv } from '../bots/gateway';
 import { RuntimeHub } from '../runtime/hub';
-import { SymphonyServer } from '../server';
+import { SymHarixServer } from '../server';
 import { createRuntimeAccessControllerFromEnv } from '../server/runtimeAccess';
 import { TrackerProjectResolutionService } from '../tracker/projectResolution';
 import { LinearClient } from '../tracker/linear-client';
@@ -115,7 +115,7 @@ export class RuntimeHost {
           this.config.repositories.routing,
         );
 
-        return new SymphonyServer(
+        return new SymHarixServer(
           db,
           config,
           runtimeHub,

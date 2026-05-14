@@ -1,6 +1,6 @@
 /**
- * Symphony Service - Core Domain Types
- * Based on Symphony Specification v1
+ * SymHarix Service - Core Domain Types
+ * Based on SymHarix Specification v1
  */
 
 // ============================================================================

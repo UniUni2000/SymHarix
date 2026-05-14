@@ -1,4 +1,4 @@
-"""Symphony shared library."""
+"""SymHarix shared library."""
 
 from .state_machine import State, Transition, StateMachine
 

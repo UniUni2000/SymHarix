@@ -1,4 +1,5 @@
 import type { RuntimeAccessView, RuntimeManifest } from '../runtime/types';
+import { readSymHarixEnv } from '../config/env';
 
 export interface RuntimeAccessController {
   describe(headers?: Headers | Record<string, string | undefined>): RuntimeAccessView;
@@ -89,7 +90,7 @@ export function createRuntimeAccessController(options?: {
 
 export function createRuntimeAccessControllerFromEnv(): RuntimeAccessController {
   return createRuntimeAccessController({
-    writeToken: process.env.SYMPHONY_RUNTIME_WRITE_TOKEN || null,
+    writeToken: readSymHarixEnv('SYMPHONY_RUNTIME_WRITE_TOKEN') || null,
   });
 }
 

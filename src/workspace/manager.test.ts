@@ -18,7 +18,7 @@ function createSeedRepo(projectRoot: string, repoName: string): string {
   const repoPath = path.join(projectRoot, repoName);
   fs.mkdirSync(repoPath, { recursive: true });
   run('git init -b main', repoPath);
-  run('git config user.name "Symphony Test"', repoPath);
+  run('git config user.name "SymHarix Test"', repoPath);
   run('git config user.email "symphony-test@example.com"', repoPath);
   fs.writeFileSync(path.join(repoPath, 'README.md'), `# ${repoName}\n`);
   run('git add README.md', repoPath);
@@ -365,13 +365,13 @@ describe('WorkspaceManager', () => {
 
     expect(fs.existsSync(hookPath)).toBe(true);
     expect(fs.existsSync(managedHookPath)).toBe(true);
-    expect(fs.readFileSync(managedHookPath, 'utf8')).toContain('Symphony workflow artifacts must not be committed');
+    expect(fs.readFileSync(managedHookPath, 'utf8')).toContain('SymHarix workflow artifacts must not be committed');
 
     fs.writeFileSync(path.join(workspacePath, 'HANDOVER.md'), '# Generated handover\n');
     run('git add HANDOVER.md', workspacePath);
 
     expect(() => run('git commit -m "bad commit"', workspacePath)).toThrow(
-      /Symphony workflow artifacts must not be committed/,
+      /SymHarix workflow artifacts must not be committed/,
     );
   });
 });

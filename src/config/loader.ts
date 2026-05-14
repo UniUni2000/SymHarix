@@ -7,6 +7,7 @@ import { ServiceConfig, WorkflowDefinition } from '../types';
 import * as os from 'os';
 import * as path from 'path';
 import { parseRepositoryRouteConfigMap } from '../routing/repositoryRouting';
+import { readSymHarixEnv } from './env';
 
 /**
  * Default configuration values
@@ -61,7 +62,14 @@ function resolveEnvRef(value: string): string {
   }
 
   const envVarName = value.slice(1);
-  const envValue = process.env[envVarName];
+  const legacyName = envVarName.startsWith('SYMHARIX_')
+    ? `SYMPHONY_${envVarName.slice('SYMHARIX_'.length)}`
+    : envVarName.startsWith('SYMPHONY_')
+      ? envVarName
+      : null;
+  const envValue = legacyName
+    ? readSymHarixEnv(legacyName)
+    : process.env[envVarName];
 
   // If $VAR resolves to empty string or undefined, treat as missing
   if (!envValue) {

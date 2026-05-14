@@ -17,6 +17,13 @@ describe('startLocalTunnel', () => {
     })).toBe(true);
   });
 
+  test('accepts SYMHARIX aliases for tunnel provisioning config', () => {
+    expect(shouldProvisionStartLocalTunnel({
+      SYMHARIX_TELEGRAM_BOT_TOKEN: 'telegram-token',
+      SYMHARIX_PUBLIC_BASE_URL: '',
+    })).toBe(true);
+  });
+
   test('skips temporary tunnel provisioning when a public base URL is already configured', () => {
     expect(shouldProvisionStartLocalTunnel({
       SYMPHONY_TELEGRAM_BOT_TOKEN: 'telegram-token',

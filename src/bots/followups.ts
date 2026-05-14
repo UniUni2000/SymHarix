@@ -178,14 +178,14 @@ function textForLocale(locale: RuntimeLocale, zh: string, en: string): string {
 function buildLifecycleMessage(issue: RuntimeIssueView, notificationClass: LifecycleNotificationClass): BotTransportMessage {
   const locale = issueLocale(issue);
   const headline = notificationClass === 'retrying'
-    ? textForLocale(locale, `Symphony 重试中 · ${issue.identifier}`, `Symphony retrying · ${issue.identifier}`)
+    ? textForLocale(locale, `SymHarix 重试中 · ${issue.identifier}`, `SymHarix retrying · ${issue.identifier}`)
     : notificationClass === 'failed'
-      ? textForLocale(locale, `Symphony 失败 · ${issue.identifier}`, `Symphony failed · ${issue.identifier}`)
+      ? textForLocale(locale, `SymHarix 失败 · ${issue.identifier}`, `SymHarix failed · ${issue.identifier}`)
       : notificationClass === 'delivery_failed'
-        ? textForLocale(locale, `Symphony 交付阻塞 · ${issue.identifier}`, `Symphony delivery blocked · ${issue.identifier}`)
+        ? textForLocale(locale, `SymHarix 交付阻塞 · ${issue.identifier}`, `SymHarix delivery blocked · ${issue.identifier}`)
       : notificationClass === 'cancelled'
-        ? textForLocale(locale, `Symphony 已取消 · ${issue.identifier}`, `Symphony cancelled · ${issue.identifier}`)
-        : textForLocale(locale, `Symphony 完成 · ${issue.identifier}`, `Symphony completed · ${issue.identifier}`);
+        ? textForLocale(locale, `SymHarix 已取消 · ${issue.identifier}`, `SymHarix cancelled · ${issue.identifier}`)
+        : textForLocale(locale, `SymHarix 完成 · ${issue.identifier}`, `SymHarix completed · ${issue.identifier}`);
   const summary = notificationClass === 'retrying'
     ? textForLocale(locale, '这张单刚进入重试队列；我会继续盯高信号结果，不再推送同类抖动。', 'This issue just entered the retry queue; I will keep watching for high-signal results without repeating the same noise.')
     : notificationClass === 'failed'
@@ -217,7 +217,7 @@ function buildLifecycleMessage(issue: RuntimeIssueView, notificationClass: Lifec
 function buildTimelineDigestMessage(issue: RuntimeIssueView, event: RuntimeTimelineEvent): BotTransportMessage {
   return {
     text: [
-      `Symphony timeline · ${issue.identifier}`,
+      `SymHarix timeline · ${issue.identifier}`,
       `${event.message}`,
       issue.github_repo ? `repo ${issue.github_repo}` : null,
     ].filter(Boolean).join('\n'),

@@ -2,6 +2,7 @@ import {
   SUPERVISOR_ORCHESTRATOR_TOOL_NAMES,
   type SupervisorOrchestratorToolName,
 } from './orchestratorBroker';
+import { readSymHarixEnv } from '../config/env';
 
 type JsonRpcMessage = {
   jsonrpc?: '2.0';
@@ -139,18 +140,18 @@ function listTools(): Array<Record<string, unknown>> {
 
 function getDefaultContext(args: Record<string, unknown>): Record<string, unknown> {
   return {
-    transport: process.env.SYMPHONY_SUPERVISOR_ORCHESTRATOR_TRANSPORT || 'telegram',
+    transport: readSymHarixEnv('SYMPHONY_SUPERVISOR_ORCHESTRATOR_TRANSPORT') || 'telegram',
     conversation_id:
-      process.env.SYMPHONY_SUPERVISOR_ORCHESTRATOR_CONVERSATION_ID ||
+      readSymHarixEnv('SYMPHONY_SUPERVISOR_ORCHESTRATOR_CONVERSATION_ID') ||
       (typeof args.conversation_id === 'string' ? args.conversation_id : 'supervisor-orchestrator'),
     user_id: typeof args.user_id === 'string' ? args.user_id : null,
     display_name: typeof args.display_name === 'string' ? args.display_name : null,
-    repo_ref: process.env.SYMPHONY_SUPERVISOR_ORCHESTRATOR_REPO_REF || null,
+    repo_ref: readSymHarixEnv('SYMPHONY_SUPERVISOR_ORCHESTRATOR_REPO_REF') || null,
   };
 }
 
 async function callBroker(toolName: SupervisorOrchestratorToolName, args: Record<string, unknown>): Promise<unknown> {
-  const endpoint = process.env.SYMPHONY_SUPERVISOR_ORCHESTRATOR_ENDPOINT?.trim();
+  const endpoint = readSymHarixEnv('SYMPHONY_SUPERVISOR_ORCHESTRATOR_ENDPOINT')?.trim();
   if (!endpoint) {
     return {
       error: 'orchestrator_endpoint_not_configured',
@@ -162,8 +163,8 @@ async function callBroker(toolName: SupervisorOrchestratorToolName, args: Record
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...(process.env.SYMPHONY_SUPERVISOR_ORCHESTRATOR_TOKEN
-        ? { 'x-supervisor-orchestrator-token': process.env.SYMPHONY_SUPERVISOR_ORCHESTRATOR_TOKEN }
+      ...(readSymHarixEnv('SYMPHONY_SUPERVISOR_ORCHESTRATOR_TOKEN')
+        ? { 'x-supervisor-orchestrator-token': readSymHarixEnv('SYMPHONY_SUPERVISOR_ORCHESTRATOR_TOKEN') }
         : {}),
     },
     body: JSON.stringify({

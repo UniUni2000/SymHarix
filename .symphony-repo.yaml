@@ -26,4 +26,4 @@ runtime_hints:
   url: http://localhost:8080/runtime
   ready_log:
     - "[orchestrator] Started"
-    - "Symphony Server started on"
+    - "SymHarix Server started on"

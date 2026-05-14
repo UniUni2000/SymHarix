@@ -173,16 +173,16 @@ describe('SupervisorClaudeRuntimeService', () => {
       'http://127.0.0.1:3000/api/v1/bots/supervisor-context/call',
       'http://127.0.0.1:3000/api/v1/bots/supervisor-orchestrator/call',
       'token-1',
-      '/srv/symphonyness',
+      '/srv/symharix',
     ));
 
     expect(config.mcpServers['supervisor-context'].args).toEqual([
       'run',
-      '/srv/symphonyness/src/supervisor/contextMcpServer.ts',
+      '/srv/symharix/src/supervisor/contextMcpServer.ts',
     ]);
     expect(config.mcpServers['supervisor-orchestrator'].args).toEqual([
       'run',
-      '/srv/symphonyness/src/supervisor/orchestratorMcpServer.ts',
+      '/srv/symharix/src/supervisor/orchestratorMcpServer.ts',
     ]);
     expect(config.mcpServers['supervisor-orchestrator'].env).toMatchObject({
       SYMPHONY_SUPERVISOR_ORCHESTRATOR_ENDPOINT:

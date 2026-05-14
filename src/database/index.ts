@@ -1,5 +1,5 @@
 /**
- * Database Connection Module for Symphony Enterprise Agent Platform
+ * Database Connection Module for SymHarix Enterprise Agent Platform
  * Provides SQLite database connection with WAL mode for concurrency
  */
 

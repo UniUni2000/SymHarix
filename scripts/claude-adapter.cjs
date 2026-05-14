@@ -2,7 +2,7 @@
 
 /**
  * claude-adapter.js
- * Bridges Symphony's JSON-RPC protocol to a native Claude Code stream-json session.
+ * Bridges SymHarix's JSON-RPC protocol to a native Claude Code stream-json session.
  */
 
 const cp = require('child_process');
@@ -74,7 +74,7 @@ function buildClaudeCliArgs(options = {}) {
 }
 
 function isAdapterDebugEnabled(env = process.env) {
-  return env.SYMPHONY_ADAPTER_DEBUG === '1';
+  return env.SYMHARIX_ADAPTER_DEBUG === '1' || env.SYMPHONY_ADAPTER_DEBUG === '1';
 }
 
 function formatCompactNumber(value) {

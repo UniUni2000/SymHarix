@@ -19,7 +19,7 @@ export function isCapabilityQuestion(text: string): boolean {
 function buildCapabilityReply(locale: RuntimeLocale | null | undefined): string {
   if (isEnglishLocale(locale)) {
     return [
-      "I'm your Symphony Runtime Operator Copilot. I can help you manage issues and workflows within the Symphony runtime. Here's what I can do:",
+      "I'm your SymHarix Runtime Operator Copilot. I can help you manage issues and workflows within the SymHarix runtime. Here's what I can do:",
       '',
       '- Create issues with a title, description, and target project.',
       '- Check issue status and show issue card details.',
@@ -31,7 +31,7 @@ function buildCapabilityReply(locale: RuntimeLocale | null | undefined): string 
     ].join('\n');
   }
   return [
-    '我是你的 Symphony Runtime Operator Copilot，可以帮你管理 Symphony runtime 里的 issue 和工作流。具体来说，我能：',
+    '我是你的 SymHarix Runtime Operator Copilot，可以帮你管理 SymHarix runtime 里的 issue 和工作流。具体来说，我能：',
     '',
     '- 创建新的 issue，指定标题、描述和项目。',
     '- 查看 issue 状态和卡片详情。',

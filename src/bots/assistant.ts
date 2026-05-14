@@ -1651,8 +1651,8 @@ function buildScopedHelp(context: BotRuntimeCopilotContext, originalText: string
   const availableProjects = context.available_projects.map((project) => project.project_slug);
   return [
     english
-      ? 'I mainly handle the Symphony control plane: creating issues, checking status, reading repository routes, setting the default project, stop/retry/watch, and governance actions such as rewrite/split/override.'
-      : '我主要负责 Symphony 控制面：建单、查状态、看仓库路由、设置默认项目、stop/retry/watch，以及治理相关的 rewrite/split/override。',
+      ? 'I mainly handle the SymHarix control plane: creating issues, checking status, reading repository routes, setting the default project, stop/retry/watch, and governance actions such as rewrite/split/override.'
+      : '我主要负责 SymHarix 控制面：建单、查状态、看仓库路由、设置默认项目、stop/retry/watch，以及治理相关的 rewrite/split/override。',
     context.default_project_slug
       ? english ? `Current default project: ${context.default_project_slug}` : `当前默认项目：${context.default_project_slug}`
       : null,

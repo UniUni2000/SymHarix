@@ -488,7 +488,7 @@ export function buildSupervisorIssueVisualCardSvg(issue: RuntimeIssueView): stri
   <rect width="1080" height="1080" fill="#071018"/>
   <rect x="34" y="34" width="1012" height="1012" rx="42" fill="url(#cardBg)" stroke="#263647" stroke-width="3"/>
   <path d="M74 126 C92 88 126 90 144 126 S196 164 216 126 S268 88 288 126" fill="none" stroke="#2F94FF" stroke-width="13" stroke-linecap="round"/>
-  <text x="326" y="135" fill="#F6FAFD" font-size="34" font-weight="840">symphonyness</text>
+  <text x="326" y="135" fill="#F6FAFD" font-size="34" font-weight="840">symharix</text>
   <rect x="800" y="91" width="198" height="62" rx="18" fill="#111820" stroke="#2C3D50" stroke-width="2"/>
   <text x="899" y="132" text-anchor="middle" fill="#6BB4FF" font-size="22" font-weight="820">${escapeXml(textForLocale(locale, '打开 Mini App', 'Open Mini App'))}</text>
 

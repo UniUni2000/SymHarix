@@ -1,3 +1,5 @@
+import { readSymHarixEnvTrimmed } from '../config/env';
+
 function normalizeEnvValue(value: string | undefined | null): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
@@ -132,13 +134,13 @@ export function getStartLocalTunnelProbeRecoveryReason(params: {
 export function shouldProvisionStartLocalTunnel(
   env: Record<string, string | undefined>,
 ): boolean {
-  if (!normalizeEnvValue(env.SYMPHONY_TELEGRAM_BOT_TOKEN)) {
+  if (!readSymHarixEnvTrimmed('SYMPHONY_TELEGRAM_BOT_TOKEN', env)) {
     return false;
   }
-  if (normalizeEnvValue(env.SYMPHONY_TELEGRAM_BOOTSTRAP)?.toLowerCase() === 'off') {
+  if (readSymHarixEnvTrimmed('SYMPHONY_TELEGRAM_BOOTSTRAP', env)?.toLowerCase() === 'off') {
     return false;
   }
-  const publicBaseUrl = normalizeEnvValue(env.SYMPHONY_PUBLIC_BASE_URL);
+  const publicBaseUrl = readSymHarixEnvTrimmed('SYMPHONY_PUBLIC_BASE_URL', env);
   if (publicBaseUrl && !isEphemeralTryCloudflareUrl(publicBaseUrl)) {
     return false;
   }

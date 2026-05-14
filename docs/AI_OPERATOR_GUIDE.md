@@ -6,16 +6,16 @@ This guide is for maintainers and AI agents working inside this repository. It f
 
 ## Prime Directive / 首要原则
 
-Respect the operator's configured target. symphonyness can create issues, branches, PRs, comments, and tracker state transitions in the routed repository.
+Respect the operator's configured target. SymHarix can create issues, branches, PRs, comments, and tracker state transitions in the routed repository.
 
-必须尊重操作者配置的目标仓库。symphonyness 可以在路由仓库中创建 issue、branch、PR、comment，并修改 tracker 状态。
+必须尊重操作者配置的目标仓库。SymHarix 可以在路由仓库中创建 issue、branch、PR、comment，并修改 tracker 状态。
 
 Before any live test, check:
 
 任何 live test 前先检查：
 
 ```bash
-rg -n "SYMPHONY_TRACKER_PROJECT_SLUG|repositories:|routing:|github_owner|github_repo" .env WORKFLOW.md
+rg -n "SYMHARIX_TRACKER_PROJECT_SLUG|repositories:|routing:|github_owner|github_repo" .env WORKFLOW.md
 ```
 
 Expected example:
@@ -33,9 +33,9 @@ Only run live verification against a repository where automated issues, branches
 
 ## What The System Is / 系统边界
 
-symphonyness is a local control plane with a Telegram-first Supervisor.
+SymHarix is a local control plane with a Telegram-first Supervisor.
 
-symphonyness 是一个带 Telegram-first Supervisor 的本地控制平面。
+SymHarix 是一个带 Telegram-first Supervisor 的本地控制平面。
 
 - Telegram is the main clarification and approval surface.
   Telegram 是主要澄清和审批入口。
@@ -43,6 +43,8 @@ symphonyness 是一个带 Telegram-first Supervisor 的本地控制平面。
   Runtime Deck 是本地诊断和控制界面。
 - Linear and GitHub are records and delivery surfaces.
   Linear 和 GitHub 是记录与交付界面。
+- Multi-repo context is explicit: Telegram can list configured routes, switch the chat default project, and read a named repo through the read-only advisor.
+  多仓库上下文必须显式：Telegram 可以列出已配置 route、切换 chat 默认项目，并通过只读 advisor 读取指定仓库。
 - Orchestrator owns dispatch, retry, dev/review handoff, delivery cleanup, and repair.
   Orchestrator 负责派发、重试、开发/评审交接、交付清理和修复。
 - Claude Code-compatible execution runs through `scripts/claude-adapter.cjs`.
@@ -77,6 +79,7 @@ Use another port only when `3000` is busy:
 
 ```bash
 PORT=4000 bun run start:local
+PORT=4000 bun run health
 ```
 
 If startup behaves strangely, inspect before changing code:
@@ -103,6 +106,10 @@ For Telegram, verify:
 If Telegram replies but the local manifest has an empty webhook URL, another bot process or deployment may be answering with the same token.
 
 如果 Telegram 有回复但本地 manifest 的 webhook URL 为空，可能是另一个 bot 进程或部署正在使用同一个 token 回复。
+
+If the public base URL is a temporary `trycloudflare.com` address, treat HTTP 530, stale webhook URLs, DNS errors, and repeated pending updates as tunnel-layer failures first. Let `start:local` recover the tunnel before changing application code.
+
+如果 public base URL 是临时 `trycloudflare.com` 地址，HTTP 530、旧 webhook URL、DNS 错误和 pending updates 持续增长应先按隧道层故障处理。先让 `start:local` 恢复隧道，再考虑改应用代码。
 
 ## Live E2E Rules / Live E2E 规则
 
@@ -163,6 +170,8 @@ When something breaks, classify the layer before patching:
   Dev agent：adapter 启动、workspace path、Anthropic key、分支漂移。
 - Delivery: PR, tracker transition, issue close, cleanup.
   交付：PR、tracker 状态流转、issue close、清理。
+- Delivery blocker: proof is satisfied, but merge or final delivery failed, commonly `delivery_code=merge_blocked`.
+  交付阻塞：证据已满足，但 merge 或最终交付失败，常见为 `delivery_code=merge_blocked`。
 
 ## Common Checks / 常用检查
 
@@ -175,6 +184,7 @@ Check:
 - `/api/v1/bots/manifest`
 - webhook diagnostics
 - tunnel/public URL reachability
+- stale `trycloudflare.com` public base URL
 - callback audit logs
 - `bot_transport_events`
 
@@ -238,13 +248,36 @@ If missing or failed, verify:
 - chat default project / chat 默认项目
 - `WORKFLOW.md -> repositories.routing` / `WORKFLOW.md -> repositories.routing`
 - route local path or source cache / 路由 local path 或 source cache
-- `SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_COMMAND` / `SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_COMMAND`
+- `SYMHARIX_SUPERVISOR_REPO_UNDERSTANDING_COMMAND` / `SYMHARIX_SUPERVISOR_READONLY_ADVISOR_COMMAND`
 - `claude-code/bin/claude-haha --help` from this checkout / 在本 checkout 中运行 `claude-code/bin/claude-haha --help`
 - readable repository path and valid Git `HEAD` / 仓库路径可读且 Git `HEAD` 有效
 
 Repo understanding is read-only. It should improve conversation and recommendations, but must not create issues or edit code before a Plan Card is approved.
 
 仓库理解是只读的。它应改善对话和建议，但不能在 Plan Card 获批前创建 issue 或编辑代码。
+
+### Wrong Repository In Telegram / Telegram 里仓库不对
+
+Check configured routes and chat preference before changing code:
+
+改代码前先检查 route 配置和 chat 偏好：
+
+```bash
+rg -n "repositories:|routing:|github_owner|github_repo|SYMHARIX_TRACKER_PROJECT_SLUG" WORKFLOW.md .env
+```
+
+In Telegram, ask for available repositories or switch explicitly:
+
+在 Telegram 中询问可用仓库或显式切换：
+
+- `有哪些仓库？`
+- `切到 sample-project`
+- `切到 acme/demo-app`
+- `test2 仓库主要做什么？`
+
+The resolver accepts project slug, full `owner/repo`, or repo name. If a route is missing, the system should fail closed instead of guessing.
+
+resolver 接受 project slug、完整 `owner/repo` 或 repo name。缺失 route 时系统应 fail closed，而不是猜测。
 
 ### Dev Agent Fails Immediately / Dev Agent 立即失败
 
@@ -284,6 +317,10 @@ Check:
 - GitHub issue mapping
 - tracker state conflict recovery
 - orphan repair logs
+
+If `delivery_code=merge_blocked`, treat it as a delivery blocker, not as failed review proof. Open the active PR, inspect the merge failure, then retry or supersede after the blocker is resolved.
+
+如果 `delivery_code=merge_blocked`，把它当成交付阻塞，而不是 review 证据失败。打开 active PR，检查 merge 失败原因，解决后再 retry 或 supersede。
 
 ## Repair Commands / 修复命令
 

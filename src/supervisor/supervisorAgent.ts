@@ -15,6 +15,7 @@ import type {
   SupervisorRepoSourceSnapshot,
 } from './repoSourceResolver';
 import { isSupervisorControlPlaneQuestion } from '../bots/controlPlaneIntent';
+import { readSymHarixEnv } from '../config/env';
 
 export interface SupervisorAgentRuntimeContext {
   source: 'telegram_chat' | 'slash_command' | 'inline_action';
@@ -613,32 +614,32 @@ export function createSupervisorAgentFromEnv(
   const readOnlyAdvisor = repoSourceResolver
     ? createReadOnlyClaudeSupervisorAdvisorFromEnv()
     : null;
-  const provider = normalizeConfigValue(process.env.SYMPHONY_SUPERVISOR_AGENT_PROVIDER)
-    ?? normalizeConfigValue(process.env.SYMPHONY_SUPERVISOR_CC_PROVIDER)
-    ?? normalizeConfigValue(process.env.SYMPHONY_SUPERVISOR_LLM_PROVIDER)
-    ?? normalizeConfigValue(process.env.SYMPHONY_BOT_LLM_PROVIDER);
-  const model = normalizeConfigValue(process.env.SYMPHONY_SUPERVISOR_AGENT_MODEL)
-    ?? normalizeConfigValue(process.env.SYMPHONY_SUPERVISOR_CC_MODEL)
-    ?? normalizeConfigValue(process.env.SYMPHONY_SUPERVISOR_LLM_MODEL)
-    ?? normalizeConfigValue(process.env.SYMPHONY_BOT_LLM_MODEL);
-  const apiKey = normalizeConfigValue(process.env.SYMPHONY_SUPERVISOR_AGENT_API_KEY)
-    ?? normalizeConfigValue(process.env.SYMPHONY_SUPERVISOR_CC_API_KEY)
-    ?? normalizeConfigValue(process.env.SYMPHONY_SUPERVISOR_LLM_API_KEY)
-    ?? normalizeConfigValue(process.env.SYMPHONY_BOT_LLM_API_KEY);
+  const provider = normalizeConfigValue(readSymHarixEnv('SYMPHONY_SUPERVISOR_AGENT_PROVIDER'))
+    ?? normalizeConfigValue(readSymHarixEnv('SYMPHONY_SUPERVISOR_CC_PROVIDER'))
+    ?? normalizeConfigValue(readSymHarixEnv('SYMPHONY_SUPERVISOR_LLM_PROVIDER'))
+    ?? normalizeConfigValue(readSymHarixEnv('SYMPHONY_BOT_LLM_PROVIDER'));
+  const model = normalizeConfigValue(readSymHarixEnv('SYMPHONY_SUPERVISOR_AGENT_MODEL'))
+    ?? normalizeConfigValue(readSymHarixEnv('SYMPHONY_SUPERVISOR_CC_MODEL'))
+    ?? normalizeConfigValue(readSymHarixEnv('SYMPHONY_SUPERVISOR_LLM_MODEL'))
+    ?? normalizeConfigValue(readSymHarixEnv('SYMPHONY_BOT_LLM_MODEL'));
+  const apiKey = normalizeConfigValue(readSymHarixEnv('SYMPHONY_SUPERVISOR_AGENT_API_KEY'))
+    ?? normalizeConfigValue(readSymHarixEnv('SYMPHONY_SUPERVISOR_CC_API_KEY'))
+    ?? normalizeConfigValue(readSymHarixEnv('SYMPHONY_SUPERVISOR_LLM_API_KEY'))
+    ?? normalizeConfigValue(readSymHarixEnv('SYMPHONY_BOT_LLM_API_KEY'));
   const normalizedProvider = normalizeProvider(provider);
-  const baseUrl = normalizeConfigValue(process.env.SYMPHONY_SUPERVISOR_AGENT_BASE_URL)
-    ?? normalizeConfigValue(process.env.SYMPHONY_SUPERVISOR_CC_BASE_URL)
-    ?? normalizeConfigValue(process.env.SYMPHONY_SUPERVISOR_LLM_BASE_URL)
-    ?? normalizeConfigValue(process.env.SYMPHONY_BOT_LLM_BASE_URL)
+  const baseUrl = normalizeConfigValue(readSymHarixEnv('SYMPHONY_SUPERVISOR_AGENT_BASE_URL'))
+    ?? normalizeConfigValue(readSymHarixEnv('SYMPHONY_SUPERVISOR_CC_BASE_URL'))
+    ?? normalizeConfigValue(readSymHarixEnv('SYMPHONY_SUPERVISOR_LLM_BASE_URL'))
+    ?? normalizeConfigValue(readSymHarixEnv('SYMPHONY_BOT_LLM_BASE_URL'))
     ?? (normalizedProvider === 'anthropic'
       ? 'https://api.anthropic.com/v1'
       : normalizedProvider === 'openai'
         ? 'https://api.openai.com/v1'
         : null);
-  const timeoutMs = parsePositiveInteger(process.env.SYMPHONY_SUPERVISOR_AGENT_TIMEOUT_MS)
-    ?? parsePositiveInteger(process.env.SYMPHONY_SUPERVISOR_CC_TIMEOUT_MS)
-    ?? parsePositiveInteger(process.env.SYMPHONY_SUPERVISOR_LLM_TIMEOUT_MS)
-    ?? parsePositiveInteger(process.env.SYMPHONY_BOT_LLM_TIMEOUT_MS)
+  const timeoutMs = parsePositiveInteger(readSymHarixEnv('SYMPHONY_SUPERVISOR_AGENT_TIMEOUT_MS'))
+    ?? parsePositiveInteger(readSymHarixEnv('SYMPHONY_SUPERVISOR_CC_TIMEOUT_MS'))
+    ?? parsePositiveInteger(readSymHarixEnv('SYMPHONY_SUPERVISOR_LLM_TIMEOUT_MS'))
+    ?? parsePositiveInteger(readSymHarixEnv('SYMPHONY_BOT_LLM_TIMEOUT_MS'))
     ?? 45_000;
 
   if (!normalizedProvider || !model || !apiKey || !baseUrl) {

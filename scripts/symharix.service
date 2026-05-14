@@ -1,0 +1,17 @@
+[Unit]
+Description=SymHarix Harnessed Code Development Platform
+After=network.target
+
+[Service]
+Type=simple
+User=%USER%
+WorkingDirectory=/home/%USER%/symharix
+Environment=PATH=/usr/bin:/home/%USER%/.bun/bin
+ExecStart=/home/%USER%/.bun/bin/bun run start
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/%USER%/symharix/symharix.log
+StandardError=append:/home/%USER%/symharix/symharix.log
+
+[Install]
+WantedBy=multi-user.target

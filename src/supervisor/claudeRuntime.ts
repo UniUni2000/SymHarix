@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import path from 'path';
 import { AgentRunner } from '../agent/runner';
 import type { BotCommandContext, BotCommandResponse } from '../bots/types';
+import { readSymHarixEnv } from '../config/env';
 import { inferRuntimeLocaleFromText, type RuntimeLocale } from '../i18n/locale';
 import {
   SUPERVISOR_ORCHESTRATOR_TOOL_NAMES,
@@ -254,10 +255,10 @@ export class SupervisorClaudeRuntimeService {
 
   constructor(private readonly options: SupervisorClaudeRuntimeServiceOptions) {
     this.contextEndpoint = options.contextEndpoint
-      ?? process.env.SYMPHONY_SUPERVISOR_CONTEXT_ENDPOINT
+      ?? readSymHarixEnv('SYMPHONY_SUPERVISOR_CONTEXT_ENDPOINT')
       ?? null;
     this.orchestratorEndpoint = options.orchestratorEndpoint
-      ?? process.env.SYMPHONY_SUPERVISOR_ORCHESTRATOR_ENDPOINT
+      ?? readSymHarixEnv('SYMPHONY_SUPERVISOR_ORCHESTRATOR_ENDPOINT')
       ?? null;
     this.orchestratorBridge = options.orchestratorBridge ?? null;
     this.contextToken = options.contextToken ?? randomUUID();

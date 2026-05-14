@@ -2149,7 +2149,7 @@ describe('BotAssistantService', () => {
           supervisorRuntimeCalls += 1;
           return {
             message: [
-              "I'm your Symphony Runtime Operator Copilot. I can help you manage issues and workflows within the Symphony runtime.",
+              "I'm your SymHarix Runtime Operator Copilot. I can help you manage issues and workflows within the SymHarix runtime.",
               '- Create issues with a title, description, and target project.',
               '- Stop, retry, close, override, rewrite, or split issues.',
             ].join('\n'),

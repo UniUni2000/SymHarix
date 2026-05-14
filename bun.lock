@@ -3,7 +3,7 @@
   "configVersion": 0,
   "workspaces": {
     "": {
-      "name": "symphonyness",
+      "name": "symharix",
       "dependencies": {
         "@anthropic-ai/sdk": "^0.80.0",
         "@resvg/resvg-js": "^2.6.2",

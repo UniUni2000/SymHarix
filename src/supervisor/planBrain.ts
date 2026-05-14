@@ -9,6 +9,7 @@ import type {
   SupervisorPlanBrainInput,
   SupervisorPlanBrainResult,
 } from './sessionService';
+import { readSymHarixEnv } from '../config/env';
 
 const DEFAULT_TIMEOUT_MS = 45_000;
 const MAX_TIMEOUT_MS = 300_000;
@@ -201,7 +202,7 @@ function parsePlanBrainResult(record: Record<string, unknown>): SupervisorPlanBr
 function buildPrompt(input: SupervisorPlanBrainInput): string {
   const englishOutput = input.session.supervisor_locale === 'en';
   return [
-    'You are the planning brain for Symphony Supervisor Plane.',
+    'You are the planning brain for SymHarix Supervisor Plane.',
     'The user is talking in Telegram. Act like a careful senior engineer helping them turn a rough request into an executable plan.',
     englishOutput
       ? 'Return JSON only. The original user request is English, so write all user-facing planCard text in English.'
@@ -320,15 +321,15 @@ export class HttpSupervisorPlanBrain implements SupervisorPlanBrain {
 }
 
 export function createSupervisorPlanBrainFromEnv(fetchImpl: typeof fetch = fetch): SupervisorPlanBrain | null {
-  const provider = normalize(process.env.SYMPHONY_SUPERVISOR_LLM_PROVIDER)
-    ?? normalize(process.env.SYMPHONY_BOT_LLM_PROVIDER);
-  const model = normalize(process.env.SYMPHONY_SUPERVISOR_LLM_MODEL)
-    ?? normalize(process.env.SYMPHONY_BOT_LLM_MODEL);
-  const apiKey = normalize(process.env.SYMPHONY_SUPERVISOR_LLM_API_KEY)
-    ?? normalize(process.env.SYMPHONY_BOT_LLM_API_KEY);
+  const provider = normalize(readSymHarixEnv('SYMPHONY_SUPERVISOR_LLM_PROVIDER'))
+    ?? normalize(readSymHarixEnv('SYMPHONY_BOT_LLM_PROVIDER'));
+  const model = normalize(readSymHarixEnv('SYMPHONY_SUPERVISOR_LLM_MODEL'))
+    ?? normalize(readSymHarixEnv('SYMPHONY_BOT_LLM_MODEL'));
+  const apiKey = normalize(readSymHarixEnv('SYMPHONY_SUPERVISOR_LLM_API_KEY'))
+    ?? normalize(readSymHarixEnv('SYMPHONY_BOT_LLM_API_KEY'));
   const normalizedProvider = normalizeProvider(provider);
-  const baseUrl = normalize(process.env.SYMPHONY_SUPERVISOR_LLM_BASE_URL)
-    ?? normalize(process.env.SYMPHONY_BOT_LLM_BASE_URL)
+  const baseUrl = normalize(readSymHarixEnv('SYMPHONY_SUPERVISOR_LLM_BASE_URL'))
+    ?? normalize(readSymHarixEnv('SYMPHONY_BOT_LLM_BASE_URL'))
     ?? (normalizedProvider === 'anthropic'
       ? 'https://api.anthropic.com/v1'
       : normalizedProvider === 'openai'
@@ -344,7 +345,7 @@ export function createSupervisorPlanBrainFromEnv(fetchImpl: typeof fetch = fetch
     model,
     apiKey,
     baseUrl,
-    timeoutMs: parsePositiveInteger(process.env.SYMPHONY_SUPERVISOR_LLM_TIMEOUT_MS)
+    timeoutMs: parsePositiveInteger(readSymHarixEnv('SYMPHONY_SUPERVISOR_LLM_TIMEOUT_MS'))
       ?? DEFAULT_TIMEOUT_MS,
   }, fetchImpl);
 }

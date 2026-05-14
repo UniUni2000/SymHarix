@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import * as https from 'node:https';
+import { readSymHarixEnv } from '../config/env';
 
 function isTelegramApiUrl(input: RequestInfo | URL): boolean {
   const raw = typeof input === 'string'
@@ -56,7 +57,7 @@ function hasProxyEnv(): boolean {
 }
 
 function telegramProxyDisabled(): boolean {
-  return /^(1|true|yes|on)$/i.test(process.env.SYMPHONY_TELEGRAM_DISABLE_PROXY?.trim() || '');
+  return /^(1|true|yes|on)$/i.test(readSymHarixEnv('SYMPHONY_TELEGRAM_DISABLE_PROXY')?.trim() || '');
 }
 
 function normalizeUrl(input: RequestInfo | URL): string {
@@ -149,7 +150,7 @@ async function curlFetch(input: RequestInfo | URL, init?: RequestInit): Promise<
   const method = init?.method ?? 'GET';
   const headers = new Headers(init?.headers);
   let stdinValue: string | Buffer = '';
-  const timeoutSeconds = Number.parseInt(process.env.SYMPHONY_TELEGRAM_CURL_TIMEOUT_SECONDS || '', 10);
+  const timeoutSeconds = Number.parseInt(readSymHarixEnv('SYMPHONY_TELEGRAM_CURL_TIMEOUT_SECONDS') || '', 10);
 
   const args = [
     '-sS',

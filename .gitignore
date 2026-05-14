@@ -59,6 +59,6 @@ symphony.db
 symphony.db-shm
 symphony.db-wal
 
-# Symphony workspaces
+# SymHarix workspaces
 workspaces/
 .worktrees/

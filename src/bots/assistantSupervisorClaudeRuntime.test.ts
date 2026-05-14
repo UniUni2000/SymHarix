@@ -600,7 +600,7 @@ describe('BotAssistantService top-level Supervisor Claude runtime', () => {
         respond: async (request) => {
           supervisorRuntimeCalls.push(request.text);
           return {
-            message: '我是你的 Symphony Runtime Operator Copilot，可以创建新的 issue，查看状态，重试或关闭 issue。',
+            message: '我是你的 SymHarix Runtime Operator Copilot，可以创建新的 issue，查看状态，重试或关闭 issue。',
           };
         },
       },
@@ -619,7 +619,7 @@ describe('BotAssistantService top-level Supervisor Claude runtime', () => {
 
     const response = await assistant.respondToText(context, '你能做什么');
 
-    expect(response.message).toContain('Symphony Runtime Operator Copilot');
+    expect(response.message).toContain('SymHarix Runtime Operator Copilot');
     expect(response.message).toContain('创建新的 issue');
     expect(response.message).not.toContain('只读 Claude Code brain');
     expect(response.message).not.toContain('不能做');

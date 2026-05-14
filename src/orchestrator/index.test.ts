@@ -710,7 +710,7 @@ describe('Orchestrator Stability', () => {
 
     await expect(first.orchestrator.start()).resolves.toBeUndefined();
     await expect(second.orchestrator.start()).rejects.toThrow(
-      /Another Symphony orchestrator instance already holds the primary lease/,
+      /Another SymHarix orchestrator instance already holds the primary lease/,
     );
 
     await first.orchestrator.stop();
@@ -4051,7 +4051,7 @@ describe('Orchestrator Stability', () => {
 
     runGit(['init', '--bare', remoteRepoPath], tempRoot);
     runGit(['init', '-b', 'main'], seedRepoPath);
-    runGit(['config', 'user.name', 'Symphony Test'], seedRepoPath);
+    runGit(['config', 'user.name', 'SymHarix Test'], seedRepoPath);
     runGit(['config', 'user.email', 'symphony-test@example.com'], seedRepoPath);
     fs.writeFileSync(
       path.join(seedRepoPath, '.symphony-constitution.md'),
@@ -4163,7 +4163,7 @@ describe('Orchestrator Stability', () => {
 
     runGit(['init', '--bare', remoteRepoPath], tempRoot);
     runGit(['init', '-b', 'main'], seedRepoPath);
-    runGit(['config', 'user.name', 'Symphony Test'], seedRepoPath);
+    runGit(['config', 'user.name', 'SymHarix Test'], seedRepoPath);
     runGit(['config', 'user.email', 'symphony-test@example.com'], seedRepoPath);
     fs.writeFileSync(path.join(seedRepoPath, 'README.md'), '# Seed\n', 'utf8');
     runGit(['add', '.'], seedRepoPath);

@@ -264,7 +264,7 @@ ${liveVerifierImportant ? `${liveVerifierImportant}\n` : ''}
 - If you discover the issue description is unclear, document it in \`.symphony/HANDOVER.md\` "${englishOutput ? 'Known Issues' : '已知问题'}" and continue with your best judgment
 - Treat \`.symphony/change-pack/evidence.json\` as a proof-of-work checklist. Do not end the turn while required evidence is still missing.
 - Workflow/process artifacts are never product files. Never stage or commit \`DEVELOPMENT_LOG.md\`, \`HANDOVER.md\`, \`REVIEW_REPORT.md\`, anything under \`.symphony/\`, or similar review/dev process notes.
-- Do not delete \`.symphony/\` or \`.symphony/state.json\`. Symphony owns that private runtime directory; damaging it can break post-processing even when the product change is correct.
+- Do not delete \`.symphony/\` or \`.symphony/state.json\`. SymHarix owns that private runtime directory; damaging it can break post-processing even when the product change is correct.
 - If you are doing cleanup work, only clean user/product files explicitly in scope. Never use \`.symphony/\` as the final deliverable location.
 - When complete: create \`.symphony/HANDOVER.md\`, make sure evidence is current, then stop for orchestrator post-processing.
 `;
@@ -287,6 +287,6 @@ ${logContent}
 ${judgment.requiresTests ? '## Tests Required: YES' : ''}
 
 Continue from "下次继续" section. Update \`.symphony/DEVELOPMENT_LOG.md\` as you make progress.
-Do not delete \`.symphony/\` or \`.symphony/state.json\`; Symphony owns that private runtime directory.
+Do not delete \`.symphony/\` or \`.symphony/state.json\`; SymHarix owns that private runtime directory.
 `;
 }

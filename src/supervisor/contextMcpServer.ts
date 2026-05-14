@@ -2,6 +2,7 @@ import {
   SUPERVISOR_CONTEXT_TOOL_NAMES,
   type SupervisorContextToolName,
 } from './contextBroker';
+import { readSymHarixEnv } from '../config/env';
 
 type JsonRpcMessage = {
   jsonrpc?: '2.0';
@@ -113,18 +114,18 @@ function listTools(): Array<Record<string, unknown>> {
 
 function getDefaultContext(args: Record<string, unknown>): Record<string, unknown> {
   return {
-    transport: process.env.SYMPHONY_SUPERVISOR_CONTEXT_TRANSPORT || 'telegram',
+    transport: readSymHarixEnv('SYMPHONY_SUPERVISOR_CONTEXT_TRANSPORT') || 'telegram',
     conversation_id:
-      process.env.SYMPHONY_SUPERVISOR_CONTEXT_CONVERSATION_ID ||
+      readSymHarixEnv('SYMPHONY_SUPERVISOR_CONTEXT_CONVERSATION_ID') ||
       (typeof args.conversation_id === 'string' ? args.conversation_id : 'supervisor-context'),
     user_id: typeof args.user_id === 'string' ? args.user_id : null,
     display_name: typeof args.display_name === 'string' ? args.display_name : null,
-    repo_ref: process.env.SYMPHONY_SUPERVISOR_CONTEXT_REPO_REF || null,
+    repo_ref: readSymHarixEnv('SYMPHONY_SUPERVISOR_CONTEXT_REPO_REF') || null,
   };
 }
 
 async function callBroker(toolName: SupervisorContextToolName, args: Record<string, unknown>): Promise<unknown> {
-  const endpoint = process.env.SYMPHONY_SUPERVISOR_CONTEXT_ENDPOINT?.trim();
+  const endpoint = readSymHarixEnv('SYMPHONY_SUPERVISOR_CONTEXT_ENDPOINT')?.trim();
   if (!endpoint) {
     return {
       error: 'context_endpoint_not_configured',
@@ -136,8 +137,8 @@ async function callBroker(toolName: SupervisorContextToolName, args: Record<stri
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...(process.env.SYMPHONY_SUPERVISOR_CONTEXT_TOKEN
-        ? { 'x-supervisor-context-token': process.env.SYMPHONY_SUPERVISOR_CONTEXT_TOKEN }
+      ...(readSymHarixEnv('SYMPHONY_SUPERVISOR_CONTEXT_TOKEN')
+        ? { 'x-supervisor-context-token': readSymHarixEnv('SYMPHONY_SUPERVISOR_CONTEXT_TOKEN') }
         : {}),
     },
     body: JSON.stringify({

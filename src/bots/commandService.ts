@@ -187,7 +187,7 @@ function parseWatchArgs(inlineArgs: string): {
 function formatOverview(runtime: RuntimeControlPlane): string {
   const overview = runtime.getOverview();
   const lines = [
-    `Symphony runtime · running ${overview.counts.running} · retrying ${overview.counts.retrying} · tracked ${overview.counts.total}`,
+    `SymHarix runtime · running ${overview.counts.running} · retrying ${overview.counts.retrying} · tracked ${overview.counts.total}`,
   ];
 
   if (overview.issues.length === 0) {
@@ -511,7 +511,7 @@ export class BotCommandService {
   ): Promise<BotCommandResponse> {
     if (!this.preferences) {
       return {
-        message: 'Project preferences are not configured for this Symphony server.',
+        message: 'Project preferences are not configured for this SymHarix server.',
       };
     }
 
@@ -571,7 +571,7 @@ export class BotCommandService {
   ): Promise<BotCommandResponse> {
     if (!this.subscriptions.canWatch(context.transport)) {
       return {
-        message: `${context.transport} watch notifications are not configured on this Symphony server.`,
+        message: `${context.transport} watch notifications are not configured on this SymHarix server.`,
       };
     }
 

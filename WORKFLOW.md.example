@@ -1,7 +1,7 @@
 ---
 tracker:
   kind: linear
-  api_key: $SYMPHONY_TRACKER_API_KEY
+  api_key: $SYMHARIX_TRACKER_API_KEY
   endpoint: https://api.linear.app/graphql
   active_states:
     - Todo
@@ -49,11 +49,11 @@ workspace:
   root: ./workspaces
 repositories:
   routing:
-    # Key must match Linear project_slug. symphonyness fails closed when a project is not routed.
+    # Key must match Linear project_slug. SymHarix fails closed when a project is not routed.
     sample-project:
       github_owner: acme
       github_repo: demo-app
-      # Optional. Relative paths resolve from the symphonyness repository root.
+      # Optional. Relative paths resolve from the SymHarix repository root.
       local_path: ./repos/demo-app
 codex:
   # The default adapter invokes the bundled Claude Code runtime.
@@ -67,7 +67,7 @@ server:
   port: 3000
 ---
 
-# symphonyness Agent
+# SymHarix Agent
 
 You are an AI coding assistant.
 
@@ -86,4 +86,4 @@ Repository routing is explicit:
 - `repositories.routing` keys must match Linear `project_slug`
 - each route must declare `github_owner` and `github_repo`
 - `local_path` is optional and, when relative, resolves from the repository root
-- if an issue's `project_slug` does not match a configured route, symphonyness will fail closed and skip dispatch
+- if an issue's `project_slug` does not match a configured route, SymHarix will fail closed and skip dispatch

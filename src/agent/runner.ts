@@ -6,6 +6,7 @@
 import { EventEmitter } from 'events';
 import * as cp from 'child_process';
 import * as path from 'path';
+import { readSymHarixEnv } from '../config/env';
 import {
   AgentEvent,
   AgentEventType,
@@ -113,7 +114,7 @@ export class AgentRunner extends EventEmitter {
   }
 
   private shouldLogDiagnostics(): boolean {
-    return process.env.SYMPHONY_ADAPTER_DEBUG === '1';
+    return readSymHarixEnv('SYMPHONY_ADAPTER_DEBUG') === '1';
   }
 
   /**

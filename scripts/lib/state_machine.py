@@ -1,5 +1,5 @@
 # scripts/lib/state_machine.py
-"""State machine for symphonyness issue workflow."""
+"""State machine for symharix issue workflow."""
 
 from enum import Enum
 from dataclasses import dataclass, field

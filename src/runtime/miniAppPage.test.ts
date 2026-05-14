@@ -738,7 +738,7 @@ describe('Telegram Mini App issue presentation', () => {
       orchestrator_state: 'failed',
       delivery_state: 'delivery_failed',
       delivery_code: 'dirty_workspace_no_commit',
-      delivery_summary: 'Failed to remove workflow artifacts from branch feature/int-155: Symphony workflow artifacts must not be committed',
+      delivery_summary: 'Failed to remove workflow artifacts from branch feature/int-155: SymHarix workflow artifacts must not be committed',
       actions: {
         can_stop: false,
         can_retry: true,

@@ -10,6 +10,7 @@ import * as os from 'os';
 import * as path from 'path';
 import type { Database } from 'bun:sqlite';
 import * as yaml from 'yaml';
+import { readSymHarixEnv } from '../config/env';
 import {
   AgentTimelinePayload,
   ChangePackSummary,
@@ -599,7 +600,7 @@ export class Orchestrator extends EventEmitter {
       // Startup terminal workspace cleanup (Section 8.6)
       // Delay and run in the background so first-turn HTTP/webhook traffic is
       // not competing with historical workspace and orphan repair.
-      const startupCleanupDelayMs = Number.parseInt(process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS || '', 10);
+      const startupCleanupDelayMs = Number.parseInt(readSymHarixEnv('SYMPHONY_STARTUP_CLEANUP_DELAY_MS') || '', 10);
       this.startupCleanupTimer = setTimeout(() => {
         this.startupCleanupTimer = null;
         if (!this.running || this.stopRequested) {
@@ -612,7 +613,7 @@ export class Orchestrator extends EventEmitter {
 
       // Give Telegram/session repair a short startup window to preempt stale
       // active threads before the orchestrator resumes polling old tracker work.
-      const firstTickDelayMs = Number.parseInt(process.env.SYMPHONY_FIRST_TICK_DELAY_MS || '', 10);
+      const firstTickDelayMs = Number.parseInt(readSymHarixEnv('SYMPHONY_FIRST_TICK_DELAY_MS') || '', 10);
       this.scheduleTick(Number.isFinite(firstTickDelayMs) && firstTickDelayMs >= 0 ? firstTickDelayMs : 10_000);
 
       console.log('[orchestrator] Started');
@@ -1510,7 +1511,7 @@ export class Orchestrator extends EventEmitter {
       return {
         accepted: false,
         status: 'rejected',
-        message: `${issue.identifier} does not have a project_slug, so Symphony cannot create split follow-up issues`,
+        message: `${issue.identifier} does not have a project_slug, so SymHarix cannot create split follow-up issues`,
         issue_id: issue.id,
         issue_identifier: issue.identifier,
       };
@@ -1738,7 +1739,7 @@ export class Orchestrator extends EventEmitter {
       return {
         accepted: false,
         status: 'rejected',
-        message: `${sourceIssue.identifier} does not have a project_slug, so Symphony cannot create a governance follow-up issue`,
+        message: `${sourceIssue.identifier} does not have a project_slug, so SymHarix cannot create a governance follow-up issue`,
         issue_id: sourceIssue.id,
         issue_identifier: sourceIssue.identifier,
       };
@@ -1763,7 +1764,7 @@ export class Orchestrator extends EventEmitter {
       return {
         accepted: false,
         status: 'rejected',
-        message: `${sourceIssue.identifier} 已经是治理子任务，Symphony 不会继续自动创建下一层治理 issue。请直接 rewrite/split/override 这张子任务。`,
+        message: `${sourceIssue.identifier} 已经是治理子任务，SymHarix 不会继续自动创建下一层治理 issue。请直接 rewrite/split/override 这张子任务。`,
         issue_id: sourceIssue.id,
         issue_identifier: sourceIssue.identifier,
         governance_action: {
@@ -2172,7 +2173,7 @@ export class Orchestrator extends EventEmitter {
         : 'unknown-holder';
       const expiresAt = lease?.expires_at?.toISOString() ?? 'unknown-expiry';
       throw new Error(
-        `Another Symphony orchestrator instance already holds the primary lease (${holder}, expires ${expiresAt}).`,
+        `Another SymHarix orchestrator instance already holds the primary lease (${holder}, expires ${expiresAt}).`,
       );
     }
 
@@ -2209,7 +2210,7 @@ export class Orchestrator extends EventEmitter {
       return;
     }
 
-    const message = 'Symphony orchestrator lost the primary leadership lease; stopping to avoid duplicate execution.';
+    const message = 'SymHarix orchestrator lost the primary leadership lease; stopping to avoid duplicate execution.';
     console.error(`[orchestrator] ${message}`);
     this.emit('error', new Error(message));
     await this.stop();
@@ -5670,7 +5671,7 @@ export class Orchestrator extends EventEmitter {
       '',
       'This governance child finished without a PR because no actionable code diff remained after workflow artifact cleanup.',
       '',
-      summary?.trim() || 'No actionable diff remained, so Symphony closed this child as a no-op completion.',
+      summary?.trim() || 'No actionable diff remained, so SymHarix closed this child as a no-op completion.',
     ].join('\n');
   }
 

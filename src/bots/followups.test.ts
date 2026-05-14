@@ -248,8 +248,8 @@ describe('BotFollowupService', () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    const lifecycleMessage = notifier.messages.find((item) => item.message.text.startsWith('Symphony completed'));
-    expect(lifecycleMessage?.message.text).toContain('Symphony completed · INT-1');
+    const lifecycleMessage = notifier.messages.find((item) => item.message.text.startsWith('SymHarix completed'));
+    expect(lifecycleMessage?.message.text).toContain('SymHarix completed · INT-1');
     expect(lifecycleMessage?.message.text).toContain('This issue has reached a terminal state');
     expect(lifecycleMessage?.message.text).not.toMatch(/[\u3400-\u9fff]/);
 
@@ -1201,7 +1201,7 @@ describe('BotFollowupService', () => {
     const conversationMessages = notifier.messages.filter((entry) => !entry.message.photo);
     expect(conversationMessages.some((entry) => (
       entry.recipient.conversation_id === 'chat-ops' &&
-      entry.message.text?.includes('Symphony delivery blocked · INT-1') &&
+      entry.message.text?.includes('SymHarix delivery blocked · INT-1') &&
       entry.message.text?.includes('merge_blocked') &&
       entry.message.text?.includes('PR #64')
     ))).toBe(true);

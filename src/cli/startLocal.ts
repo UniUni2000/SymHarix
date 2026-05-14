@@ -4,6 +4,13 @@ import { execSync, spawn, type ChildProcess } from 'child_process';
 import * as net from 'net';
 import * as path from 'path';
 import { createCloudflaredTunnelProvider, type TelegramTunnelHandle } from '../bots/telegramBootstrap';
+import {
+  deleteSymHarixEnv,
+  readSymHarixEnv,
+  readSymHarixEnvTrimmed,
+  setSymHarixEnv,
+  syncSymHarixEnvAliases,
+} from '../config/env';
 import { loadWorkflow, resolveWorkflowPath } from '../workflow/loader';
 import { buildServiceConfig } from '../config/loader';
 import {
@@ -20,6 +27,7 @@ import {
 } from './startLocalTunnel';
 
 const projectRoot = path.resolve(__dirname, '../..');
+syncSymHarixEnvAliases(process.env);
 
 function portHasListener(port: number): boolean {
   try {
@@ -32,12 +40,12 @@ function portHasListener(port: number): boolean {
   }
 }
 
-function stopExistingSymphonynessIfNeeded(port: number): void {
+function stopExistingSymHarixnessIfNeeded(port: number): void {
   if (!portHasListener(port)) {
     return;
   }
 
-  console.log(`[symphonyness] start:local detected an existing listener on port ${port}; stopping prior local instance...`);
+  console.log(`[symharix] start:local detected an existing listener on port ${port}; stopping prior local instance...`);
   try {
     execSync(`${process.execPath} --env-file=.env run src/cli/index.ts --kill`, {
       cwd: projectRoot,
@@ -97,20 +105,20 @@ async function detectLocalHttpProxy(): Promise<string | null> {
 }
 
 async function configureStartLocalProxyEnv(env: Record<string, string | undefined>): Promise<void> {
-  const proxyMode = env.SYMPHONY_PROXY_MODE?.trim().toLowerCase() || 'auto';
+  const proxyMode = readSymHarixEnvTrimmed('SYMPHONY_PROXY_MODE', env)?.toLowerCase() || 'auto';
   if (proxyMode === 'off') {
-    env.SYMPHONY_TELEGRAM_DISABLE_PROXY = '1';
-    console.log('[symphonyness] start:local Telegram proxy disabled by SYMPHONY_PROXY_MODE=off');
+    setSymHarixEnv('SYMPHONY_TELEGRAM_DISABLE_PROXY', '1', env);
+    console.log('[symharix] start:local Telegram proxy disabled by SYMPHONY_PROXY_MODE=off');
     return;
   }
 
-  delete env.SYMPHONY_TELEGRAM_DISABLE_PROXY;
+  deleteSymHarixEnv('SYMPHONY_TELEGRAM_DISABLE_PROXY', env);
 
-  const configuredProxy = env.SYMPHONY_PROXY_URL?.trim();
+  const configuredProxy = readSymHarixEnvTrimmed('SYMPHONY_PROXY_URL', env);
   if (configuredProxy) {
     applyProxyEnv(env, configuredProxy);
     ensureNoProxyForLocalhost(env);
-    console.log(`[symphonyness] start:local using Telegram proxy from SYMPHONY_PROXY_URL: ${configuredProxy}`);
+    console.log(`[symharix] start:local using Telegram proxy from SYMPHONY_PROXY_URL: ${configuredProxy}`);
     return;
   }
 
@@ -122,7 +130,7 @@ async function configureStartLocalProxyEnv(env: Record<string, string | undefine
       env.HTTPS_PROXY = env.HTTP_PROXY;
     }
     ensureNoProxyForLocalhost(env);
-    console.log('[symphonyness] start:local using existing HTTP_PROXY/HTTPS_PROXY for Telegram API calls');
+    console.log('[symharix] start:local using existing HTTP_PROXY/HTTPS_PROXY for Telegram API calls');
     return;
   }
 
@@ -135,21 +143,27 @@ async function configureStartLocalProxyEnv(env: Record<string, string | undefine
   if (detectedProxy) {
     applyProxyEnv(env, detectedProxy);
     ensureNoProxyForLocalhost(env);
-    console.log(`[symphonyness] start:local detected local Telegram proxy: ${detectedProxy}`);
+    console.log(`[symharix] start:local detected local Telegram proxy: ${detectedProxy}`);
   } else {
     ensureNoProxyForLocalhost(env);
-    console.log('[symphonyness] start:local no local Telegram proxy detected; continuing without proxy');
+    console.log('[symharix] start:local no local Telegram proxy detected; continuing without proxy');
   }
 }
 
 function configureStartLocalTelegramRetryEnv(env: Record<string, string | undefined>): void {
-  env.SYMPHONY_TELEGRAM_WEBHOOK_RETRY_ATTEMPTS ||= '6';
-  env.SYMPHONY_TELEGRAM_WEBHOOK_RETRY_DELAY_MS ||= '2000';
-  env.SYMPHONY_TELEGRAM_STARTUP_SUMMARY_ATTEMPTS ||= '60';
+  if (!readSymHarixEnvTrimmed('SYMPHONY_TELEGRAM_WEBHOOK_RETRY_ATTEMPTS', env)) {
+    setSymHarixEnv('SYMPHONY_TELEGRAM_WEBHOOK_RETRY_ATTEMPTS', '6', env);
+  }
+  if (!readSymHarixEnvTrimmed('SYMPHONY_TELEGRAM_WEBHOOK_RETRY_DELAY_MS', env)) {
+    setSymHarixEnv('SYMPHONY_TELEGRAM_WEBHOOK_RETRY_DELAY_MS', '2000', env);
+  }
+  if (!readSymHarixEnvTrimmed('SYMPHONY_TELEGRAM_STARTUP_SUMMARY_ATTEMPTS', env)) {
+    setSymHarixEnv('SYMPHONY_TELEGRAM_STARTUP_SUMMARY_ATTEMPTS', '60', env);
+  }
 }
 
 function resolveTelegramStartupSummaryAttempts(env: Record<string, string | undefined>): number {
-  const maxAttempts = Number.parseInt(env.SYMPHONY_TELEGRAM_STARTUP_SUMMARY_ATTEMPTS || '', 10);
+  const maxAttempts = Number.parseInt(readSymHarixEnv('SYMPHONY_TELEGRAM_STARTUP_SUMMARY_ATTEMPTS', env) || '', 10);
   return Number.isFinite(maxAttempts) && maxAttempts > 0 ? maxAttempts : 60;
 }
 
@@ -158,7 +172,7 @@ function resolvePositiveIntegerEnv(
   name: string,
   fallback: number,
 ): number {
-  const parsed = Number.parseInt(env[name] || '', 10);
+  const parsed = Number.parseInt(readSymHarixEnv(name, env) || '', 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
@@ -220,7 +234,7 @@ async function printTelegramStartupSummary(
     try {
       const telegram = await readTelegramManifestSnapshot(port);
       if (telegram && shouldEmitTelegramStartupSummary(telegram, expectedPublicBaseUrl)) {
-        console.log(`[symphonyness] ${buildTelegramStartupSummary(telegram, expectedPublicBaseUrl)}`);
+        console.log(`[symharix] ${buildTelegramStartupSummary(telegram, expectedPublicBaseUrl)}`);
         return;
       }
     } catch {
@@ -230,7 +244,7 @@ async function printTelegramStartupSummary(
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
-  console.log('[symphonyness] telegram: unhealthy webhook_url=(none)');
+  console.log('[symharix] telegram: unhealthy webhook_url=(none)');
 }
 
 async function stopChild(child: ChildProcess): Promise<void> {
@@ -255,6 +269,7 @@ async function stopChild(child: ChildProcess): Promise<void> {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const childEnv = { ...process.env } as Record<string, string | undefined>;
+  syncSymHarixEnvAliases(childEnv);
   const workflowPath = resolveWorkflowPath();
   const workflowLoad = loadWorkflow(workflowPath);
   const workflowServerPort = workflowLoad.success
@@ -262,8 +277,8 @@ async function main(): Promise<void> {
     : null;
   const requestedPort = resolveStartLocalPort(args, childEnv, workflowServerPort);
 
-  stopExistingSymphonynessIfNeeded(requestedPort);
-  if (childEnv.SYMPHONY_TELEGRAM_BOT_TOKEN?.trim()) {
+  stopExistingSymHarixnessIfNeeded(requestedPort);
+  if (readSymHarixEnvTrimmed('SYMPHONY_TELEGRAM_BOT_TOKEN', childEnv)) {
     await configureStartLocalProxyEnv(childEnv);
     configureStartLocalTelegramRetryEnv(childEnv);
   }
@@ -330,7 +345,7 @@ async function main(): Promise<void> {
     );
     let lastError: unknown = null;
     try {
-      console.log('[symphonyness] start:local provisioning temporary Telegram tunnel...');
+      console.log('[symharix] start:local provisioning temporary Telegram tunnel...');
       const localBaseUrl = `http://127.0.0.1:${requestedPort}`;
       const tunnelProvider = createCloudflaredTunnelProvider();
       let nextTunnelHandle: TelegramTunnelHandle | null = null;
@@ -345,7 +360,7 @@ async function main(): Promise<void> {
           }
           const message = error instanceof Error ? error.message : String(error);
           console.warn(
-            `[symphonyness] start:local tunnel attempt ${attempt}/${maxAttempts} failed; retrying: ${message}`,
+            `[symharix] start:local tunnel attempt ${attempt}/${maxAttempts} failed; retrying: ${message}`,
           );
           await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
         }
@@ -355,15 +370,15 @@ async function main(): Promise<void> {
         throw lastError instanceof Error ? lastError : new Error('Telegram tunnel provider did not return a handle');
       }
 
-      console.log(`[symphonyness] start:local tunnel ready: ${nextTunnelHandle.publicBaseUrl}`);
-      console.log('[symphonyness] start:local using temporary tunnel only for this process; .env was not modified.');
+      console.log(`[symharix] start:local tunnel ready: ${nextTunnelHandle.publicBaseUrl}`);
+      console.log('[symharix] start:local using temporary tunnel only for this process; .env was not modified.');
       return nextTunnelHandle;
     } catch (error) {
       console.warn(
-        '[symphonyness] start:local could not pre-provision Telegram tunnel; falling back to normal bootstrap.',
+        '[symharix] start:local could not pre-provision Telegram tunnel; falling back to normal bootstrap.',
       );
       if (error instanceof Error) {
-        console.warn(`[symphonyness] ${error.message}`);
+        console.warn(`[symharix] ${error.message}`);
       }
       return null;
     }
@@ -382,7 +397,7 @@ async function main(): Promise<void> {
 
     const spawnedChild = child;
     spawnedChild.once('error', (error) => {
-      console.error('[symphonyness] start:local failed to launch the service process.');
+      console.error('[symharix] start:local failed to launch the service process.');
       console.error(error);
       void finish(1, null);
     });
@@ -404,10 +419,10 @@ async function main(): Promise<void> {
     }
 
     recoveryInFlight = (async () => {
-      console.warn(`[symphonyness] start:local detected unhealthy Telegram tunnel; recovering. reason=${reason}`);
+      console.warn(`[symharix] start:local detected unhealthy Telegram tunnel; recovering. reason=${reason}`);
       const nextTunnelHandle = await provisionTemporaryTunnel();
       if (!nextTunnelHandle) {
-        console.warn('[symphonyness] start:local tunnel recovery skipped; keeping the current service running.');
+        console.warn('[symharix] start:local tunnel recovery skipped; keeping the current service running.');
         return;
       }
 
@@ -419,19 +434,19 @@ async function main(): Promise<void> {
       }
 
       tunnelHandle = nextTunnelHandle;
-      childEnv.SYMPHONY_PUBLIC_BASE_URL = nextTunnelHandle.publicBaseUrl;
+      setSymHarixEnv('SYMPHONY_PUBLIC_BASE_URL', nextTunnelHandle.publicBaseUrl, childEnv);
       if (previousTunnelHandle) {
         await previousTunnelHandle.dispose();
       }
       spawnServiceChild();
       void printTelegramStartupSummary(
         requestedPort,
-        childEnv.SYMPHONY_PUBLIC_BASE_URL?.trim() || null,
+        readSymHarixEnvTrimmed('SYMPHONY_PUBLIC_BASE_URL', childEnv),
         resolveTelegramStartupSummaryAttempts(childEnv),
       );
     })().catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
-      console.warn(`[symphonyness] start:local tunnel recovery failed: ${message}`);
+      console.warn(`[symharix] start:local tunnel recovery failed: ${message}`);
     }).finally(() => {
       recoveryInFlight = null;
     });
@@ -460,7 +475,7 @@ async function main(): Promise<void> {
         return;
       }
       void (async () => {
-        const expectedPublicBaseUrl = childEnv.SYMPHONY_PUBLIC_BASE_URL?.trim() || null;
+        const expectedPublicBaseUrl = readSymHarixEnvTrimmed('SYMPHONY_PUBLIC_BASE_URL', childEnv);
         if (!expectedPublicBaseUrl) {
           degradedPolls = 0;
           return;
@@ -492,7 +507,7 @@ async function main(): Promise<void> {
         await restartServiceWithFreshTunnel(recoveryReason);
       })().catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
-        console.warn(`[symphonyness] start:local tunnel watchdog check failed: ${message}`);
+        console.warn(`[symharix] start:local tunnel watchdog check failed: ${message}`);
       });
     }, intervalMs);
     tunnelWatchdog.unref?.();
@@ -501,21 +516,21 @@ async function main(): Promise<void> {
   if (shouldProvisionStartLocalTunnel(childEnv)) {
     tunnelHandle = await provisionTemporaryTunnel();
     if (tunnelHandle) {
-      childEnv.SYMPHONY_PUBLIC_BASE_URL = tunnelHandle.publicBaseUrl;
+      setSymHarixEnv('SYMPHONY_PUBLIC_BASE_URL', tunnelHandle.publicBaseUrl, childEnv);
     }
   }
 
   spawnServiceChild();
   void printTelegramStartupSummary(
     requestedPort,
-    childEnv.SYMPHONY_PUBLIC_BASE_URL?.trim() || null,
+    readSymHarixEnvTrimmed('SYMPHONY_PUBLIC_BASE_URL', childEnv),
     resolveTelegramStartupSummaryAttempts(childEnv),
   );
   startTelegramTunnelWatchdog();
 }
 
 void main().catch((error) => {
-  console.error('[symphonyness] start:local wrapper failed.');
+  console.error('[symharix] start:local wrapper failed.');
   console.error(error);
   process.exit(1);
 });

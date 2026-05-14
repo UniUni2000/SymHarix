@@ -4,6 +4,7 @@ import type {
   BotRuntimeCopilotContext,
 } from './types';
 import { spawn } from 'node:child_process';
+import { readSymHarixEnv } from '../config/env';
 
 export interface BotAssistantModelRequest {
   text: string;
@@ -114,7 +115,7 @@ function buildPromptText(params: BotAssistantModelRequest): string {
   ].join(':');
 
   return [
-    'You are Symphony Runtime Operator Copilot.',
+    'You are SymHarix Runtime Operator Copilot.',
     'Return JSON only.',
     'You can either choose an action intent or answer a runtime/control-plane question.',
     'Allowed JSON shapes:',
@@ -156,9 +157,9 @@ function buildPromptText(params: BotAssistantModelRequest): string {
     '- If the user is closing the conversation or acknowledging the current state, e.g. 没事/先这样/all good, return answer_question with a calm acknowledgement and do not invent a control action.',
     '- If the user asks whether things are clean or cleaned up, answer from runtime_context.overview and known external surfaces instead of asking them for a command.',
     '- If runtime_context.repo_profile is present and the user asks what the repo/project does, answer from that repo profile before falling back to issue history.',
-    '- If the user message is just a greeting or pleasantry like 你好/hello/hi, return answer_question with a brief greeting plus a one-line description of what Symphony can help with.',
+    '- If the user message is just a greeting or pleasantry like 你好/hello/hi, return answer_question with a brief greeting plus a one-line description of what SymHarix can help with.',
     '- If the user asks about today\'s date or the current time, use current_local_date/current_local_time/current_local_timezone below instead of guessing.',
-    '- Scope is limited to Symphony runtime, issue creation/control, repository routing, and usage help.',
+    '- Scope is limited to SymHarix runtime, issue creation/control, repository routing, and usage help.',
     `current_local_date: ${currentLocalDate}`,
     `current_local_time: ${currentLocalTime}`,
     `current_local_timezone: ${timezone}`,
@@ -647,7 +648,7 @@ export function createBotAssistantModel(
 }
 
 export function createBotAssistantModelFromEnv(fetchImpl: typeof fetch = fetch): BotAssistantModel {
-  const transportMode = normalizeConfigValue(process.env.SYMPHONY_BOT_LLM_HTTP_TRANSPORT)?.toLowerCase() ?? 'fetch';
+  const transportMode = normalizeConfigValue(readSymHarixEnv('SYMPHONY_BOT_LLM_HTTP_TRANSPORT'))?.toLowerCase() ?? 'fetch';
   const fetchTransport = new FetchBotAssistantHttpTransport(fetchImpl);
   const curlTransport = new CurlBotAssistantHttpTransport();
   const transportOptions: BotAssistantModelOptions =
@@ -658,10 +659,10 @@ export function createBotAssistantModelFromEnv(fetchImpl: typeof fetch = fetch):
         : { primaryTransport: fetchTransport, fallbackTransport: null };
 
   return createBotAssistantModel({
-    provider: process.env.SYMPHONY_BOT_LLM_PROVIDER ?? null,
-    model: process.env.SYMPHONY_BOT_LLM_MODEL ?? null,
-    apiKey: process.env.SYMPHONY_BOT_LLM_API_KEY ?? null,
-    baseUrl: process.env.SYMPHONY_BOT_LLM_BASE_URL ?? null,
-    timeoutMs: parsePositiveInteger(process.env.SYMPHONY_BOT_LLM_TIMEOUT_MS),
+    provider: readSymHarixEnv('SYMPHONY_BOT_LLM_PROVIDER') ?? null,
+    model: readSymHarixEnv('SYMPHONY_BOT_LLM_MODEL') ?? null,
+    apiKey: readSymHarixEnv('SYMPHONY_BOT_LLM_API_KEY') ?? null,
+    baseUrl: readSymHarixEnv('SYMPHONY_BOT_LLM_BASE_URL') ?? null,
+    timeoutMs: parsePositiveInteger(readSymHarixEnv('SYMPHONY_BOT_LLM_TIMEOUT_MS')),
   }, fetchImpl, transportOptions);
 }

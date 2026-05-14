@@ -737,7 +737,7 @@ describe('SupervisorAgentRuntimeService', () => {
       text: 'What can you do',
     });
 
-    expect(english.message).toContain("I'm your Symphony Runtime Operator Copilot");
+    expect(english.message).toContain("I'm your SymHarix Runtime Operator Copilot");
     expect(english.message).toContain('Create issues');
     expect(english.message).not.toContain('我明白了');
     expect(english.message).not.toContain('我接住了');
@@ -749,7 +749,7 @@ describe('SupervisorAgentRuntimeService', () => {
       text: '你能干什么',
     });
 
-    expect(chinese.message).toContain('我是你的 Symphony Runtime Operator Copilot');
+    expect(chinese.message).toContain('我是你的 SymHarix Runtime Operator Copilot');
     expect(chinese.message).toContain('创建新的 issue');
   });
 
