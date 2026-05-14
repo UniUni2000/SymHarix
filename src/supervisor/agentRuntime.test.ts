@@ -391,6 +391,32 @@ describe('SupervisorAgentRuntimeService', () => {
     })?.tool_name).toBe('create_issue');
   });
 
+  test('treats Chinese add-issue text with a file name as a create issue request', async () => {
+    const h = createHarness();
+
+    const response = await h.service.respond({
+      context: h.context,
+      text: '新增一个issue，新增test6.py，内容留空',
+    });
+
+    expect(response.message).toContain('Action: create issue');
+    expect(response.message).toContain('Reply with: 确认 / 取消');
+    expect(response.message).not.toContain('只读模式');
+    const pending = h.pendingActions.findOpenByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(pending?.tool_name).toBe('create_issue');
+    expect(pending?.tool_args).toMatchObject({
+      title: '新增一个issue，新增test6.py，内容留空',
+    });
+    const run = h.runs.findLatestByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name)).toEqual([]);
+  });
+
   test('asks the supervisor for issue recommendations instead of creating from advisory wording', async () => {
     const agentInputs: Array<{ userText: string; repoRef: string | null }> = [];
     const h = createHarness(undefined, {
@@ -556,6 +582,45 @@ describe('SupervisorAgentRuntimeService', () => {
     expect(pending?.tool_name).toBe('create_issue');
     expect(pending?.tool_args).toMatchObject({
       title: '为 stellar_mass_luminosity.py 添加 Python 类型注解',
+    });
+  });
+
+  test('turns a "do this issue" follow-up into a create confirmation for the last recommendation', async () => {
+    const h = createHarness(undefined, {
+      supervisorAgentService: {
+        respond: async (input) => ({
+          mode: 'issue_recommendation',
+          repoRef: input.repoRef,
+          title: '新增 test6.py，内容留空',
+          summary: '在仓库根目录新增 test6.py 文件，内容留空。',
+          nextStep: 'ask for approval before creating work',
+        }),
+        getRepoConversationDiagnostics: () => [],
+      },
+    });
+
+    const recommendation = await h.service.respond({
+      context: h.context,
+      text: '你建议这个仓库当前做什么 issue 最能提升',
+    });
+    expect(recommendation.message).toContain('我建议先做这个 issue');
+
+    const response = await h.service.respond({
+      context: h.context,
+      text: '做这个issue',
+    });
+
+    expect(response.message).toContain('Action: create issue');
+    expect(response.message).toContain('Title: 新增 test6.py，内容留空');
+    expect(response.message).toContain('Reply with: 确认 / 取消');
+    expect(response.message).not.toContain('只读模式');
+    const pending = h.pendingActions.findOpenByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(pending?.tool_name).toBe('create_issue');
+    expect(pending?.tool_args).toMatchObject({
+      title: '新增 test6.py，内容留空',
     });
   });
 
@@ -1263,6 +1328,33 @@ describe('SupervisorAgentRuntimeService', () => {
       conversation_id: 'chat-1',
     });
     expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name)).toEqual(['set_default_project']);
+  });
+
+  test('answers internal mode questions as a single Supervisor entrypoint without treating agent as a project slug', async () => {
+    for (const text of ['如何切换read-only和agent模式', '如何切换read-only模式']) {
+      const h = createHarness();
+
+      const response = await h.service.respond({
+        context: h.context,
+        text,
+      });
+
+      expect(response.message).toContain('没有需要手动切换的模式');
+      expect(response.message).toContain('统一 Supervisor 入口');
+      expect(response.message).toContain('内部只读地理解仓库');
+      expect(response.message).not.toContain('agent 模式');
+      expect(response.message).not.toContain('只读模式');
+      expect(response.message).not.toContain('Project slug "agent"');
+      expect(h.pendingActions.findOpenByConversation({
+        transport: 'telegram',
+        conversation_id: 'chat-1',
+      })).toBeNull();
+      const run = h.runs.findLatestByConversation({
+        transport: 'telegram',
+        conversation_id: 'chat-1',
+      });
+      expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name)).toEqual([]);
+    }
   });
 
   test('sets the default project through a repository alias in runtime tool args', async () => {
