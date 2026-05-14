@@ -101,6 +101,9 @@ describe('DefaultSupervisorAgentService', () => {
           activeIssueId: null,
         });
         expect(input.prompt).toContain('natural conversation first');
+        expect(input.prompt).toContain('detected_user_language: English');
+        expect(input.prompt).toContain('Every user-facing JSON string field must be English');
+        expect(input.prompt).toContain('Do not use Chinese in greetings');
         return {
           mode: 'chat_reply',
           message: 'You can keep this conversational; I can help shape the next step when you are ready.',
@@ -126,6 +129,39 @@ describe('DefaultSupervisorAgentService', () => {
       repoRef: 'acme/demo-app',
       message: 'You can keep this conversational; I can help shape the next step when you are ready.',
     });
+  });
+
+  test('keeps English greetings inside the supervisor agent language contract', async () => {
+    const prompts: string[] = [];
+    const agent = new DefaultSupervisorAgentService({
+      resolveRepoProfile: async () => repoProfile,
+      analyze: async (input) => {
+        prompts.push(input.prompt);
+        return {
+          mode: 'chat_reply',
+          message: 'Hello. I can show the current repository status if you want.',
+        };
+      },
+    });
+
+    const result = await agent.respond({
+      localPath: '/tmp/demo-app',
+      repoRef: 'acme/demo-app',
+      defaultRepoRef: 'fallback/repo',
+      userText: 'hello',
+      projectContext: null,
+      runtimeContext: {
+        source: 'telegram_chat',
+        defaultProjectSlug: 'demo-app',
+        activeIssueId: null,
+      },
+    });
+
+    expect(result?.mode).toBe('chat_reply');
+    expect(prompts[0]).toContain('detected_user_language: English');
+    expect(prompts[0]).toContain('Every user-facing JSON string field must be English');
+    expect(prompts[0]).toContain('Do not use Chinese in greetings');
+    expect(prompts[0]).toContain('user_text: hello');
   });
 
   test('returns issue_recommendation for work-creation style requests', async () => {

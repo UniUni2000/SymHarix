@@ -52,6 +52,7 @@ describe('SupervisorClaudeRuntimeService', () => {
     expect(turns[0]).toContain('Context source map');
     expect(turns[0]).toContain('list_context_sources');
     expect(turns[0]).toContain('compact evidence');
+    expect(turns[0]).toContain('detected_user_language: Chinese');
   });
 
   test('allows read-only repo tools and supervisor context MCP tools but not repo mutation tools', () => {
@@ -75,6 +76,8 @@ describe('SupervisorClaudeRuntimeService', () => {
     const prompt = buildSupervisorClaudeSystemPrompt();
 
     expect(prompt).toContain('Telegram text is user-facing');
+    expect(prompt).toContain('Output Language block');
+    expect(prompt).toContain('overrides prior session language');
     expect(prompt).toContain('do not output raw JSON');
     expect(prompt).toContain('supervisor-orchestrator');
     expect(prompt).toContain('list_orchestrator_capabilities');
@@ -84,6 +87,31 @@ describe('SupervisorClaudeRuntimeService', () => {
     expect(prompt).toContain('Do not call yourself a read-only brain');
     expect(prompt).toContain('For capability questions');
     expect(prompt).toContain('create, switch repositories, retry, stop, close, supersede');
+  });
+
+  test('adds a strict English output-language block for English Telegram turns', async () => {
+    const turns: string[] = [];
+    const service = new SupervisorClaudeRuntimeService({
+      resolveWorkspace: async () => ({
+        repoRef: 'DingfangHu/my-symphony-test',
+        localPath: '/tmp/source-cache/my-symphony-test',
+      }),
+      createSession: async () => ({
+        ask: async (prompt) => {
+          turns.push(prompt);
+          return { message: 'Hello. Current status looks stable.' };
+        },
+        dispose: async () => undefined,
+      }),
+    });
+
+    await service.respond({ context, text: 'hello', canWrite: true });
+
+    expect(turns[0]).toContain('## Output Language');
+    expect(turns[0]).toContain('detected_user_language: English');
+    expect(turns[0]).toContain('Write every user-facing sentence in English');
+    expect(turns[0]).toContain('Do not use Chinese in greetings');
+    expect(turns[0]).toContain('user_message: hello');
   });
 
   test('frames the supervisor as a repo steward that improves vague issue ideas', () => {
