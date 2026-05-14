@@ -3,12 +3,12 @@ import pytest
 import tempfile
 from pathlib import Path
 from scripts.lib.state_machine import State
-from scripts.lib.state_store import StateStore, SymphonyDir
+from scripts.lib.state_store import StateStore, SymHarixDir
 
 def test_symphony_dir_path():
-    """Test SymphonyDir path construction."""
+    """Test SymHarixDir path construction."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        sd = SymphonyDir(Path(tmpdir), "INT-23")
+        sd = SymHarixDir(Path(tmpdir), "INT-23")
         expected = Path(tmpdir) / "INT-23" / ".symphony"
         assert sd.path == expected
 
@@ -19,14 +19,14 @@ def test_symphony_dir_prefers_workspace_local_path_for_git_worktree():
         workspace.mkdir()
         (workspace / ".git").write_text("gitdir: /tmp/fake-worktree\n")
 
-        sd = SymphonyDir(workspace, "INT-23")
+        sd = SymHarixDir(workspace, "INT-23")
 
         assert sd.path == workspace / ".symphony"
 
 def test_create_directory_structure():
     """Test that create() creates the directory structure."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        sd = SymphonyDir(Path(tmpdir), "INT-23")
+        sd = SymHarixDir(Path(tmpdir), "INT-23")
         sd.create()
         assert sd.state_file.exists()
         assert sd.context_file.exists()
@@ -35,7 +35,7 @@ def test_create_directory_structure():
 def test_write_and_read_state():
     """Test state.json write and read."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        sd = SymphonyDir(Path(tmpdir), "INT-23")
+        sd = SymHarixDir(Path(tmpdir), "INT-23")
         sd.create()
 
         state_data = {
@@ -67,7 +67,7 @@ def test_write_and_read_state():
 def test_append_event():
     """Test events.log append."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        sd = SymphonyDir(Path(tmpdir), "INT-23")
+        sd = SymHarixDir(Path(tmpdir), "INT-23")
         sd.create()
 
         sd.append_event("state_changed", {"from": "TODO", "to": "IN_PROGRESS"})
@@ -208,9 +208,9 @@ def test_update_metadata():
         assert state["metadata"]["branch"] == "int-23"  # Unchanged
 
 def test_symphony_dir_delete():
-    """Test SymphonyDir.delete removes entire workspace."""
+    """Test SymHarixDir.delete removes entire workspace."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        sd = SymphonyDir(Path(tmpdir), "INT-23")
+        sd = SymHarixDir(Path(tmpdir), "INT-23")
         sd.create()
 
         # Create a file in workspace

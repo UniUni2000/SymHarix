@@ -71,7 +71,7 @@ describe('issue visual cards', () => {
       },
     }));
 
-    expect(svg).toContain('symphonyness');
+    expect(svg).toContain('symharix');
     expect(svg).toContain('打开 Mini App');
     expect(svg).toContain('状态概览');
     expect(svg).toContain('Telegram 预览');

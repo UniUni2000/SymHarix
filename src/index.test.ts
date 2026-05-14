@@ -1,5 +1,5 @@
 /**
- * Symphony Core Tests
+ * SymHarix Core Tests
  * Section 17: Test and Validation Matrix
  */
 
@@ -105,6 +105,23 @@ describe('Config Layer', () => {
       const config = buildServiceConfig(workflow);
       expect(config.trackerApiKey).toBe('resolved_value');
       delete process.env.TEST_API_KEY;
+    });
+
+    it('should resolve SYMHARIX $VAR references from legacy SYMPHONY env aliases', () => {
+      process.env.SYMPHONY_TRACKER_API_KEY = 'legacy_value';
+      const workflow = {
+        config: {
+          tracker: {
+            kind: 'linear',
+            api_key: '$SYMHARIX_TRACKER_API_KEY',
+            project_slug: 'TEST'
+          }
+        },
+        prompt_template: 'test'
+      };
+      const config = buildServiceConfig(workflow);
+      expect(config.trackerApiKey).toBe('legacy_value');
+      delete process.env.SYMPHONY_TRACKER_API_KEY;
     });
 
     it('should parse repositories.routing into formal repository routes', () => {

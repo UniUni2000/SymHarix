@@ -8,7 +8,7 @@ export function renderRuntimePage(): string {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>symphonyness Runtime</title>
+    <title>symharix Runtime</title>
     <style>${runtimePageStyles}</style>
   </head>
   <body>

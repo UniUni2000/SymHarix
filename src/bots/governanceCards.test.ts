@@ -128,7 +128,7 @@ describe('governanceCards', () => {
 
     expect(message.format).toBe('telegram_html');
     expect(message.text).toContain('<b>正在执行 · INT-37</b>');
-    expect(message.text).toContain('Symphony 正在处理你的治理操作');
+    expect(message.text).toContain('SymHarix 正在处理你的治理操作');
     expect(message.text).toContain('按方案拆成两个任务');
     expect(message.action_rows ?? []).toHaveLength(0);
   });

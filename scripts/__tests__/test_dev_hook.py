@@ -316,7 +316,7 @@ def test_dev_hook_commits_gitignore_when_ignored_cache_dirs_exist(tmp_path):
         )
 
     git("init", "-b", "main")
-    git("config", "user.name", "Symphony Test")
+    git("config", "user.name", "SymHarix Test")
     git("config", "user.email", "symphony-test@example.com")
     (repo / "README.md").write_text("base\n", encoding="utf-8")
     git("add", "README.md")

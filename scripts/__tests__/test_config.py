@@ -5,6 +5,27 @@ import os
 from pathlib import Path
 from scripts.lib.config import Config, load_config
 
+ENV_KEYS = [
+    "LINEAR_API_KEY",
+    "GITHUB_TOKEN",
+    "GITHUB_OWNER",
+    "GITHUB_REPO",
+    "WORKSPACE_ROOT",
+    "SYMHARIX_TRACKER_API_KEY",
+    "SYMHARIX_GITHUB_OWNER",
+    "SYMHARIX_GITHUB_REPO",
+    "SYMHARIX_WORKSPACE_ROOT",
+    "SYMPHONY_TRACKER_API_KEY",
+    "SYMPHONY_GITHUB_OWNER",
+    "SYMPHONY_GITHUB_REPO",
+    "SYMPHONY_WORKSPACE_ROOT",
+]
+
+
+def clear_config_env():
+    for key in ENV_KEYS:
+        os.environ.pop(key, None)
+
 def test_config_defaults():
     """Test Config has sensible defaults."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -73,11 +94,7 @@ def test_load_config_from_env():
 
 def test_load_config_missing_linear_api_key():
     """Test load_config raises error without LINEAR_API_KEY."""
-    # Clear the env var if it exists
-    if "LINEAR_API_KEY" in os.environ:
-        del os.environ["LINEAR_API_KEY"]
-    if "SYMPHONY_TRACKER_API_KEY" in os.environ:
-        del os.environ["SYMPHONY_TRACKER_API_KEY"]
+    clear_config_env()
 
     with pytest.raises(ValueError) as exc_info:
         load_config()
@@ -98,7 +115,7 @@ def test_load_config_missing_github_token():
         del os.environ["LINEAR_API_KEY"]
 
 def test_load_config_with_symphony_prefix():
-    """Test load_config supports SYMPHONY_ prefixed env vars."""
+    """Test load_config supports legacy SYMPHONY_ prefixed env vars."""
     with tempfile.TemporaryDirectory() as tmpdir:
         os.environ["SYMPHONY_TRACKER_API_KEY"] = "symphony_lin_key"
         os.environ["SYMPHONY_GITHUB_OWNER"] = "symphony_owner"
@@ -115,3 +132,25 @@ def test_load_config_with_symphony_prefix():
             del os.environ["SYMPHONY_GITHUB_OWNER"]
             del os.environ["SYMPHONY_GITHUB_REPO"]
             del os.environ["GITHUB_TOKEN"]
+
+def test_load_config_with_symharix_prefix_preferred():
+    """Test load_config prefers SYMHARIX_ env vars over legacy SYMPHONY_ aliases."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        clear_config_env()
+        os.environ["SYMHARIX_TRACKER_API_KEY"] = "symharix_lin_key"
+        os.environ["SYMHARIX_GITHUB_OWNER"] = "symharix_owner"
+        os.environ["SYMHARIX_GITHUB_REPO"] = "symharix_repo"
+        os.environ["SYMHARIX_WORKSPACE_ROOT"] = tmpdir
+        os.environ["SYMPHONY_TRACKER_API_KEY"] = "legacy_lin_key"
+        os.environ["SYMPHONY_GITHUB_OWNER"] = "legacy_owner"
+        os.environ["SYMPHONY_GITHUB_REPO"] = "legacy_repo"
+        os.environ["GITHUB_TOKEN"] = "gh_token"
+
+        try:
+            config = load_config()
+            assert config.linear_api_key == "symharix_lin_key"
+            assert config.github_owner == "symharix_owner"
+            assert config.github_repo == "symharix_repo"
+            assert config.workspace_root == Path(tmpdir)
+        finally:
+            clear_config_env()

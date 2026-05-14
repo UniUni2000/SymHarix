@@ -293,7 +293,7 @@ set -eu
 blocked_paths=$(git diff --cached --name-only --diff-filter=ACMR -- ${WORKFLOW_ARTIFACT_PATHS.map((item) => `"${item}"`).join(' ')} || true)
 
 if [ -n "$blocked_paths" ]; then
-  echo "Symphony workflow artifacts must not be committed:" >&2
+  echo "SymHarix workflow artifacts must not be committed:" >&2
   echo "$blocked_paths" >&2
   echo "Keep DEVELOPMENT_LOG/HANDOVER/REVIEW_REPORT and .symphony outside product commits." >&2
   exit 1
@@ -319,7 +319,7 @@ fi
       const isManagedHook =
         current.includes('symphony-managed-wrapper') ||
         current.includes('symphony-workflow-guard') ||
-        current.includes('Symphony workflow artifacts must not be committed');
+        current.includes('SymHarix workflow artifacts must not be committed');
 
       if (current && !isManagedHook) {
         try {

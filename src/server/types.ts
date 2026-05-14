@@ -1,5 +1,5 @@
 /**
- * Server Types for Symphony HTTP Server
+ * Server Types for SymHarix HTTP Server
  */
 
 /**

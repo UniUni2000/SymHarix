@@ -1,5 +1,5 @@
 /**
- * Health Check Routes for Symphony HTTP Server
+ * Health Check Routes for SymHarix HTTP Server
  */
 
 import { Hono } from 'hono';

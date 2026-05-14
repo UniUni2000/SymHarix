@@ -227,7 +227,7 @@ export class BotSubscriptionService {
             const content = historyView?.digest
               ? `${historyView.digest.headline}\n${historyView.digest.detail}${historyView.digest.history_blurb ? `\n${historyView.digest.history_blurb}` : ''}`
               : formatIssueSummary(issue);
-            await this.sendToSubscription(subscription, `Symphony update\n${content}`);
+            await this.sendToSubscription(subscription, `SymHarix update\n${content}`);
           }),
       );
       return;
@@ -259,8 +259,8 @@ export class BotSubscriptionService {
             this.sendToSubscription(
               subscription,
               subscription.preset === 'verbose'
-                ? `Symphony timeline\n${formatTimelineSummary(timeline)}`
-                : `Symphony timeline\n${timeline.issue_identifier || timeline.issue_id} · ${timeline.message}`,
+                ? `SymHarix timeline\n${formatTimelineSummary(timeline)}`
+                : `SymHarix timeline\n${timeline.issue_identifier || timeline.issue_id} · ${timeline.message}`,
             ),
           ),
       );

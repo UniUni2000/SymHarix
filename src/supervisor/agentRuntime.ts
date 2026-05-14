@@ -22,6 +22,7 @@ import type {
 } from '../bots/types';
 import type { BotAssistantModel, BotAssistantModelOutput } from '../bots/model';
 import { BotCommandService } from '../bots/commandService';
+import { readSymHarixEnv } from '../config/env';
 import { isTerminalIssue, isUserVisibleActiveIssue } from '../bots/issueVisibility';
 import { buildIssueCardActionRows } from '../bots/issueCardActions';
 import {
@@ -1331,7 +1332,7 @@ export class SupervisorAgentRuntimeService {
       Math.max(
         1,
         options.modelTimeoutMs
-          ?? parsePositiveInteger(process.env.SYMPHONY_SUPERVISOR_TOOL_ROUTER_TIMEOUT_MS)
+          ?? parsePositiveInteger(readSymHarixEnv('SYMPHONY_SUPERVISOR_TOOL_ROUTER_TIMEOUT_MS'))
           ?? DEFAULT_MODEL_TIMEOUT_MS,
       ),
     );

@@ -1,5 +1,5 @@
 # scripts/lib/state_store.py
-"""File system state storage for Symphony."""
+"""File system state storage for SymHarix."""
 
 import json
 import shutil
@@ -15,7 +15,7 @@ CONTEXT_FILE_NAME = "context.json"
 EVENTS_FILE_NAME = "events.log"
 STATE_VERSION = 1
 
-class SymphonyDir:
+class SymHarixDir:
     """Manages the .symphony directory for a workspace."""
 
     def __init__(self, workspace_root: Path, issue_id: str):
@@ -98,7 +98,7 @@ class StateStore:
     def __init__(self, workspace_root: Path, issue_id: str):
         self.workspace_root = workspace_root
         self.issue_id = issue_id
-        self.symphony_dir = SymphonyDir(workspace_root, issue_id)
+        self.symphony_dir = SymHarixDir(workspace_root, issue_id)
         self.state_machine = StateMachine()
 
     def initialize(

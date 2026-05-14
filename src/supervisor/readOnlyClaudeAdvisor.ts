@@ -1,4 +1,5 @@
 import { AgentRunner } from '../agent/runner';
+import { readSymHarixEnv } from '../config/env';
 import type { PendingRuntimeRequest, RuntimeRequestResponse } from '../types';
 import type {
   SupervisorAgentBackendResult,
@@ -406,11 +407,11 @@ export function createClaudeCodeReadOnlyAdvisorRunner(
 }
 
 export function createReadOnlyClaudeSupervisorAdvisorFromEnv(): SupervisorReadOnlyClaudeAdvisor | null {
-  const command = normalizeConfigValue(process.env.SYMPHONY_SUPERVISOR_READONLY_ADVISOR_COMMAND)
-    ?? normalizeConfigValue(process.env.SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_COMMAND)
+  const command = normalizeConfigValue(readSymHarixEnv('SYMPHONY_SUPERVISOR_READONLY_ADVISOR_COMMAND'))
+    ?? normalizeConfigValue(readSymHarixEnv('SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_COMMAND'))
     ?? 'node scripts/claude-adapter.cjs';
-  const timeoutMs = parsePositiveInteger(process.env.SYMPHONY_SUPERVISOR_READONLY_ADVISOR_TIMEOUT_MS)
-    ?? parsePositiveInteger(process.env.SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_TIMEOUT_MS)
+  const timeoutMs = parsePositiveInteger(readSymHarixEnv('SYMPHONY_SUPERVISOR_READONLY_ADVISOR_TIMEOUT_MS'))
+    ?? parsePositiveInteger(readSymHarixEnv('SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_TIMEOUT_MS'))
     ?? 120_000;
   const manager = new SupervisorReadOnlyClaudeConversationManager({
     createSession: createClaudeCodeReadOnlyAdvisorSessionFactory({

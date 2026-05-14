@@ -527,7 +527,7 @@ export function buildSupervisorSessionVisualCardSvg(session: SupervisorSessionRe
     <rect x="18" y="18" width="1044" height="1044" rx="34" fill="none" stroke="#253D51" stroke-width="2" opacity="0.7"/>
 
     <path d="M56 70 C74 40 104 40 122 70 S174 100 192 70 S244 40 262 70" fill="none" stroke="#58E7AE" stroke-width="10" stroke-linecap="round" />
-    <text x="294" y="80" fill="#5CE6AA" font-size="27" font-weight="760">symphonyness</text>
+    <text x="294" y="80" fill="#5CE6AA" font-size="27" font-weight="760">symharix</text>
     <text x="500" y="80" fill="#96A7B4" font-size="26" font-weight="520">Supervisor</text>
 
     <rect x="56" y="106" width="154" height="38" rx="11" fill="#172838" stroke="#30465A"/>
@@ -663,7 +663,7 @@ function buildMilestoneSummarySvg(
     </defs>
     <rect width="900" height="1280" fill="url(#bg)" />
     <rect x="54" y="56" width="792" height="1168" rx="34" fill="url(#panel)" stroke="#2a435b" />
-    <text x="92" y="130" fill="#58e5aa" font-size="25" font-weight="820">symphonyness · Milestone</text>
+    <text x="92" y="130" fill="#58e5aa" font-size="25" font-weight="820">symharix · Milestone</text>
     <text x="92" y="206" fill="#f4f8ff" font-size="44" font-weight="850">${escapeSvg(compact(identifier, 18))}</text>
     ${textLines({ x: 92, y: 258, lines: wrapText(title, 28, 2), size: 28, fill: '#dbe7f3', weight: 620, lineHeight: 38 })}
 

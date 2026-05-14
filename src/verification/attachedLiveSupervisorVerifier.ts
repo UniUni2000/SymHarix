@@ -1,4 +1,5 @@
 import type { RuntimeIssueView, RuntimeOverview } from '../runtime/types';
+import { readSymHarixEnv } from '../config/env';
 import type { LiveLifecycleCheckpoint, LiveLifecycleVerificationResult } from './liveLifecycleVerifier';
 
 export interface AttachedLiveSupervisorVerifyInput {
@@ -283,7 +284,7 @@ export async function verifyAttachedLiveSupervisor(
       serverUrl,
       chatId: input.telegramChatId,
       text: requestText,
-      webhookSecret: input.webhookSecret ?? process.env.SYMPHONY_TELEGRAM_WEBHOOK_SECRET ?? null,
+      webhookSecret: input.webhookSecret ?? readSymHarixEnv('SYMPHONY_TELEGRAM_WEBHOOK_SECRET') ?? null,
       updateId: Math.floor(startedAt || Date.now()),
     });
     pass(checkpoints, 'issue_created', input.telegramChatId);
@@ -309,7 +310,7 @@ export async function verifyAttachedLiveSupervisor(
       serverUrl,
       chatId: input.telegramChatId,
       text: '批准并开始',
-      webhookSecret: input.webhookSecret ?? process.env.SYMPHONY_TELEGRAM_WEBHOOK_SECRET ?? null,
+      webhookSecret: input.webhookSecret ?? readSymHarixEnv('SYMPHONY_TELEGRAM_WEBHOOK_SECRET') ?? null,
       updateId: Math.floor((startedAt || Date.now()) + 1),
     });
     input.reporter?.(`Sent supervisor approval through Telegram webhook for session ${approvalSession.sessionId}`);

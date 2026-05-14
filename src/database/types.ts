@@ -14,7 +14,7 @@ import type {
 import type { RuntimeLocale } from '../i18n/locale';
 
 /**
- * Database Types for Symphony Enterprise Agent Platform
+ * Database Types for SymHarix Enterprise Agent Platform
  */
 
 /**

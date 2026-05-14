@@ -229,7 +229,7 @@ export class RepoCacheManager {
   }
 
   private async configureGitIdentity(repoPath: string): Promise<void> {
-    await execAsync(`git -C "${repoPath}" config user.name "Symphony Agent"`);
+    await execAsync(`git -C "${repoPath}" config user.name "SymHarix Agent"`);
     await execAsync(`git -C "${repoPath}" config user.email "symphony@example.com"`);
   }
 

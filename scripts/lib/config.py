@@ -6,9 +6,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+def get_symharix_env(name: str, default: Optional[str] = None) -> Optional[str]:
+    """Read SYMHARIX_* first, then fall back to legacy SYMPHONY_*."""
+    if not name.startswith("SYMPHONY_"):
+        raise ValueError(f"Expected SYMPHONY_ environment variable name, got {name}")
+    current_name = "SYMHARIX_" + name[len("SYMPHONY_"):]
+    current_value = os.environ.get(current_name)
+    if current_value and current_value.strip():
+        return current_value
+    legacy_value = os.environ.get(name)
+    return legacy_value if legacy_value is not None else default
+
 @dataclass
 class Config:
-    """Symphony configuration."""
+    """SymHarix configuration."""
 
     # Required fields (no defaults)
     linear_api_key: str
@@ -34,9 +45,9 @@ class Config:
 def load_config() -> Config:
     """Load configuration from environment variables."""
     # Linear API key
-    linear_api_key = os.environ.get("LINEAR_API_KEY") or os.environ.get("SYMPHONY_TRACKER_API_KEY")
+    linear_api_key = os.environ.get("LINEAR_API_KEY") or get_symharix_env("SYMPHONY_TRACKER_API_KEY")
     if not linear_api_key:
-        raise ValueError("LINEAR_API_KEY or SYMPHONY_TRACKER_API_KEY is required")
+        raise ValueError("LINEAR_API_KEY or SYMHARIX_TRACKER_API_KEY/SYMPHONY_TRACKER_API_KEY is required")
 
     # GitHub token
     github_token = os.environ.get("GITHUB_TOKEN")
@@ -44,18 +55,18 @@ def load_config() -> Config:
         raise ValueError("GITHUB_TOKEN is required")
 
     # GitHub owner (optional when owner/repo is provided via route env or workspace state)
-    github_owner = os.environ.get("GITHUB_OWNER") or os.environ.get("SYMPHONY_GITHUB_OWNER")
+    github_owner = os.environ.get("GITHUB_OWNER") or get_symharix_env("SYMPHONY_GITHUB_OWNER")
 
     # GitHub repo (optional - dispatch/runtime can provide the canonical owner/repo)
-    github_repo = os.environ.get("GITHUB_REPO") or os.environ.get("SYMPHONY_GITHUB_REPO")
+    github_repo = os.environ.get("GITHUB_REPO") or get_symharix_env("SYMPHONY_GITHUB_REPO")
 
     # Workspace root
-    workspace_root = os.environ.get("WORKSPACE_ROOT") or os.environ.get(
+    workspace_root = os.environ.get("WORKSPACE_ROOT") or get_symharix_env(
         "SYMPHONY_WORKSPACE_ROOT", "/tmp/symphony_workspaces"
     )
 
     # Auto-merge no reviews
-    auto_merge_no_reviews = os.environ.get("SYMPHONY_AUTO_MERGE_NO_REVIEWS", "").lower() in ("true", "1", "yes")
+    auto_merge_no_reviews = (get_symharix_env("SYMPHONY_AUTO_MERGE_NO_REVIEWS", "") or "").lower() in ("true", "1", "yes")
 
     return Config(
         linear_api_key=linear_api_key,

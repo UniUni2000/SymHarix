@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { createDefaultTelegramApiFetch } from './telegramHttp';
+import { readSymHarixEnv } from '../config/env';
 
 export interface TelegramTunnelHandle {
   publicBaseUrl: string;
@@ -59,7 +60,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function parsePositiveIntegerEnv(name: string): number | null {
-  const parsed = Number.parseInt(process.env[name] || '', 10);
+  const parsed = Number.parseInt(readSymHarixEnv(name) || '', 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
@@ -69,13 +70,13 @@ function isRetryableTunnelWebhookError(error: unknown): boolean {
 }
 
 export function createCloudflaredTunnelProvider(
-  tunnelCommand: string = process.env.SYMPHONY_TELEGRAM_TUNNEL_COMMAND?.trim() || 'cloudflared',
+  tunnelCommand: string = readSymHarixEnv('SYMPHONY_TELEGRAM_TUNNEL_COMMAND')?.trim() || 'cloudflared',
   timeoutMs: number = 15_000,
 ): TelegramTunnelProvider {
   return async (localBaseUrl: string) => {
     return new Promise<TelegramTunnelHandle>((resolve, reject) => {
       let settled = false;
-      const protocol = process.env.SYMPHONY_TELEGRAM_TUNNEL_PROTOCOL?.trim() || 'http2';
+      const protocol = readSymHarixEnv('SYMPHONY_TELEGRAM_TUNNEL_PROTOCOL')?.trim() || 'http2';
       const child = spawn(
         tunnelCommand,
         ['tunnel', '--url', localBaseUrl, '--protocol', protocol, '--no-autoupdate'],

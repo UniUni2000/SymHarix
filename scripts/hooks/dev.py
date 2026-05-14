@@ -229,7 +229,7 @@ Implement the required changes. When complete:
         title = f"[{self.issue_id}] {issue['title']}" if issue else self.issue_id
         body = f"""## Summary
 
-Automated PR created by Symphony Agent Platform.
+Automated PR created by SymHarix Agent Platform.
 
 **Linear Issue:** {self.issue_id}
 

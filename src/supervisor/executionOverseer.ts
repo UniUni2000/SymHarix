@@ -1,5 +1,6 @@
 import type { SupervisorPlanCard, SupervisorSessionRecord } from '../database/types';
 import type { RuntimeIssueView } from '../runtime/types';
+import { readSymHarixEnv } from '../config/env';
 import type { SupervisorMilestone } from './types';
 
 export type SupervisorOversightDecision = 'continue' | 'ask_user' | 'report' | 'complete';
@@ -311,7 +312,7 @@ function buildOverseerPrompt(input: {
 }): string {
   const { session, issue, milestone, deterministic } = input;
   return [
-    'You are the execution overseer for Symphony Supervisor Plane.',
+    'You are the execution overseer for SymHarix Supervisor Plane.',
     'Act like a senior architect supervising a dev agent, similar to how a human would guide Claude Code.',
     'You do not execute tools. You decide the next supervision move and produce one concise instruction for the dev agent when safe.',
     'Return JSON only. Prefer Chinese for user_summary; dev_instruction may be Chinese and should be concrete.',
@@ -508,19 +509,19 @@ export class HttpSupervisorExecutionOverseer implements SupervisorExecutionOvers
 export function createSupervisorExecutionOverseerFromEnv(
   fetchImpl: typeof fetch = fetch,
 ): SupervisorExecutionOverseer {
-  const provider = normalize(process.env.SYMPHONY_SUPERVISOR_OVERSEER_PROVIDER)
-    ?? normalize(process.env.SYMPHONY_SUPERVISOR_LLM_PROVIDER)
-    ?? normalize(process.env.SYMPHONY_BOT_LLM_PROVIDER);
-  const model = normalize(process.env.SYMPHONY_SUPERVISOR_OVERSEER_MODEL)
-    ?? normalize(process.env.SYMPHONY_SUPERVISOR_LLM_MODEL)
-    ?? normalize(process.env.SYMPHONY_BOT_LLM_MODEL);
-  const apiKey = normalize(process.env.SYMPHONY_SUPERVISOR_OVERSEER_API_KEY)
-    ?? normalize(process.env.SYMPHONY_SUPERVISOR_LLM_API_KEY)
-    ?? normalize(process.env.SYMPHONY_BOT_LLM_API_KEY);
+  const provider = normalize(readSymHarixEnv('SYMPHONY_SUPERVISOR_OVERSEER_PROVIDER'))
+    ?? normalize(readSymHarixEnv('SYMPHONY_SUPERVISOR_LLM_PROVIDER'))
+    ?? normalize(readSymHarixEnv('SYMPHONY_BOT_LLM_PROVIDER'));
+  const model = normalize(readSymHarixEnv('SYMPHONY_SUPERVISOR_OVERSEER_MODEL'))
+    ?? normalize(readSymHarixEnv('SYMPHONY_SUPERVISOR_LLM_MODEL'))
+    ?? normalize(readSymHarixEnv('SYMPHONY_BOT_LLM_MODEL'));
+  const apiKey = normalize(readSymHarixEnv('SYMPHONY_SUPERVISOR_OVERSEER_API_KEY'))
+    ?? normalize(readSymHarixEnv('SYMPHONY_SUPERVISOR_LLM_API_KEY'))
+    ?? normalize(readSymHarixEnv('SYMPHONY_BOT_LLM_API_KEY'));
   const normalizedProvider = normalizeProvider(provider);
-  const baseUrl = normalize(process.env.SYMPHONY_SUPERVISOR_OVERSEER_BASE_URL)
-    ?? normalize(process.env.SYMPHONY_SUPERVISOR_LLM_BASE_URL)
-    ?? normalize(process.env.SYMPHONY_BOT_LLM_BASE_URL)
+  const baseUrl = normalize(readSymHarixEnv('SYMPHONY_SUPERVISOR_OVERSEER_BASE_URL'))
+    ?? normalize(readSymHarixEnv('SYMPHONY_SUPERVISOR_LLM_BASE_URL'))
+    ?? normalize(readSymHarixEnv('SYMPHONY_BOT_LLM_BASE_URL'))
     ?? (normalizedProvider === 'anthropic'
       ? 'https://api.anthropic.com/v1'
       : normalizedProvider === 'openai'
@@ -536,8 +537,8 @@ export function createSupervisorExecutionOverseerFromEnv(
     model,
     apiKey,
     baseUrl,
-    timeoutMs: parsePositiveInteger(process.env.SYMPHONY_SUPERVISOR_OVERSEER_TIMEOUT_MS)
-      ?? parsePositiveInteger(process.env.SYMPHONY_SUPERVISOR_LLM_TIMEOUT_MS)
+    timeoutMs: parsePositiveInteger(readSymHarixEnv('SYMPHONY_SUPERVISOR_OVERSEER_TIMEOUT_MS'))
+      ?? parsePositiveInteger(readSymHarixEnv('SYMPHONY_SUPERVISOR_LLM_TIMEOUT_MS'))
       ?? DEFAULT_TIMEOUT_MS,
   }, fetchImpl);
 }

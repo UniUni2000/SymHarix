@@ -68,6 +68,7 @@ import {
   type TelegramWebhookDiagnosticsService,
 } from './telegramDiagnostics';
 import { TelegramWebhookBootstrapService } from './telegramBootstrap';
+import { readSymHarixEnv, syncSymHarixEnvAliases } from '../config/env';
 import { createDefaultTelegramApiFetch } from './telegramHttp';
 import { logger } from '../logging';
 import { SupervisorSessionService, type SupervisorPlanBrain } from '../supervisor/sessionService';
@@ -950,9 +951,9 @@ function createRepoUnderstandingServiceFromEnv(
   }
 
   const repository = new SupervisorRepoUnderstandingRepository(db);
-  const timeoutMs = parsePositiveInteger(process.env.SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_TIMEOUT_MS)
+  const timeoutMs = parsePositiveInteger(readSymHarixEnv('SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_TIMEOUT_MS'))
     ?? 120_000;
-  const command = process.env.SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_COMMAND
+  const command = readSymHarixEnv('SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_COMMAND')
     || 'node scripts/claude-adapter.cjs';
 
   return new DefaultClaudeRepoUnderstandingService({
@@ -1023,7 +1024,7 @@ export class DefaultBotGateway implements BotGateway {
   private readonly seenTelegramUpdateOrder: string[] = [];
   private readonly runtimeIssueCardLock = new RuntimeIssueCardLock();
   private readonly supervisorSessionCardLock = new SupervisorSessionCardLock();
-  private telegramPublicBaseUrl: string | null = normalizePublicBaseUrl(process.env.SYMPHONY_PUBLIC_BASE_URL || null);
+  private telegramPublicBaseUrl: string | null = normalizePublicBaseUrl(readSymHarixEnv('SYMPHONY_PUBLIC_BASE_URL') || null);
   private telegramWebhookUsedTunnel: boolean | null = null;
   private startupRepairTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -1090,7 +1091,7 @@ export class DefaultBotGateway implements BotGateway {
     this.telegramTextProcessingAckDelayMs = Math.max(
       1,
       options.telegramTextProcessingAckDelayMs
-        ?? parsePositiveInteger(process.env.SYMPHONY_TELEGRAM_TEXT_ACK_DELAY_MS)
+        ?? parsePositiveInteger(readSymHarixEnv('SYMPHONY_TELEGRAM_TEXT_ACK_DELAY_MS'))
         ?? 3_000,
     );
     this.telegramTextCoalesceDelayMs = Math.max(0, options.telegramTextCoalesceDelayMs ?? 0);
@@ -1106,8 +1107,8 @@ export class DefaultBotGateway implements BotGateway {
       ? (options.telegramBootstrapService ?? new TelegramWebhookBootstrapService({
           botToken: telegramConfig.botToken,
           webhookSecret: telegramConfig.webhookSecret,
-          publicBaseUrl: process.env.SYMPHONY_PUBLIC_BASE_URL || null,
-          bootstrapMode: process.env.SYMPHONY_TELEGRAM_BOOTSTRAP === 'off' ? 'off' : 'auto',
+          publicBaseUrl: readSymHarixEnv('SYMPHONY_PUBLIC_BASE_URL') || null,
+          bootstrapMode: readSymHarixEnv('SYMPHONY_TELEGRAM_BOOTSTRAP') === 'off' ? 'off' : 'auto',
         }))
       : null;
     this.subscriptions = new BotSubscriptionService(runtime, {
@@ -1237,7 +1238,7 @@ export class DefaultBotGateway implements BotGateway {
             runtime,
             this.supervisorSessions,
             {
-              staleSessionMaxAgeMs: parsePositiveInteger(process.env.SYMPHONY_SUPERVISOR_SESSION_REPAIR_MAX_AGE_MS)
+              staleSessionMaxAgeMs: parsePositiveInteger(readSymHarixEnv('SYMPHONY_SUPERVISOR_SESSION_REPAIR_MAX_AGE_MS'))
                 ?? null,
             },
           ).repair();
@@ -1248,7 +1249,7 @@ export class DefaultBotGateway implements BotGateway {
       }
     };
     const startupRepairDelayMs = options.startupRepairDelayMs
-      ?? parsePositiveInteger(process.env.SYMPHONY_BOT_FOLLOWUP_REPAIR_DELAY_MS)
+      ?? parsePositiveInteger(readSymHarixEnv('SYMPHONY_BOT_FOLLOWUP_REPAIR_DELAY_MS'))
       ?? 5_000;
     this.startupRepairTimer = setTimeout(() => {
       this.startupRepairTimer = null;
@@ -1288,7 +1289,7 @@ export class DefaultBotGateway implements BotGateway {
           jobRepository: supervisorJobs ?? undefined,
           devConversationService: supervisorJobs ? new SupervisorDevConversationService() : undefined,
           syncIssue: (issue) => this.supervisorSessionService?.syncIssue(issue),
-          intervalMs: Number.parseInt(process.env.SYMPHONY_SUPERVISOR_JOB_INTERVAL_MS || '', 10) || undefined,
+          intervalMs: Number.parseInt(readSymHarixEnv('SYMPHONY_SUPERVISOR_JOB_INTERVAL_MS') || '', 10) || undefined,
         })
       : null;
     if (this.supervisorWorker) {
@@ -3698,6 +3699,8 @@ export function createBotGatewayFromEnv(
     githubToken?: string | null;
   } = {},
 ): BotGateway {
+  syncSymHarixEnvAliases();
+
   const parseOperatorIds = (value: string | undefined): Set<string> =>
     new Set(
       String(value || '')
@@ -3744,7 +3747,7 @@ export function createBotGatewayFromEnv(
       )
     : options.supervisorRepoSourceResolver;
   const telegramDiagnostics = new DefaultTelegramWebhookDiagnosticsService(
-    process.env.SYMPHONY_TELEGRAM_BOT_TOKEN || null,
+    readSymHarixEnv('SYMPHONY_TELEGRAM_BOT_TOKEN') || null,
   );
   const supervisorCcAdvisor = options.supervisorCcAdvisor === undefined
     ? createSupervisorCcAdvisorFromEnv()
@@ -3792,24 +3795,24 @@ export function createBotGatewayFromEnv(
     supervisorSessions: supervisorSessionRepository,
     repoIntelligenceResolver: supervisorRepoIntelligenceResolver,
   });
-  const supervisorClaudeRuntimeService = process.env.SYMPHONY_SUPERVISOR_CLAUDE_RUNTIME === 'off'
+  const supervisorClaudeRuntimeService = readSymHarixEnv('SYMPHONY_SUPERVISOR_CLAUDE_RUNTIME') === 'off'
     ? null
     : new SupervisorClaudeRuntimeService({
         resolveWorkspace: (input) => supervisorContextBroker.resolveWorkspace(input),
-        command: process.env.SYMPHONY_SUPERVISOR_CLAUDE_COMMAND || 'node scripts/claude-adapter.cjs',
-        contextEndpoint: process.env.SYMPHONY_SUPERVISOR_CONTEXT_ENDPOINT || null,
+        command: readSymHarixEnv('SYMPHONY_SUPERVISOR_CLAUDE_COMMAND') || 'node scripts/claude-adapter.cjs',
+        contextEndpoint: readSymHarixEnv('SYMPHONY_SUPERVISOR_CONTEXT_ENDPOINT') || null,
         projectRoot: process.cwd(),
       });
 
   return new DefaultBotGateway(runtime, {
-    botToken: process.env.SYMPHONY_TELEGRAM_BOT_TOKEN || null,
-    webhookSecret: process.env.SYMPHONY_TELEGRAM_WEBHOOK_SECRET || null,
-    operationsChatId: process.env.SYMPHONY_TELEGRAM_OPERATIONS_CHAT_ID || null,
-    operatorIds: parseOperatorIds(process.env.SYMPHONY_TELEGRAM_OPERATOR_IDS),
+    botToken: readSymHarixEnv('SYMPHONY_TELEGRAM_BOT_TOKEN') || null,
+    webhookSecret: readSymHarixEnv('SYMPHONY_TELEGRAM_WEBHOOK_SECRET') || null,
+    operationsChatId: readSymHarixEnv('SYMPHONY_TELEGRAM_OPERATIONS_CHAT_ID') || null,
+    operatorIds: parseOperatorIds(readSymHarixEnv('SYMPHONY_TELEGRAM_OPERATOR_IDS')),
   }, {
-    botToken: process.env.SYMPHONY_DISCORD_BOT_TOKEN || null,
-    publicKey: process.env.SYMPHONY_DISCORD_PUBLIC_KEY || null,
-    operatorIds: parseOperatorIds(process.env.SYMPHONY_DISCORD_OPERATOR_IDS),
+    botToken: readSymHarixEnv('SYMPHONY_DISCORD_BOT_TOKEN') || null,
+    publicKey: readSymHarixEnv('SYMPHONY_DISCORD_PUBLIC_KEY') || null,
+    operatorIds: parseOperatorIds(readSymHarixEnv('SYMPHONY_DISCORD_OPERATOR_IDS')),
   }, undefined, subscriptionRepository, {
     preferencesRepository,
     conversationFocusRepository,
@@ -3840,7 +3843,7 @@ export function createBotGatewayFromEnv(
     supervisorAgentService: supervisorAgentService ?? null,
     repoUnderstandingService: repoUnderstandingService ?? null,
     telegramDiagnostics,
-    telegramTextCoalesceDelayMs: parseNonNegativeInteger(process.env.SYMPHONY_TELEGRAM_TEXT_COALESCE_DELAY_MS)
+    telegramTextCoalesceDelayMs: parseNonNegativeInteger(readSymHarixEnv('SYMPHONY_TELEGRAM_TEXT_COALESCE_DELAY_MS'))
       ?? 2_000,
   });
 }

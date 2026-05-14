@@ -1,5 +1,5 @@
 /**
- * Database Schema Definitions for Symphony Enterprise Agent Platform
+ * Database Schema Definitions for SymHarix Enterprise Agent Platform
  * Defines table structures and initialization logic
  */
 

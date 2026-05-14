@@ -1,4 +1,4 @@
-# symphonyness Quick Start / 快速开始
+# SymHarix Quick Start / 快速开始
 
 This guide takes a fresh checkout to a working Runtime Deck and Telegram-first Supervisor flow.
 
@@ -19,6 +19,10 @@ bun run start:local
 `start:local` reruns the safe setup guard, stops an older local listener on the same port when possible, prepares Telegram proxy settings, creates a temporary `cloudflared` tunnel when needed, starts the service, and keeps the tunnel URL in process memory rather than writing it back to `.env`.
 
 `start:local` 会重新执行安全初始化检查，在可能时停止同端口旧实例，准备 Telegram 代理配置，在需要时创建临时 `cloudflared` 隧道，启动服务，并且只在当前进程中使用临时隧道地址，不写回 `.env`。
+
+If you already have a stale temporary `trycloudflare.com` URL, `start:local` will probe it and recover with a fresh tunnel when the watchdog sees the public URL or Telegram webhook degrade.
+
+如果当前已有过期的临时 `trycloudflare.com` 地址，`start:local` 会探测它，并在 watchdog 发现公网 URL 或 Telegram webhook 退化时自动换新隧道。
 
 ## 1. Install Tools / 安装工具
 
@@ -41,6 +45,8 @@ Optional:
 
 - `cloudflared`, if you want Telegram webhooks to reach a local machine without your own public HTTPS URL.
   如果没有自己的公网 HTTPS 地址，但想让 Telegram webhook 进入本机，需要安装 `cloudflared`。
+- `sqlite3`, if you want to inspect local diagnostics directly.
+  如果想直接检查本地诊断数据，可以安装 `sqlite3`。
 
 Initialize:
 
@@ -52,9 +58,9 @@ bun run setup:local
 
 ## 2. Route A Repository / 配置仓库路由
 
-symphonyness routes Linear projects to GitHub repositories through `WORKFLOW.md`.
+SymHarix routes Linear projects to GitHub repositories through `WORKFLOW.md`.
 
-symphonyness 通过 `WORKFLOW.md` 把 Linear 项目路由到 GitHub 仓库。
+SymHarix 通过 `WORKFLOW.md` 把 Linear 项目路由到 GitHub 仓库。
 
 Example:
 
@@ -85,10 +91,14 @@ Rules:
   路由 key 必须匹配 Linear 的 `project_slug`。
 - `github_owner` and `github_repo` are required.
   `github_owner` 和 `github_repo` 必填。
-- `local_path` is optional. Relative paths resolve from this symphonyness repository.
-  `local_path` 可选。相对路径从当前 symphonyness 仓库解析。
+- `local_path` is optional. Relative paths resolve from this SymHarix repository.
+  `local_path` 可选。相对路径从当前 SymHarix 仓库解析。
 - Missing routes fail closed before workspace creation or agent dispatch.
   缺失路由会在创建 workspace 或派发 agent 前 fail closed。
+
+You can add more route entries for a multi-repo workspace. Telegram can list configured repositories, switch the chat default project, and answer repo-reading questions against a named route.
+
+多仓库 workspace 可以继续添加更多 route。Telegram 可以列出已配置仓库、切换当前 chat 的默认项目，并针对指定 route 回答仓库读取问题。
 
 ## 3. Fill `.env` / 填写 `.env`
 
@@ -97,9 +107,9 @@ Minimum local execution:
 本地执行最小配置：
 
 ```dotenv
-SYMPHONY_TRACKER_KIND=linear
-SYMPHONY_TRACKER_API_KEY=...
-SYMPHONY_TRACKER_PROJECT_SLUG=sample-project
+SYMHARIX_TRACKER_KIND=linear
+SYMHARIX_TRACKER_API_KEY=...
+SYMHARIX_TRACKER_PROJECT_SLUG=sample-project
 GITHUB_TOKEN=...
 ANTHROPIC_API_KEY=...
 ```
@@ -113,9 +123,9 @@ CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 CLAUDE_CODE_LOCAL_SKIP_REMOTE_PREFETCH=1
 ```
 
-Do not rename `SYMPHONY_*` or `.symphony-*`; they are internal compatibility contracts.
+Use `SYMHARIX_*` for new environment variables. Legacy `SYMPHONY_*` names, `.symphony-*` repository contracts, and the local `symphony.db` file remain supported for compatibility.
 
-不要重命名 `SYMPHONY_*` 或 `.symphony-*`；它们是内部兼容契约。
+新环境变量请使用 `SYMHARIX_*`。旧的 `SYMPHONY_*` 名称、`.symphony-*` 仓库契约和本地 `symphony.db` 文件仍会为了兼容继续支持。
 
 ## 4. Configure Telegram / 配置 Telegram
 
@@ -124,31 +134,31 @@ Minimum Telegram settings:
 Telegram 最小配置：
 
 ```dotenv
-SYMPHONY_TELEGRAM_BOT_TOKEN=...
-SYMPHONY_TELEGRAM_WEBHOOK_SECRET=...
-SYMPHONY_TELEGRAM_OPERATOR_IDS=<your-telegram-user-id>
+SYMHARIX_TELEGRAM_BOT_TOKEN=...
+SYMHARIX_TELEGRAM_WEBHOOK_SECRET=...
+SYMHARIX_TELEGRAM_OPERATOR_IDS=<your-telegram-user-id>
 ```
 
 Webhook choices:
 
 Webhook 选择：
 
-- With your own public HTTPS URL, set `SYMPHONY_PUBLIC_BASE_URL=https://...`.
-  如果有自己的公网 HTTPS 地址，设置 `SYMPHONY_PUBLIC_BASE_URL=https://...`。
+- With your own public HTTPS URL, set `SYMHARIX_PUBLIC_BASE_URL=https://...`.
+  如果有自己的公网 HTTPS 地址，设置 `SYMHARIX_PUBLIC_BASE_URL=https://...`。
 - Without one, leave it empty and install `cloudflared`; `start:local` will try a temporary tunnel.
   如果没有，留空并安装 `cloudflared`；`start:local` 会尝试临时隧道。
-- If you manage Telegram webhook registration yourself, set `SYMPHONY_TELEGRAM_BOOTSTRAP=off`.
-  如果你自己管理 Telegram webhook 注册，设置 `SYMPHONY_TELEGRAM_BOOTSTRAP=off`。
+- If you manage Telegram webhook registration yourself, set `SYMHARIX_TELEGRAM_BOOTSTRAP=off`.
+  如果你自己管理 Telegram webhook 注册，设置 `SYMHARIX_TELEGRAM_BOOTSTRAP=off`。
 
 Useful local knobs:
 
 常用本地参数：
 
 ```dotenv
-SYMPHONY_PROXY_MODE=auto
-SYMPHONY_TELEGRAM_TUNNEL_PROTOCOL=http2
-SYMPHONY_TELEGRAM_WEBHOOK_RETRY_ATTEMPTS=6
-SYMPHONY_TELEGRAM_STARTUP_SUMMARY_ATTEMPTS=60
+SYMHARIX_PROXY_MODE=auto
+SYMHARIX_TELEGRAM_TUNNEL_PROTOCOL=http2
+SYMHARIX_TELEGRAM_WEBHOOK_RETRY_ATTEMPTS=6
+SYMHARIX_TELEGRAM_STARTUP_SUMMARY_ATTEMPTS=60
 ```
 
 ## 5. Configure LLMs / 配置 LLM
@@ -158,10 +168,10 @@ For richer Telegram natural-language behavior:
 为了获得更好的 Telegram 自然语言体验：
 
 ```dotenv
-SYMPHONY_BOT_LLM_PROVIDER=anthropic
-SYMPHONY_BOT_LLM_MODEL=claude-3-5-sonnet-latest
-SYMPHONY_BOT_LLM_API_KEY=...
-SYMPHONY_BOT_LLM_HTTP_TRANSPORT=fetch
+SYMHARIX_BOT_LLM_PROVIDER=anthropic
+SYMHARIX_BOT_LLM_MODEL=claude-3-5-sonnet-latest
+SYMHARIX_BOT_LLM_API_KEY=...
+SYMHARIX_BOT_LLM_HTTP_TRANSPORT=fetch
 ```
 
 Supervisor planning defaults to the bot LLM. Override only when you need a separate model:
@@ -169,10 +179,10 @@ Supervisor planning defaults to the bot LLM. Override only when you need a separ
 Supervisor 计划默认复用 Bot LLM。只有需要单独模型时才覆盖：
 
 ```dotenv
-SYMPHONY_SUPERVISOR_LLM_PROVIDER=
-SYMPHONY_SUPERVISOR_LLM_MODEL=
-SYMPHONY_SUPERVISOR_LLM_API_KEY=
-SYMPHONY_SUPERVISOR_LLM_TIMEOUT_MS=45000
+SYMHARIX_SUPERVISOR_LLM_PROVIDER=
+SYMHARIX_SUPERVISOR_LLM_MODEL=
+SYMHARIX_SUPERVISOR_LLM_API_KEY=
+SYMHARIX_SUPERVISOR_LLM_TIMEOUT_MS=45000
 ```
 
 Read-only repo understanding defaults to the bundled adapter:
@@ -180,13 +190,14 @@ Read-only repo understanding defaults to the bundled adapter:
 只读仓库理解默认使用内置 adapter：
 
 ```dotenv
-SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_COMMAND=
-SYMPHONY_SUPERVISOR_READONLY_ADVISOR_COMMAND=
+SYMHARIX_SUPERVISOR_TOOL_ROUTER_TIMEOUT_MS=12000
+SYMHARIX_SUPERVISOR_REPO_UNDERSTANDING_COMMAND=
+SYMHARIX_SUPERVISOR_READONLY_ADVISOR_COMMAND=
 ```
 
-Blank values use `node scripts/claude-adapter.cjs`.
+Blank command values use `node scripts/claude-adapter.cjs`. The tool-router timeout is capped at 60000 ms.
 
-留空时使用 `node scripts/claude-adapter.cjs`。
+命令留空时使用 `node scripts/claude-adapter.cjs`。tool-router timeout 上限为 60000 ms。
 
 ## 6. Start / 启动
 
@@ -202,9 +213,18 @@ Open:
 http://localhost:3000/runtime
 ```
 
-If you set `SYMPHONY_RUNTIME_WRITE_TOKEN`, enter the same token in the Runtime Deck token field before using write actions.
+Use a different local port only when needed:
 
-如果设置了 `SYMPHONY_RUNTIME_WRITE_TOKEN`，使用 Runtime Deck 写操作前需要在 token 输入框填写同一个 token。
+只在需要时更换本地端口：
+
+```bash
+PORT=4000 bun run start:local
+PORT=4000 bun run health
+```
+
+If you set `SYMHARIX_RUNTIME_WRITE_TOKEN`, enter the same token in the Runtime Deck token field before using write actions.
+
+如果设置了 `SYMHARIX_RUNTIME_WRITE_TOKEN`，使用 Runtime Deck 写操作前需要在 token 输入框填写同一个 token。
 
 Health checks:
 
@@ -219,6 +239,10 @@ curl http://localhost:3000/api/v1/bots/manifest
 Telegram is ready only when `/api/v1/bots/manifest` shows a healthy Telegram transport and a non-empty `webhook_url` pointing at the current public base URL.
 
 只有当 `/api/v1/bots/manifest` 显示 Telegram transport healthy，并且 `webhook_url` 非空且指向当前 public base URL 时，Telegram 才真正接到本地服务。
+
+The local service being up is not enough for Telegram: confirm the public tunnel, webhook URL, pending update count, and last webhook error in that manifest.
+
+本地服务启动不等于 Telegram 可用：还需要在该 manifest 里确认公网隧道、webhook URL、pending update count 和最后一次 webhook error。
 
 ## 7. Use Telegram / 使用 Telegram
 
@@ -242,8 +266,8 @@ Expected behavior:
    Supervisor 直接回答、追问细节，或展示 Plan Card。
 4. Risky or broad tasks wait for approval.
    高风险或范围较大的任务会等待批准。
-5. After approval, symphonyness creates work and runs it through the Orchestrator.
-   批准后，symphonyness 创建任务，并通过 Orchestrator 执行。
+5. After approval, SymHarix creates work and runs it through the Orchestrator.
+   批准后，SymHarix 创建任务，并通过 Orchestrator 执行。
 6. Normal lifecycle updates edit the existing card instead of sending duplicates.
    正常生命周期更新会编辑已有卡片，而不是重复发送新卡片。
 
@@ -252,6 +276,9 @@ Useful text actions:
 常用文本操作：
 
 - `现在是什么单子？`
+- `有哪些仓库？`
+- `切到 test2 仓库`
+- `test2 仓库主要做什么？`
 - `批准并开始`
 - `改一下计划：...`
 - `取消当前线程`
@@ -303,10 +330,10 @@ Startup repair defaults:
 启动修复默认值：
 
 ```dotenv
-SYMPHONY_BOT_FOLLOWUP_REPAIR_DELAY_MS=5000
-SYMPHONY_SUPERVISOR_SESSION_REPAIR_MAX_AGE_MS=86400000
-SYMPHONY_STARTUP_CLEANUP_DELAY_MS=900000
-SYMPHONY_FIRST_TICK_DELAY_MS=10000
+SYMHARIX_BOT_FOLLOWUP_REPAIR_DELAY_MS=5000
+SYMHARIX_SUPERVISOR_SESSION_REPAIR_MAX_AGE_MS=86400000
+SYMHARIX_STARTUP_CLEANUP_DELAY_MS=900000
+SYMHARIX_FIRST_TICK_DELAY_MS=10000
 ```
 
 ## 10. Troubleshooting / 排障
@@ -328,10 +355,10 @@ Bot says the model is unavailable:
 
 Bot 提示模型不可用：
 
-- Confirm `SYMPHONY_BOT_LLM_*` and `SYMPHONY_SUPERVISOR_*`.
-  检查 `SYMPHONY_BOT_LLM_*` 和 `SYMPHONY_SUPERVISOR_*`。
-- Keep `SYMPHONY_BOT_LLM_HTTP_TRANSPORT=fetch` unless debugging transport.
-  除非在调试网络传输，否则保持 `SYMPHONY_BOT_LLM_HTTP_TRANSPORT=fetch`。
+- Confirm `SYMHARIX_BOT_LLM_*` and `SYMHARIX_SUPERVISOR_*`.
+  检查 `SYMHARIX_BOT_LLM_*` 和 `SYMHARIX_SUPERVISOR_*`。
+- Keep `SYMHARIX_BOT_LLM_HTTP_TRANSPORT=fetch` unless debugging transport.
+  除非在调试网络传输，否则保持 `SYMHARIX_BOT_LLM_HTTP_TRANSPORT=fetch`。
 
 Issue created but agent does not run:
 
@@ -341,8 +368,21 @@ Issue 已创建但 agent 没跑：
   确认 `WORKFLOW.md -> repositories.routing` 包含 Linear project slug。
 - Confirm `codex.command` is `node ./scripts/claude-adapter.cjs`.
   确认 `codex.command` 是 `node ./scripts/claude-adapter.cjs`。
+- Confirm `ANTHROPIC_API_KEY` is available to the service process.
+  确认 service process 能读取 `ANTHROPIC_API_KEY`。
 - Check Runtime issue detail for `delivery_code`, `delivery_summary`, and supervisor directives.
   在 Runtime issue detail 中检查 `delivery_code`、`delivery_summary` 和 supervisor directive。
+
+Review passed but delivery is blocked:
+
+Review 通过但交付阻塞：
+
+- Check Runtime issue detail for `delivery_code=merge_blocked`.
+  在 Runtime issue detail 中检查 `delivery_code=merge_blocked`。
+- Open the active PR from the Runtime Deck or Mini App and resolve the merge blocker there.
+  从 Runtime Deck 或 Mini App 打开 active PR，并在 PR 里处理 merge blocker。
+- After the blocker is fixed, retry the issue or let the operator decide whether to close/supersede it.
+  blocker 修复后，重试该 issue，或由操作者决定关闭/替换。
 
 Too many Telegram messages:
 

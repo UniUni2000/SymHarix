@@ -728,7 +728,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="dark light" />
-    <title>symphonyness issue cockpit · ${escapedIssueId}</title>
+    <title>symharix issue cockpit · ${escapedIssueId}</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
       :root {
@@ -1971,7 +1971,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
               <svg class="wave" viewBox="0 0 70 42" aria-hidden="true">
                 <path d="M4 23 C12 5 26 8 27 24 C29 42 47 39 50 19 C53 2 63 9 66 21" fill="none" stroke="#2c93ff" stroke-width="6" stroke-linecap="round"/>
               </svg>
-              <span>symphonyness</span>
+              <span>symharix</span>
             </div>
             <div class="issue-topline">
               <p id="issue-eyebrow" class="issue-eyebrow">${escapedIssueId}</p>

@@ -1,10 +1,10 @@
 /**
- * Tests for the minimal symphonyness HTTP server
+ * Tests for the minimal symharix HTTP server
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { SymphonyServer } from './index';
+import { SymHarixServer } from './index';
 import { initializeSchema, dropAllTables } from '../database/schema';
 import {
   AgentRunRepository,
@@ -19,9 +19,9 @@ async function readJson<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
 }
 
-describe('SymphonyServer', () => {
+describe('SymHarixServer', () => {
   let db: Database;
-  let server: SymphonyServer;
+  let server: SymHarixServer;
   let runtimeControlPlane: RuntimeControlPlane;
   let botGateway: BotGateway;
   let createIssueCalls: Array<Record<string, unknown>> = [];
@@ -280,7 +280,7 @@ describe('SymphonyServer', () => {
       dispose: () => undefined,
     };
 
-    server = new SymphonyServer(db, {
+    server = new SymHarixServer(db, {
       port: 0,
       hostname: '127.0.0.1',
       corsOrigins: ['*'],
@@ -438,7 +438,7 @@ describe('SymphonyServer', () => {
     expect(response.headers.get('content-type')).toContain('text/html');
 
     const html = await response.text();
-    expect(html).toContain('symphonyness Runtime');
+    expect(html).toContain('symharix Runtime');
     expect(html).toContain('Command Deck');
     expect(html).toContain('Access token');
     expect(html).toContain('New Issue');
@@ -479,7 +479,7 @@ describe('SymphonyServer', () => {
 
     const html = await response.text();
     expect(html).toContain('telegram-web-app.js');
-    expect(html).toContain('symphonyness');
+    expect(html).toContain('symharix');
     expect(html).toContain('issue cockpit');
     expect(html).toContain('INT-RT-1');
     expect(html).toContain('/api/v1/runtime/issues/INT-RT-1');
@@ -762,7 +762,7 @@ describe('SymphonyServer', () => {
       handleDiscordInteraction: async () => ({ status: 200, body: { ok: true } }),
     };
 
-    const startedServer = new SymphonyServer(
+    const startedServer = new SymHarixServer(
       db,
       { port: 0 },
       null,
@@ -781,7 +781,7 @@ describe('SymphonyServer', () => {
   });
 
   test('POST runtime mutations require a write token when runtime access is protected', async () => {
-    const protectedServer = new (SymphonyServer as any)(
+    const protectedServer = new (SymHarixServer as any)(
       db,
       {
         port: 0,

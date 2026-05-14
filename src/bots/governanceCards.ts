@@ -243,7 +243,7 @@ export function buildGovernanceConfirmingMessage(params: {
     format: 'telegram_html',
     text: joinHtmlLines([
       `<b>${textForLocale(locale, '请确认', 'Please Confirm')} · ${escapeHtml(params.issue.identifier)}</b>`,
-      textForLocale(locale, '你即将执行下面的操作；确认后 Symphony 会立即发起对应动作。', 'You are about to run the action below. Once confirmed, Symphony will start it immediately.'),
+      textForLocale(locale, '你即将执行下面的操作；确认后 SymHarix 会立即发起对应动作。', 'You are about to run the action below. Once confirmed, SymHarix will start it immediately.'),
       params.notice ? escapeHtml(params.notice) : null,
       null,
       `<b>${textForLocale(locale, '准备执行', 'Action')}</b>`,
@@ -275,7 +275,7 @@ export function buildGovernanceExecutingMessage(
     format: 'telegram_html',
     text: joinHtmlLines([
       `<b>${textForLocale(locale, '正在执行', 'Running')} · ${escapeHtml(issue.identifier)}</b>`,
-      textForLocale(locale, 'Symphony 正在处理你的治理操作，请稍等片刻。', 'Symphony is processing your governance action. Please wait a moment.'),
+      textForLocale(locale, 'SymHarix 正在处理你的治理操作，请稍等片刻。', 'SymHarix is processing your governance action. Please wait a moment.'),
       params.notice ? escapeHtml(params.notice) : null,
       null,
       `<b>${textForLocale(locale, '当前动作', 'Current Action')}</b>`,

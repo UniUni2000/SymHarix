@@ -9,10 +9,11 @@ import type {
   TurnTranscriptEntry,
 } from '../types';
 import { parseCanonicalReviewReport } from '../hooks/review-prompt';
+import { readSymHarixEnv } from '../config/env';
 
 const DEFAULT_SUPERVISOR_MODEL =
-  process.env.SYMPHONY_SUPERVISOR_LLM_MODEL ||
-  process.env.SYMPHONY_BOT_LLM_MODEL ||
+  readSymHarixEnv('SYMPHONY_SUPERVISOR_LLM_MODEL') ||
+  readSymHarixEnv('SYMPHONY_BOT_LLM_MODEL') ||
   process.env.ANTHROPIC_MODEL ||
   'claude-sonnet-4-5';
 
@@ -304,12 +305,12 @@ export class AnthropicSupervisorService implements SupervisorService {
   constructor(model = DEFAULT_SUPERVISOR_MODEL) {
     this.client = new Anthropic({
       apiKey:
-        process.env.SYMPHONY_SUPERVISOR_LLM_API_KEY ||
-        process.env.SYMPHONY_BOT_LLM_API_KEY ||
+        readSymHarixEnv('SYMPHONY_SUPERVISOR_LLM_API_KEY') ||
+        readSymHarixEnv('SYMPHONY_BOT_LLM_API_KEY') ||
         process.env.ANTHROPIC_API_KEY,
       baseURL:
-        process.env.SYMPHONY_SUPERVISOR_LLM_BASE_URL ||
-        process.env.SYMPHONY_BOT_LLM_BASE_URL ||
+        readSymHarixEnv('SYMPHONY_SUPERVISOR_LLM_BASE_URL') ||
+        readSymHarixEnv('SYMPHONY_BOT_LLM_BASE_URL') ||
         process.env.ANTHROPIC_BASE_URL,
     });
     this.model = model;
@@ -334,7 +335,7 @@ export class AnthropicSupervisorService implements SupervisorService {
               {
                 type: 'text',
                 text: [
-                  'You are the supervisor LLM for Symphony.',
+                  'You are the supervisor LLM for SymHarix.',
                   'Your role is to act like the human user of Claude Code and decide the next user message after a completed turn.',
                   'Return JSON only.',
                   'Allowed JSON:',
@@ -449,7 +450,7 @@ export class AnthropicSupervisorService implements SupervisorService {
                 {
                   type: 'text',
                   text: [
-                    'You are the supervisor LLM for Symphony.',
+                    'You are the supervisor LLM for SymHarix.',
                     'A running Claude Code session requested permission to use a tool.',
                     'Return JSON only.',
                     'Allowed JSON:',
@@ -525,7 +526,7 @@ export class AnthropicSupervisorService implements SupervisorService {
               {
                 type: 'text',
                 text: [
-                  'You are the supervisor LLM for Symphony.',
+                  'You are the supervisor LLM for SymHarix.',
                   'A running Claude Code session requested user input via an elicitation request.',
                   'Return JSON only.',
                   'Allowed JSON:',

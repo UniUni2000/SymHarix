@@ -1,5 +1,5 @@
 /**
- * symphonyness HTTP Server - Main Entry Point
+ * symharix HTTP Server - Main Entry Point
  * Minimal Hono REST API for the control plane
  */
 
@@ -21,6 +21,7 @@ import {
   createRuntimeAccessControllerFromEnv,
   type RuntimeAccessController,
 } from './runtimeAccess';
+import { readSymHarixEnv } from '../config/env';
 
 /**
  * Default server configuration
@@ -32,10 +33,10 @@ const DEFAULT_CONFIG: ServerConfig = {
 };
 
 /**
- * SymphonyServer class
+ * SymHarixServer class
  * Main HTTP server with Hono framework
  */
-export class SymphonyServer {
+export class SymHarixServer {
   private app: Hono;
   private config: ServerConfig;
   private db: Database;
@@ -45,7 +46,7 @@ export class SymphonyServer {
   private server: ReturnType<typeof Bun.serve> | null = null;
 
   /**
-   * Create a new Symphony server instance
+   * Create a new SymHarix server instance
    */
   constructor(
     db: Database,
@@ -76,7 +77,7 @@ export class SymphonyServer {
     this.app.use('*', cors({
       origin: '*',
       allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-      allowHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'X-Symphony-Runtime-Token'],
+      allowHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'X-SymHarix-Runtime-Token'],
       exposeHeaders: ['X-Request-ID', 'X-Total-Count'],
       maxAge: 86400,
     }));
@@ -133,7 +134,7 @@ export class SymphonyServer {
       return c.json({
         success: true,
         data: {
-          name: 'symphonyness HTTP Server',
+          name: 'symharix HTTP Server',
           version: '1.0.0',
           endpoints: {
             health: '/api/v1/health',
@@ -167,7 +168,7 @@ export class SymphonyServer {
 
   private getPublicBaseUrl(): string | null {
     const manifestUrl = this.botGateway?.getManifest().transports.telegram.public_base_url ?? null;
-    const envUrl = process.env.SYMPHONY_PUBLIC_BASE_URL || null;
+    const envUrl = readSymHarixEnv('SYMPHONY_PUBLIC_BASE_URL') || null;
     const raw = manifestUrl || envUrl;
     if (!raw) {
       return null;
@@ -189,7 +190,7 @@ export class SymphonyServer {
         });
 
         console.log(
-          `symphonyness server started on http://${this.config.hostname}:${this.server.port}`,
+          `symharix server started on http://${this.config.hostname}:${this.server.port}`,
         );
         const port = this.server.port ?? this.config.port ?? 0;
 
@@ -217,7 +218,7 @@ export class SymphonyServer {
       if (this.server) {
         this.server.stop();
         this.server = null;
-      console.log('symphonyness server stopped');
+      console.log('symharix server stopped');
       }
       this.botGateway?.dispose?.();
       resolve();
@@ -241,7 +242,7 @@ export class SymphonyServer {
 }
 
 /**
- * Create and start a Symphony server
+ * Create and start a SymHarix server
  */
 export async function createServer(
   db: Database,
@@ -249,8 +250,8 @@ export async function createServer(
   runtimeControlPlane?: RuntimeControlPlane | null,
   botGateway?: BotGateway | null,
   runtimeAccessController?: RuntimeAccessController | null,
-): Promise<SymphonyServer> {
-  const server = new SymphonyServer(
+): Promise<SymHarixServer> {
+  const server = new SymHarixServer(
     db,
     config,
     runtimeControlPlane ?? null,
@@ -269,4 +270,4 @@ export async function createServer(
   return server;
 }
 
-export default SymphonyServer;
+export default SymHarixServer;
