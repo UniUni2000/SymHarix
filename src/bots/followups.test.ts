@@ -19,6 +19,7 @@ import type {
 } from './types';
 import { BotMessageEditError } from './types';
 import { BotFollowupService } from './followups';
+import { RuntimeIssueCardLock } from './runtimeIssueCardLock';
 
 function createRuntimeControlPlane(): RuntimeControlPlane & { emit: (event: RuntimeStreamEvent) => void } {
   const listeners = new Set<(event: RuntimeStreamEvent) => void>();
@@ -202,6 +203,60 @@ class FailingEditDeferredNotifier extends DeferredNotifier {
 }
 
 describe('BotFollowupService', () => {
+  test('localizes lifecycle digests to English for English issues', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const baseIssue = runtime.getIssue('issue-1');
+    if (!baseIssue) {
+      throw new Error('Expected issue-1 to exist');
+    }
+    const notifier = new MemoryNotifier();
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+
+    followups.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      user_id: 'user-1',
+      role: 'origin',
+    });
+
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, messageStates, {
+      bootstrapCurrentGovernanceCards: false,
+    });
+
+    runtime.emit({
+      type: 'issue',
+      data: {
+        ...baseIssue,
+        title: 'Smoke test',
+        tracker_state: 'Done',
+        orchestrator_state: 'completed',
+        delivery_state: 'completed',
+        delivery_summary: 'Issue is complete and final delivery is closed.',
+        governance_status: null,
+        governance_decision: null,
+        governance_summary: null,
+        active_governance_suggestions: [],
+        supervisor_locale: 'en',
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const lifecycleMessage = notifier.messages.find((item) => item.message.text.startsWith('Symphony completed'));
+    expect(lifecycleMessage?.message.text).toContain('Symphony completed · INT-1');
+    expect(lifecycleMessage?.message.text).toContain('This issue has reached a terminal state');
+    expect(lifecycleMessage?.message.text).not.toMatch(/[\u3400-\u9fff]/);
+
+    service.dispose();
+    db.close();
+  });
+
   test('deduplicates origin and ops recipients when they point to the same Telegram chat', async () => {
     const db = new Database(':memory:');
     initializeSchema(db);
@@ -593,6 +648,99 @@ describe('BotFollowupService', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(notifier.edits).toHaveLength(0);
+
+    service.dispose();
+    db.close();
+  });
+
+  test('suppresses runtime issue card sends while a supervisor session is materializing its root issue', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const issue = runtime.getIssue('issue-1');
+    if (!issue) {
+      throw new Error('Expected issue-1 to exist');
+    }
+    issue.title = 'Materializing supervisor issue';
+    issue.tracker_state = 'In Progress';
+    issue.phase = 'DEV';
+    issue.orchestrator_state = 'workspace_ready';
+    issue.governance_status = null;
+    issue.governance_decision = null;
+    issue.governance_summary = null;
+    issue.active_governance_suggestions = [];
+    issue.actions = {
+      can_stop: true,
+      can_retry: false,
+      can_override_governance: false,
+      can_rewrite_governance: false,
+      can_split_governance: false,
+      can_open_pr: false,
+    };
+
+    const notifier = new MemoryNotifier();
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+    const sessions = new SupervisorSessionRepository(db);
+
+    followups.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      user_id: 'user-1',
+      role: 'origin',
+    });
+    sessions.create({
+      id: 'session-1',
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      user_id: 'user-1',
+      state: 'approved_for_materialization',
+      repo_ref: 'test2',
+      intake_mode: 'direct_run',
+      approval_mode: 'auto',
+      plan_version: 1,
+      root_issue_id: null,
+      plan_card: {
+        title: 'Materializing supervisor issue',
+        user_goal: 'Create one issue and keep one Telegram panel',
+        in_scope: ['创建 issue 后只保留一张图片面板'],
+        out_of_scope: ['不重复发送 runtime issue card'],
+        acceptance: ['Supervisor 回复和 followup 不会各发一张图片'],
+        known_risks: [],
+        execution_strategy: '物化期间由 SupervisorWorker/Gateway 拥有卡片。',
+        needs_user_approval: false,
+        repo_ref: 'acme/repo',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '自动执行',
+          summary: '直接执行小任务。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, messageStates, {
+      bootstrapCurrentGovernanceCards: false,
+      supervisorSessionRepository: sessions,
+    });
+
+    runtime.emit({ type: 'issue', data: issue });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(notifier.messages).toHaveLength(0);
+    expect(messageStates.findByConversationIssue({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+    })).toBeNull();
 
     service.dispose();
     db.close();
@@ -1053,7 +1201,7 @@ describe('BotFollowupService', () => {
     const conversationMessages = notifier.messages.filter((entry) => !entry.message.photo);
     expect(conversationMessages.some((entry) => (
       entry.recipient.conversation_id === 'chat-ops' &&
-      entry.message.text?.includes('Symphony 交付阻塞 · INT-1') &&
+      entry.message.text?.includes('Symphony delivery blocked · INT-1') &&
       entry.message.text?.includes('merge_blocked') &&
       entry.message.text?.includes('PR #64')
     ))).toBe(true);
@@ -1343,6 +1491,318 @@ describe('BotFollowupService', () => {
       card_kind: 'runtime_issue',
       card_state: 'open',
     }));
+
+    service.dispose();
+    db.close();
+  });
+
+  test('skips runtime issue card sends while another sender holds the card lock', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const issue = runtime.getIssue('issue-1');
+    if (!issue) {
+      throw new Error('Expected issue-1 to exist');
+    }
+    issue.title = 'Add smoke test';
+    issue.tracker_state = 'In Progress';
+    issue.phase = 'DEV';
+    issue.orchestrator_state = 'dev_running';
+    issue.governance_status = null;
+    issue.governance_decision = null;
+    issue.governance_summary = null;
+    issue.active_governance_suggestions = [];
+    issue.actions = {
+      can_stop: true,
+      can_retry: false,
+      can_override_governance: false,
+      can_rewrite_governance: false,
+      can_split_governance: false,
+      can_open_pr: false,
+    };
+
+    const notifier = new MemoryNotifier();
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+    const runtimeIssueCardLock = new RuntimeIssueCardLock();
+
+    followups.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      user_id: 'user-1',
+      role: 'origin',
+    });
+
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, messageStates, {
+      bootstrapCurrentGovernanceCards: false,
+      runtimeIssueCardLock,
+    });
+
+    const release = runtimeIssueCardLock.acquire({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+    });
+
+    runtime.emit({ type: 'issue', data: issue });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(notifier.messages).toHaveLength(0);
+    expect(messageStates.findByConversationIssue({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+    })).toBeNull();
+
+    release();
+    issue.updated_at = '2026-01-01T00:01:00.000Z';
+    runtime.emit({ type: 'issue', data: issue });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(notifier.messages).toHaveLength(1);
+    expect(messageStates.findByConversationIssue({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+    })).toEqual(expect.objectContaining({
+      message_id: 'msg-1',
+      card_kind: 'runtime_issue',
+      card_state: 'open',
+    }));
+
+    service.dispose();
+    db.close();
+  });
+
+  test('skips runtime issue card sends while the conversation is waiting for a user-reply card', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const issue = runtime.getIssue('issue-1');
+    if (!issue) {
+      throw new Error('Expected issue-1 to exist');
+    }
+    issue.title = 'Add smoke test';
+    issue.tracker_state = 'In Progress';
+    issue.phase = 'DEV';
+    issue.orchestrator_state = 'dev_running';
+    issue.governance_status = null;
+    issue.governance_decision = null;
+    issue.governance_summary = null;
+    issue.active_governance_suggestions = [];
+    issue.actions = {
+      can_stop: true,
+      can_retry: false,
+      can_override_governance: false,
+      can_rewrite_governance: false,
+      can_split_governance: false,
+      can_open_pr: false,
+    };
+
+    const notifier = new MemoryNotifier();
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+    const runtimeIssueCardLock = new RuntimeIssueCardLock();
+
+    followups.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      user_id: 'user-1',
+      role: 'origin',
+    });
+
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, messageStates, {
+      bootstrapCurrentGovernanceCards: false,
+      runtimeIssueCardLock,
+    });
+
+    const release = runtimeIssueCardLock.acquireConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+    });
+
+    runtime.emit({ type: 'issue', data: issue });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(notifier.messages).toHaveLength(0);
+    expect(messageStates.findByConversationIssue({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+    })).toBeNull();
+
+    release();
+    issue.updated_at = '2026-01-01T00:01:00.000Z';
+    runtime.emit({ type: 'issue', data: issue });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(notifier.messages).toHaveLength(1);
+    expect(messageStates.findByConversationIssue({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+    })).toEqual(expect.objectContaining({
+      message_id: 'msg-1',
+      card_kind: 'runtime_issue',
+      card_state: 'open',
+    }));
+
+    service.dispose();
+    db.close();
+  });
+
+  test('coalesces concurrent runtime issue card sends across material key changes', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const issue = runtime.getIssue('issue-1');
+    if (!issue) {
+      throw new Error('Expected issue-1 to exist');
+    }
+    issue.title = 'Add smoke test';
+    issue.tracker_state = 'In Progress';
+    issue.phase = 'DEV';
+    issue.orchestrator_state = 'dev_running';
+    issue.governance_status = null;
+    issue.governance_decision = null;
+    issue.governance_summary = null;
+    issue.active_governance_suggestions = [];
+    issue.actions = {
+      can_stop: true,
+      can_retry: false,
+      can_override_governance: false,
+      can_rewrite_governance: false,
+      can_split_governance: false,
+      can_open_pr: false,
+    };
+
+    let releaseSend: (() => void) | null = null;
+    const notifier = new DeferredNotifier(new Promise((resolve) => {
+      releaseSend = resolve;
+    }));
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+
+    followups.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      user_id: 'user-1',
+      role: 'origin',
+    });
+
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, messageStates, {
+      bootstrapCurrentGovernanceCards: false,
+    });
+
+    runtime.emit({ type: 'issue', data: issue });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(notifier.messages).toHaveLength(1);
+
+    issue.updated_at = '2026-01-01T00:01:00.000Z';
+    issue.tracker_state = 'Review';
+    runtime.emit({ type: 'issue', data: issue });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(notifier.messages).toHaveLength(1);
+    releaseSend?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(messageStates.findByConversationIssue({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+    })).toEqual(expect.objectContaining({
+      message_id: 'msg-1',
+      card_kind: 'runtime_issue',
+      card_state: 'open',
+    }));
+
+    service.dispose();
+    db.close();
+  });
+
+  test('does not send a new runtime issue card while the conversation already has an active one', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const issue = runtime.getIssue('issue-1');
+    if (!issue) {
+      throw new Error('Expected issue-1 to exist');
+    }
+    issue.title = 'Add smoke test';
+    issue.tracker_state = 'In Progress';
+    issue.phase = 'DEV';
+    issue.orchestrator_state = 'dev_running';
+    issue.governance_status = null;
+    issue.governance_decision = null;
+    issue.governance_summary = null;
+    issue.active_governance_suggestions = [];
+    issue.actions = {
+      can_stop: true,
+      can_retry: false,
+      can_override_governance: false,
+      can_rewrite_governance: false,
+      can_split_governance: false,
+      can_open_pr: false,
+    };
+
+    const notifier = new MemoryNotifier();
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+
+    followups.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      user_id: 'user-1',
+      role: 'origin',
+    });
+    messageStates.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-existing',
+      issue_identifier: 'INT-OLD',
+      message_id: 'msg-old',
+      card_kind: 'runtime_issue',
+      card_key: 'issue-card|INT-OLD|open',
+      card_state: 'open',
+    });
+
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, messageStates, {
+      bootstrapCurrentGovernanceCards: false,
+    });
+
+    runtime.emit({ type: 'issue', data: issue });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(notifier.messages).toHaveLength(0);
+    expect(messageStates.findByConversationIssue({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+    })).toBeNull();
 
     service.dispose();
     db.close();

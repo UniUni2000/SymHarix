@@ -2792,6 +2792,7 @@ export class SupervisorSessionService {
       photo: response.photo ?? visual?.photo,
       show_caption_above_media: response.show_caption_above_media ?? (visual ? false : undefined),
       action_rows: response.action_rows ?? (visual ? supervisorActionRows(session, visualIssue) : undefined),
+      issue_id: response.issue_id ?? visualIssue?.issue_id ?? session.root_issue_id ?? null,
       session_id: session.id,
       material_key: fullMaterialKey,
     };
