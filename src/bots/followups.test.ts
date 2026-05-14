@@ -1201,7 +1201,7 @@ describe('BotFollowupService', () => {
     const conversationMessages = notifier.messages.filter((entry) => !entry.message.photo);
     expect(conversationMessages.some((entry) => (
       entry.recipient.conversation_id === 'chat-ops' &&
-      entry.message.text?.includes('Symphony 交付阻塞 · INT-1') &&
+      entry.message.text?.includes('Symphony delivery blocked · INT-1') &&
       entry.message.text?.includes('merge_blocked') &&
       entry.message.text?.includes('PR #64')
     ))).toBe(true);
