@@ -3,6 +3,7 @@ import type { SupervisorSessionRecord } from '../database/types';
 import type { RuntimeControlPlane, RuntimeIssueView } from '../runtime/types';
 import { logger } from '../logging';
 import { buildSupervisorSessionFollowupMessage, type SupervisorSessionService } from './sessionService';
+import type { SupervisorSessionCardLock } from './sessionCardLock';
 import {
   getBotMessageEditFailureKind,
   type BotRecipient,
@@ -33,11 +34,13 @@ export interface SupervisorWorkerOptions {
   notifiers: Partial<Record<BotTransport, BotTransportNotifier>>;
   transportEventRepository?: BotTransportEventRepository | null;
   editThrottleMs?: number;
+  sessionCardLock?: SupervisorSessionCardLock | null;
 }
 
 export class SupervisorWorker {
   private readonly unsubscribe: () => void;
   private readonly inFlightMaterialKeys = new Set<string>();
+  private readonly inFlightInitialSessionSends = new Set<string>();
   private readonly recentMaterialEdits = new Map<string, number>();
 
   constructor(private readonly options: SupervisorWorkerOptions) {
@@ -51,6 +54,16 @@ export class SupervisorWorker {
 
   dispose(): void {
     this.unsubscribe();
+  }
+
+  private hasActiveSessionCardInConversation(session: SupervisorSessionRecord): boolean {
+    return this.options.sessionRepository.findAll().some((candidate) => (
+      candidate.id !== session.id
+      && candidate.transport === session.transport
+      && candidate.conversation_id === session.conversation_id
+      && RESTORABLE_SESSION_STATES.has(candidate.state)
+      && Boolean(candidate.last_message_id)
+    ));
   }
 
   async reconcile(): Promise<void> {
@@ -191,7 +204,24 @@ export class SupervisorWorker {
       }
     }
 
+    if (
+      this.inFlightInitialSessionSends.has(session.id) ||
+      this.options.sessionCardLock?.isLocked({
+        transport: session.transport,
+        conversation_id: session.conversation_id,
+        session_id: session.id,
+      }) ||
+      this.hasActiveSessionCardInConversation(session)
+    ) {
+      return;
+    }
+
+    this.inFlightInitialSessionSends.add(session.id);
     try {
+      const latestSession = this.options.sessionRepository.findById(session.id);
+      if (latestSession?.last_message_id) {
+        return;
+      }
       this.inFlightMaterialKeys.add(coalesceKey);
       const messageRef = await notifier.sendMessage(recipient, message);
       this.options.sessionRepository.update({
@@ -232,6 +262,7 @@ export class SupervisorWorker {
       });
     } finally {
       this.inFlightMaterialKeys.delete(coalesceKey);
+      this.inFlightInitialSessionSends.delete(session.id);
     }
   }
 
