@@ -301,7 +301,7 @@ describe('BotAssistantService top-level Supervisor Claude runtime', () => {
     subscriptions.dispose();
   });
 
-  test('lets Supervisor Claude/orchestrator handle card requests before pending reminders', async () => {
+  test('lets the unified Supervisor runtime handle card requests before pending reminders', async () => {
     db = new Database(':memory:');
     initializeSchema(db);
 
@@ -355,17 +355,17 @@ describe('BotAssistantService top-level Supervisor Claude runtime', () => {
       {
         respond: async (request) => {
           supervisorRuntimeCalls.push(request.text);
-          throw new Error('legacy supervisor runtime card shortcut should not be reached');
-        },
-      },
-      {
-        respond: async (request) => {
-          supervisorClaudeCalls.push(request.text);
           return {
             message: 'Issue Card · INT-163',
             media_key: 'issue-card|INT-163',
             issue_id: 'issue-163',
           };
+        },
+      },
+      {
+        respond: async (request) => {
+          supervisorClaudeCalls.push(request.text);
+          throw new Error('legacy Supervisor Claude runtime should not be reached');
         },
       },
     );
@@ -374,8 +374,8 @@ describe('BotAssistantService top-level Supervisor Claude runtime', () => {
 
     expect(response.message).toBe('Issue Card · INT-163');
     expect(response.media_key).toBe('issue-card|INT-163');
-    expect(supervisorClaudeCalls).toEqual(['卡片发我']);
-    expect(supervisorRuntimeCalls).toEqual([]);
+    expect(supervisorRuntimeCalls).toEqual(['卡片发我']);
+    expect(supervisorClaudeCalls).toEqual([]);
 
     subscriptions.dispose();
   });

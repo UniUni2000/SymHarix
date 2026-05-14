@@ -1330,26 +1330,31 @@ describe('SupervisorAgentRuntimeService', () => {
     expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name)).toEqual(['set_default_project']);
   });
 
-  test('answers agent mode questions without treating agent as a project slug', async () => {
-    const h = createHarness();
+  test('answers internal mode questions as a single Supervisor entrypoint without treating agent as a project slug', async () => {
+    for (const text of ['如何切换read-only和agent模式', '如何切换read-only模式']) {
+      const h = createHarness();
 
-    const response = await h.service.respond({
-      context: h.context,
-      text: '如何切换到agent模式？',
-    });
+      const response = await h.service.respond({
+        context: h.context,
+        text,
+      });
 
-    expect(response.message).toContain('不需要手动切换 agent 模式');
-    expect(response.message).toContain('创建/新增 issue');
-    expect(response.message).not.toContain('Project slug "agent"');
-    expect(h.pendingActions.findOpenByConversation({
-      transport: 'telegram',
-      conversation_id: 'chat-1',
-    })).toBeNull();
-    const run = h.runs.findLatestByConversation({
-      transport: 'telegram',
-      conversation_id: 'chat-1',
-    });
-    expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name)).toEqual([]);
+      expect(response.message).toContain('没有需要手动切换的模式');
+      expect(response.message).toContain('统一 Supervisor 入口');
+      expect(response.message).toContain('内部只读地理解仓库');
+      expect(response.message).not.toContain('agent 模式');
+      expect(response.message).not.toContain('只读模式');
+      expect(response.message).not.toContain('Project slug "agent"');
+      expect(h.pendingActions.findOpenByConversation({
+        transport: 'telegram',
+        conversation_id: 'chat-1',
+      })).toBeNull();
+      const run = h.runs.findLatestByConversation({
+        transport: 'telegram',
+        conversation_id: 'chat-1',
+      });
+      expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name)).toEqual([]);
+    }
   });
 
   test('sets the default project through a repository alias in runtime tool args', async () => {

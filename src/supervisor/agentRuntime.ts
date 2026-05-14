@@ -281,7 +281,7 @@ function isSupervisorAdvisoryQuestion(text: string): boolean {
 
 function isSupervisorRuntimeModeQuestion(text: string): boolean {
   const normalized = text.trim();
-  return /(?:如何|怎么|怎样|为什么|为啥).{0,24}(?:切换|开启|打开|进入|变成).{0,16}(?:agent\s*模式|agent模式|代理模式|写入权限|写权限|只读模式)|(?:agent\s*模式|agent模式|代理模式|写入权限|写权限|只读模式).{0,24}(?:如何|怎么|怎样|为什么|为啥|切换|开启|打开|进入)/i.test(normalized);
+  return /(?:如何|怎么|怎样|为什么|为啥).{0,24}(?:切换|开启|打开|进入|变成).{0,16}(?:agent\s*模式|agent模式|代理模式|写入权限|写权限|写入模式|只读模式|read[- ]?only\s*(?:模式)?|readonly\s*(?:模式)?)|(?:agent\s*模式|agent模式|代理模式|写入权限|写权限|写入模式|只读模式|read[- ]?only\s*(?:模式)?|readonly\s*(?:模式)?).{0,24}(?:如何|怎么|怎样|为什么|为啥|切换|开启|打开|进入)/i.test(normalized);
 }
 
 function buildSupervisorRuntimeModeAnswer(text: string): string {
@@ -289,13 +289,13 @@ function buildSupervisorRuntimeModeAnswer(text: string): string {
   return [
     textForLocale(
       locale,
-      '这里不需要手动切换 agent 模式。',
-      'You do not need to switch agent modes manually here.',
+      '这里没有需要手动切换的模式，只有统一 Supervisor 入口。你一直在和 Supervisor 对话。',
+      'There are no user-switchable modes here. You are always talking to Supervisor.',
     ),
     textForLocale(
       locale,
-      '直接说“创建/新增 issue ……”这类明确动作时，我会走写入工具并先给确认；仓库问答和推荐才会走只读分析路径。',
-      'When you ask for a concrete action such as creating an issue, I will use the write tool and ask for confirmation first; repository Q&A and recommendations use the read-only analysis path.',
+      '你直接说“创建/新增 issue ……”这类明确动作时，我会整理成待确认动作；你问仓库内容或让我推荐时，我会在内部只读地理解仓库。',
+      'When you ask for a concrete action such as creating an issue, I will turn it into a confirmation request; when you ask about repository content or recommendations, I may use an internal read-only repository-understanding agent.',
     ),
   ].join('\n');
 }
