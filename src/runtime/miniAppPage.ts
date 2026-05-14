@@ -79,6 +79,18 @@ function parseRuntimeJsonSummary(value: string): Record<string, unknown> | null 
   }
 }
 
+function genericRuntimeJsonSummary(parsed: Record<string, unknown>, locale?: RuntimeLocale | null): string {
+  const englishOutput = locale === 'en';
+  if (parsed.turn && typeof parsed.turn === 'object') {
+    return englishOutput ? 'Runtime turn updated.' : '运行状态已更新。';
+  }
+  if (typeof parsed.code === 'string' && parsed.code.trim()) {
+    const label = parsed.code.replace(/[_-]+/g, ' ').trim();
+    return englishOutput ? `Runtime ${label}.` : '运行状态已更新。';
+  }
+  return englishOutput ? 'Runtime status updated.' : '运行状态已更新。';
+}
+
 export function normalizeRuntimeMiniAppSummary(
   value: string | null | undefined,
   fallback = '',
@@ -103,6 +115,7 @@ export function normalizeRuntimeMiniAppSummary(
     if (message) {
       return compactPlainText(localizeKnownRuntimeText(message, locale), maxLength);
     }
+    return compactPlainText(genericRuntimeJsonSummary(parsed, locale), maxLength);
   }
   return compactPlainText(localizeKnownRuntimeText(raw || fallback, locale), maxLength);
 }
@@ -1268,17 +1281,26 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       }
       .signal-row strong {
         display: block;
+        min-width: 0;
         color: var(--ink);
         font-size: 15px;
         line-height: 1.26;
         font-weight: 790;
+        overflow-wrap: anywhere;
+        word-break: break-word;
       }
       .signal-row span {
         display: block;
+        min-width: 0;
         margin-top: 5px;
         color: var(--soft);
         font-size: 13px;
         line-height: 1.48;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+      .signal-row > div {
+        min-width: 0;
       }
       .signal-key {
         color: var(--muted);
@@ -2553,6 +2575,13 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             if (message) {
               return localizeKnownRuntimeText(message).replace(/\\s+/g, ' ').trim().slice(0, limit);
             }
+            if (parsed.turn && typeof parsed.turn === 'object') {
+              return isEnglish() ? 'Runtime turn updated.' : '运行状态已更新。';
+            }
+            if (code) {
+              return isEnglish() ? 'Runtime ' + code.replace(/[_-]+/g, ' ') + '.' : '运行状态已更新。';
+            }
+            return isEnglish() ? 'Runtime status updated.' : '运行状态已更新。';
           }
           return localizeKnownRuntimeText(raw || fallback || '').replace(/\\s+/g, ' ').trim();
         }

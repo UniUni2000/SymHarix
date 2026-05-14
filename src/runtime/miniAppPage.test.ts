@@ -1178,12 +1178,33 @@ describe('Telegram Mini App issue presentation', () => {
     expect(presentation.visibleMilestones[2]?.summary).not.toContain('tool_call_id');
   });
 
+  test('summarizes generic runtime JSON instead of exposing long status payloads', () => {
+    const rawTurn = JSON.stringify({
+      turn: {
+        id: 'adapter-turn-1',
+        api_calls: 15,
+        tokens: { input: 38337, output: 14067 },
+      },
+    });
+
+    expect(normalizeRuntimeMiniAppSummary(rawTurn)).toBe('运行状态已更新。');
+    expect(normalizeRuntimeMiniAppSummary(rawTurn, '', 120, 'en')).toBe('Runtime turn updated.');
+  });
+
   test('allows agent and milestone summaries to wrap inside their panels', () => {
     const html = renderRuntimeMiniAppPage('INT-143');
 
     expect(html).toContain('.agent-row span,');
     expect(html).toContain('white-space: normal;');
     expect(html).toContain('overflow-wrap: anywhere;');
+  });
+
+  test('allows overview signal text to wrap inside its card', () => {
+    const html = renderRuntimeMiniAppPage('INT-143');
+
+    expect(html).toContain('.signal-row > div');
+    expect(html).toContain('.signal-row strong');
+    expect(html).toContain('word-break: break-word;');
   });
 
   test('localizes known runtime-generated Chinese summaries for English mini app sessions', () => {
