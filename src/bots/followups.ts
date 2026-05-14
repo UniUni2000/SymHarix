@@ -23,6 +23,7 @@ import {
 } from './types';
 import { buildIssueCardActionRows } from './issueCardActions';
 import type { RuntimeIssueCardLock } from './runtimeIssueCardLock';
+import { inferRuntimeLocaleFromText, type RuntimeLocale } from '../i18n/locale';
 
 interface BotFollowupServiceOptions {
   telegramOperationsChatId?: string | null;
@@ -161,25 +162,39 @@ function compactLifecycleText(value: string | null | undefined, maxLength: numbe
   return `${compacted.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
+function issueLocale(issue: RuntimeIssueView): RuntimeLocale {
+  return issue.supervisor_locale ?? inferRuntimeLocaleFromText([
+    issue.title,
+    issue.supervisor_plan_summary,
+    issue.delivery_summary,
+    issue.next_recommended_action,
+  ].filter(Boolean).join('\n'));
+}
+
+function textForLocale(locale: RuntimeLocale, zh: string, en: string): string {
+  return locale === 'en' ? en : zh;
+}
+
 function buildLifecycleMessage(issue: RuntimeIssueView, notificationClass: LifecycleNotificationClass): BotTransportMessage {
+  const locale = issueLocale(issue);
   const headline = notificationClass === 'retrying'
-    ? `Symphony 重试中 · ${issue.identifier}`
+    ? textForLocale(locale, `Symphony 重试中 · ${issue.identifier}`, `Symphony retrying · ${issue.identifier}`)
     : notificationClass === 'failed'
-      ? `Symphony 失败 · ${issue.identifier}`
+      ? textForLocale(locale, `Symphony 失败 · ${issue.identifier}`, `Symphony failed · ${issue.identifier}`)
       : notificationClass === 'delivery_failed'
-        ? `Symphony 交付阻塞 · ${issue.identifier}`
+        ? textForLocale(locale, `Symphony 交付阻塞 · ${issue.identifier}`, `Symphony delivery blocked · ${issue.identifier}`)
       : notificationClass === 'cancelled'
-        ? `Symphony 已取消 · ${issue.identifier}`
-        : `Symphony 完成 · ${issue.identifier}`;
+        ? textForLocale(locale, `Symphony 已取消 · ${issue.identifier}`, `Symphony cancelled · ${issue.identifier}`)
+        : textForLocale(locale, `Symphony 完成 · ${issue.identifier}`, `Symphony completed · ${issue.identifier}`);
   const summary = notificationClass === 'retrying'
-    ? '这张单刚进入重试队列；我会继续盯高信号结果，不再推送同类抖动。'
+    ? textForLocale(locale, '这张单刚进入重试队列；我会继续盯高信号结果，不再推送同类抖动。', 'This issue just entered the retry queue; I will keep watching for high-signal results without repeating the same noise.')
     : notificationClass === 'failed'
-      ? '这张单当前执行失败，等待你处理或下一次显式重试。'
+      ? textForLocale(locale, '这张单当前执行失败，等待你处理或下一次显式重试。', 'This issue is currently failed and is waiting for recovery or an explicit retry.')
       : notificationClass === 'delivery_failed'
-        ? (issue.delivery_summary || issue.delivery_code || '这张单的最终交付被阻塞，需要你处理。')
+        ? (issue.delivery_summary || issue.delivery_code || textForLocale(locale, '这张单的最终交付被阻塞，需要你处理。', 'This issue final delivery is blocked and needs attention.'))
       : notificationClass === 'cancelled'
-        ? '这张单已经结束，不会再继续自动推进。'
-        : '这张单已经进入终态，当前主链处理完成。';
+        ? textForLocale(locale, '这张单已经结束，不会再继续自动推进。', 'This issue has ended and will not continue automatically.')
+        : textForLocale(locale, '这张单已经进入终态，当前主链处理完成。', 'This issue has reached a terminal state; the main processing path is complete.');
   const failureReason = notificationClass === 'failed'
     ? compactLifecycleText(issue.delivery_summary, 260)
     : null;
@@ -187,7 +202,7 @@ function buildLifecycleMessage(issue: RuntimeIssueView, notificationClass: Lifec
     headline,
     `${issue.title}`,
     summary,
-    failureReason ? `失败原因：${failureReason}` : null,
+    failureReason ? `${textForLocale(locale, '失败原因', 'Failure reason')}：${failureReason}` : null,
     `phase ${issue.phase} · tracker ${issue.tracker_state} · orchestrator ${issue.orchestrator_state || 'unknown'}`,
     issue.delivery_code ? `delivery ${issue.delivery_code}` : null,
     issue.github_repo ? `repo ${issue.github_repo}` : null,

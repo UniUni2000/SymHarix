@@ -297,6 +297,83 @@ describe('BotAssistantService', () => {
     subscriptions.dispose();
   });
 
+  test('uses English confirmation copy and buttons for English issue requests', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    preferences.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-english-create',
+      default_project_slug: 'test2',
+    });
+
+    const projectResolver = new TrackerProjectResolutionService(
+      {
+        listProjects: async () => ({
+          projects: [
+            { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' },
+          ],
+        }),
+        findProjectBySlug: async (projectSlug: string) => ({
+          project: projectSlug === 'test2'
+            ? { project_id: 'project-1', project_slug: 'test2', project_name: 'Test Two' }
+            : null,
+        }),
+      } as any,
+      {
+        test2: {
+          github_owner: 'UniUni2000',
+          github_repo: 'test2',
+          local_path: null,
+        },
+      },
+    );
+
+    const commandService = new BotCommandService(runtime, subscriptions, () => true, preferences, projectResolver);
+    const assistant = new BotAssistantService(
+      runtime,
+      commandService,
+      preferences,
+      pending,
+      projectResolver,
+      {
+        decide: async () => ({
+          intent: {
+            kind: 'create_issue',
+            title: 'Create an issue and conduct a smoke test',
+            description: 'Use as few tokens as possible.',
+            project_slug: null,
+          },
+        }),
+      },
+    );
+
+    const response = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-english-create' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      'Create an issue and conduct a smoke test, requiring the consumption of as few tokens as possible.',
+    );
+
+    expect(response.message).toContain('Action: create issue');
+    expect(response.message).toContain('Reply with: Confirm / Cancel');
+    expect(response.message).not.toContain('确认');
+    expect(response.message).not.toContain('取消');
+    expect(response.actions?.map((action) => action.label)).toEqual(['Confirm', 'Cancel']);
+    expect(pending.findByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-english-create',
+    })?.summary_message).toContain('Reply with: Confirm / Cancel');
+
+    subscriptions.dispose();
+  });
+
   test('routes Telegram create-issue requests through the supervisor session when the supervisor plane is enabled', async () => {
     db = new Database(':memory:');
     initializeSchema(db);
@@ -585,7 +662,9 @@ describe('BotAssistantService', () => {
 
     expect(supervisorCalls).toBe(0);
     expect(response.message).toContain('Action: create issue');
-    expect(response.message).toContain('Reply with 确认 / 取消.');
+    expect(response.message).toContain('Reply with: Confirm / Cancel.');
+    expect(response.message).not.toContain('确认');
+    expect(response.message).not.toContain('取消');
     expect(runtime.createIssueCalls).toHaveLength(0);
     expect(
       pending.findByConversation({
@@ -837,6 +916,99 @@ describe('BotAssistantService', () => {
 
     subscriptions.dispose();
     supervisorService.dispose();
+  });
+
+  test('keeps plain greetings lightweight even when Supervisor Claude has project history', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntimeControlPlane();
+    runtime.getOverview = () => ({
+      generated_at: '2026-01-01T00:00:00.000Z',
+      counts: { running: 0, retrying: 0, total: 0 },
+      issues: [],
+    });
+    runtime.getIssue = () => null;
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const preferences = new BotConversationPreferenceRepository(db);
+    const pending = new BotPendingActionRepository(db);
+    let supervisorClaudeCalls = 0;
+
+    const assistant = new BotAssistantService(
+      runtime,
+      new BotCommandService(runtime, subscriptions, () => true, preferences),
+      preferences,
+      pending,
+      null,
+      {
+        decide: async () => {
+          throw new Error('generic model should not run for a plain greeting');
+        },
+      },
+      undefined,
+      subscriptions,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      {
+        respond: async () => {
+          supervisorClaudeCalls += 1;
+          return {
+            message: 'The `!` machine keeps rolling — now 10-for-10. What is next?',
+          };
+        },
+      },
+    );
+
+    const response = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-greeting-light' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      'hello',
+    );
+
+    expect(response.message).toBe('Hello. What would you like to work on next?');
+    expect(response.message).not.toContain('10-for-10');
+    expect(response.message).not.toContain('TES-');
+    expect(supervisorClaudeCalls).toBe(0);
+
+    const stretchedGreeting = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-greeting-light' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      'heellloo',
+    );
+
+    expect(stretchedGreeting.message).toBe('Hello. What would you like to work on next?');
+    expect(stretchedGreeting.message).not.toContain('10-for-10');
+    expect(stretchedGreeting.message).not.toContain('TES-');
+    expect(supervisorClaudeCalls).toBe(0);
+
+    const howAreYou = await assistant.respondToText(
+      {
+        transport: 'telegram',
+        recipient: { transport: 'telegram', conversation_id: 'chat-greeting-light' },
+        identity: { user_id: 'user-1', display_name: 'Alice' },
+      },
+      'How are you?',
+    );
+
+    expect(howAreYou.message).toBe('Doing well, thanks. What would you like to work on next?');
+    expect(howAreYou.message).not.toContain('repo');
+    expect(howAreYou.message).not.toContain('10-for-10');
+    expect(howAreYou.message).not.toContain('TES-');
+    expect(supervisorClaudeCalls).toBe(0);
+
+    subscriptions.dispose();
   });
 
   test('answers repo content questions via the advisor instead of resurfacing an active supervisor card', async () => {
@@ -2638,7 +2810,7 @@ describe('BotAssistantService', () => {
       identity: { user_id: 'user-1', display_name: 'Alice' },
     }, 'hello');
 
-    expect(response.message).toContain('I can help you');
+    expect(response.message).toContain('Hello.');
     expect(response.message).not.toContain('Action: close issue');
 
     subscriptions.dispose();
