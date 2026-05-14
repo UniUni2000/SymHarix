@@ -22,6 +22,7 @@ import {
   type BotTransportNotifier,
 } from './types';
 import { buildIssueCardActionRows } from './issueCardActions';
+import type { RuntimeIssueCardLock } from './runtimeIssueCardLock';
 
 interface BotFollowupServiceOptions {
   telegramOperationsChatId?: string | null;
@@ -29,6 +30,7 @@ interface BotFollowupServiceOptions {
   deliveryStateRepository?: BotFollowupDeliveryStateRepository | null;
   transportEventRepository?: BotTransportEventRepository | null;
   supervisorSessionRepository?: SupervisorSessionRepository | null;
+  runtimeIssueCardLock?: RuntimeIssueCardLock | null;
 }
 
 export type LifecycleNotificationClass = 'retrying' | 'failed' | 'delivery_failed' | 'done' | 'cancelled';
@@ -538,6 +540,17 @@ export class BotFollowupService {
     });
   }
 
+  private hasActiveRuntimeIssueCard(recipient: BotRecipient): boolean {
+    if (!this.messageStates) {
+      return false;
+    }
+
+    return this.messageStates.findOpenByConversation({
+      transport: recipient.transport,
+      conversation_id: recipient.conversation_id,
+    }).some((record) => record.card_kind === 'runtime_issue');
+  }
+
   private shouldSkipLifecycleDigest(
     recipient: BotRecipient,
     issue: RuntimeIssueView,
@@ -681,7 +694,12 @@ export class BotFollowupService {
         transport: recipient.transport,
         conversation_id: recipient.conversation_id,
       });
-      if (!session || session.root_issue_id !== issue.issue_id) {
+      if (!session) {
+        remaining.push(recipient);
+        return;
+      }
+
+      if (session.root_issue_id && session.root_issue_id !== issue.issue_id) {
         remaining.push(recipient);
         return;
       }
@@ -875,6 +893,13 @@ export class BotFollowupService {
       if (!notifier) {
         return;
       }
+      if (this.options.runtimeIssueCardLock?.isLocked({
+        transport: recipient.transport,
+        conversation_id: recipient.conversation_id,
+        issue_id: issue.issue_id,
+      })) {
+        return;
+      }
       if (this.hasActiveGovernanceCard([recipient], issue.issue_id)) {
         return;
       }
@@ -884,6 +909,9 @@ export class BotFollowupService {
         conversation_id: recipient.conversation_id,
         issue_id: issue.issue_id,
       }) ?? null;
+      if (!existing && this.hasActiveRuntimeIssueCard(recipient)) {
+        return;
+      }
 
       if (
         existing?.card_kind === 'runtime_issue' &&
@@ -897,7 +925,6 @@ export class BotFollowupService {
         recipient.transport,
         recipient.conversation_id,
         issue.issue_id,
-        materialKey,
       ].join(':');
       if (this.runtimeIssueCardsInFlight.has(inFlightKey)) {
         return;

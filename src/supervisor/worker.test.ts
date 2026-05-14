@@ -16,6 +16,7 @@ import type {
 import { BotMessageEditError } from '../bots/types';
 import { SupervisorSessionService } from './sessionService';
 import { SupervisorWorker } from './worker';
+import { SupervisorSessionCardLock } from './sessionCardLock';
 
 function createIssueView(overrides: Partial<RuntimeIssueView> = {}): RuntimeIssueView {
   return {
@@ -198,6 +199,20 @@ class SlowEditNotifier extends MemoryNotifier {
   }
 }
 
+class DeferredSendNotifier extends MemoryNotifier {
+  constructor(private readonly sendGate: Promise<void>) {
+    super();
+  }
+
+  override async sendMessage(recipient: BotRecipient, message: BotTransportMessage): Promise<BotTransportMessageRef> {
+    this.messages.push({ recipient, message });
+    await this.sendGate;
+    return {
+      provider_message_id: `msg-${this.messages.length}`,
+    };
+  }
+}
+
 class HardFailEditNotifier extends MemoryNotifier {
   async editMessage(): Promise<BotTransportMessageRef> {
     throw new BotMessageEditError('hard_failure', 'cannot edit media message', 400, 'Bad Request');
@@ -349,6 +364,245 @@ describe('SupervisorWorker', () => {
     expect(notifier.edits[0]?.messageRef.provider_message_id).toBe('msg-existing');
     expect(sessions.findById('session-1')?.last_message_id).toBe('msg-existing');
     expect(sessions.findById('session-1')?.last_card_key).toContain('session|session-1|v2|executing');
+  });
+
+  test('does not send duplicate initial supervisor cards while the first send is in flight', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const issue = createIssueView();
+    const { runtime } = createRuntimeHarness(issue);
+    let releaseSend: (() => void) | null = null;
+    const notifier = new DeferredSendNotifier(new Promise((resolve) => {
+      releaseSend = resolve;
+    }));
+    const sessionService = new SupervisorSessionService(runtime, null, sessions, events);
+    const worker = new SupervisorWorker({
+      runtime,
+      sessionService,
+      sessionRepository: sessions,
+      notifiers: {
+        telegram: notifier,
+      },
+    });
+
+    sessions.create({
+      id: 'session-1',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'executing',
+      repo_ref: 'test2',
+      intake_mode: 'plan_then_approve',
+      approval_mode: 'explicit_user_approval',
+      plan_version: 2,
+      root_issue_id: 'issue-root',
+      plan_card: {
+        title: 'Root issue',
+        user_goal: 'Root issue',
+        in_scope: ['按顺序执行'],
+        out_of_scope: ['不重复发卡'],
+        acceptance: ['只保留一张初始卡'],
+        known_risks: [],
+        execution_strategy: '执行中保持单卡。',
+        needs_user_approval: true,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '按推荐继续',
+          summary: '继续推进。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    const first = worker.reconcileSession('session-1');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await worker.reconcileSession('session-1');
+    releaseSend?.();
+    await first;
+
+    expect(notifier.messages).toHaveLength(1);
+    expect(sessions.findById('session-1')?.last_message_id).toBe('msg-1');
+
+    worker.dispose();
+    db.close();
+  });
+
+  test('does not send an initial supervisor card while Gateway owns the session card lock', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const issue = createIssueView();
+    const { runtime } = createRuntimeHarness(issue);
+    const notifier = new MemoryNotifier();
+    const sessionService = new SupervisorSessionService(runtime, null, sessions, events);
+    const sessionCardLock = new SupervisorSessionCardLock();
+    const worker = new SupervisorWorker({
+      runtime,
+      sessionService,
+      sessionRepository: sessions,
+      notifiers: {
+        telegram: notifier,
+      },
+      sessionCardLock,
+    });
+
+    sessions.create({
+      id: 'session-1',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'executing',
+      repo_ref: 'test2',
+      intake_mode: 'plan_then_approve',
+      approval_mode: 'explicit_user_approval',
+      plan_version: 2,
+      root_issue_id: 'issue-root',
+      plan_card: {
+        title: 'Root issue',
+        user_goal: 'Root issue',
+        in_scope: ['按顺序执行'],
+        out_of_scope: ['不重复发卡'],
+        acceptance: ['只保留引用用户消息的卡'],
+        known_risks: [],
+        execution_strategy: '执行中保持单卡。',
+        needs_user_approval: true,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '按推荐继续',
+          summary: '继续推进。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+    const release = sessionCardLock.acquire({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      session_id: 'session-1',
+    });
+
+    await worker.reconcileSession('session-1');
+    expect(notifier.messages).toHaveLength(0);
+
+    sessions.update({
+      id: 'session-1',
+      last_message_id: 'msg-from-gateway',
+      last_card_key: 'session|session-1|gateway',
+    });
+    release();
+    await worker.reconcileSession('session-1');
+
+    expect(notifier.messages).toHaveLength(0);
+    expect(notifier.edits).toHaveLength(1);
+    expect(notifier.edits[0]?.messageRef.provider_message_id).toBe('msg-from-gateway');
+
+    worker.dispose();
+    db.close();
+  });
+
+  test('does not send an initial supervisor card when the conversation already has an active card', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const issue = createIssueView();
+    const { runtime } = createRuntimeHarness(issue);
+    const notifier = new MemoryNotifier();
+    const sessionService = new SupervisorSessionService(runtime, null, sessions, events);
+    const worker = new SupervisorWorker({
+      runtime,
+      sessionService,
+      sessionRepository: sessions,
+      notifiers: {
+        telegram: notifier,
+      },
+    });
+
+    sessions.create({
+      id: 'session-existing',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'executing',
+      repo_ref: 'test2',
+      intake_mode: 'plan_then_approve',
+      approval_mode: 'explicit_user_approval',
+      plan_version: 2,
+      root_issue_id: 'issue-existing',
+      last_message_id: 'msg-existing',
+      last_card_key: 'session|session-existing|v2|executing',
+      plan_card: {
+        title: 'Existing issue',
+        user_goal: 'Existing issue',
+        in_scope: ['已有运行面板'],
+        out_of_scope: ['不新增面板'],
+        acceptance: ['复用现有面板'],
+        known_risks: [],
+        execution_strategy: '保持单卡。',
+        needs_user_approval: true,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '继续',
+          summary: '继续推进。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+    sessions.create({
+      id: 'session-1',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      state: 'executing',
+      repo_ref: 'test2',
+      intake_mode: 'plan_then_approve',
+      approval_mode: 'explicit_user_approval',
+      plan_version: 2,
+      root_issue_id: 'issue-root',
+      plan_card: {
+        title: 'Root issue',
+        user_goal: 'Root issue',
+        in_scope: ['新增 issue'],
+        out_of_scope: ['重复运行面板'],
+        acceptance: ['不发第二张初始卡'],
+        known_risks: [],
+        execution_strategy: '已有面板时静默。',
+        needs_user_approval: true,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_only',
+        recommended_option: {
+          label: '继续',
+          summary: '继续推进。',
+        },
+        alternate_option: null,
+        governance_preview: null,
+      },
+    });
+
+    await worker.reconcileSession('session-1');
+
+    expect(notifier.messages).toHaveLength(0);
+    expect(notifier.edits).toHaveLength(0);
+    expect(sessions.findById('session-1')?.last_message_id).toBeNull();
+
+    worker.dispose();
+    db.close();
   });
 
   test('keeps one supervisor card when a Telegram edit fails with a hard error', async () => {
