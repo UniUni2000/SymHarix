@@ -3057,7 +3057,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
               tone: deleted ? 'red' : added ? 'green' : 'blue'
             };
           }
-          match = trimmed.match(/(?:删除|移除|remove(?:d)?|delete(?:d)?)\\s+\`?([^\`\\n]+?)\`?(?:\\s|$)/i);
+          match = trimmed.match(/(?:删除|移除|remove(?:d)?|delete(?:d)?)(?:\\s*[:：]\\s*|\\s+)\`?([^\`\\n]+?)\`?(?:\\s|$)/i);
           if (match && match[1]) {
             const path = readablePath(match[1]);
             if (!isLikelyDiffPath(path)) return null;
@@ -3070,7 +3070,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
               tone: 'red'
             };
           }
-          match = trimmed.match(/(?:新增|创建|添加|add(?:ed)?|create(?:d)?)\\s+\`?([^\`\\n]+?)\`?(?:\\s|$)/i);
+          match = trimmed.match(/(?:新增|创建|添加|add(?:ed)?|create(?:d)?)(?:\\s*[:：]\\s*|\\s+)\`?([^\`\\n]+?)\`?(?:\\s|$)/i);
           if (match && match[1]) {
             const path = readablePath(match[1]);
             if (!isLikelyDiffPath(path)) return null;
@@ -3083,7 +3083,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
               tone: 'green'
             };
           }
-          match = trimmed.match(/(?:更新|修改|编辑|清空|modify|update(?:d)?|edit(?:ed)?)\\s+\`?([^\`\\n]+?)\`?(?:\\s|$)/i);
+          match = trimmed.match(/(?:更新|修改|编辑|清空|modify|update(?:d)?|edit(?:ed)?)(?:\\s*[:：]\\s*|\\s+)\`?([^\`\\n]+?)\`?(?:\\s|$)/i);
           if (match && match[1]) {
             const path = readablePath(match[1]);
             if (!isLikelyDiffPath(path)) return null;
@@ -3113,7 +3113,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         }
         function splitHistoryChangeLines(source) {
           return String(source || '')
-            .replace(/\\s+-\\s+(?=(?:删除|移除|新增|创建|添加|更新|修改|编辑|清空|remove|delete|add|create|modify|update|edit)\\b)/ig, '\\n- ')
+            .replace(/\\s+-\\s+(?=(?:删除|移除|新增|创建|添加|更新|修改|编辑|清空)(?:\\s*[:：]|\\s)|(?:remove|delete|add|create|modify|update|edit)\\b)/ig, '\\n- ')
             .replace(/\\s+(?=\\|\\s*(?:\`?[\\w./-]+\`?)\\s*\\|\\s*(?:deleted|removed|删除|移除|modified|updated|added|created|新增|创建))/ig, '\\n')
             .split(/\\n+/);
         }
@@ -3159,6 +3159,12 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           });
           return byPath;
         }
+        function escapeRegExp(value) {
+          const specials = '\\\\^$.*+?()[]{}|';
+          return String(value || '').split('').map((char) => (
+            specials.indexOf(char) >= 0 ? '\\\\' + char : char
+          )).join('');
+        }
         function diffStatsForPath(history, path) {
           if (!path) return null;
           const fromWorkspace = historyFileDiffForPath(history, path);
@@ -3170,7 +3176,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           }
           const direct = extractDiffStatsFromHistory(history).get(path);
           if (direct) return direct;
-          const escapedPath = String(path).replace(/[.*+?^$()|[\]{}\\]/g, '\\$&');
+          const escapedPath = escapeRegExp(path);
           const pattern = new RegExp('(?:^|\\\\n)\\\\|?\\\\s*' + escapedPath + '\\\\s*\\\\|\\\\s*[^|]+?\\\\|\\\\s*\\\\+(\\\\d+)\\\\s*-\\\\s*(\\\\d+)', 'i');
           for (const source of changeTextSourcesFromHistory(history)) {
             const match = String(source || '').match(pattern);

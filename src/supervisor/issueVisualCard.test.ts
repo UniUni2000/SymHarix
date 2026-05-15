@@ -41,7 +41,7 @@ function issue(overrides: Partial<RuntimeIssueView> = {}): RuntimeIssueView {
 }
 
 describe('issue visual cards', () => {
-  test('renders direct issue cards as Mini App-aligned Telegram status previews', () => {
+  test('renders direct issue cards as Telegram status previews without a Mini App header badge', () => {
     const svg = buildSupervisorIssueVisualCardSvg(issue({
       phase: 'REVIEW',
       tracker_state: 'In Progress',
@@ -72,7 +72,8 @@ describe('issue visual cards', () => {
     }));
 
     expect(svg).toContain('symharix');
-    expect(svg).toContain('打开 Mini App');
+    expect(svg).not.toContain('x="800" y="91" width="198" height="62"');
+    expect(svg).not.toContain('x="899" y="132" text-anchor="middle" fill="#6BB4FF" font-size="22" font-weight="820">打开 Mini App</text>');
     expect(svg).toContain('状态概览');
     expect(svg).toContain('Telegram 预览');
     expect(svg).toContain('实时进度');
@@ -95,7 +96,7 @@ describe('issue visual cards', () => {
       next_recommended_action: null,
     }));
 
-    expect(svg).toContain('Open Mini App');
+    expect(svg).not.toContain('x="899" y="132" text-anchor="middle" fill="#6BB4FF" font-size="22" font-weight="820">Open Mini App</text>');
     expect(svg).toContain('Status Overview');
     expect(svg).toContain('Telegram Preview');
     expect(svg).toContain('Live progress');

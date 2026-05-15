@@ -862,6 +862,8 @@ describe('Telegram Mini App issue presentation', () => {
     expect(html).toContain("file.drawerMode === 'full' ? t('diffDetails') : t('diffSummary')");
     expect(html).toContain('getPresentation(issue).diffFiles');
     expect(html).toContain('extractDiffFilesFromHistory(state.history)');
+    expect(html).toContain('(?:\\s*[:：]\\s*|\\s+)');
+    expect(html).toContain('(?:删除|移除|新增|创建|添加|更新|修改|编辑|清空)(?:\\s*[:：]|\\s)');
   });
 
   test('covers state labels and progress states for waiting, blocked, retry, preparing, and cancellation flows', () => {
@@ -1240,6 +1242,23 @@ describe('Telegram Mini App issue presentation', () => {
     expect(html).toContain('.signal-row > div');
     expect(html).toContain('.signal-row strong');
     expect(html).toContain('word-break: break-word;');
+  });
+
+  test('escapes diff stat paths before building client-side regexes', () => {
+    const html = renderRuntimeMiniAppPage('INT-143');
+    const helperStart = html.indexOf('function escapeRegExp(value)');
+    const helperEnd = html.indexOf('        function diffStatsForPath', helperStart);
+    const helperSource = html.slice(helperStart, helperEnd);
+    const escapeRegExp = new Function(`${helperSource}; return escapeRegExp;`)() as (value: string) => string;
+
+    const escapedPath = escapeRegExp('*.pyc');
+    const pattern = new RegExp(
+      '(?:^|\\n)\\|?\\s*' + escapedPath + '\\s*\\|\\s*[^|]+?\\|\\s*\\+(\\d+)\\s*-\\s*(\\d+)',
+      'i',
+    );
+
+    expect(escapedPath).toBe('\\*\\.pyc');
+    expect('| *.pyc | added | +7 -0'.match(pattern)?.slice(1)).toEqual(['7', '0']);
   });
 
   test('localizes known runtime-generated Chinese summaries for English mini app sessions', () => {

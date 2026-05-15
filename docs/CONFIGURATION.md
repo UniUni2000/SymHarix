@@ -87,6 +87,10 @@ Blank is convenient for local development. Set it before exposing `/runtime` pub
 
 本地开发可以留空。公开暴露 `/runtime` 前应设置。
 
+Runtime issue detail restores token usage from persisted agent runs, so completed issues can still show usage after the live orchestrator snapshot is gone. Mini App history also tries workspace diffs, merge commits, and active PR heads before falling back to compact history text.
+
+Runtime issue detail 会从持久化 agent runs 恢复 token 使用量，所以 live orchestrator snapshot 消失后，已完成 issue 仍能显示 usage。Mini App history 也会优先尝试 workspace diff、merge commit 和 active PR head，然后再 fallback 到压缩历史文本。
+
 ### Telegram / Telegram
 
 | Variable | Required | Meaning / 含义 |

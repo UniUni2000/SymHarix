@@ -96,6 +96,12 @@ export const AGENT_RUNS_TABLE_SCHEMA = `
     output_summary TEXT,
     decision TEXT,
     error TEXT,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    uncached_input_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
     started_at TEXT NOT NULL,
     finished_at TEXT,
     FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE
@@ -816,6 +822,12 @@ export function initializeSchema(db: Database): void {
   ensureColumn(db, 'work_items', 'import_edges_json', 'TEXT');
   ensureColumn(db, 'work_items', 'architectural_target', 'TEXT');
   ensureColumn(db, 'work_items', 'fitness_signals_json', 'TEXT');
+  ensureColumn(db, 'agent_runs', 'input_tokens', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'agent_runs', 'output_tokens', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'agent_runs', 'total_tokens', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'agent_runs', 'uncached_input_tokens', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'agent_runs', 'cache_creation_input_tokens', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'agent_runs', 'cache_read_input_tokens', 'INTEGER NOT NULL DEFAULT 0');
   db.exec(CONTROL_PLANE_INDEXES_SCHEMA);
 }
 

@@ -424,6 +424,53 @@ describe('RuntimeHub', () => {
     hub.dispose();
   });
 
+  test('restores completed issue usage from persisted agent runs when live snapshots are gone', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workItemRepository = new WorkItemRepository(db);
+    const agentRunRepository = new AgentRunRepository(db);
+    workItemRepository.create({
+      id: 'work-usage-history',
+      linear_issue_id: 'issue-usage-history',
+      linear_identifier: 'INT-usage-history',
+      linear_title: 'Usage history issue',
+      linear_state: 'Done',
+      github_repo: 'acme/repo',
+      branch_name: 'feature/int-usage-history',
+      workspace_path: '/tmp/workspaces/INT-usage-history',
+      orchestrator_state: 'completed',
+      delivery_summary: 'Issue is complete.',
+    });
+    agentRunRepository.create({
+      id: 'run-usage-history-dev',
+      work_item_id: 'work-usage-history',
+      agent_type: 'dev',
+      phase: 'dev',
+      run_status: 'completed',
+      input_tokens: 362691,
+      output_tokens: 1496,
+      total_tokens: 364187,
+      uncached_input_tokens: 4099,
+      cache_read_input_tokens: 358592,
+      input_summary: 'dev',
+    });
+
+    const hub = new RuntimeHub(db, new FakeController());
+    const completedIssue = hub.getIssue('INT-usage-history');
+
+    expect(completedIssue?.session).toBeNull();
+    expect(completedIssue?.usage).toEqual({
+      input_tokens: 362691,
+      output_tokens: 1496,
+      total_tokens: 364187,
+      uncached_input_tokens: 4099,
+      cache_read_input_tokens: 358592,
+    });
+
+    hub.dispose();
+  });
+
   test('pushes live issue usage when orchestrator state changes', () => {
     db = new Database(':memory:');
     initializeSchema(db);
@@ -1889,6 +1936,75 @@ describe('RuntimeHub', () => {
     expect(historyView.file_diffs[0]?.patch).toContain('-const ring = renderProgressRing(progress);');
     expect(historyView.file_diffs[0]?.additions).toBeGreaterThan(0);
     expect(historyView.file_diffs[0]?.deletions).toBeGreaterThan(0);
+
+    hub.dispose();
+  });
+
+  test('recovers file diffs from a fetched PR head when the worktree and branch were cleaned', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workspaceRoot = mkdtempSync(join(tmpdir(), 'runtime-hub-pr-head-diff-'));
+    tempDirs.push(workspaceRoot);
+    const remoteDir = join(workspaceRoot, 'remote.git');
+    const sourceDir = join(workspaceRoot, 'acme__repo', 'source');
+    mkdirSync(join(sourceDir, 'src'), { recursive: true });
+    execFileSync('git', ['init', '--bare', remoteDir], { stdio: 'pipe' });
+    writeFileSync(join(sourceDir, 'src', 'calculator.py'), [
+      'def value():',
+      '    return 1',
+      '',
+    ].join('\n'));
+    execFileSync('git', ['init', '-b', 'main'], { cwd: sourceDir, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.email', 'codex@example.com'], { cwd: sourceDir, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.name', 'Codex'], { cwd: sourceDir, stdio: 'pipe' });
+    execFileSync('git', ['remote', 'add', 'origin', remoteDir], { cwd: sourceDir, stdio: 'pipe' });
+    execFileSync('git', ['add', '.'], { cwd: sourceDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'base'], { cwd: sourceDir, stdio: 'pipe' });
+    execFileSync('git', ['push', '-u', 'origin', 'main'], { cwd: sourceDir, stdio: 'pipe' });
+    execFileSync('git', ['checkout', '-b', 'feature/int-pr-ref'], { cwd: sourceDir, stdio: 'pipe' });
+    writeFileSync(join(sourceDir, 'src', 'calculator.py'), [
+      '__all__ = ["value"]',
+      '',
+      'def value():',
+      '    return 2',
+      '',
+    ].join('\n'));
+    execFileSync('git', ['add', '.'], { cwd: sourceDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'feat(INT-PR): update calculator'], { cwd: sourceDir, stdio: 'pipe' });
+    execFileSync('git', ['push', 'origin', 'HEAD:refs/pull/121/head'], { cwd: sourceDir, stdio: 'pipe' });
+    execFileSync('git', ['checkout', 'main'], { cwd: sourceDir, stdio: 'pipe' });
+    execFileSync('git', ['branch', '-D', 'feature/int-pr-ref'], { cwd: sourceDir, stdio: 'pipe' });
+
+    const workItemRepository = new WorkItemRepository(db);
+    workItemRepository.create({
+      id: 'issue-pr-head-diff',
+      linear_issue_id: 'issue-pr-head-diff',
+      linear_identifier: 'INT-PR-HEAD',
+      linear_title: 'Cleaned PR head diff attachment test',
+      linear_state: 'Done',
+      github_repo: 'acme/repo',
+      active_pr_number: 121,
+      branch_name: 'feature/int-pr-ref',
+      workspace_path: join(workspaceRoot, 'acme__repo', 'worktrees', 'INT-PR-HEAD'),
+      orchestrator_state: 'completed',
+    });
+
+    const controller = new FakeController();
+    const hub = new RuntimeHub(db, controller, { workspaceRoot });
+
+    const historyView = (hub as any).getHistoryView('INT-PR-HEAD', 5);
+
+    expect(historyView.file_diffs.map((item: any) => item.path)).toEqual(['src/calculator.py']);
+    expect(historyView.file_diffs[0]?.patch).toContain('+__all__ = ["value"]');
+    expect(historyView.file_diffs[0]?.patch).toContain('return 2');
+    expect(historyView.file_diffs[0]?.additions).toBeGreaterThan(0);
+    expect(historyView.file_diffs[0]?.deletions).toBeGreaterThan(0);
+    expect(execFileSync('git', ['rev-parse', '--verify', 'refs/remotes/origin/pr/121'], {
+      cwd: sourceDir,
+      encoding: 'utf8',
+      stdio: 'pipe',
+    }).trim()).toMatch(/^[0-9a-f]{40}$/);
 
     hub.dispose();
   });
