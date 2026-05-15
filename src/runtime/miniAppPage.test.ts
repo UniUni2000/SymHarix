@@ -5,6 +5,7 @@ import {
   buildRuntimeMiniAppDiffFiles,
   buildRuntimeMiniAppIssuePresentation,
   buildRuntimeMiniAppMilestones,
+  buildRuntimeMiniAppUsagePresentation,
   normalizeRuntimeMiniAppSummary,
   renderRuntimeMiniAppPage,
   runtimeMiniAppProgressLabel,
@@ -676,20 +677,33 @@ describe('Telegram Mini App issue presentation', () => {
     expect(html).toContain('代码改动');
   });
 
-  test('renders the Mini App as a three-item bottom phone tab bar', () => {
+  test('renders the Mini App as a four-item bottom phone tab bar', () => {
     const html = renderRuntimeMiniAppPage('INT-143');
 
     expect(html).toContain('class="fixed-header"');
     expect(html).toContain('data-tab="overview"');
     expect(html).toContain('data-tab="changes"');
     expect(html).toContain('data-tab="delivery"');
+    expect(html).toContain('data-tab="usage"');
     expect(html).toContain('id="tab-overview"');
     expect(html).toContain('id="tab-changes"');
     expect(html).toContain('id="tab-delivery"');
+    expect(html).toContain('id="tab-usage"');
     expect(html).toContain('class="tab-icon"');
     expect(html).toContain('<span class="tab-label">Issue</span>');
     expect(html).toContain('<span class="tab-label">Changes</span>');
     expect(html).toContain('<span class="tab-label">Delivery</span>');
+    expect(html).toContain('<span class="tab-label">Usage</span>');
+    expect(html).toContain('symharix issue cockpit');
+    expect(html).toContain('<span>symharix</span>');
+    expect(html).not.toContain('symphonyness');
+    expect(html).toContain('id="usage-donut"');
+    expect(html).toContain('id="usage-bars"');
+    expect(html).not.toContain('id="usage-metrics"');
+    expect(html).not.toContain('id="usage-heading"');
+    expect(html).not.toContain('id="usage-equation"');
+    expect(html).toContain('function usageTotalFontSize(value)');
+    expect(html).toContain('function renderUsage(issue)');
     expect(html).toContain("chip(issue.active_pr_number ? 'PR #' + issue.active_pr_number : t('prPending'), 'blue')");
     expect(html).toContain("chip(issue.branch_name || (child && child.issue_identifier) || t('rootIssue'), 'blue')");
     expect(html).toContain('id="theme-toggle"');
@@ -1189,6 +1203,27 @@ describe('Telegram Mini App issue presentation', () => {
 
     expect(normalizeRuntimeMiniAppSummary(rawTurn)).toBe('运行状态已更新。');
     expect(normalizeRuntimeMiniAppSummary(rawTurn, '', 120, 'en')).toBe('Runtime turn updated.');
+  });
+
+  test('summarizes issue token usage with platform-style uncached and cache read fields', () => {
+    const usage = buildRuntimeMiniAppUsagePresentation(createIssue({
+      usage: {
+        input_tokens: 235134,
+        output_tokens: 7258,
+        total_tokens: 242392,
+        uncached_input_tokens: 23283,
+        cache_creation_input_tokens: 18315,
+        cache_read_input_tokens: 193536,
+      },
+    }));
+
+    expect(usage).toEqual({
+      total: 242392,
+      inputTotal: 235134,
+      uncached: 41598,
+      cacheRead: 193536,
+      output: 7258,
+    });
   });
 
   test('allows agent and milestone summaries to wrap inside their panels', () => {
