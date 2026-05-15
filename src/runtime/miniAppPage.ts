@@ -32,6 +32,14 @@ export interface RuntimeMiniAppDiffFileItem {
   tone: 'green' | 'blue' | 'yellow' | 'red' | 'neutral';
 }
 
+export interface RuntimeMiniAppUsagePresentation {
+  total: number;
+  inputTotal: number;
+  uncached: number;
+  cacheRead: number;
+  output: number;
+}
+
 export interface RuntimeMiniAppIssuePresentation {
   mode: 'live' | 'completed';
   progress: number;
@@ -130,6 +138,28 @@ function isRetryableRuntimeMiniAppFailure(issue: RuntimeIssueView): boolean {
 
 export function isRuntimeMiniAppIssueCompleted(issue: RuntimeIssueView): boolean {
   return isRuntimeIssueCompleted(issue);
+}
+
+function runtimeMiniAppNumber(value: number | null | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.trunc(value));
+}
+
+export function buildRuntimeMiniAppUsagePresentation(issue: RuntimeIssueView): RuntimeMiniAppUsagePresentation {
+  const tokens = issue.usage ?? issue.session?.tokens ?? null;
+  const inputTotal = runtimeMiniAppNumber(tokens?.input_tokens);
+  const output = runtimeMiniAppNumber(tokens?.output_tokens);
+  const cacheRead = Math.min(inputTotal, runtimeMiniAppNumber(tokens?.cache_read_input_tokens));
+  const total = Math.max(runtimeMiniAppNumber(tokens?.total_tokens), inputTotal + output);
+  return {
+    total,
+    inputTotal,
+    uncached: Math.max(0, inputTotal - cacheRead),
+    cacheRead,
+    output,
+  };
 }
 
 function runtimeMiniAppStateLabel(issue: RuntimeIssueView): string {
@@ -1134,7 +1164,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         bottom: calc(8px + env(safe-area-inset-bottom));
         z-index: 30;
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: repeat(4, minmax(0, 1fr));
         width: min(calc(100vw - 34px), calc(var(--miniapp-width) - 34px));
         min-height: var(--bottom-nav-height);
         gap: 6px;
@@ -1345,6 +1375,86 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         border-radius: 999px;
         background:
           linear-gradient(90deg, #56e39f 0%, #56e39f var(--accept-a, 0%), #6bb4ff var(--accept-a, 0%), #6bb4ff var(--accept-b, 0%), color-mix(in srgb, var(--line-strong) 72%, transparent) var(--accept-b, 0%), color-mix(in srgb, var(--line-strong) 72%, transparent) 100%);
+      }
+      .usage-hero {
+        display: flex;
+        justify-content: center;
+        padding: 8px 0 18px;
+      }
+      .usage-donut {
+        --uncached-deg: 0deg;
+        --cache-deg: 0deg;
+        --output-deg: 0deg;
+        display: grid;
+        place-items: center;
+        width: 168px;
+        aspect-ratio: 1;
+        border-radius: 50%;
+        background:
+          radial-gradient(circle, var(--ring-core) 0 54%, transparent 55%),
+          conic-gradient(
+            #ffd166 0 var(--uncached-deg),
+            #56e39f var(--uncached-deg) calc(var(--uncached-deg) + var(--cache-deg)),
+            #6bb4ff calc(var(--uncached-deg) + var(--cache-deg)) calc(var(--uncached-deg) + var(--cache-deg) + var(--output-deg)),
+            rgba(156, 179, 204, 0.18) calc(var(--uncached-deg) + var(--cache-deg) + var(--output-deg)) 360deg
+          );
+        box-shadow: inset 0 0 0 1px var(--line), 0 16px 32px rgba(0, 0, 0, 0.22);
+      }
+      .usage-donut strong {
+        max-width: 116px;
+        color: var(--ink);
+        font-size: var(--usage-total-font-size, 25px);
+        line-height: 1;
+        font-weight: 820;
+        text-align: center;
+        overflow-wrap: anywhere;
+      }
+      .usage-donut span {
+        display: block;
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 780;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        text-align: center;
+      }
+      .usage-bars {
+        display: grid;
+        gap: 12px;
+      }
+      .usage-bar-row {
+        display: grid;
+        gap: 7px;
+      }
+      .usage-bar-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .usage-bar-head strong {
+        color: var(--ink);
+        font-size: 13px;
+        line-height: 1.2;
+      }
+      .usage-bar-head span {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 760;
+      }
+      .usage-bar-track {
+        height: 9px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: rgba(156, 179, 204, 0.14);
+      }
+      .usage-bar-track i {
+        display: block;
+        width: var(--value, 0%);
+        height: 100%;
+        border-radius: inherit;
+        background: var(--tone, #6bb4ff);
       }
       .stage-row {
         display: grid;
@@ -2022,6 +2132,10 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 13l4 4L19 7M6 20h12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span class="tab-label">Delivery</span>
         </button>
+        <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab="usage">
+          <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19V9M12 19V5M19 19v-7M4 19h16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span class="tab-label">Usage</span>
+        </button>
       </div>
 
       <section id="tab-overview" class="tab-panel active" role="tabpanel">
@@ -2124,6 +2238,23 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         </div>
       </section>
 
+      <section id="tab-usage" class="tab-panel" role="tabpanel">
+        <div class="tab-stack">
+          <section class="panel pad">
+            <h2 class="panel-title"><span data-i18n="tokenUsage">Token 消耗</span></h2>
+            <div class="usage-hero">
+              <div id="usage-donut" class="usage-donut" aria-label="Token usage chart">
+                <div>
+                  <strong id="usage-total">0</strong>
+                  <span data-i18n="totalTokens">总量</span>
+                </div>
+              </div>
+            </div>
+            <div id="usage-bars" class="usage-bars"></div>
+          </section>
+        </div>
+      </section>
+
       <div id="diff-drawer-backdrop" class="diff-drawer-backdrop" hidden></div>
       <aside id="diff-drawer" class="diff-drawer" hidden aria-hidden="true" aria-labelledby="diff-drawer-title">
         <div class="diff-drawer-header">
@@ -2206,6 +2337,9 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           acceptanceList: document.getElementById('acceptance-list'),
           deliverySummary: document.getElementById('delivery-summary'),
           childList: document.getElementById('child-list'),
+          usageDonut: document.getElementById('usage-donut'),
+          usageTotal: document.getElementById('usage-total'),
+          usageBars: document.getElementById('usage-bars'),
           rootLabel: document.getElementById('root-label'),
           complexityChip: document.getElementById('complexity-chip'),
           roundGoal: document.getElementById('round-goal'),
@@ -2252,6 +2386,12 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             deliveryClosure: '交付闭环',
             deliverySummaryTitle: '交付总结',
             childQueue: '子任务队列',
+            tokenUsage: 'Token 消耗',
+            totalTokens: '总量',
+            uncachedTokens: '未命中',
+            cacheReadTokens: '缓存命中',
+            outputTokens: '输出',
+            usageWaiting: '等待 token 统计。',
             fullLog: '完整日志',
             collapse: '收起',
             expand: '展开',
@@ -2371,6 +2511,12 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             deliveryClosure: 'Delivery',
             deliverySummaryTitle: 'Delivery Summary',
             childQueue: 'Child Queue',
+            tokenUsage: 'Token Usage',
+            totalTokens: 'Total',
+            uncachedTokens: 'Uncached',
+            cacheReadTokens: 'Cache read',
+            outputTokens: 'Output',
+            usageWaiting: 'Waiting for token usage.',
             fullLog: 'Full Log',
             collapse: 'Collapse',
             expand: 'Expand',
@@ -2651,6 +2797,42 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           const date = new Date(iso || Date.now());
           if (Number.isNaN(date.getTime())) return '--:--:--';
           return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+        }
+        function tokenNumber(value) {
+          const numeric = Number(value || 0);
+          return Number.isFinite(numeric) && numeric > 0 ? Math.trunc(numeric) : 0;
+        }
+        function tokenUsage(issue) {
+          const tokens = issue && (issue.usage || (issue.session && issue.session.tokens)) || null;
+          const inputTotal = tokenNumber(tokens && tokens.input_tokens);
+          const output = tokenNumber(tokens && tokens.output_tokens);
+          const cacheRead = Math.min(inputTotal, tokenNumber(tokens && tokens.cache_read_input_tokens));
+          const total = Math.max(tokenNumber(tokens && tokens.total_tokens), inputTotal + output);
+          return {
+            total: total,
+            inputTotal: inputTotal,
+            uncached: Math.max(0, inputTotal - cacheRead),
+            cacheRead: cacheRead,
+            output: output
+          };
+        }
+        function formatTokenCount(value) {
+          return tokenNumber(value).toLocaleString('en-US');
+        }
+        function usageTotalFontSize(value) {
+          const length = formatTokenCount(value).length;
+          if (length <= 9) return '25px';
+          if (length <= 10) return '22px';
+          if (length <= 12) return '20px';
+          if (length <= 14) return '18px';
+          return '16px';
+        }
+        function usagePercent(value, total) {
+          if (!total) return 0;
+          return Math.max(0, Math.min(100, (tokenNumber(value) / total) * 100));
+        }
+        function usageDegrees(value, total) {
+          return Math.round(usagePercent(value, total) * 3.6);
         }
         async function fetchJson(url) {
           const response = await fetch(url);
@@ -3730,6 +3912,26 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             '<div class="child-row"><div><strong>Child ' + String(index + 1) + ' · ' + escapeHtml(child.issue_identifier || 'pending') + '</strong><span>' + escapeHtml(child.title || child.governance_summary || 'queued') + '</span></div>' + chip(child.queue_state || 'queued', child.queue_state === 'current' ? 'blue' : '') + '</div>'
           )).join('');
         }
+        function usageBar(label, value, total, tone) {
+          const percent = usagePercent(value, total);
+          return '<div class="usage-bar-row"><div class="usage-bar-head"><strong>' + escapeHtml(label) + '</strong><span>' + escapeHtml(formatTokenCount(value)) + ' · ' + String(Math.round(percent)) + '%</span></div><div class="usage-bar-track"><i style="--value:' + String(percent) + '%;--tone:' + escapeHtml(tone) + '"></i></div></div>';
+        }
+        function renderUsage(issue) {
+          const usage = tokenUsage(issue);
+          const hasUsage = usage.total > 0;
+          el.usageTotal.textContent = formatTokenCount(usage.total);
+          el.usageTotal.style.setProperty('--usage-total-font-size', usageTotalFontSize(usage.total));
+          el.usageDonut.style.setProperty('--uncached-deg', String(usageDegrees(usage.uncached, usage.total)) + 'deg');
+          el.usageDonut.style.setProperty('--cache-deg', String(usageDegrees(usage.cacheRead, usage.total)) + 'deg');
+          el.usageDonut.style.setProperty('--output-deg', String(usageDegrees(usage.output, usage.total)) + 'deg');
+          el.usageBars.innerHTML = hasUsage
+            ? [
+                usageBar(t('uncachedTokens'), usage.uncached, usage.total, '#ffd166'),
+                usageBar(t('cacheReadTokens'), usage.cacheRead, usage.total, '#56e39f'),
+                usageBar(t('outputTokens'), usage.output, usage.total, '#6bb4ff')
+              ].join('')
+            : '<p class="panel-copy">' + escapeHtml(t('usageWaiting')) + '</p>';
+        }
         function renderHistoryPanel() {
           const view = state.history || {};
           const digest = view.digest || {};
@@ -3784,6 +3986,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           renderDelivery(state.issue);
           renderAcceptance(state.issue);
           renderChildren(state.issue);
+          renderUsage(state.issue);
           renderActions(state.issue);
           setActiveTab(state.activeTab);
         }
