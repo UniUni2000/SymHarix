@@ -12,7 +12,7 @@ import {
   SyncEventRepository,
   WorkItemRepository,
 } from '../database';
-import type { SupervisorSessionRecord, WorkItem } from '../database/types';
+import type { AgentRun, SupervisorSessionRecord, WorkItem } from '../database/types';
 import type { OrchestratorStateSnapshot } from '../orchestrator';
 import { describeSupervisorThread } from '../supervisor/threadSummary';
 import { localizeKnownRuntimeText } from '../i18n/locale';
@@ -341,6 +341,23 @@ function findPrMergeCommit(repoRoot: string, prNumber: number | null): string | 
     '-n',
     '1',
   ]);
+}
+
+function resolvePrHeadRef(repoRoot: string, prNumber: number | null): string | null {
+  if (!prNumber) {
+    return null;
+  }
+
+  const localRef = `refs/remotes/origin/pr/${prNumber}`;
+  if (runGit(repoRoot, ['rev-parse', '--verify', localRef])) {
+    return localRef;
+  }
+
+  if (!gitSucceeds(repoRoot, ['fetch', '--quiet', 'origin', `+refs/pull/${prNumber}/head:${localRef}`])) {
+    return null;
+  }
+
+  return runGit(repoRoot, ['rev-parse', '--verify', localRef]) ? localRef : null;
 }
 
 function firstCommitParent(repoRoot: string, commit: string): string | null {
@@ -840,6 +857,27 @@ export class RuntimeHub implements RuntimeControlPlane {
     };
   }
 
+  private copyAgentRunTokenUsage(run: AgentRun): RuntimeIssueTokenUsage | null {
+    return this.copyTokenUsage({
+      input_tokens: run.input_tokens,
+      output_tokens: run.output_tokens,
+      total_tokens: run.total_tokens,
+      uncached_input_tokens: run.uncached_input_tokens,
+      cache_creation_input_tokens: run.cache_creation_input_tokens,
+      cache_read_input_tokens: run.cache_read_input_tokens,
+    });
+  }
+
+  private runningTokenSnapshotKey(running: OrchestratorStateSnapshot['running'][number]): string {
+    if (running.agent_run_id?.trim()) {
+      return `run:${running.agent_run_id.trim()}`;
+    }
+    const phase = derivePhase(running.state);
+    return running.session_id
+      ? `${phase}:${running.session_id}:${running.started_at}`
+      : `${phase}:${running.stage}:${running.started_at}`;
+  }
+
   private rememberRunningTokenSnapshot(
     issueId: string,
     running: OrchestratorStateSnapshot['running'][number] | null,
@@ -849,27 +887,37 @@ export class RuntimeHub implements RuntimeControlPlane {
       return;
     }
 
-    const phase = derivePhase(running.state);
-    const sessionKey = running.session_id
-      ? `${phase}:${running.session_id}:${running.started_at}`
-      : `${phase}:${running.stage}:${running.started_at}`;
     let snapshots = this.tokenSnapshotsByIssueId.get(issueId);
     if (!snapshots) {
       snapshots = new Map<string, RuntimeTokenSnapshot>();
       this.tokenSnapshotsByIssueId.set(issueId, snapshots);
     }
-    snapshots.set(sessionKey, tokens);
+    snapshots.set(this.runningTokenSnapshotKey(running), tokens);
   }
 
   private buildIssueTokenUsage(
     issueId: string,
     running: OrchestratorStateSnapshot['running'][number] | null,
+    workItemId?: string | null,
   ): RuntimeIssueTokenUsage | null {
     this.rememberRunningTokenSnapshot(issueId, running);
 
+    const combined = new Map<string, RuntimeTokenSnapshot>();
+    if (workItemId) {
+      for (const run of this.agentRunRepository.findByWorkItemId(workItemId)) {
+        const tokens = this.copyAgentRunTokenUsage(run);
+        if (tokens) {
+          combined.set(`run:${run.id}`, tokens);
+        }
+      }
+    }
+
+    for (const [key, tokens] of this.tokenSnapshotsByIssueId.get(issueId) ?? []) {
+      combined.set(key, tokens);
+    }
+
     let total: RuntimeIssueTokenUsage | null = null;
-    const snapshots = this.tokenSnapshotsByIssueId.get(issueId);
-    for (const tokens of snapshots?.values() ?? []) {
+    for (const tokens of combined.values()) {
       total = this.addTokenUsage(total, tokens);
     }
     return total;
@@ -887,7 +935,7 @@ export class RuntimeHub implements RuntimeControlPlane {
     ) ?? null;
     const timeline = this.timelineByIssueId.get(workItem.linear_issue_id) ?? [];
     const runtimeSession = running ? this.buildSessionView(running, timeline) : null;
-    const usage = this.buildIssueTokenUsage(workItem.linear_issue_id, running);
+    const usage = this.buildIssueTokenUsage(workItem.linear_issue_id, running, workItem.id);
     const hasOverride = Boolean(workItem.governance_override_at);
     const canOverrideGovernance =
       !hasOverride &&
@@ -1620,6 +1668,18 @@ export class RuntimeHub implements RuntimeControlPlane {
         const prDiffs = listGitFileDiffs(repoRoot, parent, prMergeCommit, limit);
         if (prDiffs.length > 0) {
           return prDiffs;
+        }
+      }
+    }
+
+    const prHeadRef = resolvePrHeadRef(repoRoot, workItem.active_pr_number);
+    if (prHeadRef) {
+      const baseRef = resolveHistoryDiffBaseRef(repoRoot);
+      const baseCommit = baseRef ? runGit(repoRoot, ['merge-base', baseRef, prHeadRef]) : null;
+      if (baseCommit) {
+        const prHeadDiffs = listGitFileDiffs(repoRoot, baseCommit, prHeadRef, limit);
+        if (prHeadDiffs.length > 0) {
+          return prHeadDiffs;
         }
       }
     }

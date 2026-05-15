@@ -43,6 +43,8 @@ SymHarix 是一个带 Telegram-first Supervisor 的本地控制平面。
   Runtime Deck 是本地诊断和控制界面。
 - Linear and GitHub are records and delivery surfaces.
   Linear 和 GitHub 是记录与交付界面。
+- Runtime issue detail and Mini App history are the best place to inspect persisted agent-run usage, replay summaries, active PR context, and file diffs.
+  Runtime issue detail 与 Mini App history 是查看持久化 agent-run usage、回放摘要、active PR 上下文和文件 diff 的主要位置。
 - Multi-repo context is explicit: Telegram can list configured routes, switch the chat default project, and read a named repo through the read-only advisor.
   多仓库上下文必须显式：Telegram 可以列出已配置 route、切换 chat 默认项目，并通过只读 advisor 读取指定仓库。
 - Orchestrator owns dispatch, retry, dev/review handoff, delivery cleanup, and repair.

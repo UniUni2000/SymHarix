@@ -463,6 +463,7 @@ export interface RunningEntry {
   identifier: string;
   issue: Issue;
   stage: RunningStage;
+  agent_run_id?: string | null;
   session_id: string | null;
   codex_app_server_pid: string | null;
   last_codex_message: string | null;

@@ -335,6 +335,12 @@ export interface AgentRun {
   output_summary: string | null;
   decision: string | null;
   error: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  uncached_input_tokens: number;
+  cache_creation_input_tokens: number;
+  cache_read_input_tokens: number;
   started_at: Date;
   finished_at: Date | null;
 }
@@ -349,6 +355,12 @@ export interface CreateAgentRun {
   output_summary?: string | null;
   decision?: string | null;
   error?: string | null;
+  input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+  uncached_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
   started_at?: Date;
   finished_at?: Date | null;
 }

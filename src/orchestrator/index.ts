@@ -175,6 +175,7 @@ export interface OrchestratorStateSnapshot {
     issue_identifier: string;
     state: string;
     stage: RunningStage;
+    agent_run_id?: string | null;
     session_id: string | null;
     turn_count: number;
     last_event: string | null;
@@ -531,6 +532,7 @@ export class Orchestrator extends EventEmitter {
         issue_identifier: entry.identifier,
         state: entry.issue.state,
         stage: entry.stage,
+        agent_run_id: entry.agent_run_id ?? null,
         session_id: entry.session_id,
         turn_count: entry.turn_count,
         last_event: entry.last_codex_event,
@@ -2947,6 +2949,7 @@ export class Orchestrator extends EventEmitter {
         identifier: issue.identifier,
         issue,
         stage: 'dispatching',
+        agent_run_id: null,
         session_id: null,
         codex_app_server_pid: null,
         last_codex_message: null,
@@ -5929,6 +5932,12 @@ export class Orchestrator extends EventEmitter {
         output_summary: outputSummary,
         decision: decision ?? null,
         error: error ?? null,
+        input_tokens: result.tokens.input,
+        output_tokens: result.tokens.output,
+        total_tokens: result.tokens.total,
+        uncached_input_tokens: result.tokens.uncached_input ?? 0,
+        cache_creation_input_tokens: result.tokens.cache_creation_input ?? 0,
+        cache_read_input_tokens: result.tokens.cache_read_input ?? 0,
         finished_at: new Date(),
       });
     };
@@ -6095,6 +6104,9 @@ export class Orchestrator extends EventEmitter {
       });
       agentRunId = agentRun.id;
       result.agent_run_id = agentRun.id;
+      if (runningEntry) {
+        runningEntry.agent_run_id = agentRun.id;
+      }
 
       // Step 4: Launch agent session
       this.setRunningStage(issue.id, 'coding');
@@ -6392,6 +6404,7 @@ export class Orchestrator extends EventEmitter {
           identifier: issue.identifier,
           issue,
           stage: 'coding',
+          agent_run_id: null,
           session_id: null,
           codex_app_server_pid: null,
           last_codex_message: null,

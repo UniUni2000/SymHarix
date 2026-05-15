@@ -467,6 +467,42 @@ describe('AgentRunRepository', () => {
     const runs = repository.findByWorkItemId('wi-runs');
     expect(runs.map((run) => run.id)).toEqual(['run-1', 'run-2']);
   });
+
+  test('persists run token usage for completed runtime detail views', () => {
+    const workItems = new WorkItemRepository(db);
+    const repository = new AgentRunRepository(db);
+
+    workItems.create({
+      id: 'wi-run-usage',
+      linear_issue_id: 'linear-run-usage',
+      linear_identifier: 'INT-RUN-USAGE',
+      linear_title: 'Run usage item',
+      linear_state: 'Done',
+      github_repo: 'acme/repo',
+    });
+
+    repository.create({
+      id: 'run-usage',
+      work_item_id: 'wi-run-usage',
+      agent_type: 'dev',
+      phase: 'dev',
+      run_status: 'completed',
+      input_summary: 'usage run',
+      input_tokens: 362691,
+      output_tokens: 1496,
+      total_tokens: 364187,
+      uncached_input_tokens: 4099,
+      cache_read_input_tokens: 358592,
+    });
+
+    expect(repository.findById('run-usage')).toMatchObject({
+      input_tokens: 362691,
+      output_tokens: 1496,
+      total_tokens: 364187,
+      uncached_input_tokens: 4099,
+      cache_read_input_tokens: 358592,
+    });
+  });
 });
 
 describe('ReviewEventRepository', () => {

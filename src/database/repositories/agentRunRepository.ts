@@ -8,15 +8,27 @@ import type { AgentRun, CreateAgentRun, UpdateAgentRun } from '../types';
 export class AgentRunRepository {
   constructor(private db: Database) {}
 
+  private tokenNumber(value: number | null | undefined): number {
+    return typeof value === 'number' && Number.isFinite(value)
+      ? Math.max(0, Math.trunc(value))
+      : 0;
+  }
+
   create(run: CreateAgentRun): AgentRun {
     const startedAt = run.started_at?.toISOString() ?? new Date().toISOString();
     const stmt = this.db.prepare(`
       INSERT INTO agent_runs (
         id, work_item_id, agent_type, phase, run_status,
-        input_summary, output_summary, decision, error, started_at, finished_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        input_summary, output_summary, decision, error,
+        input_tokens, output_tokens, total_tokens,
+        uncached_input_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+        started_at, finished_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
+    const inputTokens = this.tokenNumber(run.input_tokens);
+    const outputTokens = this.tokenNumber(run.output_tokens);
+    const totalTokens = Math.max(this.tokenNumber(run.total_tokens), inputTokens + outputTokens);
     stmt.run(
       run.id,
       run.work_item_id,
@@ -27,6 +39,12 @@ export class AgentRunRepository {
       run.output_summary ?? null,
       run.decision ?? null,
       run.error ?? null,
+      inputTokens,
+      outputTokens,
+      totalTokens,
+      this.tokenNumber(run.uncached_input_tokens),
+      this.tokenNumber(run.cache_creation_input_tokens),
+      this.tokenNumber(run.cache_read_input_tokens),
       startedAt,
       run.finished_at?.toISOString() ?? null
     );
@@ -49,9 +67,9 @@ export class AgentRunRepository {
 
   update(run: UpdateAgentRun): AgentRun | null {
     const fields: string[] = [];
-    const params: Array<string | null> = [];
+    const params: Array<string | number | null> = [];
 
-    const assign = (field: string, value: string | null): void => {
+    const assign = (field: string, value: string | number | null): void => {
       fields.push(`${field} = ?`);
       params.push(value);
     };
@@ -63,6 +81,12 @@ export class AgentRunRepository {
     if (run.output_summary !== undefined) assign('output_summary', run.output_summary);
     if (run.decision !== undefined) assign('decision', run.decision);
     if (run.error !== undefined) assign('error', run.error);
+    if (run.input_tokens !== undefined) assign('input_tokens', this.tokenNumber(run.input_tokens));
+    if (run.output_tokens !== undefined) assign('output_tokens', this.tokenNumber(run.output_tokens));
+    if (run.total_tokens !== undefined) assign('total_tokens', this.tokenNumber(run.total_tokens));
+    if (run.uncached_input_tokens !== undefined) assign('uncached_input_tokens', this.tokenNumber(run.uncached_input_tokens));
+    if (run.cache_creation_input_tokens !== undefined) assign('cache_creation_input_tokens', this.tokenNumber(run.cache_creation_input_tokens));
+    if (run.cache_read_input_tokens !== undefined) assign('cache_read_input_tokens', this.tokenNumber(run.cache_read_input_tokens));
     if (run.started_at !== undefined) assign('started_at', run.started_at.toISOString());
     if (run.finished_at !== undefined) assign('finished_at', run.finished_at?.toISOString() ?? null);
 
@@ -97,6 +121,12 @@ export class AgentRunRepository {
       output_summary: row.output_summary as string | null,
       decision: row.decision as string | null,
       error: row.error as string | null,
+      input_tokens: this.tokenNumber(row.input_tokens as number | null | undefined),
+      output_tokens: this.tokenNumber(row.output_tokens as number | null | undefined),
+      total_tokens: this.tokenNumber(row.total_tokens as number | null | undefined),
+      uncached_input_tokens: this.tokenNumber(row.uncached_input_tokens as number | null | undefined),
+      cache_creation_input_tokens: this.tokenNumber(row.cache_creation_input_tokens as number | null | undefined),
+      cache_read_input_tokens: this.tokenNumber(row.cache_read_input_tokens as number | null | undefined),
       started_at: new Date(row.started_at as string),
       finished_at: row.finished_at ? new Date(row.finished_at as string) : null,
     };
