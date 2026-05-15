@@ -11,7 +11,7 @@ import { getEventMetadata } from './metadata.js'
 
 const DATADOG_LOGS_ENDPOINT =
   'https://http-intake.logs.us5.datadoghq.com/api/v2/logs'
-const DATADOG_CLIENT_TOKEN = ''
+const DATADOG_CLIENT_TOKEN_ENV = 'CLAUDE_CODE_DATADOG_CLIENT_TOKEN'
 const DEFAULT_FLUSH_INTERVAL_MS = 15000
 const MAX_BATCH_SIZE = 100
 const NETWORK_TIMEOUT_MS = 5000
@@ -99,17 +99,24 @@ let logBatch: DatadogLog[] = []
 let flushTimer: NodeJS.Timeout | null = null
 let datadogInitialized: boolean | null = null
 
+function getDatadogClientToken(): string | undefined {
+  const token = process.env[DATADOG_CLIENT_TOKEN_ENV]?.trim()
+  return token || undefined
+}
+
 async function flushLogs(): Promise<void> {
   if (logBatch.length === 0) return
 
   const logsToSend = logBatch
   logBatch = []
+  const clientToken = getDatadogClientToken()
+  if (!clientToken) return
 
   try {
     await axios.post(DATADOG_LOGS_ENDPOINT, logsToSend, {
       headers: {
         'Content-Type': 'application/json',
-        'DD-API-KEY': DATADOG_CLIENT_TOKEN,
+        'DD-API-KEY': clientToken,
       },
       timeout: NETWORK_TIMEOUT_MS,
     })
@@ -129,6 +136,11 @@ function scheduleFlush(): void {
 
 export const initializeDatadog = memoize(async (): Promise<boolean> => {
   if (isAnalyticsDisabled()) {
+    datadogInitialized = false
+    return false
+  }
+
+  if (!getDatadogClientToken()) {
     datadogInitialized = false
     return false
   }

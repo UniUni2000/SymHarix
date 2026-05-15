@@ -1,0 +1,11 @@
+title = "SymHarix secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Claude Max plan tier identifier, not a credential"
+regexTarget = "match"
+paths = ['''^claude-code/src/commands/upgrade/upgrade\.tsx$''']
+regexes = ['''tokens\.rateLimitTier\s*===\s*['"]default_claude_max_20x['"]''']
+condition = "AND"
