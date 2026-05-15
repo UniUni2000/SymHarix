@@ -32,6 +32,7 @@ import type {
   RuntimeHistoryFileDiff,
   RuntimeIssueDigest,
   RuntimeIssueHistoryView,
+  RuntimeIssueTokenUsage,
   RuntimeIssueView,
   RuntimeMilestoneView,
   RuntimeOverview,
@@ -43,6 +44,8 @@ import type {
   RuntimeToolActivity,
 } from './types';
 import { getRepoSourcePath, getSourcePathFromWorktree, sanitizeWorkspaceKey } from '../workspace/shared';
+
+type RuntimeTokenSnapshot = RuntimeIssueTokenUsage;
 
 interface RuntimeHubController {
   getStateSnapshot(): OrchestratorStateSnapshot;
@@ -359,6 +362,7 @@ export class RuntimeHub implements RuntimeControlPlane {
   private readonly workspaceRoot: string | null;
   private readonly issueCacheById = new Map<string, Issue>();
   private readonly timelineByIssueId = new Map<string, RuntimeTimelineEvent[]>();
+  private readonly tokenSnapshotsByIssueId = new Map<string, Map<string, RuntimeTokenSnapshot>>();
   private readonly subscribers = new Map<number, (event: RuntimeStreamEvent) => void>();
   private readonly listeners: Array<{ event: string; listener: (...args: any[]) => void }> = [];
   private nextSubscriberId = 1;
@@ -632,8 +636,11 @@ export class RuntimeHub implements RuntimeControlPlane {
   }
 
   private bindControllerListeners(): void {
-    this.bind('state:changed', () => {
+    this.bind('state:changed', (snapshot?: OrchestratorStateSnapshot) => {
       this.publishOverview();
+      for (const entry of snapshot?.running ?? []) {
+        this.publishIssue(entry.issue_id);
+      }
     });
     this.bind('issue:dispatched', (issue: Issue) => {
       this.issueCacheById.set(issue.id, issue);
@@ -772,6 +779,102 @@ export class RuntimeHub implements RuntimeControlPlane {
     return null;
   }
 
+  private tokenNumber(value: number | null | undefined): number {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      return 0;
+    }
+    return Math.max(0, Math.trunc(value));
+  }
+
+  private copyTokenUsage(tokens: RuntimeIssueTokenUsage | null | undefined): RuntimeIssueTokenUsage | null {
+    if (!tokens) {
+      return null;
+    }
+
+    const inputTokens = this.tokenNumber(tokens.input_tokens);
+    const outputTokens = this.tokenNumber(tokens.output_tokens);
+    const totalTokens = Math.max(this.tokenNumber(tokens.total_tokens), inputTokens + outputTokens);
+    if (inputTokens <= 0 && outputTokens <= 0 && totalTokens <= 0) {
+      return null;
+    }
+
+    const uncachedInput = this.tokenNumber(tokens.uncached_input_tokens);
+    const cacheCreationInput = this.tokenNumber(tokens.cache_creation_input_tokens);
+    const cacheReadInput = this.tokenNumber(tokens.cache_read_input_tokens);
+    return {
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      total_tokens: totalTokens,
+      ...(uncachedInput > 0 ? { uncached_input_tokens: uncachedInput } : {}),
+      ...(cacheCreationInput > 0 ? { cache_creation_input_tokens: cacheCreationInput } : {}),
+      ...(cacheReadInput > 0 ? { cache_read_input_tokens: cacheReadInput } : {}),
+    };
+  }
+
+  private addTokenUsage(
+    left: RuntimeIssueTokenUsage | null | undefined,
+    right: RuntimeIssueTokenUsage | null | undefined,
+  ): RuntimeIssueTokenUsage | null {
+    const base = this.copyTokenUsage(left);
+    const delta = this.copyTokenUsage(right);
+    if (!base) {
+      return delta;
+    }
+    if (!delta) {
+      return base;
+    }
+
+    const inputTokens = this.tokenNumber(base.input_tokens) + this.tokenNumber(delta.input_tokens);
+    const outputTokens = this.tokenNumber(base.output_tokens) + this.tokenNumber(delta.output_tokens);
+    const totalTokens = this.tokenNumber(base.total_tokens) + this.tokenNumber(delta.total_tokens);
+    const uncachedInput = this.tokenNumber(base.uncached_input_tokens) + this.tokenNumber(delta.uncached_input_tokens);
+    const cacheCreationInput = this.tokenNumber(base.cache_creation_input_tokens) + this.tokenNumber(delta.cache_creation_input_tokens);
+    const cacheReadInput = this.tokenNumber(base.cache_read_input_tokens) + this.tokenNumber(delta.cache_read_input_tokens);
+    return {
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      total_tokens: Math.max(totalTokens, inputTokens + outputTokens),
+      ...(uncachedInput > 0 ? { uncached_input_tokens: uncachedInput } : {}),
+      ...(cacheCreationInput > 0 ? { cache_creation_input_tokens: cacheCreationInput } : {}),
+      ...(cacheReadInput > 0 ? { cache_read_input_tokens: cacheReadInput } : {}),
+    };
+  }
+
+  private rememberRunningTokenSnapshot(
+    issueId: string,
+    running: OrchestratorStateSnapshot['running'][number] | null,
+  ): void {
+    const tokens = this.copyTokenUsage(running?.tokens);
+    if (!running || !tokens) {
+      return;
+    }
+
+    const phase = derivePhase(running.state);
+    const sessionKey = running.session_id
+      ? `${phase}:${running.session_id}:${running.started_at}`
+      : `${phase}:${running.stage}:${running.started_at}`;
+    let snapshots = this.tokenSnapshotsByIssueId.get(issueId);
+    if (!snapshots) {
+      snapshots = new Map<string, RuntimeTokenSnapshot>();
+      this.tokenSnapshotsByIssueId.set(issueId, snapshots);
+    }
+    snapshots.set(sessionKey, tokens);
+  }
+
+  private buildIssueTokenUsage(
+    issueId: string,
+    running: OrchestratorStateSnapshot['running'][number] | null,
+  ): RuntimeIssueTokenUsage | null {
+    this.rememberRunningTokenSnapshot(issueId, running);
+
+    let total: RuntimeIssueTokenUsage | null = null;
+    const snapshots = this.tokenSnapshotsByIssueId.get(issueId);
+    for (const tokens of snapshots?.values() ?? []) {
+      total = this.addTokenUsage(total, tokens);
+    }
+    return total;
+  }
+
   private buildIssueView(
     workItem: WorkItem,
     snapshot: OrchestratorStateSnapshot,
@@ -784,6 +887,7 @@ export class RuntimeHub implements RuntimeControlPlane {
     ) ?? null;
     const timeline = this.timelineByIssueId.get(workItem.linear_issue_id) ?? [];
     const runtimeSession = running ? this.buildSessionView(running, timeline) : null;
+    const usage = this.buildIssueTokenUsage(workItem.linear_issue_id, running);
     const hasOverride = Boolean(workItem.governance_override_at);
     const canOverrideGovernance =
       !hasOverride &&
@@ -855,6 +959,7 @@ export class RuntimeHub implements RuntimeControlPlane {
       active_pr_number: workItem.active_pr_number,
       supervisor_locale: workItem.supervisor_locale,
       session: runtimeSession,
+      usage,
       complexity,
       round,
       roundGoal: round.goal,
@@ -963,6 +1068,7 @@ export class RuntimeHub implements RuntimeControlPlane {
       (entry) => entry.issue_id === issue.id,
     ) ?? null;
     const timeline = this.timelineByIssueId.get(issue.id) ?? [];
+    const usage = this.buildIssueTokenUsage(issue.id, running);
 
     return {
       issue_id: issue.id,
@@ -979,6 +1085,7 @@ export class RuntimeHub implements RuntimeControlPlane {
       active_pr_number: null,
       supervisor_locale: null,
       session: running ? this.buildSessionView(running, timeline) : null,
+      usage,
       complexity: 'L1',
       round: {
         index: 1,

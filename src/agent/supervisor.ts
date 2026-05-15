@@ -3,6 +3,7 @@ import type {
   AgentTimelinePayload,
   CompletionRequirement,
   Issue,
+  LlmTokenUsage,
   PendingRuntimeRequest,
   RuntimeRequestResponse,
   SupervisorNextAction,
@@ -37,6 +38,77 @@ function truncate(value: string, maxLength: number): string {
   }
 
   return `${value.slice(0, maxLength - 3)}...`;
+}
+
+function usageNumber(value: unknown): number {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
+}
+
+function nestedUsageNumberTotal(value: unknown): number {
+  if (!value || typeof value !== 'object') {
+    return 0;
+  }
+
+  return Object.values(value).reduce(
+    (total, part) => total + usageNumber(part),
+    0,
+  );
+}
+
+function cacheCreationInputFromUsage(record: Record<string, unknown>): number {
+  return usageNumber(
+    record.cache_creation_input_tokens ??
+      record.cacheCreationInputTokens ??
+      record.cache_creation_input ??
+      record.cacheCreationInput,
+  ) || nestedUsageNumberTotal(record.cache_creation ?? record.cacheCreation);
+}
+
+function extractAnthropicTokenUsage(message: unknown): LlmTokenUsage | null {
+  const usage = message && typeof message === 'object'
+    ? (message as Record<string, unknown>).usage
+    : null;
+  if (!usage || typeof usage !== 'object') {
+    return null;
+  }
+
+  const record = usage as Record<string, unknown>;
+  const uncachedInput = usageNumber(record.input_tokens ?? record.inputTokens);
+  const cacheCreationInput = cacheCreationInputFromUsage(record);
+  const cacheReadInput = usageNumber(
+    record.cache_read_input_tokens ??
+      record.cacheReadInputTokens ??
+      record.cache_read_input ??
+      record.cacheReadInput,
+  );
+  const output = usageNumber(record.output_tokens ?? record.outputTokens);
+  const input = uncachedInput + cacheCreationInput + cacheReadInput;
+  const total = Math.max(usageNumber(record.total_tokens), input + output);
+  if (input <= 0 && output <= 0 && total <= 0) {
+    return null;
+  }
+
+  return {
+    input,
+    output,
+    total,
+    ...(cacheCreationInput > 0 || cacheReadInput > 0 ? { uncached_input: uncachedInput } : {}),
+    ...(cacheCreationInput > 0 ? { cache_creation_input: cacheCreationInput } : {}),
+    ...(cacheReadInput > 0 ? { cache_read_input: cacheReadInput } : {}),
+  };
+}
+
+function attachTokenUsage<T extends SupervisorNextAction | RuntimeRequestResponse>(
+  result: T,
+  tokenUsage: LlmTokenUsage | null,
+): T {
+  return tokenUsage
+    ? {
+        ...result,
+        token_usage: [...(result.token_usage ?? []), tokenUsage],
+      }
+    : result;
 }
 
 function stringifyForPrompt(value: unknown, maxLength = 4000): string {
@@ -324,6 +396,7 @@ export class AnthropicSupervisorService implements SupervisorService {
       return deterministicAction;
     }
 
+    let tokenUsage: LlmTokenUsage | null = null;
     try {
       const message = await this.client.messages.create({
         model: this.model,
@@ -381,6 +454,7 @@ export class AnthropicSupervisorService implements SupervisorService {
           },
         ],
       });
+      tokenUsage = extractAnthropicTokenUsage(message);
 
       const text = extractMessageText(message.content);
       const parsed = extractJsonObject(text);
@@ -390,10 +464,10 @@ export class AnthropicSupervisorService implements SupervisorService {
         (parsed.kind === 'continue' || parsed.kind === 'finish' || parsed.kind === 'abort')
       ) {
         if (parsed.kind === 'continue' && typeof parsed.message === 'string' && parsed.message.trim()) {
-          return {
+          return attachTokenUsage({
             kind: 'continue',
             message: parsed.message.trim(),
-          };
+          }, tokenUsage);
         }
 
         if (
@@ -401,20 +475,20 @@ export class AnthropicSupervisorService implements SupervisorService {
           typeof parsed.reason === 'string' &&
           parsed.reason.trim()
         ) {
-          return {
+          return attachTokenUsage({
             kind: parsed.kind,
             reason: parsed.reason.trim(),
-          };
+          }, tokenUsage);
         }
       }
     } catch {
       // Fall through to deterministic fallback below.
     }
 
-    return {
+    return attachTokenUsage({
       kind: 'continue',
       message: buildDefaultContinueMessage(context.mode, context.issue),
-    };
+    }, tokenUsage);
   }
 
   async respondToRuntimeRequest(
@@ -439,6 +513,7 @@ export class AnthropicSupervisorService implements SupervisorService {
     }
 
     if (context.request.kind === 'approval') {
+      let tokenUsage: LlmTokenUsage | null = null;
       try {
         const message = await this.client.messages.create({
           model: this.model,
@@ -484,6 +559,7 @@ export class AnthropicSupervisorService implements SupervisorService {
             },
           ],
         });
+        tokenUsage = extractAnthropicTokenUsage(message);
 
         const text = extractMessageText(message.content);
         const parsed = extractJsonObject(text);
@@ -493,28 +569,29 @@ export class AnthropicSupervisorService implements SupervisorService {
             parsed.updatedInput && typeof parsed.updatedInput === 'object'
               ? (parsed.updatedInput as Record<string, unknown>)
               : undefined;
-          return buildPermissionResponse(
+          return attachTokenUsage(buildPermissionResponse(
             context.request,
             'allow',
             undefined,
             updatedInput,
-          );
+          ), tokenUsage);
         }
 
         if (parsed?.behavior === 'deny' && typeof parsed.message === 'string') {
-          return buildPermissionResponse(
+          return attachTokenUsage(buildPermissionResponse(
             context.request,
             'deny',
             parsed.message.trim(),
-          );
+          ), tokenUsage);
         }
       } catch {
         // Fall through to deterministic fallback below.
       }
 
-      return buildPermissionResponse(context.request, 'allow');
+      return attachTokenUsage(buildPermissionResponse(context.request, 'allow'), tokenUsage);
     }
 
+    let tokenUsage: LlmTokenUsage | null = null;
     try {
       const message = await this.client.messages.create({
         model: this.model,
@@ -558,6 +635,7 @@ export class AnthropicSupervisorService implements SupervisorService {
           },
         ],
       });
+      tokenUsage = extractAnthropicTokenUsage(message);
 
       const text = extractMessageText(message.content);
       const parsed = extractJsonObject(text);
@@ -566,7 +644,7 @@ export class AnthropicSupervisorService implements SupervisorService {
         parsed &&
         (parsed.action === 'accept' || parsed.action === 'decline' || parsed.action === 'cancel')
       ) {
-        return {
+        return attachTokenUsage({
           response: {
             action: parsed.action,
             ...(parsed.action === 'accept' &&
@@ -575,13 +653,13 @@ export class AnthropicSupervisorService implements SupervisorService {
               ? { content: parsed.content }
               : {}),
           },
-        };
+        }, tokenUsage);
       }
     } catch {
       // Fall through to deterministic fallback below.
     }
 
-    return buildElicitationCancelResponse();
+    return attachTokenUsage(buildElicitationCancelResponse(), tokenUsage);
   }
 }
 

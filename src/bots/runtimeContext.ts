@@ -60,6 +60,7 @@ function toIssueContextView(issue: RuntimeIssueView): BotIssueContextView {
       : null,
     session_stage: issue.session?.stage ?? null,
     session_message: issue.session?.last_message ?? null,
+    usage: issue.usage ?? issue.session?.tokens ?? null,
     supervisor_session_state: issue.supervisor_session_state ?? null,
     supervisor_plan_summary: issue.supervisor_plan_summary ?? null,
     architectural_target: issue.architectural_target ?? null,

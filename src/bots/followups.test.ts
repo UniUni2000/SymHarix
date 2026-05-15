@@ -21,6 +21,8 @@ import { BotMessageEditError } from './types';
 import { BotFollowupService } from './followups';
 import { RuntimeIssueCardLock } from './runtimeIssueCardLock';
 
+type RuntimeIssueTokenUsage = NonNullable<RuntimeIssueView['session']>['tokens'];
+
 function createRuntimeControlPlane(): RuntimeControlPlane & { emit: (event: RuntimeStreamEvent) => void } {
   const listeners = new Set<(event: RuntimeStreamEvent) => void>();
   const issue: RuntimeIssueView = {
@@ -235,6 +237,42 @@ describe('BotFollowupService', () => {
       data: {
         ...baseIssue,
         title: 'Smoke test',
+        tracker_state: 'In Review',
+        orchestrator_state: 'review_running',
+        delivery_state: null,
+        delivery_summary: null,
+        governance_status: null,
+        governance_decision: null,
+        governance_summary: null,
+        active_governance_suggestions: [],
+        supervisor_locale: 'en',
+        session: {
+          session_id: 'thread-1-turn-2',
+          turn_count: 2,
+          stage: 'coding',
+          last_event: 'turn_completed',
+          last_message: 'Turn 2 completed',
+          started_at: '2026-01-01T00:00:00.000Z',
+          last_event_at: '2026-01-01T00:01:00.000Z',
+          tokens: {
+            input_tokens: 6000,
+            output_tokens: 400,
+            total_tokens: 6400,
+            uncached_input_tokens: 1200,
+            cache_read_input_tokens: 4500,
+          },
+          recent_tools: [],
+          recent_files: [],
+        },
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    runtime.emit({
+      type: 'issue',
+      data: {
+        ...baseIssue,
+        title: 'Smoke test',
         tracker_state: 'Done',
         orchestrator_state: 'completed',
         delivery_state: 'completed',
@@ -251,7 +289,255 @@ describe('BotFollowupService', () => {
     const lifecycleMessage = notifier.messages.find((item) => item.message.text.startsWith('SymHarix completed'));
     expect(lifecycleMessage?.message.text).toContain('SymHarix completed · INT-1');
     expect(lifecycleMessage?.message.text).toContain('This issue has reached a terminal state');
+    expect(lifecycleMessage?.message.text).toContain('Tokens: 6,400 (input total 6,000 = uncached 1,500 + cache read 4,500, output 400)');
     expect(lifecycleMessage?.message.text).not.toMatch(/[\u3400-\u9fff]/);
+
+    service.dispose();
+    db.close();
+  });
+
+  test('aggregates completed issue token usage across dev and review sessions', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const baseIssue = runtime.getIssue('issue-1');
+    if (!baseIssue) {
+      throw new Error('Expected issue-1 to exist');
+    }
+    const notifier = new MemoryNotifier();
+    const followups = new BotIssueFollowupRepository(db);
+
+    followups.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+      issue_identifier: 'TES-106',
+      user_id: 'user-1',
+      role: 'origin',
+    });
+
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, null, {
+      bootstrapCurrentGovernanceCards: false,
+    });
+
+    const makeSession = (
+      sessionId: string,
+      tokens: RuntimeIssueTokenUsage,
+    ): NonNullable<RuntimeIssueView['session']> => ({
+      session_id: sessionId,
+      turn_count: 1,
+      stage: 'coding',
+      last_event: 'turn_completed',
+      last_message: 'Turn 1 completed',
+      started_at: '2026-05-14T11:00:00.000Z',
+      last_event_at: '2026-05-14T11:01:00.000Z',
+      tokens,
+      recent_tools: [],
+      recent_files: [],
+    });
+    const reusedNativeSessionId = 'thread-1-turn-1';
+
+    runtime.emit({
+      type: 'issue',
+      data: {
+        ...baseIssue,
+        identifier: 'TES-106',
+        title: "Update myworld.py output to add an extra '!'",
+        tracker_state: 'In Progress',
+        orchestrator_state: 'dev_running',
+        delivery_state: null,
+        delivery_summary: null,
+        governance_status: null,
+        governance_decision: null,
+        governance_summary: null,
+        active_governance_suggestions: [],
+        supervisor_locale: 'en',
+        session: makeSession(reusedNativeSessionId, {
+          input_tokens: 100,
+          output_tokens: 10,
+          total_tokens: 110,
+          cache_read_input_tokens: 80,
+        }),
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    runtime.emit({
+      type: 'issue',
+      data: {
+        ...baseIssue,
+        identifier: 'TES-106',
+        title: "Update myworld.py output to add an extra '!'",
+        tracker_state: 'In Review',
+        orchestrator_state: 'completed',
+        delivery_state: null,
+        delivery_summary: null,
+        governance_status: null,
+        governance_decision: null,
+        governance_summary: null,
+        active_governance_suggestions: [],
+        supervisor_locale: 'en',
+        session: makeSession(reusedNativeSessionId, {
+          input_tokens: 137365,
+          output_tokens: 4998,
+          total_tokens: 142363,
+          cache_read_input_tokens: 117248,
+        }),
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    runtime.emit({
+      type: 'issue',
+      data: {
+        ...baseIssue,
+        identifier: 'TES-106',
+        title: "Update myworld.py output to add an extra '!'",
+        tracker_state: 'In Review',
+        orchestrator_state: 'review_running',
+        delivery_state: null,
+        delivery_summary: null,
+        governance_status: null,
+        governance_decision: null,
+        governance_summary: null,
+        active_governance_suggestions: [],
+        supervisor_locale: 'en',
+        phase: 'REVIEW',
+        session: makeSession(reusedNativeSessionId, {
+          input_tokens: 95365,
+          output_tokens: 2057,
+          total_tokens: 97422,
+          cache_read_input_tokens: 75008,
+        }),
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    runtime.emit({
+      type: 'issue',
+      data: {
+        ...baseIssue,
+        identifier: 'TES-106',
+        title: "Update myworld.py output to add an extra '!'",
+        tracker_state: 'Done',
+        orchestrator_state: 'completed',
+        delivery_state: 'completed',
+        delivery_summary: 'Issue is complete and final delivery is closed.',
+        governance_status: null,
+        governance_decision: null,
+        governance_summary: null,
+        active_governance_suggestions: [],
+        supervisor_locale: 'en',
+        session: null,
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const lifecycleMessage = notifier.messages.find((item) => item.message.text.startsWith('SymHarix completed'));
+    expect(lifecycleMessage?.message.text).toContain('SymHarix completed · TES-106');
+    expect(lifecycleMessage?.message.text).toContain('Tokens: 239,785 (input total 232,730 = uncached 40,474 + cache read 192,256, output 7,055)');
+
+    service.dispose();
+    db.close();
+  });
+
+  test('prefers runtime issue usage over local lifecycle token snapshots', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const baseIssue = runtime.getIssue('issue-1');
+    if (!baseIssue) {
+      throw new Error('Expected issue-1 to exist');
+    }
+    const notifier = new MemoryNotifier();
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+
+    followups.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-origin',
+      issue_id: 'issue-1',
+      issue_identifier: 'TES-114',
+      user_id: 'user-1',
+      role: 'origin',
+    });
+
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, messageStates, {
+      bootstrapCurrentGovernanceCards: false,
+    });
+
+    runtime.emit({
+      type: 'issue',
+      data: {
+        ...baseIssue,
+        identifier: 'TES-114',
+        title: "Create a new issue to update the output of myworld.py, adding one extra '!' to the existing output.",
+        tracker_state: 'In Review',
+        orchestrator_state: 'review_running',
+        delivery_state: null,
+        delivery_summary: null,
+        governance_status: null,
+        governance_decision: null,
+        governance_summary: null,
+        active_governance_suggestions: [],
+        supervisor_locale: 'en',
+        phase: 'REVIEW',
+        session: {
+          session_id: 'stale-review-session',
+          turn_count: 1,
+          stage: 'coding',
+          last_event: 'turn_completed',
+          last_message: 'Turn 1 completed',
+          started_at: '2026-05-15T12:00:00.000Z',
+          last_event_at: '2026-05-15T12:01:00.000Z',
+          tokens: {
+            input_tokens: 240892,
+            output_tokens: 4258,
+            total_tokens: 245150,
+            cache_read_input_tokens: 197632,
+          },
+          recent_tools: [],
+          recent_files: [],
+        },
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    runtime.emit({
+      type: 'issue',
+      data: {
+        ...baseIssue,
+        identifier: 'TES-114',
+        title: "Create a new issue to update the output of myworld.py, adding one extra '!' to the existing output.",
+        tracker_state: 'Done',
+        orchestrator_state: 'completed',
+        delivery_state: 'completed',
+        delivery_summary: 'Issue is complete and final delivery is closed.',
+        governance_status: null,
+        governance_decision: null,
+        governance_summary: null,
+        active_governance_suggestions: [],
+        supervisor_locale: 'en',
+        phase: 'DEV',
+        session: null,
+        usage: {
+          input_tokens: 261283,
+          output_tokens: 8356,
+          total_tokens: 269639,
+          cache_read_input_tokens: 215424,
+        },
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const lifecycleMessage = notifier.messages.find((item) => item.message.text.startsWith('SymHarix completed'));
+    expect(lifecycleMessage?.message.text).toContain('SymHarix completed · TES-114');
+    expect(lifecycleMessage?.message.text).toContain('Tokens: 269,639 (input total 261,283 = uncached 45,859 + cache read 215,424, output 8,356)');
+    expect(lifecycleMessage?.message.text).not.toContain('Tokens: 245,150');
 
     service.dispose();
     db.close();
@@ -1490,6 +1776,38 @@ describe('BotFollowupService', () => {
       message_id: 'msg-1',
       card_kind: 'runtime_issue',
       card_state: 'open',
+    }));
+
+    issue.tracker_state = 'In review';
+    issue.orchestrator_state = 'review_running';
+    issue.delivery_state = 'completed';
+    issue.delivery_summary = 'Issue is complete and final delivery is closed.';
+    issue.actions = {
+      can_stop: false,
+      can_retry: false,
+      can_override_governance: false,
+      can_rewrite_governance: false,
+      can_split_governance: false,
+      can_open_pr: true,
+    };
+    issue.updated_at = '2026-01-01T00:02:00.000Z';
+    runtime.emit({ type: 'issue', data: issue });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(notifier.edits).toHaveLength(2);
+    expect(notifier.edits[1]?.messageRef.provider_message_id).toBe('msg-1');
+    expect(notifier.edits[1]?.message.caption).toContain('Completed · 100%');
+    expect(
+      messageStates.findByConversationIssue({
+        transport: 'telegram',
+        conversation_id: 'chat-origin',
+        issue_id: 'issue-1',
+      }),
+    ).toEqual(expect.objectContaining({
+      message_id: 'msg-1',
+      card_kind: 'runtime_issue',
+      card_state: 'resolved',
     }));
 
     service.dispose();

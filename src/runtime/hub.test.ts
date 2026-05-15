@@ -19,8 +19,47 @@ import {
 } from '../database';
 import { RuntimeHub } from './hub';
 import type { AgentEvent } from '../types';
+import type { OrchestratorStateSnapshot } from '../orchestrator';
 
 class FakeController extends EventEmitter {
+  snapshot: OrchestratorStateSnapshot = {
+    generated_at: '2026-01-01T00:00:00.000Z',
+    counts: {
+      running: 1,
+      retrying: 0,
+    },
+    running: [
+      {
+        issue_id: 'issue-1',
+        issue_identifier: 'INT-1',
+        state: 'In Progress',
+        stage: 'coding' as const,
+        session_id: 'thread-1-turn-1',
+        turn_count: 2,
+        last_event: 'timeline',
+        last_message: 'Using Read',
+        started_at: '2026-01-01T00:00:00.000Z',
+        last_event_at: '2026-01-01T00:01:00.000Z',
+        tokens: {
+          input_tokens: 120,
+          output_tokens: 30,
+          total_tokens: 150,
+          uncached_input_tokens: 20,
+          cache_creation_input_tokens: 20,
+          cache_read_input_tokens: 80,
+        },
+      },
+    ],
+    retrying: [],
+    codex_totals: {
+      input_tokens: 120,
+      output_tokens: 30,
+      total_tokens: 150,
+      seconds_running: 12,
+    },
+    rate_limits: null,
+  };
+
   createIssue = async () => ({
     accepted: true,
     status: 'accepted' as const,
@@ -95,40 +134,7 @@ class FakeController extends EventEmitter {
   });
 
   getStateSnapshot() {
-    return {
-      generated_at: '2026-01-01T00:00:00.000Z',
-      counts: {
-        running: 1,
-        retrying: 0,
-      },
-      running: [
-        {
-          issue_id: 'issue-1',
-          issue_identifier: 'INT-1',
-          state: 'In Progress',
-          stage: 'coding' as const,
-          session_id: 'thread-1-turn-1',
-          turn_count: 2,
-          last_event: 'timeline',
-          last_message: 'Using Read',
-          started_at: '2026-01-01T00:00:00.000Z',
-          last_event_at: '2026-01-01T00:01:00.000Z',
-          tokens: {
-            input_tokens: 120,
-            output_tokens: 30,
-            total_tokens: 150,
-          },
-        },
-      ],
-      retrying: [],
-      codex_totals: {
-        input_tokens: 120,
-        output_tokens: 30,
-        total_tokens: 150,
-        seconds_running: 12,
-      },
-      rate_limits: null,
-    };
+    return this.snapshot;
   }
 }
 
@@ -282,6 +288,22 @@ describe('RuntimeHub', () => {
     expect(overview.counts.running).toBe(1);
     expect(overview.issues).toHaveLength(1);
     expect(overview.issues[0]?.session?.recent_tools).toHaveLength(2);
+    expect(overview.issues[0]?.session?.tokens).toEqual({
+      input_tokens: 120,
+      output_tokens: 30,
+      total_tokens: 150,
+      uncached_input_tokens: 20,
+      cache_creation_input_tokens: 20,
+      cache_read_input_tokens: 80,
+    });
+    expect(overview.issues[0]?.usage).toEqual({
+      input_tokens: 120,
+      output_tokens: 30,
+      total_tokens: 150,
+      uncached_input_tokens: 20,
+      cache_creation_input_tokens: 20,
+      cache_read_input_tokens: 80,
+    });
     expect(overview.issues[0]?.session?.recent_files[0]?.path).toBe('/tmp/workspaces/INT-1/app.py');
     expect(overview.issues[0]?.actions.can_stop).toBe(true);
     expect(overview.issues[0]?.actions.can_override_governance).toBe(false);
@@ -302,6 +324,171 @@ describe('RuntimeHub', () => {
     expect(timeline).toHaveLength(2);
     expect(timeline[1]?.message).toBe('Write completed');
 
+    hub.dispose();
+  });
+
+  test('keeps aggregated issue usage across dev and review sessions after completion', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workItemRepository = new WorkItemRepository(db);
+    workItemRepository.create({
+      id: 'issue-usage',
+      linear_issue_id: 'issue-usage',
+      linear_identifier: 'INT-usage',
+      linear_title: 'Usage issue',
+      linear_state: 'In Progress',
+      github_repo: 'acme/repo',
+      branch_name: 'feature/int-usage',
+      workspace_path: '/tmp/workspaces/INT-usage',
+      orchestrator_state: 'dev_running',
+    });
+
+    const controller = new FakeController();
+    controller.snapshot = {
+      ...controller.snapshot,
+      running: [{
+        ...controller.snapshot.running[0]!,
+        issue_id: 'issue-usage',
+        issue_identifier: 'INT-usage',
+        state: 'In Progress',
+        session_id: 'shared-native-session',
+        tokens: {
+          input_tokens: 137365,
+          output_tokens: 4998,
+          total_tokens: 142363,
+          cache_read_input_tokens: 117248,
+        },
+      }],
+    };
+    const hub = new RuntimeHub(db, controller);
+
+    expect(hub.getIssue('issue-usage')?.usage).toEqual({
+      input_tokens: 137365,
+      output_tokens: 4998,
+      total_tokens: 142363,
+      cache_read_input_tokens: 117248,
+    });
+
+    workItemRepository.update({
+      id: 'issue-usage',
+      linear_state: 'In Review',
+      orchestrator_state: 'review_running',
+    });
+    controller.snapshot = {
+      ...controller.snapshot,
+      running: [{
+        ...controller.snapshot.running[0]!,
+        state: 'In Review',
+        started_at: '2026-01-01T00:05:00.000Z',
+        tokens: {
+          input_tokens: 95365,
+          output_tokens: 2057,
+          total_tokens: 97422,
+          cache_read_input_tokens: 75008,
+        },
+      }],
+    };
+
+    expect(hub.getIssue('issue-usage')?.usage).toEqual({
+      input_tokens: 232730,
+      output_tokens: 7055,
+      total_tokens: 239785,
+      cache_read_input_tokens: 192256,
+    });
+
+    workItemRepository.update({
+      id: 'issue-usage',
+      linear_state: 'Done',
+      orchestrator_state: 'completed',
+      delivery_summary: 'Issue is complete.',
+    });
+    controller.snapshot = {
+      ...controller.snapshot,
+      counts: {
+        running: 0,
+        retrying: 0,
+      },
+      running: [],
+    };
+
+    const completedIssue = hub.getIssue('issue-usage');
+    expect(completedIssue?.session).toBeNull();
+    expect(completedIssue?.usage).toEqual({
+      input_tokens: 232730,
+      output_tokens: 7055,
+      total_tokens: 239785,
+      cache_read_input_tokens: 192256,
+    });
+
+    hub.dispose();
+  });
+
+  test('pushes live issue usage when orchestrator state changes', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workItemRepository = new WorkItemRepository(db);
+    workItemRepository.create({
+      id: 'issue-usage-push',
+      linear_issue_id: 'issue-usage-push',
+      linear_identifier: 'INT-usage-push',
+      linear_title: 'Usage push issue',
+      linear_state: 'In Progress',
+      github_repo: 'acme/repo',
+      branch_name: 'feature/int-usage-push',
+      workspace_path: '/tmp/workspaces/INT-usage-push',
+      orchestrator_state: 'dev_running',
+    });
+
+    const controller = new FakeController();
+    controller.snapshot = {
+      ...controller.snapshot,
+      running: [{
+        ...controller.snapshot.running[0]!,
+        issue_id: 'issue-usage-push',
+        issue_identifier: 'INT-usage-push',
+        tokens: {
+          input_tokens: 210,
+          output_tokens: 40,
+          total_tokens: 250,
+          cache_read_input_tokens: 120,
+        },
+      }],
+    };
+    const hub = new RuntimeHub(db, controller);
+    const issueEvents: any[] = [];
+    const unsubscribe = hub.subscribe((event) => {
+      if (event.type === 'issue') {
+        issueEvents.push(event.data);
+      }
+    });
+
+    controller.snapshot = {
+      ...controller.snapshot,
+      running: [{
+        ...controller.snapshot.running[0]!,
+        tokens: {
+          input_tokens: 260,
+          output_tokens: 50,
+          total_tokens: 310,
+          cache_read_input_tokens: 160,
+        },
+      }],
+    };
+    controller.emit('state:changed', controller.snapshot);
+
+    expect(issueEvents).toContainEqual(expect.objectContaining({
+      issue_id: 'issue-usage-push',
+      usage: {
+        input_tokens: 260,
+        output_tokens: 50,
+        total_tokens: 310,
+        cache_read_input_tokens: 160,
+      },
+    }));
+
+    unsubscribe();
     hub.dispose();
   });
 

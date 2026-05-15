@@ -941,6 +941,7 @@ function buildControlPlaneIssueSnapshot(
           recent_files: issue.session.recent_files.slice(-5),
         }
       : null,
+    usage: issue.usage ?? issue.session?.tokens ?? null,
     supervisor_session_state: issue.supervisor_session_state ?? null,
     supervisor_plan_summary: issue.supervisor_plan_summary ?? null,
     governance_thread_state: issue.governance_thread_state,

@@ -8,6 +8,7 @@ const {
   collectTimelineEventsFromClaudeMessage,
   createTimelineState,
   formatTurnCompletedMessage,
+  normalizeApiUsageTokens,
   startAdapter,
 } = require('../scripts/claude-adapter.cjs');
 
@@ -147,6 +148,27 @@ describe('claude-adapter timeline helpers', () => {
     expect(message).toBe('Turn 3 completed · in 1.2k / out 400');
   });
 
+  test('counts raw API cache tokens in token summaries', () => {
+    const tokens = normalizeApiUsageTokens({
+      input_tokens: 1200,
+      cache_creation: {
+        ephemeral_5m_input_tokens: 300,
+      },
+      cache_read_input_tokens: 4500,
+      output_tokens: 400,
+    });
+
+    expect(tokens).toEqual({
+      input: 6000,
+      output: 400,
+      total: 6400,
+      uncached_input: 1200,
+      cache_creation_input: 300,
+      cache_read_input: 4500,
+    });
+    expect(formatTurnCompletedMessage(3, tokens)).toBe('Turn 3 completed · in 6k (cache 4.8k) / out 400');
+  });
+
   test('passes available built-in tools separately from allowed permission tools', () => {
     const args = buildClaudeCliArgs({
       tools: ['Read', 'Grep', 'Glob', 'LS', 'TodoRead'],
@@ -253,6 +275,98 @@ describe('claude-adapter timeline helpers', () => {
         input: 2408,
         output: 91,
         total: 2499,
+      });
+    } finally {
+      runtime?.rl.close();
+      childProcess.spawn = originalSpawn;
+      process.exit = originalExit;
+    }
+  });
+
+  test('emits per-turn token deltas from raw cumulative API usage including cache tokens', async () => {
+    const originalSpawn = childProcess.spawn;
+    const originalExit = process.exit;
+    const fakeClaude = createFakeClaudeProcess();
+    const adapterIn = new PassThrough();
+    const adapterOut = new PassThrough();
+    const adapterErr = new PassThrough();
+    const adapterCollector = createJsonCollector(adapterOut);
+    let runtime;
+
+    childProcess.spawn = () => fakeClaude;
+    process.exit = () => {};
+
+    try {
+      runtime = startAdapter({
+        env: { ...process.env, SYMPHONY_ADAPTER_DEBUG: '0' },
+        stdin: adapterIn,
+        stdout: adapterOut,
+        stderr: adapterErr,
+      });
+
+      adapterIn.write(`${JSON.stringify({ id: 1, method: 'initialize', params: {} })}\n`);
+      await adapterCollector.waitFor((message) => message.id === 1);
+
+      adapterIn.write(`${JSON.stringify({ id: 2, method: 'thread/start', params: { cwd: process.cwd() } })}\n`);
+      await adapterCollector.waitFor((message) => message.id === 2);
+
+      adapterIn.write(`${JSON.stringify({
+        id: 3,
+        method: 'turn/start',
+        params: { input: [{ type: 'text', text: 'first' }] },
+      })}\n`);
+      await adapterCollector.waitFor((message) => message.id === 3);
+      fakeClaude.stdout.write(`${JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        num_turns: 1,
+        usage: {
+          input_tokens: 100,
+          cache_creation_input_tokens: 50,
+          cache_read_input_tokens: 850,
+          output_tokens: 25,
+        },
+      })}\n`);
+
+      const firstTurnCompleted = await adapterCollector.waitFor(
+        (message) => message.method === 'turn/completed',
+      );
+      expect(firstTurnCompleted.result.turn.tokens).toEqual({
+        input: 1000,
+        output: 25,
+        total: 1025,
+        uncached_input: 100,
+        cache_creation_input: 50,
+        cache_read_input: 850,
+      });
+
+      adapterIn.write(`${JSON.stringify({
+        id: 4,
+        method: 'turn/start',
+        params: { input: [{ type: 'text', text: 'second' }] },
+      })}\n`);
+      await adapterCollector.waitFor((message) => message.id === 4);
+      fakeClaude.stdout.write(`${JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        num_turns: 2,
+        usage: {
+          input_tokens: 150,
+          cache_creation_input_tokens: 50,
+          cache_read_input_tokens: 1050,
+          output_tokens: 45,
+        },
+      })}\n`);
+
+      const secondTurnCompleted = await adapterCollector.waitFor(
+        (message) => message.method === 'turn/completed',
+      );
+      expect(secondTurnCompleted.result.turn.tokens).toEqual({
+        input: 250,
+        output: 20,
+        total: 270,
+        uncached_input: 50,
+        cache_read_input: 200,
       });
     } finally {
       runtime?.rl.close();

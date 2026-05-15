@@ -92,6 +92,34 @@ describe('AnthropicSupervisorService', () => {
     expect(result.message).toContain('INT-25');
   });
 
+  test('returns raw provider token usage with supervisor decisions', async () => {
+    const service = new AnthropicSupervisorService('test-model');
+    const create = mock(async () => ({
+      content: [{ type: 'text', text: '{"kind":"finish","reason":"ready"}' }],
+      usage: {
+        input_tokens: 1200,
+        cache_creation: {
+          ephemeral_5m_input_tokens: 300,
+        },
+        cache_read_input_tokens: 4000,
+        output_tokens: 75,
+      },
+    }));
+    (service as any).client = { messages: { create } };
+
+    const result = await service.decideNextAction(decisionContext);
+
+    expect(result.kind).toBe('finish');
+    expect(result.token_usage).toEqual([{
+      input: 5500,
+      output: 75,
+      total: 5575,
+      uncached_input: 1200,
+      cache_creation_input: 300,
+      cache_read_input: 4000,
+    }]);
+  });
+
   test('uses deterministic missing-requirements guidance for dev turns before calling the provider', async () => {
     const service = new AnthropicSupervisorService('test-model');
     const create = mock(async () => ({

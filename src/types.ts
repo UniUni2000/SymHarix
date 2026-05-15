@@ -422,6 +422,9 @@ export interface LiveSession {
   codex_input_tokens: number;
   codex_output_tokens: number;
   codex_total_tokens: number;
+  codex_uncached_input_tokens?: number;
+  codex_cache_creation_input_tokens?: number;
+  codex_cache_read_input_tokens?: number;
   last_reported_input_tokens: number;
   last_reported_output_tokens: number;
   last_reported_total_tokens: number;
@@ -468,6 +471,9 @@ export interface RunningEntry {
   codex_input_tokens: number;
   codex_output_tokens: number;
   codex_total_tokens: number;
+  codex_uncached_input_tokens?: number;
+  codex_cache_creation_input_tokens?: number;
+  codex_cache_read_input_tokens?: number;
   last_reported_input_tokens: number;
   last_reported_output_tokens: number;
   last_reported_total_tokens: number;
@@ -585,10 +591,20 @@ export interface TurnTranscriptEntry {
   tool_name: string | null;
 }
 
+export interface LlmTokenUsage {
+  input: number;
+  output: number;
+  total: number;
+  uncached_input?: number;
+  cache_creation_input?: number;
+  cache_read_input?: number;
+}
+
 export interface SupervisorNextAction {
   kind: 'continue' | 'finish' | 'abort';
   message?: string;
   reason?: string;
+  token_usage?: LlmTokenUsage[];
 }
 
 export interface PendingRuntimeRequest {
@@ -607,6 +623,7 @@ export interface PendingRuntimeRequest {
 
 export interface RuntimeRequestResponse {
   response: Record<string, unknown>;
+  token_usage?: LlmTokenUsage[];
 }
 
 export interface AgentEvent {
@@ -617,6 +634,9 @@ export interface AgentEvent {
     input_tokens?: number;
     output_tokens?: number;
     total_tokens?: number;
+    uncached_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
   };
   payload?: Record<string, unknown> | AgentTimelinePayload;
 }

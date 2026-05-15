@@ -96,12 +96,154 @@ function formatCompactNumber(value) {
   return `${rounded.replace(/\.0$/, '')}${units[unitIndex]}`;
 }
 
+function numericUsageValue(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
+}
+
+function nestedCacheCreationInputTokens(value) {
+  if (!value || typeof value !== 'object') {
+    return 0;
+  }
+
+  return Object.values(value).reduce(
+    (total, part) => total + numericUsageValue(part),
+    0,
+  );
+}
+
+function cacheCreationInputFromUsage(usage = {}) {
+  return numericUsageValue(
+    usage.cache_creation_input_tokens ??
+      usage.cacheCreationInputTokens ??
+      usage.cache_creation_input ??
+      usage.cacheCreationInput,
+  ) || nestedCacheCreationInputTokens(usage.cache_creation ?? usage.cacheCreation);
+}
+
+function makeTokenUsage({
+  uncachedInput = 0,
+  cacheCreationInput = 0,
+  cacheReadInput = 0,
+  output = 0,
+  total = null,
+} = {}) {
+  const safeUncachedInput = numericUsageValue(uncachedInput);
+  const safeCacheCreationInput = numericUsageValue(cacheCreationInput);
+  const safeCacheReadInput = numericUsageValue(cacheReadInput);
+  const safeOutput = numericUsageValue(output);
+  const input = safeUncachedInput + safeCacheCreationInput + safeCacheReadInput;
+  const computedTotal = input + safeOutput;
+  const safeTotal = Math.max(numericUsageValue(total), computedTotal);
+  const tokens = {
+    input,
+    output: safeOutput,
+    total: safeTotal,
+  };
+
+  if (safeCacheCreationInput > 0 || safeCacheReadInput > 0) {
+    tokens.uncached_input = safeUncachedInput;
+  }
+  if (safeCacheCreationInput > 0) {
+    tokens.cache_creation_input = safeCacheCreationInput;
+  }
+  if (safeCacheReadInput > 0) {
+    tokens.cache_read_input = safeCacheReadInput;
+  }
+
+  return tokens;
+}
+
+function normalizeApiUsageTokens(usage = {}) {
+  if (!usage || typeof usage !== 'object') {
+    return makeTokenUsage();
+  }
+
+  return makeTokenUsage({
+    uncachedInput: usage.input_tokens ?? usage.inputTokens,
+    cacheCreationInput: cacheCreationInputFromUsage(usage),
+    cacheReadInput:
+      usage.cache_read_input_tokens ??
+      usage.cacheReadInputTokens ??
+      usage.cache_read_input ??
+      usage.cacheReadInput,
+    output: usage.output_tokens ?? usage.outputTokens,
+    total: usage.total_tokens ?? usage.totalTokens,
+  });
+}
+
+function tokenUsageParts(tokens = {}) {
+  const cacheCreationInput = numericUsageValue(tokens.cache_creation_input);
+  const cacheReadInput = numericUsageValue(tokens.cache_read_input);
+  const input = numericUsageValue(tokens.input);
+  return {
+    uncachedInput: numericUsageValue(tokens.uncached_input) ||
+      Math.max(0, input - cacheCreationInput - cacheReadInput),
+    cacheCreationInput,
+    cacheReadInput,
+    output: numericUsageValue(tokens.output),
+    total: numericUsageValue(tokens.total),
+  };
+}
+
+function hasTokenUsage(tokens) {
+  return Boolean(tokens && numericUsageValue(tokens.total) > 0);
+}
+
+function isMonotonicTokenUsage(current, previous) {
+  const currentParts = tokenUsageParts(current);
+  const previousParts = tokenUsageParts(previous);
+  return currentParts.uncachedInput >= previousParts.uncachedInput &&
+    currentParts.cacheCreationInput >= previousParts.cacheCreationInput &&
+    currentParts.cacheReadInput >= previousParts.cacheReadInput &&
+    currentParts.output >= previousParts.output &&
+    currentParts.total >= previousParts.total;
+}
+
+function subtractTokenUsage(current, previous) {
+  const currentParts = tokenUsageParts(current);
+  const previousParts = tokenUsageParts(previous);
+  return makeTokenUsage({
+    uncachedInput: Math.max(0, currentParts.uncachedInput - previousParts.uncachedInput),
+    cacheCreationInput: Math.max(0, currentParts.cacheCreationInput - previousParts.cacheCreationInput),
+    cacheReadInput: Math.max(0, currentParts.cacheReadInput - previousParts.cacheReadInput),
+    output: Math.max(0, currentParts.output - previousParts.output),
+    total: Math.max(0, currentParts.total - previousParts.total),
+  });
+}
+
+function addTokenUsage(left, right) {
+  const leftParts = tokenUsageParts(left);
+  const rightParts = tokenUsageParts(right);
+  return makeTokenUsage({
+    uncachedInput: leftParts.uncachedInput + rightParts.uncachedInput,
+    cacheCreationInput: leftParts.cacheCreationInput + rightParts.cacheCreationInput,
+    cacheReadInput: leftParts.cacheReadInput + rightParts.cacheReadInput,
+    output: leftParts.output + rightParts.output,
+    total: leftParts.total + rightParts.total,
+  });
+}
+
+function sameTokenUsage(left, right) {
+  const leftParts = tokenUsageParts(left);
+  const rightParts = tokenUsageParts(right);
+  return leftParts.uncachedInput === rightParts.uncachedInput &&
+    leftParts.cacheCreationInput === rightParts.cacheCreationInput &&
+    leftParts.cacheReadInput === rightParts.cacheReadInput &&
+    leftParts.output === rightParts.output &&
+    leftParts.total === rightParts.total;
+}
+
 function formatTurnCompletedMessage(turn, tokens) {
   const input = tokens && typeof tokens.input === 'number' ? tokens.input : 0;
   const output =
     tokens && typeof tokens.output === 'number' ? tokens.output : 0;
+  const cache =
+    numericUsageValue(tokens && tokens.cache_creation_input) +
+    numericUsageValue(tokens && tokens.cache_read_input);
   if (input > 0 || output > 0) {
-    return `Turn ${turn} completed · in ${formatCompactNumber(input)} / out ${formatCompactNumber(output)}`;
+    const cacheSuffix = cache > 0 ? ` (cache ${formatCompactNumber(cache)})` : '';
+    return `Turn ${turn} completed · in ${formatCompactNumber(input)}${cacheSuffix} / out ${formatCompactNumber(output)}`;
   }
   return `Turn ${turn} completed`;
 }
@@ -507,6 +649,9 @@ function createAdapterRuntime() {
     lastChildErrorMessage: null,
     timelineState: createTimelineState(),
     pendingToolUses: new Map(),
+    turnUsageByResponse: new Map(),
+    nextUsageResponseOrdinal: 1,
+    lastCumulativeUsage: makeTokenUsage(),
     nextRuntimeRequestId: 1,
     pendingControlRequests: new Map(),
     readOnlyMode: false,
@@ -595,6 +740,9 @@ function startAdapter({
   }
 
   function emitTurnCompletedTimeline(turn, tokens) {
+    const cacheCreationInput = numericUsageValue(tokens && tokens.cache_creation_input);
+    const cacheReadInput = numericUsageValue(tokens && tokens.cache_read_input);
+    const uncachedInput = numericUsageValue(tokens && tokens.uncached_input);
     emitTimelineEvent(
       buildTimelineEvent({
         category: 'turn',
@@ -606,6 +754,9 @@ function startAdapter({
               input_tokens: tokens.input || 0,
               output_tokens: tokens.output || 0,
               total_tokens: tokens.total || 0,
+              ...(uncachedInput > 0 ? { uncached_input_tokens: uncachedInput } : {}),
+              ...(cacheCreationInput > 0 ? { cache_creation_input_tokens: cacheCreationInput } : {}),
+              ...(cacheReadInput > 0 ? { cache_read_input_tokens: cacheReadInput } : {}),
             }
           : null,
       }),
@@ -615,6 +766,75 @@ function startAdapter({
   function resetTurnState() {
     runtime.timelineState.assistantThinkingTurn = null;
     runtime.pendingToolUses.clear();
+    runtime.turnUsageByResponse.clear();
+    runtime.nextUsageResponseOrdinal = 1;
+  }
+
+  function aggregateCurrentTurnUsage() {
+    let total = makeTokenUsage();
+    for (const usage of runtime.turnUsageByResponse.values()) {
+      total = addTokenUsage(total, usage);
+    }
+    return total;
+  }
+
+  function recordAssistantUsage(ccMsg) {
+    const usage = ccMsg && ccMsg.message && ccMsg.message.usage;
+    if (!usage) {
+      return;
+    }
+
+    const tokens = normalizeApiUsageTokens(usage);
+    if (!hasTokenUsage(tokens)) {
+      return;
+    }
+
+    const messageId = typeof ccMsg.message.id === 'string' && ccMsg.message.id.trim()
+      ? ccMsg.message.id.trim()
+      : null;
+    const uuid = typeof ccMsg.uuid === 'string' && ccMsg.uuid.trim()
+      ? ccMsg.uuid.trim()
+      : null;
+    const key = messageId || uuid || `usage-response-${runtime.nextUsageResponseOrdinal++}`;
+    runtime.turnUsageByResponse.set(key, tokens);
+  }
+
+  function resolveTurnUsageFromResult(resultUsage) {
+    const normalizedResultUsage = normalizeApiUsageTokens(resultUsage || {});
+    const assistantUsage = aggregateCurrentTurnUsage();
+
+    if (!hasTokenUsage(normalizedResultUsage)) {
+      return assistantUsage;
+    }
+
+    if (hasTokenUsage(assistantUsage)) {
+      if (sameTokenUsage(normalizedResultUsage, assistantUsage)) {
+        if (!hasTokenUsage(runtime.lastCumulativeUsage)) {
+          runtime.lastCumulativeUsage = normalizedResultUsage;
+        }
+        return normalizedResultUsage;
+      }
+
+      if (isMonotonicTokenUsage(normalizedResultUsage, runtime.lastCumulativeUsage)) {
+        const deltaUsage = subtractTokenUsage(normalizedResultUsage, runtime.lastCumulativeUsage);
+        if (sameTokenUsage(deltaUsage, assistantUsage)) {
+          runtime.lastCumulativeUsage = normalizedResultUsage;
+          return deltaUsage;
+        }
+      }
+    }
+
+    if (
+      hasTokenUsage(runtime.lastCumulativeUsage) &&
+      isMonotonicTokenUsage(normalizedResultUsage, runtime.lastCumulativeUsage)
+    ) {
+      const deltaUsage = subtractTokenUsage(normalizedResultUsage, runtime.lastCumulativeUsage);
+      runtime.lastCumulativeUsage = normalizedResultUsage;
+      return deltaUsage;
+    }
+
+    runtime.lastCumulativeUsage = normalizedResultUsage;
+    return normalizedResultUsage;
   }
 
   function completeTurnIfNeeded(tokens) {
@@ -865,21 +1085,15 @@ function startAdapter({
         }
 
         processToolLifecycle(ccMsg);
+        recordAssistantUsage(ccMsg);
 
         if (ccMsg.type === 'result' && ccMsg.subtype === 'success') {
-          runtime.apiCallCount = Math.max(
-            Number(ccMsg.num_turns) || 0,
-            runtime.apiCallCount || 0,
-            1,
-          );
-          const usage = ccMsg.usage || {};
-          completeTurnIfNeeded({
-            input: Number(usage.input_tokens) || 0,
-            output: Number(usage.output_tokens) || 0,
-            total:
-              (Number(usage.input_tokens) || 0) +
-              (Number(usage.output_tokens) || 0),
-          });
+          const finalTokens = resolveTurnUsageFromResult(ccMsg.usage);
+          const reportedApiCalls = Number(ccMsg.num_turns) || 0;
+          runtime.apiCallCount = reportedApiCalls > 0
+            ? reportedApiCalls
+            : Math.max(runtime.apiCallCount || 0, runtime.turnUsageByResponse.size, 1);
+          completeTurnIfNeeded(finalTokens);
           continue;
         }
 
@@ -960,6 +1174,9 @@ function startAdapter({
         runtime.lastChildErrorMessage = null;
         runtime.timelineState = createTimelineState();
         runtime.pendingToolUses.clear();
+        runtime.turnUsageByResponse.clear();
+        runtime.nextUsageResponseOrdinal = 1;
+        runtime.lastCumulativeUsage = makeTokenUsage();
         emitDebugLog(`Received thread/start. Spawning Claude Code at ${cwd}`);
 
         const cliPath = path.resolve(__dirname, '../claude-code/bin/claude-haha');
@@ -1126,6 +1343,7 @@ module.exports = {
   formatCompactNumber,
   formatTurnCompletedMessage,
   isAdapterDebugEnabled,
+  normalizeApiUsageTokens,
   normalizeToolName,
   startAdapter,
 };

@@ -6,6 +6,7 @@ import type {
   SupervisorSessionRepository,
 } from '../database';
 import type { RuntimeControlPlane, RuntimeIssueView, RuntimeStreamEvent, RuntimeTimelineEvent } from '../runtime/types';
+import { isRuntimeIssueCompleted } from '../runtime/issueProgress';
 import { buildSupervisorIssueVisualCard } from '../supervisor/issueVisualCard';
 import {
   buildGovernanceBlockedMessage,
@@ -22,6 +23,7 @@ import {
   type BotTransportNotifier,
 } from './types';
 import { buildIssueCardActionRows } from './issueCardActions';
+import { isTerminalIssue } from './issueVisibility';
 import type { RuntimeIssueCardLock } from './runtimeIssueCardLock';
 import { inferRuntimeLocaleFromText, type RuntimeLocale } from '../i18n/locale';
 
@@ -35,6 +37,7 @@ interface BotFollowupServiceOptions {
 }
 
 export type LifecycleNotificationClass = 'retrying' | 'failed' | 'delivery_failed' | 'done' | 'cancelled';
+type RuntimeIssueTokenUsage = NonNullable<RuntimeIssueView['session']>['tokens'];
 
 function shouldNotifyTimeline(event: RuntimeTimelineEvent): boolean {
   if (
@@ -74,7 +77,11 @@ export function classifyLifecycleNotification(issue: RuntimeIssueView): Lifecycl
     return 'retrying';
   }
 
-  if (trackerState === 'done' || trackerState === 'duplicate' || orchestratorState === 'completed') {
+  if (
+    trackerState === 'done' ||
+    trackerState === 'duplicate' ||
+    (orchestratorState === 'completed' && issue.delivery_state === 'completed')
+  ) {
     return 'done';
   }
 
@@ -107,6 +114,23 @@ function shouldRefreshRuntimeIssueCard(issue: RuntimeIssueView): boolean {
   }
 
   return issue.phase === 'DEV' && Boolean(issue.session);
+}
+
+function shouldRefreshExistingRuntimeIssueCard(issue: RuntimeIssueView): boolean {
+  return shouldRefreshRuntimeIssueCard(issue) ||
+    classifyLifecycleNotification(issue) !== null ||
+    isRuntimeIssueCompleted(issue);
+}
+
+function runtimeIssueCardState(issue: RuntimeIssueView): 'open' | 'resolved' | 'failed' {
+  if (
+    issue.delivery_state === 'delivery_failed' ||
+    (issue.delivery_code && issue.delivery_code !== 'manual_stop') ||
+    issue.orchestrator_state === 'failed'
+  ) {
+    return 'failed';
+  }
+  return (isTerminalIssue(issue) || isRuntimeIssueCompleted(issue)) ? 'resolved' : 'open';
 }
 
 function buildRuntimeIssueCardMessage(issue: RuntimeIssueView): BotTransportMessage {
@@ -175,7 +199,93 @@ function textForLocale(locale: RuntimeLocale, zh: string, en: string): string {
   return locale === 'en' ? en : zh;
 }
 
-function buildLifecycleMessage(issue: RuntimeIssueView, notificationClass: LifecycleNotificationClass): BotTransportMessage {
+function numberOrZero(value: number | null | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.trunc(value));
+}
+
+function formatTokenNumber(value: number): string {
+  return String(numberOrZero(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+function copyIssueTokenUsage(tokens: RuntimeIssueTokenUsage | null | undefined): RuntimeIssueTokenUsage | null {
+  if (!tokens) {
+    return null;
+  }
+  const inputTokens = numberOrZero(tokens.input_tokens);
+  const outputTokens = numberOrZero(tokens.output_tokens);
+  const totalTokens = numberOrZero(tokens.total_tokens);
+  const hasExplicitUncachedInput = tokens.uncached_input_tokens != null;
+  const uncachedInput = numberOrZero(tokens.uncached_input_tokens);
+  const cacheReadInput = numberOrZero(tokens.cache_read_input_tokens);
+  let cacheCreationInput = numberOrZero(tokens.cache_creation_input_tokens);
+  const unassignedInput = Math.max(0, inputTokens - uncachedInput - cacheReadInput - cacheCreationInput);
+  if (hasExplicitUncachedInput && unassignedInput > 0 && (cacheReadInput > 0 || cacheCreationInput > 0)) {
+    cacheCreationInput += unassignedInput;
+  }
+  return {
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    total_tokens: totalTokens,
+    ...(uncachedInput > 0 ? { uncached_input_tokens: uncachedInput } : {}),
+    ...(cacheCreationInput > 0 ? { cache_creation_input_tokens: cacheCreationInput } : {}),
+    ...(cacheReadInput > 0 ? { cache_read_input_tokens: cacheReadInput } : {}),
+  };
+}
+
+function addIssueTokenUsage(
+  left: RuntimeIssueTokenUsage | null | undefined,
+  right: RuntimeIssueTokenUsage | null | undefined,
+): RuntimeIssueTokenUsage | null {
+  const base = copyIssueTokenUsage(left);
+  const delta = copyIssueTokenUsage(right);
+  if (!base) {
+    return delta;
+  }
+  if (!delta) {
+    return base;
+  }
+
+  const uncachedInput = numberOrZero(base.uncached_input_tokens) + numberOrZero(delta.uncached_input_tokens);
+  const cacheCreationInput = numberOrZero(base.cache_creation_input_tokens) + numberOrZero(delta.cache_creation_input_tokens);
+  const cacheReadInput = numberOrZero(base.cache_read_input_tokens) + numberOrZero(delta.cache_read_input_tokens);
+  return {
+    input_tokens: numberOrZero(base.input_tokens) + numberOrZero(delta.input_tokens),
+    output_tokens: numberOrZero(base.output_tokens) + numberOrZero(delta.output_tokens),
+    total_tokens: numberOrZero(base.total_tokens) + numberOrZero(delta.total_tokens),
+    ...(uncachedInput > 0 ? { uncached_input_tokens: uncachedInput } : {}),
+    ...(cacheCreationInput > 0 ? { cache_creation_input_tokens: cacheCreationInput } : {}),
+    ...(cacheReadInput > 0 ? { cache_read_input_tokens: cacheReadInput } : {}),
+  };
+}
+
+function buildTokenUsageLine(locale: RuntimeLocale, tokens: RuntimeIssueTokenUsage | null | undefined): string | null {
+  const usage = copyIssueTokenUsage(tokens);
+  const total = usage ? Math.max(usage.total_tokens, usage.input_tokens + usage.output_tokens) : 0;
+  if (!usage || total <= 0) {
+    return null;
+  }
+
+  const cacheRead = numberOrZero(usage.cache_read_input_tokens);
+  const uncachedInput = Math.max(0, usage.input_tokens - cacheRead);
+  const label = textForLocale(locale, 'Token 消耗', 'Tokens');
+  const outputLabel = textForLocale(locale, '输出', 'output');
+  const inputEquationParts = [
+    `${textForLocale(locale, '未命中', 'uncached')} ${formatTokenNumber(uncachedInput)}`,
+    cacheRead > 0 ? `${textForLocale(locale, '缓存读取', 'cache read')} ${formatTokenNumber(cacheRead)}` : null,
+  ].filter(Boolean);
+  const inputBreakdown = `${textForLocale(locale, '输入总计', 'input total')} ${formatTokenNumber(usage.input_tokens)} = ${inputEquationParts.join(' + ')}`;
+
+  return `${label}: ${formatTokenNumber(total)} (${inputBreakdown}, ${outputLabel} ${formatTokenNumber(usage.output_tokens)})`;
+}
+
+function buildLifecycleMessage(
+  issue: RuntimeIssueView,
+  notificationClass: LifecycleNotificationClass,
+  tokenUsage?: RuntimeIssueTokenUsage | null,
+): BotTransportMessage {
   const locale = issueLocale(issue);
   const headline = notificationClass === 'retrying'
     ? textForLocale(locale, `SymHarix 重试中 · ${issue.identifier}`, `SymHarix retrying · ${issue.identifier}`)
@@ -198,10 +308,14 @@ function buildLifecycleMessage(issue: RuntimeIssueView, notificationClass: Lifec
   const failureReason = notificationClass === 'failed'
     ? compactLifecycleText(issue.delivery_summary, 260)
     : null;
+  const tokenUsageLine = notificationClass === 'done'
+    ? buildTokenUsageLine(locale, tokenUsage ?? issue.usage ?? issue.session?.tokens)
+    : null;
   const lines = [
     headline,
     `${issue.title}`,
     summary,
+    tokenUsageLine,
     failureReason ? `${textForLocale(locale, '失败原因', 'Failure reason')}：${failureReason}` : null,
     `phase ${issue.phase} · tracker ${issue.tracker_state} · orchestrator ${issue.orchestrator_state || 'unknown'}`,
     issue.delivery_code ? `delivery ${issue.delivery_code}` : null,
@@ -232,6 +346,7 @@ export class BotFollowupService {
   private readonly lifecycleDigestsInFlight = new Set<string>();
   private readonly governanceCardsInFlight = new Set<string>();
   private readonly runtimeIssueCardsInFlight = new Set<string>();
+  private readonly issueTokenSnapshots = new Map<string, Map<string, RuntimeIssueTokenUsage>>();
 
   constructor(
     private readonly runtime: RuntimeControlPlane,
@@ -256,6 +371,7 @@ export class BotFollowupService {
     this.governanceEventKeys.clear();
     this.governanceCardsInFlight.clear();
     this.runtimeIssueCardsInFlight.clear();
+    this.issueTokenSnapshots.clear();
   }
 
   registerOrigin(params: {
@@ -281,7 +397,9 @@ export class BotFollowupService {
     }
 
     if (event.type === 'issue') {
+      this.rememberIssueTokens(event.data);
       const threadIssue = this.buildThreadIssue(event.data);
+      this.rememberIssueTokens(threadIssue);
       const recipients = this.collectRecipients(threadIssue.issue_id);
       if (recipients.length === 0) {
         return;
@@ -540,6 +658,61 @@ export class BotFollowupService {
     return Boolean(this.options.supervisorSessionRepository?.findByRootIssueId(issue.issue_id));
   }
 
+  private rememberIssueTokens(issue: RuntimeIssueView): void {
+    if (!issue.session) {
+      return;
+    }
+    const tokens = copyIssueTokenUsage(issue.session.tokens);
+    const sessionKey = this.issueSessionTokenKey(issue);
+    if (tokens && sessionKey) {
+      let sessionSnapshots = this.issueTokenSnapshots.get(issue.issue_id);
+      if (!sessionSnapshots) {
+        sessionSnapshots = new Map<string, RuntimeIssueTokenUsage>();
+        this.issueTokenSnapshots.set(issue.issue_id, sessionSnapshots);
+      }
+      sessionSnapshots.set(sessionKey, tokens);
+    }
+  }
+
+  private latestIssueTokens(issue: RuntimeIssueView): RuntimeIssueTokenUsage | null {
+    const issueUsage = copyIssueTokenUsage(issue.usage);
+    if (issueUsage && Math.max(issueUsage.total_tokens, issueUsage.input_tokens + issueUsage.output_tokens) > 0) {
+      return issueUsage;
+    }
+
+    const sessionSnapshots = this.issueTokenSnapshots.get(issue.issue_id);
+    let total: RuntimeIssueTokenUsage | null = null;
+    for (const tokens of sessionSnapshots?.values() ?? []) {
+      total = addIssueTokenUsage(total, tokens);
+    }
+
+    const currentSessionKey = this.issueSessionTokenKey(issue);
+    const currentTokens = copyIssueTokenUsage(issue.session?.tokens);
+    if (
+      currentTokens &&
+      (!sessionSnapshots || !currentSessionKey || !sessionSnapshots.has(currentSessionKey))
+    ) {
+      total = addIssueTokenUsage(total, currentTokens);
+    }
+
+    return total;
+  }
+
+  private issueSessionTokenKey(issue: RuntimeIssueView): string | null {
+    if (!issue.session) {
+      return null;
+    }
+    const sessionId = issue.session.session_id?.trim();
+    if (sessionId) {
+      return `${issue.phase}:${sessionId}`;
+    }
+    return [
+      issue.phase,
+      issue.session.stage ?? 'unknown-stage',
+      issue.session.started_at ?? issue.session.last_event_at ?? 'unknown-start',
+    ].join(':');
+  }
+
   private hasActiveGovernanceCard(recipients: BotRecipient[], issueId: string): boolean {
     if (!this.messageStates) {
       return false;
@@ -643,7 +816,7 @@ export class BotFollowupService {
     issue: RuntimeIssueView,
     notificationClass: LifecycleNotificationClass,
   ): Promise<void> {
-    const message = buildLifecycleMessage(issue, notificationClass);
+    const message = buildLifecycleMessage(issue, notificationClass, this.latestIssueTokens(issue));
 
     await Promise.allSettled(recipients.map(async (recipient) => {
       const notifier = this.notifiers[recipient.transport];
@@ -896,12 +1069,13 @@ export class BotFollowupService {
   }
 
   private async upsertRuntimeIssueCards(recipients: BotRecipient[], issue: RuntimeIssueView): Promise<void> {
-    if (!this.messageStates || !shouldRefreshRuntimeIssueCard(issue)) {
+    if (!this.messageStates || !shouldRefreshExistingRuntimeIssueCard(issue)) {
       return;
     }
 
     const message = buildRuntimeIssueCardMessage(issue);
     const materialKey = message.media_key ?? `runtime_issue_card|${issue.identifier}|${issue.updated_at}`;
+    const cardState = runtimeIssueCardState(issue);
 
     await Promise.allSettled(recipients.map(async (recipient) => {
       const notifier = this.notifiers[recipient.transport];
@@ -924,6 +1098,9 @@ export class BotFollowupService {
         conversation_id: recipient.conversation_id,
         issue_id: issue.issue_id,
       }) ?? null;
+      if (!existing && !shouldRefreshRuntimeIssueCard(issue)) {
+        return;
+      }
       if (!existing && this.hasActiveRuntimeIssueCard(recipient)) {
         return;
       }
@@ -931,7 +1108,7 @@ export class BotFollowupService {
       if (
         existing?.card_kind === 'runtime_issue' &&
         existing.card_key === materialKey &&
-        existing.card_state === 'open'
+        existing.card_state === cardState
       ) {
         return;
       }
@@ -961,7 +1138,7 @@ export class BotFollowupService {
               issue_identifier: issue.identifier,
               card_kind: 'runtime_issue',
               card_key: materialKey,
-              card_state: 'open',
+              card_state: cardState,
             });
             this.recordTransportEvent({
               recipient,
@@ -982,7 +1159,7 @@ export class BotFollowupService {
                 issue_identifier: issue.identifier,
                 card_kind: 'runtime_issue',
                 card_key: materialKey,
-                card_state: 'open',
+                card_state: cardState,
               });
               this.recordTransportEvent({
                 recipient,
@@ -1022,7 +1199,7 @@ export class BotFollowupService {
           message_id: messageRef.provider_message_id,
           card_kind: 'runtime_issue',
           card_key: materialKey,
-          card_state: 'open',
+          card_state: cardState,
         });
         this.recordTransportEvent({
           recipient,
