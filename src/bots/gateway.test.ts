@@ -2,8 +2,9 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { DefaultBotGateway } from './gateway';
 import { BotFollowupRepairService } from './followupRepair';
-import type { RuntimeControlPlane } from '../runtime/types';
+import type { RuntimeControlPlane, RuntimeIssueView } from '../runtime/types';
 import {
+  BotConversationFocusRepository,
   BotTransportEventRepository,
   BotConversationPreferenceRepository,
   BotIssueFollowupRepository,
@@ -4196,6 +4197,97 @@ describe('DefaultBotGateway', () => {
       conversation_id: '42',
       issue_id: 'unknown',
     })).toBeNull();
+
+    db.close();
+  });
+
+  test('localizes stale pending callback recovery from the focused English issue', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const followupMessageStates = new BotFollowupMessageStateRepository(db);
+    const conversationFocuses = new BotConversationFocusRepository(db);
+    const baseRuntime = createRuntimeControlPlane();
+    const englishIssue: RuntimeIssueView = {
+      ...baseRuntime.getOverview().issues[0]!,
+      issue_id: 'issue-en',
+      work_item_id: 'issue-en',
+      identifier: 'INT-EN',
+      title: 'Create a new issue to update the output of myworld.py',
+      supervisor_locale: 'en',
+    };
+    const runtime: RuntimeControlPlane = {
+      ...baseRuntime,
+      getOverview: () => ({
+        ...baseRuntime.getOverview(),
+        issues: [englishIssue],
+      }),
+      getIssue: (id: string) => ['issue-en', 'INT-EN'].includes(id) ? englishIssue : baseRuntime.getIssue(id),
+    };
+    conversationFocuses.upsert({
+      transport: 'telegram',
+      conversation_id: '42',
+      issue_id: englishIssue.issue_id,
+      issue_identifier: englishIssue.identifier,
+      repo_ref: englishIssue.github_repo,
+      source: 'callback',
+    });
+
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body || '{}')),
+      });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 101 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      runtime,
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        followupMessageStateRepository: followupMessageStates,
+        conversationFocusRepository: conversationFocuses,
+      },
+    );
+
+    const result = await gateway.handleTelegramWebhook(
+      {
+        callback_query: {
+          id: 'callback-stale',
+          data: 'pending|confirm',
+          message: {
+            chat: { id: 42 },
+            message_id: 101,
+            text: '确认 / 取消',
+          },
+          from: { id: 9, username: 'alice' },
+        },
+      } as any,
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(result.status).toBe(200);
+    expect(requests.find((request) => request.url.includes('answerCallbackQuery'))?.body.text).toBe('This card expired');
+    const editRequest = requests.find((request) => request.url.includes('editMessageText'));
+    expect(String(editRequest?.body.text)).toContain('This governance card has expired');
+    expect(String(editRequest?.body.text)).not.toMatch(/[\u3400-\u9fff]/);
 
     db.close();
   });

@@ -468,6 +468,9 @@ export interface BotIssueContextView {
       input_tokens: number;
       output_tokens: number;
       total_tokens: number;
+      uncached_input_tokens?: number;
+      cache_creation_input_tokens?: number;
+      cache_read_input_tokens?: number;
     };
     recent_tools: Array<{
       tool_name: string;
@@ -483,6 +486,14 @@ export interface BotIssueContextView {
       status: string;
       timestamp: string;
     }>;
+  } | null;
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    uncached_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
   } | null;
   session_stage: string | null;
   session_message: string | null;

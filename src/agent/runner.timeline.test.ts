@@ -154,6 +154,71 @@ describe('AgentRunner timeline events', () => {
     expect(child.stdin.writes[0]).toContain('"method":"turn/start"');
   });
 
+  test('preserves cached token fields from turn completion messages', async () => {
+    const runner = new AgentRunner({
+      codexCommand: 'node ./scripts/claude-adapter.cjs',
+      turnTimeoutMs: 5000,
+      readTimeoutMs: 1000,
+      stallTimeoutMs: 5000,
+      projectRoot: process.cwd(),
+    });
+    const child = createFakeChildProcess();
+    const events: Array<{ event: string; usage?: unknown }> = [];
+
+    const resultPromise = runner.runTurn(
+      child,
+      'thread-1',
+      'hello',
+      'INT-1: Example',
+      process.cwd(),
+      (event) => events.push({ event: event.event, usage: event.usage })
+    );
+
+    queueMicrotask(() => {
+      child.stdout.emit(
+        'data',
+        Buffer.from(
+          `${JSON.stringify({
+            method: 'turn/completed',
+            result: {
+              turn: {
+                id: 'adapter-turn-1',
+                api_calls: 2,
+                tokens: {
+                  input: 650,
+                  output: 50,
+                  total: 700,
+                  uncached_input: 100,
+                  cache_creation_input: 150,
+                  cache_read_input: 400,
+                },
+              },
+            },
+          })}\n`
+        )
+      );
+    });
+
+    const result = await resultPromise;
+
+    expect(result.tokens).toEqual({
+      input: 650,
+      output: 50,
+      total: 700,
+      uncached_input: 100,
+      cache_creation_input: 150,
+      cache_read_input: 400,
+    });
+    expect(events.at(-1)?.usage).toEqual({
+      input_tokens: 650,
+      output_tokens: 50,
+      total_tokens: 700,
+      uncached_input_tokens: 100,
+      cache_creation_input_tokens: 150,
+      cache_read_input_tokens: 400,
+    });
+  });
+
   test('round-trips approval requests and passes timeline/transcript state to the runtime handler', async () => {
     const runner = new AgentRunner({
       codexCommand: 'node ./scripts/claude-adapter.cjs',

@@ -134,10 +134,15 @@ export interface RuntimeSessionView {
     input_tokens: number;
     output_tokens: number;
     total_tokens: number;
+    uncached_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
   };
   recent_tools: RuntimeToolActivity[];
   recent_files: RuntimeFileActivity[];
 }
+
+export type RuntimeIssueTokenUsage = RuntimeSessionView['tokens'];
 
 export type RuntimeComplexityLevel = 'L1' | 'L2' | 'L3' | 'L4';
 
@@ -180,6 +185,7 @@ export interface RuntimeIssueView {
   active_pr_number: number | null;
   supervisor_locale?: RuntimeLocale | null;
   session: RuntimeSessionView | null;
+  usage?: RuntimeIssueTokenUsage | null;
   complexity?: RuntimeComplexityLevel;
   round?: RuntimeRoundView;
   roundGoal?: string;

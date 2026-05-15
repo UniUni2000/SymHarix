@@ -88,7 +88,7 @@ import {
   createSupervisorCcAdvisorFromEnv,
   type SupervisorCcAdvisor,
 } from '../supervisor/ccAdvisor';
-import { inferRuntimeLocaleFromText } from '../i18n/locale';
+import { inferRuntimeLocaleFromText, type RuntimeLocale } from '../i18n/locale';
 import {
   createSupervisorAgentFromEnv,
   shouldUseReadOnlyClaudeForText,
@@ -105,6 +105,16 @@ import type {
 
 function isEnglishRuntimeIssue(issue: RuntimeIssueView | null | undefined): boolean {
   return issue?.supervisor_locale === 'en';
+}
+
+function issueRuntimeLocale(issue: RuntimeIssueView | null | undefined): RuntimeLocale | null {
+  return issue?.supervisor_locale === 'en' || issue?.supervisor_locale === 'zh'
+    ? issue.supervisor_locale
+    : null;
+}
+
+function textForLocale(locale: RuntimeLocale | null | undefined, zh: string, en: string): string {
+  return locale === 'en' ? en : zh;
 }
 
 function textForIssueLocale(issue: RuntimeIssueView | null | undefined, zh: string, en: string): string {
@@ -2167,11 +2177,22 @@ export class DefaultBotGateway implements BotGateway {
         if (runtimeResult) {
           return runtimeResult;
         }
+        const locale = this.resolveTelegramCallbackLocale({
+          context,
+          issue,
+          existingCardState,
+          parsed,
+          originalMessageText,
+        });
         return {
           outbound: {
-            text: '这张治理卡已经失效，请直接发送“现在是什么单子？”或重新查看当前待处理线程。',
+            text: textForLocale(
+              locale,
+              '这张治理卡已经失效，请直接发送“现在是什么单子？”或重新查看当前待处理线程。',
+              'This governance card has expired. Send "what issue is active?" or reopen the current pending thread.',
+            ),
           },
-          toastText: '这张卡已失效',
+          toastText: textForLocale(locale, '这张卡已失效', 'This card expired'),
           issue: null,
           cardState: 'resolved',
           cardKey: 'stale_pending_confirm',
@@ -2225,11 +2246,22 @@ export class DefaultBotGateway implements BotGateway {
         if (runtimeResult) {
           return runtimeResult;
         }
+        const locale = this.resolveTelegramCallbackLocale({
+          context,
+          issue,
+          existingCardState,
+          parsed,
+          originalMessageText,
+        });
         return {
           outbound: {
-            text: '这张治理卡已经失效，不需要再取消了。请直接发送“现在是什么单子？”查看当前线程。',
+            text: textForLocale(
+              locale,
+              '这张治理卡已经失效，不需要再取消了。请直接发送“现在是什么单子？”查看当前线程。',
+              'This governance card has expired; there is nothing left to cancel. Send "what issue is active?" to view the current thread.',
+            ),
           },
-          toastText: '这张卡已失效',
+          toastText: textForLocale(locale, '这张卡已失效', 'This card expired'),
           issue: null,
           cardState: 'resolved',
           cardKey: 'stale_pending_cancel',
@@ -2687,13 +2719,53 @@ export class DefaultBotGateway implements BotGateway {
   }
 
   private buildGovernanceQuickActionSummary(issue: RuntimeIssueView, action: GovernanceQuickActionSpec): string {
+    const locale = issueRuntimeLocale(issue);
     return [
-      `操作：${action.label}`,
-      `Issue：${issue.identifier}`,
-      issue.github_repo ? `仓库：${issue.github_repo}` : null,
-      action.kind === 'execute_suggestion' ? `建议：${action.suggestion_type} · ${action.suggestion_id}` : null,
-      '确认后会立即执行这条治理动作。',
+      textForLocale(locale, `操作：${action.label}`, `Action: ${action.label}`),
+      `Issue: ${issue.identifier}`,
+      issue.github_repo ? textForLocale(locale, `仓库：${issue.github_repo}`, `Repository: ${issue.github_repo}`) : null,
+      action.kind === 'execute_suggestion'
+        ? textForLocale(locale, `建议：${action.suggestion_type} · ${action.suggestion_id}`, `Suggestion: ${action.suggestion_type} · ${action.suggestion_id}`)
+        : null,
+      textForLocale(locale, '确认后会立即执行这条治理动作。', 'This governance action will run immediately after confirmation.'),
     ].filter(Boolean).join('\n');
+  }
+
+  private resolveTelegramCallbackLocale(params: {
+    context: BotCommandContext;
+    issue: RuntimeIssueView | null;
+    existingCardState: ReturnType<BotFollowupMessageStateRepository['findByConversationIssue']> | null;
+    parsed: {
+      issueIdentifier: string | null;
+    };
+    originalMessageText: string | null;
+  }): RuntimeLocale {
+    const directLocale = issueRuntimeLocale(params.issue);
+    if (directLocale) {
+      return directLocale;
+    }
+
+    const conversationFocus = this.conversationFocuses?.findByConversation({
+      transport: params.context.transport,
+      conversation_id: params.context.recipient.conversation_id,
+    });
+    const issueCandidates = [
+      params.existingCardState?.issue_id ?? null,
+      params.existingCardState?.issue_identifier ?? null,
+      params.parsed.issueIdentifier,
+      conversationFocus?.issue_id ?? null,
+      conversationFocus?.issue_identifier ?? null,
+    ].filter((value, index, all): value is string => Boolean(value) && all.indexOf(value) === index);
+
+    for (const issueId of issueCandidates) {
+      const locale = issueRuntimeLocale(this.runtime.getIssue(issueId));
+      if (locale) {
+        return locale;
+      }
+    }
+
+    const originalText = params.originalMessageText?.trim();
+    return originalText ? inferRuntimeLocaleFromText(originalText) : 'zh';
   }
 
   private resolvePendingActionForCallback(

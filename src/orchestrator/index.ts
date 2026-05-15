@@ -22,6 +22,7 @@ import {
   FitnessSignal,
   IntakeCriticAssessment,
   Issue,
+  LlmTokenUsage,
   PendingRuntimeRequest,
   ResolvedRepositoryRoute,
   ResolvedRepositoryHarness,
@@ -184,6 +185,9 @@ export interface OrchestratorStateSnapshot {
       input_tokens: number;
       output_tokens: number;
       total_tokens: number;
+      uncached_input_tokens?: number;
+      cache_creation_input_tokens?: number;
+      cache_read_input_tokens?: number;
     };
   }>;
   retrying: Array<{
@@ -241,6 +245,9 @@ export interface WorkerResult {
     input: number;
     output: number;
     total: number;
+    uncached_input?: number;
+    cache_creation_input?: number;
+    cache_read_input?: number;
   };
   // API call statistics
   claude_api_calls: number;
@@ -515,23 +522,31 @@ export class Orchestrator extends EventEmitter {
   getStateSnapshot(): OrchestratorStateSnapshot {
     const now = new Date();
 
-    const running = Array.from(this.state.running.values()).map(entry => ({
-      issue_id: entry.issue.id,
-      issue_identifier: entry.identifier,
-      state: entry.issue.state,
-      stage: entry.stage,
-      session_id: entry.session_id,
-      turn_count: entry.turn_count,
-      last_event: entry.last_codex_event,
-      last_message: entry.last_codex_message,
-      started_at: entry.started_at.toISOString(),
-      last_event_at: entry.last_codex_timestamp?.toISOString() || null,
-      tokens: {
-        input_tokens: entry.codex_input_tokens,
-        output_tokens: entry.codex_output_tokens,
-        total_tokens: entry.codex_total_tokens
-      }
-    }));
+    const running = Array.from(this.state.running.values()).map(entry => {
+      const uncachedInputTokens = entry.codex_uncached_input_tokens ?? 0;
+      const cacheCreationInputTokens = entry.codex_cache_creation_input_tokens ?? 0;
+      const cacheReadInputTokens = entry.codex_cache_read_input_tokens ?? 0;
+      return {
+        issue_id: entry.issue.id,
+        issue_identifier: entry.identifier,
+        state: entry.issue.state,
+        stage: entry.stage,
+        session_id: entry.session_id,
+        turn_count: entry.turn_count,
+        last_event: entry.last_codex_event,
+        last_message: entry.last_codex_message,
+        started_at: entry.started_at.toISOString(),
+        last_event_at: entry.last_codex_timestamp?.toISOString() || null,
+        tokens: {
+          input_tokens: entry.codex_input_tokens,
+          output_tokens: entry.codex_output_tokens,
+          total_tokens: entry.codex_total_tokens,
+          ...(uncachedInputTokens > 0 ? { uncached_input_tokens: uncachedInputTokens } : {}),
+          ...(cacheCreationInputTokens > 0 ? { cache_creation_input_tokens: cacheCreationInputTokens } : {}),
+          ...(cacheReadInputTokens > 0 ? { cache_read_input_tokens: cacheReadInputTokens } : {}),
+        },
+      };
+    });
 
     const retrying = Array.from(this.state.retry_attempts.values()).map(entry => ({
       issue_id: entry.issue_id,
@@ -2940,6 +2955,9 @@ export class Orchestrator extends EventEmitter {
         codex_input_tokens: 0,
         codex_output_tokens: 0,
         codex_total_tokens: 0,
+        codex_uncached_input_tokens: 0,
+        codex_cache_creation_input_tokens: 0,
+        codex_cache_read_input_tokens: 0,
         last_reported_input_tokens: 0,
         last_reported_output_tokens: 0,
         last_reported_total_tokens: 0,
@@ -2974,6 +2992,58 @@ export class Orchestrator extends EventEmitter {
       linear_api_calls: 0,
       github_api_calls: 0
     };
+  }
+
+  private addTokenTotals(
+    current: WorkerResult['tokens'],
+    delta: WorkerResult['tokens'] | LlmTokenUsage | null | undefined,
+  ): WorkerResult['tokens'] {
+    if (!delta) {
+      return current;
+    }
+
+    const uncachedInput = (current.uncached_input || 0) + (delta.uncached_input || 0);
+    const cacheCreationInput = (current.cache_creation_input || 0) + (delta.cache_creation_input || 0);
+    const cacheReadInput = (current.cache_read_input || 0) + (delta.cache_read_input || 0);
+    return {
+      input: current.input + (delta.input || 0),
+      output: current.output + (delta.output || 0),
+      total: current.total + (delta.total || 0),
+      ...(uncachedInput > 0 ? { uncached_input: uncachedInput } : {}),
+      ...(cacheCreationInput > 0 ? { cache_creation_input: cacheCreationInput } : {}),
+      ...(cacheReadInput > 0 ? { cache_read_input: cacheReadInput } : {}),
+    };
+  }
+
+  private combineTokenUsage(usages: Array<WorkerResult['tokens'] | LlmTokenUsage> | undefined): WorkerResult['tokens'] | null {
+    if (!usages || usages.length === 0) {
+      return null;
+    }
+
+    return usages.reduce<WorkerResult['tokens']>(
+      (total, usage) => this.addTokenTotals(total, usage),
+      { input: 0, output: 0, total: 0 },
+    );
+  }
+
+  private addTokensToRunningEntry(
+    runningEntry: RunningEntry,
+    tokens: WorkerResult['tokens'] | LlmTokenUsage | null | undefined,
+  ): void {
+    if (!tokens) {
+      return;
+    }
+
+    runningEntry.codex_input_tokens += tokens.input || 0;
+    runningEntry.codex_output_tokens += tokens.output || 0;
+    runningEntry.codex_total_tokens += tokens.total || 0;
+    runningEntry.codex_uncached_input_tokens =
+      (runningEntry.codex_uncached_input_tokens ?? 0) + (tokens.uncached_input || 0);
+    runningEntry.codex_cache_creation_input_tokens =
+      (runningEntry.codex_cache_creation_input_tokens ?? 0) + (tokens.cache_creation_input || 0);
+    runningEntry.codex_cache_read_input_tokens =
+      (runningEntry.codex_cache_read_input_tokens ?? 0) + (tokens.cache_read_input || 0);
+    this.emit('state:changed', this.getStateSnapshot());
   }
 
   private registerWorkerProcess(issueId: string, child: cp.ChildProcess): void {
@@ -6102,9 +6172,14 @@ export class Orchestrator extends EventEmitter {
 
               // Update token counts
               if (event.event === 'turn_completed' && event.usage) {
-                runningEntry.codex_input_tokens += event.usage.input_tokens || 0;
-                runningEntry.codex_output_tokens += event.usage.output_tokens || 0;
-                runningEntry.codex_total_tokens += event.usage.total_tokens || 0;
+                this.addTokensToRunningEntry(runningEntry, {
+                  input: event.usage.input_tokens || 0,
+                  output: event.usage.output_tokens || 0,
+                  total: event.usage.total_tokens || 0,
+                  ...(event.usage.uncached_input_tokens ? { uncached_input: event.usage.uncached_input_tokens } : {}),
+                  ...(event.usage.cache_creation_input_tokens ? { cache_creation_input: event.usage.cache_creation_input_tokens } : {}),
+                  ...(event.usage.cache_read_input_tokens ? { cache_read_input: event.usage.cache_read_input_tokens } : {}),
+                });
               }
             }
 
@@ -6121,15 +6196,21 @@ export class Orchestrator extends EventEmitter {
             effectiveHarness: governedState.effectiveHarness,
             transcript: runtimeState.transcript,
             timeline: runtimeState.timeline,
+          }).then((response) => {
+            const supervisorTokens = this.combineTokenUsage(response.token_usage);
+            if (supervisorTokens) {
+              result.tokens = this.addTokenTotals(result.tokens, supervisorTokens);
+              const activeRunningEntry = this.state.running.get(issue.id) ?? runningEntry;
+              if (activeRunningEntry) {
+                this.addTokensToRunningEntry(activeRunningEntry, supervisorTokens);
+              }
+            }
+            return response;
           })
         );
 
         result.turns = turnNumber;
-        result.tokens = {
-          input: result.tokens.input + turnResult.tokens.input,
-          output: result.tokens.output + turnResult.tokens.output,
-          total: result.tokens.total + turnResult.tokens.total,
-        };
+        result.tokens = this.addTokenTotals(result.tokens, turnResult.tokens);
         result.claude_api_calls += turnResult.claude_api_calls || 0;
 
         const turnTouchedPaths = deriveTouchedPathsFromTimeline(turnResult.timeline);
@@ -6228,6 +6309,14 @@ export class Orchestrator extends EventEmitter {
             transcript: turnResult.transcript,
             timeline: turnResult.timeline,
           });
+          const supervisorTokens = this.combineTokenUsage(nextAction.token_usage);
+          if (supervisorTokens) {
+            result.tokens = this.addTokenTotals(result.tokens, supervisorTokens);
+            const activeRunningEntry = this.state.running.get(issue.id) ?? runningEntry;
+            if (activeRunningEntry) {
+              this.addTokensToRunningEntry(activeRunningEntry, supervisorTokens);
+            }
+          }
 
           if (nextAction.kind === 'continue') {
             if (turnNumber >= turnBudget) {
@@ -6311,6 +6400,9 @@ export class Orchestrator extends EventEmitter {
           codex_input_tokens: 0,
           codex_output_tokens: 0,
           codex_total_tokens: 0,
+          codex_uncached_input_tokens: 0,
+          codex_cache_creation_input_tokens: 0,
+          codex_cache_read_input_tokens: 0,
           last_reported_input_tokens: 0,
           last_reported_output_tokens: 0,
           last_reported_total_tokens: 0,
@@ -6968,6 +7060,7 @@ export class Orchestrator extends EventEmitter {
       }
 
       this.setRunningStage(issueId, 'completed');
+      this.emit('state:changed', this.getStateSnapshot());
       this.state.running.delete(issueId);
       this.state.claimed.delete(issueId);
 
@@ -6995,12 +7088,21 @@ export class Orchestrator extends EventEmitter {
 
       // Print completion report with API statistics
       const runtimeSeconds = (Date.now() - runningEntry.started_at.getTime()) / 1000;
+      const cacheReadInput = result.tokens.cache_read_input || 0;
+      const uncachedInput = Math.max(0, result.tokens.input - cacheReadInput);
+      const formatTokenCount = (value: number) => Math.trunc(value).toLocaleString('en-US');
+      const inputEquationParts = [
+        `uncached ${formatTokenCount(uncachedInput)}`,
+        cacheReadInput > 0 ? `cache read ${formatTokenCount(cacheReadInput)}` : null,
+      ].filter(Boolean);
+      const tokenBreakdown =
+        `input total ${formatTokenCount(result.tokens.input)} = ${inputEquationParts.join(' + ')}, output ${formatTokenCount(result.tokens.output)}`;
       console.log(`
 ========================================
 [ISSUE COMPLETE] ${identifier}
 ----------------------------------------
   Turns:        ${result.turns}
-  Tokens:       ${result.tokens.total} (input: ${result.tokens.input}, output: ${result.tokens.output})
+  Tokens:       ${formatTokenCount(result.tokens.total)} (${tokenBreakdown})
   Claude API:   ${result.claude_api_calls} calls
   Linear API:   ${result.linear_api_calls} calls
   GitHub API:   ${result.github_api_calls} calls

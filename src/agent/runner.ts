@@ -65,6 +65,9 @@ export interface TurnResult {
     input: number;
     output: number;
     total: number;
+    uncached_input?: number;
+    cache_creation_input?: number;
+    cache_read_input?: number;
   };
   claude_api_calls: number;
   timeline: AgentTimelinePayload[];
@@ -249,7 +252,65 @@ export class AgentRunner extends EventEmitter {
    * Extract token usage from app-server message
    * Section 13.5: Token Accounting
    */
-  private extractTokens(msg: CodexMessage): { input: number; output: number; total: number } | null {
+  private usageNumber(value: unknown): number {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
+  }
+
+  private nestedUsageNumberTotal(value: unknown): number {
+    if (!value || typeof value !== 'object') {
+      return 0;
+    }
+
+    return Object.values(value).reduce(
+      (total, part) => total + this.usageNumber(part),
+      0,
+    );
+  }
+
+  private cacheCreationInputFromUsage(usage: Record<string, unknown>): number {
+    return this.usageNumber(
+      usage.cache_creation_input_tokens ??
+        usage.cacheCreationInputTokens ??
+        usage.cache_creation_input ??
+        usage.cacheCreationInput,
+    ) || this.nestedUsageNumberTotal(usage.cache_creation ?? usage.cacheCreation);
+  }
+
+  private buildTokenUsage(parts: {
+    uncachedInput?: unknown;
+    cacheCreationInput?: unknown;
+    cacheReadInput?: unknown;
+    input?: unknown;
+    output?: unknown;
+    total?: unknown;
+  }): TurnResult['tokens'] {
+    const cacheCreationInput = this.usageNumber(parts.cacheCreationInput);
+    const cacheReadInput = this.usageNumber(parts.cacheReadInput);
+    const providedInput = this.usageNumber(parts.input);
+    const hasCacheInput = cacheCreationInput > 0 || cacheReadInput > 0;
+    const hasExplicitUncachedInput = parts.uncachedInput !== undefined;
+    const uncachedInput = parts.uncachedInput !== undefined
+      ? this.usageNumber(parts.uncachedInput)
+      : hasCacheInput
+        ? providedInput
+        : Math.max(0, providedInput - cacheCreationInput - cacheReadInput);
+    const input = hasExplicitUncachedInput || !hasCacheInput
+      ? providedInput || (uncachedInput + cacheCreationInput + cacheReadInput)
+      : uncachedInput + cacheCreationInput + cacheReadInput;
+    const output = this.usageNumber(parts.output);
+    const total = Math.max(this.usageNumber(parts.total), input + output);
+    return {
+      input,
+      output,
+      total,
+      ...(cacheCreationInput > 0 || cacheReadInput > 0 ? { uncached_input: uncachedInput } : {}),
+      ...(cacheCreationInput > 0 ? { cache_creation_input: cacheCreationInput } : {}),
+      ...(cacheReadInput > 0 ? { cache_read_input: cacheReadInput } : {}),
+    };
+  }
+
+  private extractTokens(msg: CodexMessage): TurnResult['tokens'] | null {
     // Look for token counts in various payload shapes
 
     // Check msg.params first (standard usage object)
@@ -257,21 +318,27 @@ export class AgentRunner extends EventEmitter {
     if (params) {
       const usage = params.usage as Record<string, unknown> | undefined;
       if (usage) {
-        return {
-          input: (usage.input_tokens as number) || (usage.inputTokens as number) || 0,
-          output: (usage.output_tokens as number) || (usage.outputTokens as number) || 0,
-          total: (usage.total_tokens as number) || (usage.totalTokens as number) || 0
-        };
+        return this.buildTokenUsage({
+          uncachedInput: usage.uncached_input_tokens ?? usage.uncachedInputTokens,
+          cacheCreationInput: this.cacheCreationInputFromUsage(usage),
+          cacheReadInput: usage.cache_read_input_tokens ?? usage.cacheReadInputTokens,
+          input: usage.input_tokens ?? usage.inputTokens,
+          output: usage.output_tokens ?? usage.outputTokens,
+          total: usage.total_tokens ?? usage.totalTokens,
+        });
       }
 
       // Check for tokenUsage nested object
       const tokenUsage = params.tokenUsage as Record<string, unknown> | undefined;
       if (tokenUsage) {
-        return {
-          input: (tokenUsage.inputTokens as number) || 0,
-          output: (tokenUsage.outputTokens as number) || 0,
-          total: (tokenUsage.totalTokens as number) || 0
-        };
+        return this.buildTokenUsage({
+          input: tokenUsage.inputTokens,
+          output: tokenUsage.outputTokens,
+          total: tokenUsage.totalTokens,
+          uncachedInput: tokenUsage.uncachedInputTokens,
+          cacheCreationInput: this.cacheCreationInputFromUsage(tokenUsage),
+          cacheReadInput: tokenUsage.cacheReadInputTokens,
+        });
       }
     }
 
@@ -282,11 +349,14 @@ export class AgentRunner extends EventEmitter {
       if (turn) {
         const turnTokens = turn.tokens as Record<string, number> | undefined;
         if (turnTokens) {
-          return {
-            input: turnTokens.input || 0,
-            output: turnTokens.output || 0,
-            total: turnTokens.total || 0
-          };
+          return this.buildTokenUsage({
+            input: turnTokens.input,
+            output: turnTokens.output,
+            total: turnTokens.total,
+            uncachedInput: turnTokens.uncached_input ?? turnTokens.uncachedInput,
+            cacheCreationInput: turnTokens.cache_creation_input ?? turnTokens.cacheCreationInput,
+            cacheReadInput: turnTokens.cache_read_input ?? turnTokens.cacheReadInput,
+          });
         }
       }
     }
@@ -840,7 +910,7 @@ export class AgentRunner extends EventEmitter {
       let completed = false;
       let cancelled = false;
       let error: string | undefined;
-      let tokens = { input: 0, output: 0, total: 0 };
+      let tokens: TurnResult['tokens'] = { input: 0, output: 0, total: 0 };
       let claudeApiCalls = 0;  // Count each result message as one API call
       const timeline: AgentTimelinePayload[] = [];
       const transcript: TurnTranscriptEntry[] = [];
@@ -935,7 +1005,10 @@ export class AgentRunner extends EventEmitter {
               usage: tokens.total > 0 ? {
                 input_tokens: tokens.input,
                 output_tokens: tokens.output,
-                total_tokens: tokens.total
+                total_tokens: tokens.total,
+                ...(tokens.uncached_input !== undefined ? { uncached_input_tokens: tokens.uncached_input } : {}),
+                ...(tokens.cache_creation_input !== undefined ? { cache_creation_input_tokens: tokens.cache_creation_input } : {}),
+                ...(tokens.cache_read_input !== undefined ? { cache_read_input_tokens: tokens.cache_read_input } : {}),
               } : undefined,
               payload: this.extractEventPayload(msg)
             };
@@ -987,14 +1060,7 @@ export class AgentRunner extends EventEmitter {
             claudeApiCalls = (turnData?.api_calls as number) || 0;
 
             // Extract tokens from adapter's turn data (overrides any tokens from earlier messages)
-            const turnTokens = turnData?.tokens as { input?: number; output?: number; total?: number } | undefined;
-            if (turnTokens) {
-              tokens = {
-                input: turnTokens.input || 0,
-                output: turnTokens.output || 0,
-                total: turnTokens.total || 0
-              };
-            }
+            tokens = this.extractTokens(msg) ?? tokens;
 
             completeTurn({
               success: true,

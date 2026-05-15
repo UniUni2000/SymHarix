@@ -875,8 +875,14 @@ describe('Orchestrator Stability', () => {
 
   it('lets the supervisor continue the native Claude session across multiple turns', async () => {
     const issue = makeIssue({ state: 'Todo' });
-    const ctx = createOrchestrator(issue, { maxTurns: 2 });
+    const ctx = createOrchestrator(issue, { maxTurns: 3 });
     orchestrator = ctx.orchestrator;
+    let capturedResult: WorkerResult | null = null;
+    const originalHandleWorkerExit = (orchestrator as any).handleWorkerExit.bind(orchestrator);
+    (orchestrator as any).handleWorkerExit = mock(async (issueId: string, result: WorkerResult) => {
+      capturedResult = result;
+      return originalHandleWorkerExit(issueId, result);
+    });
 
     ctx.supervisor.decideNextAction = mock(async (_context: unknown) => {
       const callCount = ctx.supervisor.decideNextAction.mock.calls.length;
@@ -884,12 +890,20 @@ describe('Orchestrator Stability', () => {
         return {
           kind: 'continue',
           message: 'Continue with the next concrete implementation step.',
+          token_usage: [{ input: 100, output: 10, total: 110 }],
         };
       }
 
       return {
         kind: 'finish',
         reason: 'Implementation and verification are complete.',
+        token_usage: [{
+          input: 200,
+          output: 20,
+          total: 220,
+          uncached_input: 50,
+          cache_read_input: 150,
+        }],
       };
     });
     (orchestrator as any).supervisor = ctx.supervisor;
@@ -932,6 +946,91 @@ describe('Orchestrator Stability', () => {
     expect(ctx.agentRunner.runTurn).toHaveBeenCalledTimes(2);
     expect(ctx.supervisor.decideNextAction).toHaveBeenCalledTimes(2);
     expect(ctx.agentRunner.runTurn.mock.calls[1]?.[2]).toBe('Continue with the next concrete implementation step.');
+    expect(capturedResult?.tokens).toEqual({
+      input: 320,
+      output: 40,
+      total: 360,
+      uncached_input: 50,
+      cache_read_input: 150,
+    });
+  });
+
+  it('adds supervisor runtime request token usage to the issue worker total', async () => {
+    const issue = makeIssue({ state: 'Todo' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+    let capturedResult: WorkerResult | null = null;
+    const originalHandleWorkerExit = (orchestrator as any).handleWorkerExit.bind(orchestrator);
+    (orchestrator as any).handleWorkerExit = mock(async (issueId: string, result: WorkerResult) => {
+      capturedResult = result;
+      return originalHandleWorkerExit(issueId, result);
+    });
+
+    ctx.supervisor.respondToRuntimeRequest = mock(async () => ({
+      response: { behavior: 'allow', updatedInput: {} },
+      token_usage: [{
+        input: 40,
+        output: 5,
+        total: 45,
+        uncached_input: 10,
+        cache_creation_input: 30,
+      }],
+    }));
+    (orchestrator as any).supervisor = ctx.supervisor;
+
+    ctx.agentRunner.runTurn = mock(async (...args: unknown[]) => {
+      const onRuntimeRequest = args[6] as (
+        request: unknown,
+        state: { timeline: unknown[]; transcript: unknown[] },
+      ) => Promise<unknown>;
+      await onRuntimeRequest({
+        kind: 'approval',
+        method: 'approval/request',
+        request_id: 'runtime-1',
+        turn: 1,
+        raw: {
+          subtype: 'can_use_tool',
+          tool_name: 'Bash',
+          tool_use_id: 'tool-1',
+          input: { command: 'npm test' },
+        },
+        summary: {
+          title: 'Permission request for Bash',
+          message: 'Run npm test',
+          tool_name: 'Bash',
+          subtype: 'can_use_tool',
+        },
+      }, { timeline: [], transcript: [] });
+      return {
+        success: true,
+        completed: true,
+        cancelled: false,
+        tokens: { input: 10, output: 5, total: 15 },
+        claude_api_calls: 1,
+        timeline: [],
+        transcript: [],
+      };
+    });
+    (orchestrator as any).agentRunner = ctx.agentRunner;
+
+    (orchestrator as any).runCliCommand = mock(async (command: string) => {
+      if (command === 'dispatch') {
+        return { success: true, result: makeCliResult({ final_state: 'In Progress' }) };
+      }
+      return { success: true, result: makeCliResult({ final_state: 'In Review' }) };
+    });
+
+    await (orchestrator as any).dispatchIssue(issue, null);
+    await awaitWorker(orchestrator, issue.id);
+
+    expect(ctx.supervisor.respondToRuntimeRequest).toHaveBeenCalledTimes(1);
+    expect(capturedResult?.tokens).toEqual({
+      input: 50,
+      output: 10,
+      total: 60,
+      uncached_input: 10,
+      cache_creation_input: 30,
+    });
   });
 
   it('records harness setup execution only once per workspace state file', async () => {
@@ -1391,7 +1490,7 @@ describe('Orchestrator Stability', () => {
       console.log = originalLog;
     }
 
-    expect(loggedLines.some((line) => line.includes('Tokens:       45 (input: 30, output: 15)'))).toBe(true);
+    expect(loggedLines.some((line) => line.includes('Tokens:       45 (input total 30 = uncached 30, output 15)'))).toBe(true);
   });
 
   it('finishes cleanly at the turn budget when workspace artifacts indicate completion', async () => {
