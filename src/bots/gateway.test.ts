@@ -2311,6 +2311,68 @@ describe('DefaultBotGateway', () => {
     gateway.dispose();
   });
 
+  test('keeps the runtime view button callback-based when the Mini App public base URL is a temporary trycloudflare host', async () => {
+    const requests: Array<{ url: string; body: FormData }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: init?.body as FormData,
+      });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 335 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(['9']),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+    );
+    (gateway as any).telegramPublicBaseUrl = 'https://fresh.trycloudflare.com';
+
+    await (gateway as any).telegramNotifier.sendMessage(
+      {
+        transport: 'telegram',
+        conversation_id: '42',
+      },
+      {
+        text: 'Issue Card · INT-1',
+        caption: '<b>INT-1 · Gateway test</b>',
+        format: 'telegram_html',
+        media_key: 'issue-card|INT-1|open-ephemeral-fallback',
+        photo: {
+          bytes: new Uint8Array([137, 80, 78, 71]),
+          filename: 'INT-1-card.png',
+          content_type: 'image/png',
+        },
+        action_rows: [
+          [{ label: '刷新卡片', callback_data: 'rt|INT-1|refresh' }],
+          [{ label: '打开运行视图', style: 'primary', web_app: { url: '/runtime/issues/INT-1/app' } }],
+        ],
+      },
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(JSON.parse(String(requests[0]?.body.get('reply_markup')))).toEqual({
+      inline_keyboard: [
+        [{ text: '刷新卡片', callback_data: 'rt|INT-1|refresh' }],
+        [{ text: '打开运行视图', style: 'primary', callback_data: 'rt|INT-1|open' }],
+      ],
+    });
+
+    gateway.dispose();
+  });
+
   test('handles runtime issue card buttons by refreshing the same Telegram card through supervisor runtime', async () => {
     const db = new Database(':memory:');
     initializeSchema(db);
@@ -2553,6 +2615,208 @@ describe('DefaultBotGateway', () => {
         [{ text: '打开运行视图', style: 'primary', url: 'https://app.example.test/runtime/issues/INT-248/app' }],
       ],
     });
+
+    gateway.dispose();
+  });
+
+  test('replaces a temporary trycloudflare card with a fresh preview card and current runtime view', async () => {
+    const requests: Array<{ url: string; body: FormData | Record<string, unknown> }> = [];
+    const runtimeTexts: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const rawBody = init?.body;
+      requests.push({
+        url: String(input),
+        body: rawBody instanceof FormData ? rawBody : JSON.parse(String(rawBody || '{}')),
+      });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 777 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(['9']),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        supervisorAgentRuntimeService: {
+          respond: async ({ text }) => {
+            runtimeTexts.push(text);
+            return {
+              message: 'Issue Card · INT-1',
+              caption: '<b>INT-1 · Fresh card</b>',
+              format: 'telegram_html',
+              media_key: 'issue-card|INT-1|open-ephemeral-replaced',
+              issue_id: 'issue-1',
+              photo: {
+                bytes: new Uint8Array([137, 80, 78, 71]),
+                filename: 'INT-1-fresh-card.png',
+                content_type: 'image/png',
+              },
+              show_caption_above_media: false,
+              action_rows: [
+                [{ label: '打开运行视图', style: 'primary', web_app: { url: '/runtime/issues/INT-1/app' } }],
+                [{ label: '刷新卡片', callback_data: 'rt|INT-1|refresh' }],
+              ],
+            };
+          },
+        } as unknown as SupervisorAgentRuntimeService,
+      },
+    );
+    (gateway as any).telegramPublicBaseUrl = 'https://fresh.trycloudflare.com';
+
+    const result = await gateway.handleTelegramWebhook(
+      {
+        callback_query: {
+          id: 'callback-runtime-open-ephemeral',
+          data: 'rt|INT-1|open',
+          message: {
+            chat: { id: 42 },
+            message_id: 101,
+            caption: 'issue card',
+          },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(result.status).toBe(200);
+    expect(runtimeTexts).toEqual(['INT-1 卡片']);
+    expect(requests).toHaveLength(3);
+    expect(requests[0]?.url).toContain('answerCallbackQuery');
+    expect(String((requests[0]?.body as Record<string, unknown>).text)).toMatch(/正在更新运行卡片|Updating the runtime card/i);
+    const sendPhoto = requests.find((request) => request.url.includes('sendPhoto'));
+    expect(sendPhoto?.body).toBeInstanceOf(FormData);
+    expect(JSON.parse(String((sendPhoto?.body as FormData).get('reply_markup')))).toEqual({
+      inline_keyboard: [
+        [{ text: '打开运行视图', style: 'primary', web_app: { url: 'https://fresh.trycloudflare.com/runtime/issues/INT-1/app' } }],
+        [{ text: '刷新卡片', callback_data: 'rt|INT-1|refresh' }],
+      ],
+    });
+    const deleteRequest = requests.find((request) => request.url.includes('deleteMessage'));
+    expect(deleteRequest?.body).toMatchObject({
+      chat_id: '42',
+      message_id: '101',
+    });
+
+    gateway.dispose();
+  });
+
+  test('deduplicates quick repeated temporary runtime open callbacks for the same stale card', async () => {
+    const requests: Array<{ url: string; body: FormData | Record<string, unknown> }> = [];
+    const runtimeTexts: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const rawBody = init?.body;
+      requests.push({
+        url: String(input),
+        body: rawBody instanceof FormData ? rawBody : JSON.parse(String(rawBody || '{}')),
+      });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 888 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(['9']),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        supervisorAgentRuntimeService: {
+          respond: async ({ text }) => {
+            runtimeTexts.push(text);
+            return {
+              message: 'Issue Card · INT-1',
+              caption: '<b>INT-1 · Fresh card</b>',
+              format: 'telegram_html',
+              media_key: 'issue-card|INT-1|open-ephemeral-deduped',
+              issue_id: 'issue-1',
+              photo: {
+                bytes: new Uint8Array([137, 80, 78, 71]),
+                filename: 'INT-1-deduped-card.png',
+                content_type: 'image/png',
+              },
+              show_caption_above_media: false,
+              action_rows: [
+                [{ label: '打开运行视图', style: 'primary', web_app: { url: '/runtime/issues/INT-1/app' } }],
+                [{ label: '刷新卡片', callback_data: 'rt|INT-1|refresh' }],
+              ],
+            };
+          },
+        } as unknown as SupervisorAgentRuntimeService,
+      },
+    );
+    (gateway as any).telegramPublicBaseUrl = 'https://fresh.trycloudflare.com';
+
+    const firstResult = await gateway.handleTelegramWebhook(
+      {
+        callback_query: {
+          id: 'callback-runtime-open-first',
+          data: 'rt|INT-1|open',
+          message: {
+            chat: { id: 42 },
+            message_id: 101,
+            caption: 'issue card',
+          },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+    const secondResult = await gateway.handleTelegramWebhook(
+      {
+        callback_query: {
+          id: 'callback-runtime-open-second',
+          data: 'rt|INT-1|open',
+          message: {
+            chat: { id: 42 },
+            message_id: 101,
+            caption: 'issue card',
+          },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(firstResult.status).toBe(200);
+    expect(secondResult.status).toBe(200);
+    expect(runtimeTexts).toEqual(['INT-1 卡片']);
+    expect(requests.filter((request) => request.url.includes('sendPhoto'))).toHaveLength(1);
+    expect(requests.filter((request) => request.url.includes('deleteMessage'))).toHaveLength(1);
+    const answerRequests = requests.filter((request) => request.url.includes('answerCallbackQuery'));
+    expect(answerRequests).toHaveLength(2);
+    expect(String((answerRequests[0]?.body as Record<string, unknown>).text)).toMatch(/正在更新运行卡片|Updating the runtime card/i);
+    expect(String((answerRequests[1]?.body as Record<string, unknown>).text)).toMatch(/刚刚更新|just refreshed/i);
 
     gateway.dispose();
   });
@@ -4133,7 +4397,76 @@ describe('DefaultBotGateway', () => {
 
     expect(result.status).toBe(200);
     expect(requests.find((request) => request.url.includes('answerCallbackQuery'))?.body.text).toBe('执行失败，请稍后重试');
-    expect(String(requests.find((request) => request.url.includes('sendMessage'))?.body.text)).toContain('处理 Telegram 按钮时失败');
+    expect(String(requests.find((request) => request.url.includes('sendMessage'))?.body.text)).toBe('这次 Telegram 按钮操作失败了，请稍后重试。');
+  });
+
+  test('localizes callback fallback messages without mixed-language raw errors when answerCallbackQuery returns 400', async () => {
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>;
+      requests.push({ url, body });
+      if (url.includes('answerCallbackQuery')) {
+        return new Response(JSON.stringify({ ok: false, description: 'Bad Request: query is too old' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 101 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const runtime = createRuntimeControlPlane();
+    const issue = {
+      ...runtime.getIssue('INT-1')!,
+      supervisor_locale: 'en' as const,
+    };
+    const gateway = new DefaultBotGateway(
+      {
+        ...runtime,
+        getIssue: (id: string) => ['issue-1', 'INT-1'].includes(id) ? issue : null,
+      },
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(['9']),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+    );
+    (gateway as any).telegramPublicBaseUrl = null;
+
+    const result = await gateway.handleTelegramWebhook(
+      {
+        callback_query: {
+          id: 'callback-runtime-open-400',
+          data: 'rt|INT-1|open',
+          message: {
+            chat: { id: 42 },
+            message_id: 101,
+            caption: 'issue card',
+          },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(result.status).toBe(200);
+    expect(requests.filter((request) => request.url.includes('answerCallbackQuery'))).toHaveLength(1);
+    expect(String(requests.find((request) => request.url.includes('sendMessage'))?.body.text)).toBe(
+      'This button tap expired. Open the latest card or try again.',
+    );
+
+    gateway.dispose();
   });
 
   test('treats stale pending confirm callbacks as expired cards instead of generating an UNKNOWN governance result', async () => {
