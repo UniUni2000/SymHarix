@@ -51,7 +51,7 @@ export class SupervisorRunRepository {
     const row = this.db.prepare(`
       SELECT * FROM supervisor_runs
       WHERE transport = ? AND conversation_id = ?
-      ORDER BY updated_at DESC, created_at DESC, id DESC
+      ORDER BY updated_at DESC, created_at DESC, rowid DESC
       LIMIT 1
     `).get(key.transport, key.conversation_id) as Record<string, unknown> | undefined;
     return this.map(row);
@@ -61,7 +61,7 @@ export class SupervisorRunRepository {
     const rows = this.db.prepare(`
       SELECT * FROM supervisor_runs
       WHERE transport = ? AND conversation_id = ?
-      ORDER BY updated_at DESC, created_at DESC, id DESC
+      ORDER BY updated_at DESC, created_at DESC, rowid DESC
     `).all(key.transport, key.conversation_id) as Record<string, unknown>[];
     return rows.map((row) => this.map(row)).filter((row): row is SupervisorRunRecord => row !== null);
   }
@@ -70,7 +70,7 @@ export class SupervisorRunRepository {
     const row = this.db.prepare(`
       SELECT * FROM supervisor_runs
       WHERE transport = ? AND conversation_id = ? AND state IN (${ACTIVE_RUN_STATES.map(() => '?').join(', ')})
-      ORDER BY updated_at DESC, created_at DESC, id DESC
+      ORDER BY updated_at DESC, created_at DESC, rowid DESC
       LIMIT 1
     `).get(key.transport, key.conversation_id, ...ACTIVE_RUN_STATES) as Record<string, unknown> | undefined;
     return this.map(row);
@@ -80,7 +80,7 @@ export class SupervisorRunRepository {
     const rows = this.db.prepare(`
       SELECT * FROM supervisor_runs
       WHERE state IN (${ACTIVE_RUN_STATES.map(() => '?').join(', ')})
-      ORDER BY updated_at DESC, created_at DESC, id DESC
+      ORDER BY updated_at DESC, created_at DESC, rowid DESC
     `).all(...ACTIVE_RUN_STATES) as Record<string, unknown>[];
     return rows.map((row) => this.map(row)).filter((row): row is SupervisorRunRecord => row !== null);
   }

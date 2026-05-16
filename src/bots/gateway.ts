@@ -1763,7 +1763,7 @@ export class DefaultBotGateway implements BotGateway {
             callbackQuery.id || 'unknown-callback',
             appUrl
               ? textForIssueLocale(callbackIssue, '运行视图地址已恢复，请刷新卡片后打开。', 'Runtime view URL is ready. Refresh the card, then open it again.')
-              : textForIssueLocale(callbackIssue, 'Mini App 暂时不可用：未配置 SYMPHONY_PUBLIC_BASE_URL。启动 start:local/tunnel 后刷新卡片。', 'Mini App unavailable: SYMPHONY_PUBLIC_BASE_URL is not configured. Start the local tunnel, then refresh the card.'),
+              : textForIssueLocale(callbackIssue, 'Mini App 暂时不可用：未配置 SYMHARIX_PUBLIC_BASE_URL（兼容旧名 SYMPHONY_PUBLIC_BASE_URL）。启动 start:local/tunnel 后刷新卡片。', 'Mini App unavailable: SYMHARIX_PUBLIC_BASE_URL is not configured (legacy SYMPHONY_PUBLIC_BASE_URL is also accepted). Start the local tunnel, then refresh the card.'),
           );
           this.recordTelegramCallbackAudit({
             ...auditBase,

@@ -1,14 +1,31 @@
-# SymHarix
+# ✨ SymHarix — Telegram-First AI Supervisor
 
-**语言：** [English](./README.md) | 中文
+<p align="center">
+  <img src="./assets/logo_dark.svg" alt="SymHarix" width="220">
+</p>
 
-本地优先、Telegram 优先的 coding agent 监督控制平面。
+<p align="center">
+  <strong>PLAN. APPROVE. SHIP.</strong>
+</p>
+
+<p align="center">
+  <a href="#快速开始"><img src="https://img.shields.io/badge/Quick_Start-Bun-000000?style=for-the-badge&logo=bun&logoColor=white" alt="Quick Start"></a>
+  <a href="#telegram-supervisor"><img src="https://img.shields.io/badge/Telegram-first-229ED9?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram first"></a>
+  <a href="#核心链路"><img src="https://img.shields.io/badge/Runtime-Deck-6D5DFC?style=for-the-badge" alt="Runtime Deck"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
+</p>
+
+<p align="center">
+  <strong>语言：</strong> <a href="./README.md">English</a> | 中文
+</p>
+
+可自托管、Telegram 优先的 coding agent 监督控制平面。
 
 ## SymHarix 是什么
 
-SymHarix 是一个本地优先的代码执行控制平面。用户通过 Telegram Bot 提需求，Supervisor 负责澄清、推荐计划或展示 Plan Card；用户批准后，任务会按配置路由到 GitHub 仓库，并通过内置的 Claude Code 兼容 runtime 执行。
+SymHarix 是一个可部署在本机或服务器上的代码执行控制平面。用户通过 Telegram Bot 提需求，Supervisor 负责澄清、推荐计划或展示 Plan Card；用户批准后，任务会按配置路由到 GitHub 仓库，并通过内置的 Claude Code 兼容 runtime 执行。
 
-Telegram 是主要用户交互闭环。Runtime Deck 是本地诊断和控制界面。Linear 与 GitHub 负责保存任务、分支、PR、review 证据和交付状态。
+Telegram 是主要用户交互闭环。Runtime Deck 是诊断和控制界面。Linear 与 GitHub 负责保存任务、分支、PR、review 证据和交付状态。
 
 ## 快速开始
 
@@ -84,6 +101,8 @@ SYMHARIX_TELEGRAM_WEBHOOK_SECRET=...
 SYMHARIX_TELEGRAM_OPERATOR_IDS=123456789
 ```
 
+SymHarix 不要求公网 IP，但 Telegram webhook 和 Mini App 功能需要一个稳定、可公网访问的 HTTPS URL。生产环境建议使用域名 + HTTPS 反向代理，或 named Cloudflare Tunnel。快速的 `trycloudflare.com` 隧道适合本地开发和 demo，不适合作为 24/7 生产入口。
+
 仓库路由示例：
 
 ```yaml
@@ -147,5 +166,5 @@ git diff --check
 ## 文档
 
 - [QUICKSTART.zh-CN.md](./QUICKSTART.zh-CN.md)：本地配置和第一次 Telegram 测试。
-- [docs/CONFIGURATION.md](./docs/CONFIGURATION.md)：`.env`、`WORKFLOW.md` 与目标仓库契约参考。
-- [docs/AI_OPERATOR_GUIDE.md](./docs/AI_OPERATOR_GUIDE.md)：维护者与 AI agent 的实时排障规则。
+- [docs/CONFIGURATION.zh-CN.md](./docs/CONFIGURATION.zh-CN.md)：`.env`、`WORKFLOW.md` 与目标仓库契约参考。
+- [docs/AI_OPERATOR_GUIDE.zh-CN.md](./docs/AI_OPERATOR_GUIDE.zh-CN.md)：维护者与 AI agent 的实时排障规则。

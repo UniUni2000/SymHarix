@@ -282,15 +282,17 @@ export function buildServiceConfig(workflow: WorkflowDefinition): ServiceConfig 
   const maxConcurrentAgentsByState = parseAgentByStateMap(agent.max_concurrent_agents_by_state);
   const maxTurns = parseNumber(agent.max_turns, DEFAULTS.maxTurns!);
 
-  // Codex config
-  const codex = (config.codex as Record<string, unknown>) || {};
-  const codexCommand = (codex.command as string) || DEFAULTS.codexCommand!;
-  const codexApprovalPolicy = (codex.approval_policy as string) || null;
-  const codexThreadSandbox = (codex.thread_sandbox as string) || null;
-  const codexTurnSandboxPolicy = (codex.turn_sandbox_policy as string) || null;
-  const codexTurnTimeoutMs = parseNumber(codex.turn_timeout_ms, DEFAULTS.codexTurnTimeoutMs!);
-  const codexReadTimeoutMs = parseNumber(codex.read_timeout_ms, DEFAULTS.codexReadTimeoutMs!);
-  const codexStallTimeoutMs = parseNumber(codex.stall_timeout_ms, DEFAULTS.codexStallTimeoutMs!);
+  // Agent runner config. `codex` is kept as a legacy alias for older workflows.
+  const agentRunner = (config.agent_runner as Record<string, unknown>) || {};
+  const legacyCodex = (config.codex as Record<string, unknown>) || {};
+  const runnerValue = (key: string) => agentRunner[key] ?? legacyCodex[key];
+  const codexCommand = (runnerValue('command') as string) || DEFAULTS.codexCommand!;
+  const codexApprovalPolicy = (runnerValue('approval_policy') as string) || null;
+  const codexThreadSandbox = (runnerValue('thread_sandbox') as string) || null;
+  const codexTurnSandboxPolicy = (runnerValue('turn_sandbox_policy') as string) || null;
+  const codexTurnTimeoutMs = parseNumber(runnerValue('turn_timeout_ms'), DEFAULTS.codexTurnTimeoutMs!);
+  const codexReadTimeoutMs = parseNumber(runnerValue('read_timeout_ms'), DEFAULTS.codexReadTimeoutMs!);
+  const codexStallTimeoutMs = parseNumber(runnerValue('stall_timeout_ms'), DEFAULTS.codexStallTimeoutMs!);
 
   // Server config (extension)
   const server = (config.server as Record<string, unknown>) || {};
@@ -364,9 +366,9 @@ export function validateConfigForDispatch(cfg: ServiceConfig): { valid: boolean;
     errors.push('Missing required "tracker.api_key" (or environment variable not set)');
   }
 
-  // codex.command is required
+  // agent_runner.command is required. codex.command is accepted as a legacy alias.
   if (!cfg.codexCommand) {
-    errors.push('Missing required "codex.command" configuration');
+    errors.push('Missing required "agent_runner.command" configuration');
   }
 
   return {

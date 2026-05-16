@@ -1,6 +1,6 @@
 # SymHarix Quick Start
 
-**Language:** English | [中文](./QUICKSTART.zh-CN.md)
+**Language:** English | [Chinese](./QUICKSTART.zh-CN.md)
 
 This guide takes a fresh checkout to a working Runtime Deck and Telegram-first Supervisor flow.
 
@@ -38,7 +38,7 @@ Initialize:
 bun run setup:local
 ```
 
-## 2. Route A Repository
+## 2. Route Repositories
 
 SymHarix routes Linear projects to GitHub repositories through `WORKFLOW.md`.
 
@@ -46,7 +46,10 @@ Example:
 
 ```text
 Linear project slug: sample-project
-GitHub repo: acme/demo-app
+GitHub repo: acme/web-app
+
+Linear project slug: sample-api
+GitHub repo: acme/api-service
 ```
 
 `WORKFLOW.md`:
@@ -56,9 +59,12 @@ repositories:
   routing:
     sample-project:
       github_owner: acme
-      github_repo: demo-app
+      github_repo: web-app
       # optional:
-      # local_path: ./repos/demo-app
+      # local_path: ./repos/web-app
+    sample-api:
+      github_owner: acme
+      github_repo: api-service
 ```
 
 Rules:
@@ -67,6 +73,7 @@ Rules:
 - `github_owner` and `github_repo` are required.
 - `local_path` is optional. Relative paths resolve from this SymHarix repository.
 - Missing routes fail closed before workspace creation or agent dispatch.
+- `SYMHARIX_TRACKER_PROJECT_SLUG` selects the default route for new Telegram/Runtime-created work.
 
 You can add more route entries for a multi-repo workspace. Telegram can list configured repositories, switch the chat default project, and answer repo-reading questions against a named route.
 
@@ -81,6 +88,16 @@ SYMHARIX_TRACKER_PROJECT_SLUG=sample-project
 GITHUB_TOKEN=...
 ANTHROPIC_API_KEY=...
 ```
+
+Why these values are needed:
+
+| Setting | How to choose it | Why it exists |
+| --- | --- | --- |
+| `SYMHARIX_TRACKER_KIND` | Use `linear`. | Selects the tracker backend. SymHarix currently ships with Linear as the supported tracker. |
+| `SYMHARIX_TRACKER_API_KEY` | Create a Linear API key with access to the workspace/project you want SymHarix to manage. | Lets the control plane read and update work items, states, and project metadata. |
+| `SYMHARIX_TRACKER_PROJECT_SLUG` | Use the Linear project slug that should receive Telegram/Runtime-created work. | Provides the default project for new issues and must match `WORKFLOW.md -> repositories.routing`. |
+| `GITHUB_TOKEN` | Use a GitHub token with access to every target repository listed in `WORKFLOW.md`. | Lets SymHarix fetch repository metadata, prepare workspaces, and drive delivery against the right repo. |
+| `ANTHROPIC_API_KEY` | Use the API key for the bundled Claude Code-compatible runtime. | Powers agent execution and read-only repo understanding unless you intentionally override the runtime command. |
 
 Recommended runtime defaults:
 
@@ -101,11 +118,23 @@ SYMHARIX_TELEGRAM_WEBHOOK_SECRET=...
 SYMHARIX_TELEGRAM_OPERATOR_IDS=<your-telegram-user-id>
 ```
 
+Why these values are needed:
+
+| Setting | How to choose it | Why it exists |
+| --- | --- | --- |
+| `SYMHARIX_TELEGRAM_BOT_TOKEN` | Create a bot with BotFather and paste its token. Leave blank to disable Telegram. | Enables the Telegram transport and webhook bootstrap. |
+| `SYMHARIX_TELEGRAM_WEBHOOK_SECRET` | Use a random secret string. | Lets SymHarix reject webhook calls that do not carry Telegram's secret header. |
+| `SYMHARIX_TELEGRAM_OPERATOR_IDS` | Put your Telegram user id, or a comma-separated allowlist. | Restricts write-capable Telegram actions to known operators. |
+| `SYMHARIX_PUBLIC_BASE_URL` | For production, use your stable HTTPS domain or named tunnel URL. Leave blank for local temporary tunnel mode. | Gives Telegram a webhook target and gives Mini App buttons an openable HTTPS URL. |
+| `SYMHARIX_TELEGRAM_BOOTSTRAP` | Leave blank for automatic webhook registration; set `off` only if you register webhooks yourself. | Controls whether startup calls Telegram `setWebhook`. |
+
 Webhook choices:
 
 - With your own public HTTPS URL, set `SYMHARIX_PUBLIC_BASE_URL=https://...`.
 - Without one, leave it empty and install `cloudflared`; `start:local` will try a temporary tunnel.
 - If you manage Telegram webhook registration yourself, set `SYMHARIX_TELEGRAM_BOOTSTRAP=off`.
+
+SymHarix does not require a public IP, but Telegram webhook and Mini App features require a stable publicly reachable HTTPS URL. For production, use a domain with HTTPS reverse proxy or a named Cloudflare Tunnel. Quick trycloudflare.com tunnels are intended for local development and demos, not 24/7 production.
 
 Useful local knobs:
 
@@ -182,7 +211,7 @@ Telegram is ready only when `/api/v1/bots/manifest` shows a healthy Telegram tra
 Send a normal request to the bot:
 
 ```text
-帮我看一下这个仓库还有哪些文档和代码不一致
+Find places where this repository's docs and code disagree.
 ```
 
 Expected behavior:
@@ -196,15 +225,15 @@ Expected behavior:
 
 Useful text actions:
 
-- `现在是什么单子？`
-- `有哪些仓库？`
-- `切到 test2 仓库`
-- `test2 仓库主要做什么？`
-- `批准并开始`
-- `改一下计划：...`
-- `取消当前线程`
-- `新开线程：...`
-- `重新把这个单子启动下`
+- `What is the current issue?`
+- `What repositories are configured?`
+- `Switch to the test2 repo`
+- `What does the test2 repo do?`
+- `Approve and start`
+- `Revise the plan: ...`
+- `Cancel the current thread`
+- `Start a new thread: ...`
+- `Retry this issue`
 
 ## 8. Verify
 
@@ -264,7 +293,7 @@ Bot says the model is unavailable:
 Issue created but agent does not run:
 
 - Confirm `WORKFLOW.md -> repositories.routing` contains the Linear project slug.
-- Confirm `codex.command` is `node ./scripts/claude-adapter.cjs`.
+- Confirm `agent_runner.command` is `node ./scripts/claude-adapter.cjs`.
 - Confirm `ANTHROPIC_API_KEY` is available to the service process.
 - Check Runtime issue detail for `delivery_code`, `delivery_summary`, and supervisor directives.
 

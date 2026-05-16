@@ -36,10 +36,13 @@ verification:
     timeout_ms: 1800000
     poll_interval_ms: 5000
     projects:
-      # Key must match the Linear project slug you pass to verify-live-*.
+      # Keys must match Linear project slugs and repositories.routing keys.
       sample-project:
-        title: "Live lifecycle smoke test"
-        description: "Make a tiny repository-safe change, open a PR, complete review, merge, and leave the repository clean."
+        title: "Web app lifecycle smoke test"
+        description: "Make a tiny repository-safe change in the web app, open a PR, complete review, merge, and leave the repository clean."
+      sample-api:
+        title: "API lifecycle smoke test"
+        description: "Make a tiny repository-safe change in the API service, open a PR, complete review, merge, and leave the repository clean."
 
 polling:
   interval_ms: 30000
@@ -49,14 +52,24 @@ workspace:
   root: ./workspaces
 repositories:
   routing:
-    # Key must match Linear project_slug. SymHarix fails closed when a project is not routed.
+    # One route maps one Linear project_slug to one GitHub repository.
+    # `SYMHARIX_TRACKER_PROJECT_SLUG` is the default route for new Telegram/Runtime-created work.
+    # Telegram can switch/read repos by project slug, full owner/repo, or repo name.
+    # SymHarix fails closed when a project is not routed.
     sample-project:
       github_owner: acme
-      github_repo: demo-app
+      github_repo: web-app
       # Optional. Relative paths resolve from the SymHarix repository root.
-      local_path: ./repos/demo-app
-codex:
-  # The default adapter invokes the bundled Claude Code runtime.
+      local_path: ./repos/web-app
+    sample-api:
+      github_owner: acme
+      github_repo: api-service
+      # Omit local_path to let SymHarix use its shared GitHub source cache.
+    sample-docs:
+      github_owner: acme
+      github_repo: docs-site
+agent_runner:
+  # Usually leave this unchanged. The adapter invokes the bundled Claude Code-compatible runtime.
   command: node ./scripts/claude-adapter.cjs
 agent:
   max_concurrent_agents: 3
@@ -86,4 +99,6 @@ Repository routing is explicit:
 - `repositories.routing` keys must match Linear `project_slug`
 - each route must declare `github_owner` and `github_repo`
 - `local_path` is optional and, when relative, resolves from the repository root
+- add one route per repository/project you want Telegram and Runtime to operate on
+- Telegram can switch/read repositories by project slug, full `owner/repo`, or repo name
 - if an issue's `project_slug` does not match a configured route, SymHarix will fail closed and skip dispatch

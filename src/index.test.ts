@@ -108,20 +108,79 @@ describe('Config Layer', () => {
     });
 
     it('should resolve SYMHARIX $VAR references from legacy SYMPHONY env aliases', () => {
+      const previousCurrent = process.env.SYMHARIX_TRACKER_API_KEY;
+      const previousLegacy = process.env.SYMPHONY_TRACKER_API_KEY;
+      delete process.env.SYMHARIX_TRACKER_API_KEY;
       process.env.SYMPHONY_TRACKER_API_KEY = 'legacy_value';
-      const workflow = {
+      try {
+        const workflow = {
+          config: {
+            tracker: {
+              kind: 'linear',
+              api_key: '$SYMHARIX_TRACKER_API_KEY',
+              project_slug: 'TEST'
+            }
+          },
+          prompt_template: 'test'
+        };
+        const config = buildServiceConfig(workflow);
+        expect(config.trackerApiKey).toBe('legacy_value');
+      } finally {
+        if (previousCurrent === undefined) {
+          delete process.env.SYMHARIX_TRACKER_API_KEY;
+        } else {
+          process.env.SYMHARIX_TRACKER_API_KEY = previousCurrent;
+        }
+        if (previousLegacy === undefined) {
+          delete process.env.SYMPHONY_TRACKER_API_KEY;
+        } else {
+          process.env.SYMPHONY_TRACKER_API_KEY = previousLegacy;
+        }
+      }
+    });
+
+    it('should prefer agent_runner config while keeping legacy codex config as a fallback', () => {
+      const preferredWorkflow = {
         config: {
           tracker: {
             kind: 'linear',
-            api_key: '$SYMHARIX_TRACKER_API_KEY',
+            api_key: 'test',
             project_slug: 'TEST'
-          }
+          },
+          agent_runner: {
+            command: 'node ./scripts/claude-adapter.cjs',
+            turn_timeout_ms: 1234,
+          },
+          codex: {
+            command: 'legacy-command',
+            turn_timeout_ms: 9999,
+          },
         },
         prompt_template: 'test'
       };
-      const config = buildServiceConfig(workflow);
-      expect(config.trackerApiKey).toBe('legacy_value');
-      delete process.env.SYMPHONY_TRACKER_API_KEY;
+
+      const preferredConfig = buildServiceConfig(preferredWorkflow);
+      expect(preferredConfig.codexCommand).toBe('node ./scripts/claude-adapter.cjs');
+      expect(preferredConfig.codexTurnTimeoutMs).toBe(1234);
+
+      const legacyWorkflow = {
+        config: {
+          tracker: {
+            kind: 'linear',
+            api_key: 'test',
+            project_slug: 'TEST'
+          },
+          codex: {
+            command: 'legacy-command',
+            turn_timeout_ms: 9999,
+          },
+        },
+        prompt_template: 'test'
+      };
+
+      const legacyConfig = buildServiceConfig(legacyWorkflow);
+      expect(legacyConfig.codexCommand).toBe('legacy-command');
+      expect(legacyConfig.codexTurnTimeoutMs).toBe(9999);
     });
 
     it('should parse repositories.routing into formal repository routes', () => {

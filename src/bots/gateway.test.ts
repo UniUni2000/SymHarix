@@ -2480,6 +2480,7 @@ describe('DefaultBotGateway', () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]?.url).toContain('answerCallbackQuery');
     expect(String(requests[0]?.body.text)).toContain('Mini App');
+    expect(String(requests[0]?.body.text)).toContain('SYMHARIX_PUBLIC_BASE_URL');
     expect(String(requests[0]?.body.text)).toContain('SYMPHONY_PUBLIC_BASE_URL');
 
     gateway.dispose();

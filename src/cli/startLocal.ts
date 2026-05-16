@@ -108,7 +108,9 @@ async function configureStartLocalProxyEnv(env: Record<string, string | undefine
   const proxyMode = readSymHarixEnvTrimmed('SYMPHONY_PROXY_MODE', env)?.toLowerCase() || 'auto';
   if (proxyMode === 'off') {
     setSymHarixEnv('SYMPHONY_TELEGRAM_DISABLE_PROXY', '1', env);
-    console.log('[symharix] start:local Telegram proxy disabled by SYMPHONY_PROXY_MODE=off');
+    console.log(
+      '[symharix] start:local Telegram proxy disabled by SYMHARIX_PROXY_MODE=off (legacy SYMPHONY_PROXY_MODE also accepted)',
+    );
     return;
   }
 
@@ -118,7 +120,9 @@ async function configureStartLocalProxyEnv(env: Record<string, string | undefine
   if (configuredProxy) {
     applyProxyEnv(env, configuredProxy);
     ensureNoProxyForLocalhost(env);
-    console.log(`[symharix] start:local using Telegram proxy from SYMPHONY_PROXY_URL: ${configuredProxy}`);
+    console.log(
+      `[symharix] start:local using Telegram proxy from SYMHARIX_PROXY_URL (legacy SYMPHONY_PROXY_URL also accepted): ${configuredProxy}`,
+    );
     return;
   }
 

@@ -454,6 +454,16 @@ function clearScheduledTick(orchestrator: Orchestrator): void {
     clearTimeout(pollTimer);
     (orchestrator as any).pollTimer = null;
   }
+  const startupCleanupTimer = (orchestrator as any).startupCleanupTimer as Timer | null;
+  if (startupCleanupTimer) {
+    clearTimeout(startupCleanupTimer);
+    (orchestrator as any).startupCleanupTimer = null;
+  }
+  const leaseRenewTimer = (orchestrator as any).leaseRenewTimer as Timer | null;
+  if (leaseRenewTimer) {
+    clearInterval(leaseRenewTimer);
+    (orchestrator as any).leaseRenewTimer = null;
+  }
   (orchestrator as any).running = false;
 }
 
@@ -722,7 +732,9 @@ describe('Orchestrator Stability', () => {
     const issue = makeIssue({ state: 'Todo' });
     const ctx = createOrchestrator(issue);
     orchestrator = ctx.orchestrator;
-    const previousDelay = process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS;
+    const previousCurrentDelay = process.env.SYMHARIX_STARTUP_CLEANUP_DELAY_MS;
+    const previousLegacyDelay = process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS;
+    process.env.SYMHARIX_STARTUP_CLEANUP_DELAY_MS = '0';
     process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS = '0';
     let cleanupFinished = false;
     (orchestrator as any).startupTerminalCleanup = mock(async () => {
@@ -738,10 +750,15 @@ describe('Orchestrator Stability', () => {
       await new Promise((resolve) => setTimeout(resolve, 80));
       expect(cleanupFinished).toBe(true);
     } finally {
-      if (previousDelay === undefined) {
+      if (previousCurrentDelay === undefined) {
+        delete process.env.SYMHARIX_STARTUP_CLEANUP_DELAY_MS;
+      } else {
+        process.env.SYMHARIX_STARTUP_CLEANUP_DELAY_MS = previousCurrentDelay;
+      }
+      if (previousLegacyDelay === undefined) {
         delete process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS;
       } else {
-        process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS = previousDelay;
+        process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS = previousLegacyDelay;
       }
     }
     await orchestrator.stop();
@@ -751,10 +768,14 @@ describe('Orchestrator Stability', () => {
     const issue = makeIssue({ state: 'Todo' });
     const ctx = createOrchestrator(issue);
     orchestrator = ctx.orchestrator;
-    const previousDelay = process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS;
-    const previousFirstTickDelay = process.env.SYMPHONY_FIRST_TICK_DELAY_MS;
+    const previousCurrentDelay = process.env.SYMHARIX_STARTUP_CLEANUP_DELAY_MS;
+    const previousLegacyDelay = process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS;
+    const previousCurrentFirstTickDelay = process.env.SYMHARIX_FIRST_TICK_DELAY_MS;
+    const previousLegacyFirstTickDelay = process.env.SYMPHONY_FIRST_TICK_DELAY_MS;
     const originalSetTimeout = globalThis.setTimeout;
+    delete process.env.SYMHARIX_STARTUP_CLEANUP_DELAY_MS;
     delete process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS;
+    delete process.env.SYMHARIX_FIRST_TICK_DELAY_MS;
     delete process.env.SYMPHONY_FIRST_TICK_DELAY_MS;
     const scheduledDelays: number[] = [];
     globalThis.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
@@ -775,15 +796,25 @@ describe('Orchestrator Stability', () => {
       expect(cleanupStarted).toBe(false);
     } finally {
       globalThis.setTimeout = originalSetTimeout;
-      if (previousDelay === undefined) {
+      if (previousCurrentDelay === undefined) {
+        delete process.env.SYMHARIX_STARTUP_CLEANUP_DELAY_MS;
+      } else {
+        process.env.SYMHARIX_STARTUP_CLEANUP_DELAY_MS = previousCurrentDelay;
+      }
+      if (previousLegacyDelay === undefined) {
         delete process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS;
       } else {
-        process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS = previousDelay;
+        process.env.SYMPHONY_STARTUP_CLEANUP_DELAY_MS = previousLegacyDelay;
       }
-      if (previousFirstTickDelay === undefined) {
+      if (previousCurrentFirstTickDelay === undefined) {
+        delete process.env.SYMHARIX_FIRST_TICK_DELAY_MS;
+      } else {
+        process.env.SYMHARIX_FIRST_TICK_DELAY_MS = previousCurrentFirstTickDelay;
+      }
+      if (previousLegacyFirstTickDelay === undefined) {
         delete process.env.SYMPHONY_FIRST_TICK_DELAY_MS;
       } else {
-        process.env.SYMPHONY_FIRST_TICK_DELAY_MS = previousFirstTickDelay;
+        process.env.SYMPHONY_FIRST_TICK_DELAY_MS = previousLegacyFirstTickDelay;
       }
     }
     await orchestrator.stop();

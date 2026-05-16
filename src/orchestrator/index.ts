@@ -2354,7 +2354,7 @@ export class Orchestrator extends EventEmitter {
       errors.push('Missing tracker API key');
     }
 
-    // codex.command must be present
+    // agent_runner.command must be present; codex.command is accepted as a legacy alias.
     if (!this.config.codexCommand) {
       errors.push('Missing codex command');
     }

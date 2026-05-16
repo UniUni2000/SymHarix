@@ -129,7 +129,8 @@ async function callBroker(toolName: SupervisorContextToolName, args: Record<stri
   if (!endpoint) {
     return {
       error: 'context_endpoint_not_configured',
-      message: 'Supervisor context MCP server needs SYMPHONY_SUPERVISOR_CONTEXT_ENDPOINT.',
+      message:
+        'Supervisor context MCP server needs SYMHARIX_SUPERVISOR_CONTEXT_ENDPOINT; legacy SYMPHONY_SUPERVISOR_CONTEXT_ENDPOINT is also accepted.',
     };
   }
 

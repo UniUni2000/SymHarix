@@ -235,7 +235,13 @@ export class RepoCacheManager {
 
   private async refreshRepoSource(sourcePath: string): Promise<void> {
     try {
-      await execAsync(`git -C "${sourcePath}" remote get-url origin`);
+      const origin = await this.getOriginRemoteUrl(sourcePath);
+      if (!origin) {
+        return;
+      }
+      if (!this.githubToken && /^https?:\/\/(?:[^/@]+@)?github\.com\//i.test(origin)) {
+        return;
+      }
       await execAsync(`git -C "${sourcePath}" fetch --all --prune`, { maxBuffer: 10 * 1024 * 1024 });
       await this.fastForwardCurrentBranchToRemoteDefault(sourcePath);
     } catch {

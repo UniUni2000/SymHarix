@@ -155,7 +155,8 @@ async function callBroker(toolName: SupervisorOrchestratorToolName, args: Record
   if (!endpoint) {
     return {
       error: 'orchestrator_endpoint_not_configured',
-      message: 'Supervisor orchestrator MCP server needs SYMPHONY_SUPERVISOR_ORCHESTRATOR_ENDPOINT.',
+      message:
+        'Supervisor orchestrator MCP server needs SYMHARIX_SUPERVISOR_ORCHESTRATOR_ENDPOINT; legacy SYMPHONY_SUPERVISOR_ORCHESTRATOR_ENDPOINT is also accepted.',
     };
   }
 

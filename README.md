@@ -1,14 +1,29 @@
-# SymHarix
+# ✨ SymHarix — Telegram-First AI Supervisor
 
-**Language:** English | [中文](./README.zh-CN.md)
+<p align="center">
+  <img src="./assets/logo_dark.svg" alt="SymHarix" width="220">
+</p>
 
-Local-first, Telegram-first supervision for coding agents.
+<p align="center">
+  <strong>PLAN. APPROVE. SHIP.</strong>
+</p>
+
+<p align="center">
+  <a href="#quick-start"><img src="https://img.shields.io/badge/Quick_Start-Bun-000000?style=for-the-badge&logo=bun&logoColor=white" alt="Quick Start"></a>
+  <a href="#telegram-supervisor"><img src="https://img.shields.io/badge/Telegram-first-229ED9?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram first"></a>
+  <a href="#core-flow"><img src="https://img.shields.io/badge/Runtime-Deck-6D5DFC?style=for-the-badge" alt="Runtime Deck"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
+</p>
+
+<p align="center">
+  <strong>Language:</strong> English | <a href="./README.zh-CN.md">Chinese</a>
+</p>
 
 ## What SymHarix Is
 
-SymHarix is a local control plane for supervised coding work. The user talks to a Telegram bot, the Supervisor clarifies or prepares a Plan Card, and approved work is routed to the configured GitHub repository through the bundled Claude Code-compatible runtime.
+SymHarix is a self-hostable control plane for supervised coding work. The user talks to a Telegram bot, the Supervisor clarifies or prepares a Plan Card, and approved work is routed to the configured GitHub repository through the bundled Claude Code-compatible runtime.
 
-Telegram is the primary user loop. Runtime Deck is the local diagnostics and control surface. Linear and GitHub remain the durable records for work items, branches, PRs, review evidence, and delivery state.
+Telegram is the primary user loop. Runtime Deck is the diagnostics and control surface. Linear and GitHub remain the durable records for work items, branches, PRs, review evidence, and delivery state.
 
 ## Quick Start
 
@@ -83,6 +98,8 @@ SYMHARIX_TELEGRAM_BOT_TOKEN=...
 SYMHARIX_TELEGRAM_WEBHOOK_SECRET=...
 SYMHARIX_TELEGRAM_OPERATOR_IDS=123456789
 ```
+
+SymHarix does not require a public IP, but Telegram webhook and Mini App features require a stable publicly reachable HTTPS URL. For production, use a domain with HTTPS reverse proxy or a named Cloudflare Tunnel. Quick trycloudflare.com tunnels are intended for local development and demos, not 24/7 production.
 
 Example repository route:
 
