@@ -228,7 +228,7 @@ function createRuntime(): RuntimeControlPlane & {
           governance_current_child: {
             issue_id: 'issue-2',
             issue_identifier: 'INT-2',
-            title: '拆分后的当前子任务',
+            title: '网页或 UI 改动拆成单独 issue',
             tracker_state: 'Todo',
             orchestrator_state: 'discovering',
             governance_decision: null,
@@ -242,7 +242,7 @@ function createRuntime(): RuntimeControlPlane & {
             {
               issue_id: 'issue-2',
               issue_identifier: 'INT-2',
-              title: '拆分后的当前子任务',
+              title: '网页或 UI 改动拆成单独 issue',
               tracker_state: 'Todo',
               orchestrator_state: 'discovering',
               governance_decision: null,
@@ -255,7 +255,7 @@ function createRuntime(): RuntimeControlPlane & {
             {
               issue_id: 'issue-3',
               issue_identifier: 'INT-3',
-              title: '后续排队子任务',
+              title: '拆出 runtime / control-plane 变更',
               tracker_state: 'Todo',
               orchestrator_state: 'halted',
               governance_decision: null,
@@ -2547,6 +2547,93 @@ describe('SupervisorSessionService', () => {
     expect(response?.message).toContain('INT-2');
     expect(runtime.splitGovernanceCalls).toEqual(['issue-1']);
     expect(sessions.findById(session.id)?.state).toBe('executing');
+  });
+
+  test('localizes the initial supervisor split execution card for English sessions', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const runtime = createRuntime();
+    runtime.issues.set('issue-1', createIssueView({
+      issue_id: 'issue-1',
+      identifier: 'INT-1',
+      title: 'Build a runtime dashboard and update supervisor routing',
+      tracker_state: 'In Progress',
+      governance_status: 'blocked',
+      governance_decision: 'split_before_implement',
+      governance_summary: 'This issue spans multiple objectives and should be split before implementation.',
+      governance_thread_state: 'blocked',
+      actions: {
+        can_stop: false,
+        can_retry: false,
+        can_override_governance: true,
+        can_rewrite_governance: true,
+        can_split_governance: true,
+        can_open_pr: false,
+      },
+    }));
+
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+    const session = sessions.create({
+      id: 'session-en-split',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      user_id: 'user-1',
+      supervisor_locale: 'en',
+      state: 'awaiting_user_decision',
+      repo_ref: 'test2',
+      intake_mode: 'plan_then_approve',
+      approval_mode: 'explicit_user_approval',
+      plan_version: 1,
+      root_issue_id: 'issue-1',
+      last_material_outcome: {
+        user_summary: '已为 INT-1 创建治理子任务 INT-2、INT-3，当前先处理 INT-2，其余子任务会按顺序自动接力，源单仍保持暂停。',
+      },
+      plan_card: {
+        title: 'Build a runtime dashboard and update supervisor routing',
+        user_goal: 'Build a runtime dashboard and update supervisor routing',
+        in_scope: ['Runtime dashboard', 'Supervisor routing'],
+        out_of_scope: ['不顺手扩展到无关模块。'],
+        acceptance: ['结果可验证。'],
+        known_risks: [],
+        execution_strategy: '先把源目标收成 root thread，再只放行当前 child，其余 child 顺序排队。',
+        needs_user_approval: true,
+        repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2',
+        clarification_question: null,
+        materialization_mode: 'root_with_split_queue',
+        recommended_option: {
+          label: '按推荐继续',
+          summary: '先处理治理子任务 INT-2；其余子任务会按顺序自动接力。',
+        },
+        alternate_option: null,
+        governance_preview: {
+          decision: 'split_before_implement',
+          summary: 'This issue spans multiple objectives and should be split before implementation.',
+          split_suggestions: ['把网页或 UI 改动拆成单独 issue，避免和后端调度改动绑在一起。'],
+          rewrite_title: null,
+          rewrite_description: null,
+        },
+      },
+    });
+
+    const response = await service.respondToAction({
+      context: createContext(),
+      sessionId: session.id,
+      action: 'approve',
+      canWrite: true,
+      runtimeContext: createRuntimeContext(),
+    });
+
+    expect(response).not.toBeNull();
+    expect(response?.format).toBe('telegram_html');
+    expect(response?.message).toContain('Current Child Task');
+    expect(response?.message).toContain('Split web/UI changes into their own issue');
+    expect(response?.message).toContain('Handle governance child task INT-2 first.');
+    expect(response?.message).not.toMatch(/[\u3400-\u9fff\uf900-\ufaff]/);
+    expect(runtime.splitGovernanceCalls).toEqual(['issue-1']);
   });
 
   test('records high-signal runtime milestones into supervisor session memory without duplicating unchanged updates', async () => {

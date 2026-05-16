@@ -1059,7 +1059,7 @@ describe('Orchestrator Stability', () => {
       source: 'formal' as const,
       config: {
         commands: {
-          setup: 'python3 -c "from pathlib import Path; p=Path(\'setup-count.txt\'); n=int(p.read_text())+1 if p.exists() else 1; p.write_text(str(n))"',
+          setup: 'node -e "const fs=require(\'fs\');const p=\'setup-count.txt\';const n=fs.existsSync(p)?Number(fs.readFileSync(p,\'utf8\'))+1:1;fs.writeFileSync(p,String(n))"',
         },
       },
       has_verification_requirements: false,
@@ -3314,6 +3314,15 @@ describe('Orchestrator Stability', () => {
       expect(ctx.tracker.updateIssueContent).toHaveBeenCalledTimes(1);
       expect(workItem?.governance_decision).toBe('accept');
       expect(workItem?.orchestrator_state).toBe('halted');
+      expect(currentIssue.title).toBe('Split out runtime/control-plane change');
+      expect(currentIssue.description).toContain('Source issue: INT-91');
+      expect(currentIssue.description).not.toMatch(/[\u3400-\u9fff]/);
+      expect(childIssues.map((childIssue) => childIssue.title).join('\n')).toContain('Split web/UI changes into their own issue');
+      expect(childIssues.map((childIssue) => childIssue.title).join('\n')).not.toMatch(/[\u3400-\u9fff]/);
+      expect(childIssues.map((childIssue) => childIssue.description).join('\n')).not.toMatch(/[\u3400-\u9fff]/);
+      expect(result.governance_action?.next_recommended_action).toContain('Handle governance child task');
+      expect(result.governance_action?.user_summary).toContain('Created governance child task(s)');
+      expect(JSON.stringify(result.governance_action)).not.toMatch(/[\u3400-\u9fff]/);
       expect(workItem?.governance_root_issue_id).toBe(currentIssue.id);
       expect(workItem?.governance_parent_issue_id).toBeNull();
       expect(workItem?.governance_generation).toBe(0);

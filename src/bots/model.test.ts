@@ -319,6 +319,66 @@ describe('createBotAssistantModel', () => {
     expect(messages?.[0]?.content).toContain('answer_question');
   });
 
+  test('adds a strict output-language contract from the latest user text', async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const model = createBotAssistantModel(
+      {
+        provider: 'openai',
+        model: 'gpt-test',
+        apiKey: 'secret',
+        baseUrl: 'https://example.invalid/v1',
+      },
+      async (_input, init) => {
+        requests.push(JSON.parse(String(init?.body || '{}')) as Record<string, unknown>);
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: '{"intent":{"kind":"answer_question","answer":"Hello."}}',
+                },
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          },
+        );
+      },
+    );
+
+    await model.decide({
+      text: 'What can you do?',
+      context: {
+        default_project_slug: null,
+        available_projects: [],
+        watch_subscriptions: [],
+        overview: {
+          running: 0,
+          retrying: 0,
+          total: 0,
+          active_issues: [],
+        },
+        focus_issue: null,
+        assistant: {
+          provider: null,
+          model: null,
+          configured: false,
+          health: 'unconfigured',
+          fallback_available: true,
+          last_error_code: 'unconfigured',
+        },
+      },
+    });
+
+    const messages = requests[0]?.messages as Array<{ content?: string }> | undefined;
+    expect(messages?.[0]?.content).toContain('detected_user_language: English');
+    expect(messages?.[0]?.content).toContain('Every user-facing JSON string field must be English');
+    expect(messages?.[0]?.content).toContain('Do not use Chinese in greetings');
+    expect(messages?.[0]?.content).toContain('overrides runtime_context.recent_messages');
+  });
+
   test('falls back to a secondary transport when the primary transport fails immediately', async () => {
     const primaryTransport: BotAssistantHttpTransport = {
       async send() {

@@ -359,6 +359,40 @@ function expectAssistantSafeMessage(message: string): void {
 }
 
 describe('SupervisorAgentRuntimeService', () => {
+  test('keeps English greetings and capability replies local before the model router', async () => {
+    let modelCalls = 0;
+    const h = createHarness(async () => {
+      modelCalls += 1;
+      return {
+        type: 'final_answer',
+        message: '你好！我是 SymHarix Runtime Operator Copilot。',
+      };
+    });
+
+    const greeting = await h.service.respond({
+      context: h.context,
+      text: 'hheeelllooo',
+    });
+    expect(greeting.message).toBe('Hello. What would you like to work on next?');
+    expect(greeting.message).not.toMatch(/[\u3400-\u9fff]/);
+
+    const howAreYou = await h.service.respond({
+      context: h.context,
+      text: 'How are you?',
+    });
+    expect(howAreYou.message).toBe('Doing well, thanks. What would you like to work on next?');
+    expect(howAreYou.message).not.toMatch(/[\u3400-\u9fff]/);
+
+    const capability = await h.service.respond({
+      context: h.context,
+      text: 'What can you do?',
+    });
+    expect(capability.message).toContain("I'm your SymHarix Runtime Operator Copilot");
+    expect(capability.message).toContain('Create issues');
+    expect(capability.message).not.toMatch(/[\u3400-\u9fff]/);
+    expect(modelCalls).toBe(0);
+  });
+
   test('treats create issue text with cleanup-smoke file names as a new issue request', async () => {
     const h = createHarness();
 
@@ -2087,7 +2121,7 @@ describe('SupervisorAgentRuntimeService', () => {
       text: '把这个 issue 的卡片也发我',
     });
 
-    expect(card.message).toContain('你想操作哪个 issue');
+    expect(card.message).toContain('你想看哪张 issue 卡片');
     expect(card.message).not.toContain('wrong repo read');
     const cardRun = h.runs.findLatestByConversation({
       transport: 'telegram',
@@ -2108,6 +2142,34 @@ describe('SupervisorAgentRuntimeService', () => {
     expect(h.toolCalls.findByRun(retryRun!.id).map((call) => call.tool_name)).toEqual([]);
   });
 
+  test('answers English issue-progress usage questions instead of asking for an issue id in Chinese', async () => {
+    const h = createHarness(async () => null, {
+      initialIssues: [],
+    });
+
+    const response = await h.service.respond({
+      context: h.context,
+      text: "Wow that's cool, so if a I start an issue, can I see the progress of this issue?",
+    });
+
+    expect(response.message).toContain('Yes. After an issue is created');
+    expect(response.message).toContain('How is INT-169 doing?');
+    expect(response.message).not.toMatch(/[\u3400-\u9fff]/);
+    const usageRun = h.runs.findLatestByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(h.toolCalls.findByRun(usageRun!.id).map((call) => call.tool_name)).toEqual([]);
+
+    const clarify = await h.service.respond({
+      context: h.context,
+      text: 'show this issue card',
+    });
+
+    expect(clarify.message).toContain('Which issue card do you want to see?');
+    expect(clarify.message).not.toMatch(/[\u3400-\u9fff]/);
+  });
+
   test('falls back quickly when the supervisor tool router model is slow', async () => {
     const h = createHarness(async () => {
       await new Promise((resolve) => setTimeout(resolve, 30));
@@ -2125,7 +2187,7 @@ describe('SupervisorAgentRuntimeService', () => {
       text: '把这个 issue 的卡片也发我',
     });
 
-    expect(response.message).toContain('你想操作哪个 issue');
+    expect(response.message).toContain('你想看哪张 issue 卡片');
     expect(response.message).not.toContain('late model answer');
   });
 

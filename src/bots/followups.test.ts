@@ -1814,6 +1814,179 @@ describe('BotFollowupService', () => {
     db.close();
   });
 
+  test('sends runtime cards for completed governance child issues alongside the root thread card', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const listeners = new Set<(event: RuntimeStreamEvent) => void>();
+    const base = createRuntimeControlPlane().getIssue('issue-1')!;
+    const childIssue: RuntimeIssueView = {
+      ...base,
+      issue_id: 'issue-child',
+      work_item_id: 'wi-child',
+      identifier: 'TES-127',
+      title: '[GOVERNANCE FOLLOW-UP for TES-126] Split web/UI changes into their own issue',
+      phase: 'DELIVERY',
+      tracker_state: 'Done',
+      orchestrator_state: 'completed',
+      governance_status: 'advisory',
+      governance_decision: 'accept',
+      governance_summary: 'No constitution blockers detected.',
+      governance_root_issue_id: 'issue-root',
+      governance_root_issue_identifier: 'TES-126',
+      governance_child_issues: [],
+      governance_current_child: null,
+      governance_child_queue: [],
+      governance_thread_state: null,
+      delivery_state: 'completed',
+      delivery_code: null,
+      delivery_summary: 'Issue is complete and final delivery is closed.',
+      next_recommended_action: 'PR #216 is ready; open Mini App for logs.',
+      supervisor_locale: 'en',
+      usage: {
+        input_tokens: 1000,
+        output_tokens: 100,
+        total_tokens: 1100,
+      },
+      actions: {
+        can_stop: false,
+        can_retry: false,
+        can_override_governance: false,
+        can_rewrite_governance: false,
+        can_split_governance: false,
+        can_open_pr: false,
+      },
+    } as RuntimeIssueView;
+    const rootIssue: RuntimeIssueView = {
+      ...base,
+      issue_id: 'issue-root',
+      work_item_id: 'wi-root',
+      identifier: 'TES-126',
+      title: 'Split out runtime/control-plane change',
+      tracker_state: 'In Progress',
+      orchestrator_state: 'halted',
+      governance_thread_state: 'waiting_on_child',
+      governance_root_issue_id: 'issue-root',
+      governance_root_issue_identifier: 'TES-126',
+      governance_current_child: {
+        issue_id: childIssue.issue_id,
+        issue_identifier: childIssue.identifier,
+        title: childIssue.title,
+        tracker_state: childIssue.tracker_state,
+        orchestrator_state: childIssue.orchestrator_state,
+        governance_decision: childIssue.governance_decision,
+        governance_summary: childIssue.governance_summary,
+        queue_state: 'current',
+        delivery_state: childIssue.delivery_state,
+        delivery_code: childIssue.delivery_code,
+        delivery_summary: childIssue.delivery_summary,
+      },
+      governance_child_queue: [{
+        issue_id: childIssue.issue_id,
+        issue_identifier: childIssue.identifier,
+        title: childIssue.title,
+        tracker_state: childIssue.tracker_state,
+        orchestrator_state: childIssue.orchestrator_state,
+        governance_decision: childIssue.governance_decision,
+        governance_summary: childIssue.governance_summary,
+        queue_state: 'current',
+        delivery_state: childIssue.delivery_state,
+        delivery_code: childIssue.delivery_code,
+        delivery_summary: childIssue.delivery_summary,
+      }],
+      governance_child_issues: [{
+        issue_id: childIssue.issue_id,
+        issue_identifier: childIssue.identifier,
+        title: childIssue.title,
+        tracker_state: childIssue.tracker_state,
+        orchestrator_state: childIssue.orchestrator_state,
+        governance_decision: childIssue.governance_decision,
+        governance_summary: childIssue.governance_summary,
+        delivery_state: childIssue.delivery_state,
+        delivery_code: childIssue.delivery_code,
+        delivery_summary: childIssue.delivery_summary,
+      }],
+      next_recommended_action: 'Handle governance child task TES-127 first.',
+      supervisor_locale: 'en',
+    } as RuntimeIssueView;
+    const runtime: RuntimeControlPlane & { emit: (event: RuntimeStreamEvent) => void } = {
+      getOverview: () => ({
+        generated_at: '2026-01-01T00:00:00.000Z',
+        counts: { running: 0, retrying: 0, total: 2 },
+        issues: [rootIssue, childIssue],
+      }),
+      getIssue: (id: string) => {
+        if (['issue-root', 'TES-126'].includes(id)) return rootIssue;
+        if (['issue-child', 'TES-127'].includes(id)) return childIssue;
+        return null;
+      },
+      getTimeline: () => [],
+      getHistoryView: () => null,
+      createIssue: async () => ({ accepted: true, status: 'accepted', message: 'Created', issue_id: rootIssue.issue_id, issue_identifier: rootIssue.identifier, issue: rootIssue }),
+      stopIssue: async () => ({ accepted: true, status: 'accepted', message: 'Stopped', issue_id: rootIssue.issue_id, issue_identifier: rootIssue.identifier }),
+      retryIssue: async () => ({ accepted: true, status: 'accepted', message: 'Retried', issue_id: rootIssue.issue_id, issue_identifier: rootIssue.identifier }),
+      overrideGovernance: async () => ({ accepted: true, status: 'accepted', message: 'Overridden', issue_id: rootIssue.issue_id, issue_identifier: rootIssue.identifier }),
+      rewriteGovernance: async () => ({ accepted: true, status: 'accepted', message: 'Rewritten', issue_id: rootIssue.issue_id, issue_identifier: rootIssue.identifier }),
+      splitGovernance: async () => ({ accepted: true, status: 'accepted', message: 'Split', issue_id: rootIssue.issue_id, issue_identifier: rootIssue.identifier }),
+      executeGovernanceSuggestion: async () => ({ accepted: true, status: 'accepted', message: 'Executed suggestion', issue_id: rootIssue.issue_id, issue_identifier: rootIssue.identifier }),
+      dismissGovernanceSuggestion: async () => ({ accepted: true, status: 'accepted', message: 'Dismissed suggestion', issue_id: rootIssue.issue_id, issue_identifier: rootIssue.identifier }),
+      createStream: () => new ReadableStream<Uint8Array>(),
+      subscribe: (listener) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      emit: (event) => {
+        for (const listener of listeners) {
+          listener(event);
+        }
+      },
+    };
+    const notifier = new MemoryNotifier();
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+
+    followups.upsert({
+      transport: 'telegram',
+      conversation_id: 'chat-root',
+      issue_id: rootIssue.issue_id,
+      issue_identifier: rootIssue.identifier,
+      user_id: 'user-1',
+      role: 'origin',
+    });
+
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, messageStates, {
+      bootstrapCurrentGovernanceCards: false,
+    });
+
+    runtime.emit({ type: 'issue', data: rootIssue });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(notifier.messages).toHaveLength(2);
+    expect(notifier.messages.some((entry) => entry.message.photo?.filename === 'TES-127-issue-card.png')).toBe(true);
+    expect(notifier.messages.some((entry) => entry.message.text.includes('Governance Thread · TES-126'))).toBe(true);
+    expect(
+      messageStates.findByConversationIssue({
+        transport: 'telegram',
+        conversation_id: 'chat-root',
+        issue_id: childIssue.issue_id,
+      }),
+    ).toEqual(expect.objectContaining({
+      card_kind: 'runtime_issue',
+      card_state: 'resolved',
+    }));
+    expect(followups.findByIssueId(childIssue.issue_id)).toEqual([
+      expect.objectContaining({
+        conversation_id: 'chat-root',
+        issue_identifier: 'TES-127',
+      }),
+    ]);
+
+    service.dispose();
+    db.close();
+  });
+
   test('skips runtime issue card sends while another sender holds the card lock', async () => {
     const db = new Database(':memory:');
     initializeSchema(db);
@@ -2405,7 +2578,8 @@ describe('BotFollowupService', () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(notifier.messages).toHaveLength(1);
+    expect(notifier.messages).toHaveLength(2);
+    expect(notifier.messages.some((entry) => entry.message.photo?.filename === 'INT-45-issue-card.png')).toBe(true);
     expect(notifier.edits).toHaveLength(0);
     expect(
       messageStates.findByConversationIssue({
@@ -2414,6 +2588,17 @@ describe('BotFollowupService', () => {
         issue_id: 'issue-1',
       })?.message_id,
     ).toBe('msg-1');
+    expect(
+      messageStates.findByConversationIssue({
+        transport: 'telegram',
+        conversation_id: 'chat-root',
+        issue_id: 'issue-2',
+      }),
+    ).toEqual(expect.objectContaining({
+      message_id: 'msg-2',
+      card_kind: 'runtime_issue',
+      card_state: 'open',
+    }));
 
     service.dispose();
     db.close();
@@ -2549,7 +2734,8 @@ describe('BotFollowupService', () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(notifier.messages).toHaveLength(1);
+    expect(notifier.messages).toHaveLength(2);
+    expect(notifier.messages.some((entry) => entry.message.photo?.filename === 'INT-45-issue-card.png')).toBe(true);
     expect(notifier.edits).toHaveLength(1);
     expect(notifier.edits[0]?.message.text).toContain('dirty workspace');
     expect(notifier.edits[0]?.message.text).not.toContain('No .symphony-constitution.md found yet');
@@ -2698,10 +2884,14 @@ describe('BotFollowupService', () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(notifier.messages).toHaveLength(1);
-    expect(notifier.edits).toHaveLength(1);
-    expect(notifier.edits[0]?.message.text).toContain('当前子任务');
-    expect(notifier.edits[0]?.message.text).toContain('执行失败');
+    expect(notifier.messages).toHaveLength(2);
+    expect(notifier.messages.some((entry) => entry.message.photo?.filename === 'INT-49-issue-card.png')).toBe(true);
+    const rootCardEdits = notifier.edits.filter((entry) => !entry.message.photo);
+    const childCardEdits = notifier.edits.filter((entry) => entry.message.photo?.filename === 'INT-49-issue-card.png');
+    expect(rootCardEdits).toHaveLength(1);
+    expect(childCardEdits).toHaveLength(2);
+    expect(rootCardEdits[0]?.message.text).toContain('当前子任务');
+    expect(rootCardEdits[0]?.message.text).toContain('执行失败');
     expect(
       messageStates.findByConversationIssue({
         transport: 'telegram',

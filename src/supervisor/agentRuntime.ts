@@ -41,6 +41,7 @@ import {
   type RepoProfile,
 } from './repoProfileService';
 import {
+  buildGreetingAssistantReply,
   buildNoActionAssistantReply,
   formatDuplicateToolRecovery,
   formatPendingActionReminder,
@@ -48,6 +49,8 @@ import {
   formatToolArgumentRejection,
   formatToolFailureRecovery,
   formatUnsupportedToolRecovery,
+  isCapabilityQuestion,
+  isGreetingLikeText,
 } from './assistantReliability';
 import { buildSupervisorIssueVisualCard } from './issueVisualCard';
 import { inferRuntimeLocaleFromText, type RuntimeLocale } from '../i18n/locale';
@@ -283,6 +286,49 @@ function isSupervisorAdvisoryQuestion(text: string): boolean {
 function isSupervisorRuntimeModeQuestion(text: string): boolean {
   const normalized = text.trim();
   return /(?:如何|怎么|怎样|为什么|为啥).{0,24}(?:切换|开启|打开|进入|变成).{0,16}(?:agent\s*模式|agent模式|代理模式|写入权限|写权限|写入模式|只读模式|read[- ]?only\s*(?:模式)?|readonly\s*(?:模式)?)|(?:agent\s*模式|agent模式|代理模式|写入权限|写权限|写入模式|只读模式|read[- ]?only\s*(?:模式)?|readonly\s*(?:模式)?).{0,24}(?:如何|怎么|怎样|为什么|为啥|切换|开启|打开|进入)/i.test(normalized);
+}
+
+function isIssueProgressUsageQuestion(text: string): boolean {
+  const normalized = text.trim();
+  if (extractIssueIdentifiers(normalized).length > 0) {
+    return false;
+  }
+  const english = /\b(?:if|when|after)\b.{0,80}\b(?:create|start|open|make)\b.{0,40}\b(?:an?\s+|the\s+)?issue\b/i.test(normalized) &&
+    /\b(?:can|could|will|would)\b.{0,80}\b(?:see|view|check|track|watch|monitor)\b.{0,40}\b(?:progress|status|card|updates?)\b/i.test(normalized);
+  const chinese = /(?:如果|假如|要是|创建|新建|开始|开).{0,40}(?:issue|任务|工单|单子).{0,60}(?:能|可以|会不会).{0,30}(?:看|查看|追踪|跟踪|监控).{0,20}(?:进度|状态|卡片|更新)/i.test(normalized);
+  return english || chinese;
+}
+
+function buildIssueProgressUsageAnswer(text: string): string {
+  const locale = inferRuntimeLocaleFromText(text);
+  return [
+    textForLocale(
+      locale,
+      '可以。Issue 创建后，你可以直接用 issue 编号查看进度，比如：“INT-169 现在怎么样？”或“发我 INT-169 的卡片”。',
+      'Yes. After an issue is created, you can check its progress by issue id, for example: "How is INT-169 doing?" or "Show card for INT-169."',
+    ),
+    textForLocale(
+      locale,
+      '我会展示运行状态、最近活动和 issue 卡片；如果当前只有一个活跃 issue，像“发我这个 issue 的卡片”这类追问也能继续用。',
+      'I can show the runtime status, recent activity, and issue card. If there is only one active issue, short follow-ups like "show this issue card" also work.',
+    ),
+  ].join('\n');
+}
+
+function buildContextualIssueClarification(text: string): string {
+  const locale = inferRuntimeLocaleFromText(text);
+  if (isShowCardRequest(text)) {
+    return textForLocale(
+      locale,
+      '你想看哪张 issue 卡片？可以直接说 INT-169，或者先问我当前活跃 issue。',
+      'Which issue card do you want to see? Send an issue id like INT-169, or ask me for the current active issues first.',
+    );
+  }
+  return textForLocale(
+    locale,
+    '你想操作哪个 issue？请告诉我 issue 编号（如 INT-169）。',
+    'Which issue do you want to work with? Please send the issue id, for example INT-169.',
+  );
 }
 
 function buildSupervisorRuntimeModeAnswer(text: string): string {
@@ -917,7 +963,11 @@ function botIntentToSupervisorTurn(
           }
         : {
             type: 'clarify',
-            question: '你想看哪张 issue 卡片？可以直接说 INT-xxx，或者先问我当前活跃 issue。',
+            question: textForLocale(
+              inferRuntimeLocaleFromText(input.text),
+              '你想看哪张 issue 卡片？可以直接说 INT-xxx，或者先问我当前活跃 issue。',
+              'Which issue card do you want to see? Send an issue id like INT-169, or ask me for the current active issues first.',
+            ),
           };
     }
     case 'status': {
@@ -1740,6 +1790,11 @@ export class SupervisorAgentRuntimeService {
 
   private async executeRun(request: SupervisorRuntimeRespondRequest): Promise<BotCommandResponse> {
     const run = this.createRun(request);
+    const immediateReply = this.immediateConversationalReply(request.text);
+    if (immediateReply) {
+      return this.completeRun(run.id, { message: immediateReply }, 'completed');
+    }
+
     const toolResults: SupervisorToolResult[] = [];
     let deterministicTurns: SupervisorTurn[] | null = this.options.model
       ? null
@@ -2339,6 +2394,16 @@ export class SupervisorAgentRuntimeService {
     };
   }
 
+  private immediateConversationalReply(text: string): string | null {
+    if (isGreetingLikeText(text)) {
+      return buildGreetingAssistantReply(text);
+    }
+    if (isCapabilityQuestion(text) && !isRuntimeControlActionText(text)) {
+      return buildNoActionAssistantReply(text);
+    }
+    return null;
+  }
+
   private detectControlTurn(text: string, contextualIssueId: string | null = null): SupervisorTurn | null {
     const issueIds = extractIssueIdentifiers(text);
     const targetIssueId = issueIds[0] ?? contextualIssueId;
@@ -2598,6 +2663,12 @@ export class SupervisorAgentRuntimeService {
         },
       ];
     }
+    if (isIssueProgressUsageQuestion(text)) {
+      return [{
+        type: 'final_answer',
+        message: buildIssueProgressUsageAnswer(text),
+      }];
+    }
     if (
       !issueId &&
       isContextualIssueReference(text) &&
@@ -2605,7 +2676,7 @@ export class SupervisorAgentRuntimeService {
     ) {
       return [{
         type: 'clarify',
-        question: '你想操作哪个 issue？请告诉我 issue 编号（如 INT-169）。',
+        question: buildContextualIssueClarification(text),
       }];
     }
     if (isRepositoryRouteQuestion(text)) {

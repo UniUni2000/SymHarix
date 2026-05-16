@@ -303,7 +303,7 @@ export function buildGovernanceWaitingOnChildMessage(
   const childSummaryLines = options.childSummaries ?? summarizeChildIssues(issue, locale);
   const currentChild = findCurrentChild(issue);
   const prioritizedChild = currentChild?.issue_identifier ?? childIdentifiers[0] ?? null;
-  const currentChildTitle = currentChild?.title ? compact(currentChild.title, 120) : null;
+  const currentChildTitle = currentChild?.title ? compact(localizedKnown(currentChild.title, locale), 120) : null;
   const currentChildDelivery = currentChild?.delivery_state === 'delivery_failed'
     ? compact(localizedKnown(currentChild.delivery_summary, locale), 180)
     : currentChild?.orchestrator_state === 'failed'

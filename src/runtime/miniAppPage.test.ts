@@ -1158,6 +1158,43 @@ describe('Telegram Mini App issue presentation', () => {
     expect(live.riskDelta).toBe('stable');
   });
 
+  test('localizes split governance recommendations in English Mini App presentation', () => {
+    const presentation = buildRuntimeMiniAppIssuePresentation(createIssue({
+      supervisor_locale: 'en',
+      phase: 'DEV',
+      tracker_state: 'Todo',
+      orchestrator_state: 'halted',
+      governance_thread_state: 'blocked',
+      governance_decision: 'split_before_implement',
+      governance_summary: 'This issue spans multiple objectives across different parts of the system. Please split it before dispatch.',
+      delivery_summary: null,
+      next_recommended_action: '按推荐拆成更聚焦的任务',
+      roundGoal: '按推荐拆成更聚焦的任务',
+      milestones: [],
+      session: null,
+    }));
+
+    expect(presentation.nextRecommendation).toBe('Split into more focused tasks as recommended');
+    expect(presentation.roundGoal).toBe('Split into more focused tasks as recommended');
+    expect(presentation.visibleMilestones.map((item) => item.summary).join('\n')).toContain('Split into more focused tasks as recommended');
+    expect(JSON.stringify(presentation)).not.toContain('按推荐拆成更聚焦的任务');
+  });
+
+  test('localizes split-generated issue titles for English Mini App summaries', () => {
+    expect(normalizeRuntimeMiniAppSummary(
+      '[GOVERNANCE FOLLOW-UP for TES-126] 网页或 UI 改动拆成单独 issue',
+      '',
+      180,
+      'en',
+    )).toBe('[GOVERNANCE FOLLOW-UP for TES-126] Split web/UI changes into their own issue');
+    expect(normalizeRuntimeMiniAppSummary(
+      '拆出 runtime / control-plane 变更',
+      '',
+      180,
+      'en',
+    )).toBe('Split out runtime/control-plane change');
+  });
+
   test('humanizes raw runtime JSON before it reaches agent progress or milestones', () => {
     const rawEvent = '{"level":"info","category":"tool","code":"tool_started","message":"Using Bash","turn":1,"tool_name":"Bash","detail":{"tool_call_id":"call_function_1k0l7s1exxb3_1","output_length":4000}}';
     const issue = createIssue({

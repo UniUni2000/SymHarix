@@ -40,7 +40,12 @@ import type { SupervisorRepoUnderstandingService } from '../supervisor/repoUnder
 import type { SupervisorClaudeRuntimeService } from '../supervisor/claudeRuntime';
 import { SupervisorSessionService } from '../supervisor/sessionService';
 import type { SupervisorAgentRuntimeService } from '../supervisor/agentRuntime';
-import { buildNoActionAssistantReply, isCapabilityQuestion } from '../supervisor/assistantReliability';
+import {
+  buildGreetingAssistantReply,
+  buildNoActionAssistantReply,
+  isCapabilityQuestion,
+  isGreetingLikeText,
+} from '../supervisor/assistantReliability';
 import { inferRuntimeLocaleFromText, type RuntimeLocale } from '../i18n/locale';
 import { extractIssueIdentifier } from './issueIdentifier';
 import { isIssueListQuestion } from './issueQueryIntent';
@@ -142,29 +147,6 @@ function isSupervisorSessionFocusText(text: string): boolean {
     || /^(?:当前|这张|这个|现有).{0,8}(?:卡片|计划卡).{0,8}(?:发我|给我|看看|看一下)$/i.test(normalized);
 }
 
-function isGreetingLikeText(text: string): boolean {
-  const normalized = text.trim().toLowerCase().replace(/\s+/g, ' ');
-  const compacted = normalized.replace(/[!！,.，。?？~\s'"`]+/g, '');
-  if (!normalized || normalized.length > 80) {
-    return false;
-  }
-  if (
-    extractIssueIdentifier(normalized) ||
-    /\b(?:issue|ticket|task|status|progress|repo|repository|project|branch|pr|pull request|create|update|fix|run|start|stop|retry|open|merge|review)\b/i.test(normalized) ||
-    /\b[a-z0-9_-]+\.(?:py|ts|tsx|js|jsx|json|md|yaml|yml|toml|go|rs|java|kt|swift)\b/i.test(normalized) ||
-    /(?:项目|进展|状态|仓库|分支|任务|工单|卡住|失败|中断|重试|创建|更新|修复|开始|停止|合并|评审|审核)/.test(normalized)
-  ) {
-    return false;
-  }
-  if (/^(你好|您好|哈喽|哈啰|嗨|早上好|上午好|中午好|下午好|晚上好|晚安|在吗|在么|在不在)$/.test(compacted)) {
-    return true;
-  }
-  if (/^(你|您)?(?:好吗|好么|怎么样|最近好吗)$/.test(compacted)) {
-    return true;
-  }
-  return /^(?:h+i+|h+e+y+|h+e+l+o+|yo+|hiya+|howdy+|sup+|morning|afternoon|evening|good morning|good afternoon|good evening|good night|what'?s up|wassup|how are you|how r you|how are u|how's it going|how is it going|how do you do)(?: there| again| ace| codex)?[!?.\s]*$/i.test(normalized);
-}
-
 function needsGreetingAttention(issue: BotIssueContextView): boolean {
   const stateText = [
     issue.tracker_state,
@@ -186,26 +168,13 @@ function needsGreetingAttention(issue: BotIssueContextView): boolean {
 
 function buildGreetingReply(context: BotRuntimeCopilotContext, text: string): string {
   const english = inferRuntimeLocaleFromText(text) === 'en';
-  const normalized = text.trim().toLowerCase();
-  const asksAboutAssistant = english
-    ? /\b(?:how are you|how r you|how are u|how's it going|how is it going|what'?s up|wassup)\b/i.test(normalized)
-    : /(?:你|您)?(?:好吗|好么|怎么样|最近好吗)/.test(normalized);
   const attentionIssue = context.overview.active_issues.find(needsGreetingAttention) ?? null;
   const attentionLine = attentionIssue
     ? english
       ? `One note: ${attentionIssue.identifier} may need attention (${attentionIssue.delivery_code || attentionIssue.delivery_state || attentionIssue.orchestrator_state || attentionIssue.tracker_state}).`
       : `顺带一提：${attentionIssue.identifier} 可能需要处理（${attentionIssue.delivery_code || attentionIssue.delivery_state || attentionIssue.orchestrator_state || attentionIssue.tracker_state}）。`
     : null;
-  return [
-    english
-      ? asksAboutAssistant
-        ? 'Doing well, thanks. What would you like to work on next?'
-        : 'Hello. What would you like to work on next?'
-      : asksAboutAssistant
-        ? '我很好，今天想处理什么？'
-        : '你好，今天想处理什么？',
-    attentionLine,
-  ].filter(Boolean).join('\n');
+  return buildGreetingAssistantReply(text, attentionLine);
 }
 
 function isSlashCommandText(text: string): boolean {

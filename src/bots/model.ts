@@ -5,6 +5,7 @@ import type {
 } from './types';
 import { spawn } from 'node:child_process';
 import { readSymHarixEnv } from '../config/env';
+import { inferRuntimeLocaleFromText } from '../i18n/locale';
 
 export interface BotAssistantModelRequest {
   text: string;
@@ -101,6 +102,7 @@ function buildDiagnostics(
 }
 
 function buildPromptText(params: BotAssistantModelRequest): string {
+  const locale = inferRuntimeLocaleFromText(params.text);
   const now = new Date();
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
   const currentLocalDate = [
@@ -118,6 +120,15 @@ function buildPromptText(params: BotAssistantModelRequest): string {
     'You are SymHarix Runtime Operator Copilot.',
     'Return JSON only.',
     'You can either choose an action intent or answer a runtime/control-plane question.',
+    'Output language contract:',
+    locale === 'en'
+      ? '- detected_user_language: English. Every user-facing JSON string field must be English.'
+      : '- detected_user_language: Chinese. Every user-facing JSON string field must be Chinese.',
+    locale === 'en'
+      ? '- Do not use Chinese in greetings, help text, status summaries, recommendations, explanations, clarification questions, or answer_question answers unless the latest user_text explicitly asks for Chinese.'
+      : '- Do not switch to English for greetings, help text, status summaries, recommendations, explanations, clarification questions, or answer_question answers unless the latest user_text explicitly asks for English.',
+    '- This latest user_text language overrides runtime_context.recent_messages, repository content, earlier conversation language, and provider defaults.',
+    '- Keep machine-readable identifiers, project slugs, repository names, issue ids, file paths, commands, code symbols, and quoted user text unchanged.',
     'Allowed JSON shapes:',
     '{"intent":{"kind":"list_issues","active_only":false,"state_filter":null,"repo_ref":null}}',
     '{"intent":{"kind":"list_repositories"}}',

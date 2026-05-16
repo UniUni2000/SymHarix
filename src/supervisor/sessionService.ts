@@ -5,7 +5,7 @@ import type {
   BotRuntimeCopilotContext,
   SupervisorIntakeSource,
 } from '../bots/types';
-import type { RuntimeControlPlane, RuntimeIssueView } from '../runtime/types';
+import type { RuntimeControlPlane, RuntimeGovernanceChildIssueView, RuntimeIssueView } from '../runtime/types';
 import { assessIntakeCritic } from '../governance/intakeCritic';
 import type {
   SupervisorApprovalMode,
@@ -157,6 +157,17 @@ function localizePlanCardForLocale(planCard: SupervisorPlanCard, locale: Runtime
       ? localizeKnownRuntimeText(planCard.clarification_question, locale)
       : null,
   };
+}
+
+function localizeRuntimeTextForLocale(value: string | null | undefined, locale: RuntimeLocale | null | undefined): string {
+  return localizeKnownRuntimeText(value, locale);
+}
+
+function childIssueLineForLocale(
+  child: RuntimeGovernanceChildIssueView,
+  locale: RuntimeLocale | null | undefined,
+): string {
+  return `${escapeHtml(child.issue_identifier)} · ${escapeHtml(localizeRuntimeTextForLocale(child.title, locale))}`;
 }
 
 function isInternalPlanDiagnostic(value: string): boolean {
@@ -1312,7 +1323,7 @@ export function buildSupervisorSessionFollowupMessage(
 } {
   const locale = session.supervisor_locale;
   const planCard = session.plan_card ? localizePlanCardForLocale(session.plan_card, locale) : null;
-  const title = planCard?.title || issue?.title || textForLocale(locale, '当前计划线程', 'Current plan thread');
+  const title = planCard?.title || localizeRuntimeTextForLocale(issue?.title, locale) || textForLocale(locale, '当前计划线程', 'Current plan thread');
   const currentChild = issue?.governance_current_child
     ?? issue?.governance_child_queue?.find((child) => child.queue_state === 'current')
     ?? null;
@@ -1397,7 +1408,7 @@ export function buildSupervisorSessionFollowupMessage(
       !waitingForDecision && !completed && !cancelled && !latestDevInstruction && oversightInstruction ? `<b>${textForLocale(locale, 'Supervisor 下一步指令', 'Supervisor Next Instruction')}</b>` : null,
       !waitingForDecision && !completed && !cancelled && !latestDevInstruction && oversightInstruction ? escapeHtml(compact(localizeKnownRuntimeText(oversightInstruction, locale), 260)) : null,
       currentChild ? `<b>${textForLocale(locale, '当前子任务', 'Current Child Task')}</b>` : null,
-      currentChild ? `${escapeHtml(currentChild.issue_identifier)} · ${escapeHtml(currentChild.title)}` : null,
+      currentChild ? childIssueLineForLocale(currentChild, locale) : null,
       queue.length > 0 ? `<b>${textForLocale(locale, '队列', 'Queue')}</b>` : null,
       queue.length > 0
         ? escapeHtml(queue.map((child) => `${child.issue_identifier}:${child.queue_state || 'queued'}`).join(' / '))
@@ -1620,7 +1631,7 @@ export class SupervisorSessionService {
     const session = this.sessions.findById(params.sessionId);
     if (!session) {
       return {
-        message: '这条计划卡状态已经丢失。请直接回复你想继续做什么，我会重新接上当前线程。',
+        message: 'This Plan Card state is no longer available. Reply with what you want to continue, and I will reconnect the current thread.',
       };
     }
 
@@ -1659,7 +1670,11 @@ export class SupervisorSessionService {
       id: session.id,
       state: 'cancelled',
       active_decision_kind: null,
-      delivery_summary: '用户已取消这条计划线程。',
+      delivery_summary: textForLocale(
+        session.supervisor_locale,
+        '用户已取消这条计划线程。',
+        'The user cancelled this plan thread.',
+      ),
     })!;
     this.recordEvent(session.id, 'session_cancelled_by_user', {
       text,
@@ -1687,8 +1702,9 @@ export class SupervisorSessionService {
   private async startSession(params: SupervisorServiceResponseParams): Promise<BotCommandResponse> {
     const intent = params.intent;
     if (!intent || intent.kind !== 'create_issue') {
+      const locale = inferRuntimeLocaleFromText(params.text);
       return {
-        message: '我还没拿到可以起草计划的需求。',
+        message: textForLocale(locale, '我还没拿到可以起草计划的需求。', 'I do not have a request to draft into a plan yet.'),
       };
     }
 
@@ -2263,16 +2279,17 @@ export class SupervisorSessionService {
     });
 
     if (!createResult.accepted || !createResult.issue_id) {
+      const createFailureMessage = localizeRuntimeTextForLocale(createResult.message, locale);
       this.sessions.update({
         id: session.id,
         state: 'awaiting_user_decision',
-        delivery_summary: createResult.message,
+        delivery_summary: createFailureMessage,
         last_material_outcome: {
-          materialize_error: createResult.message,
+          materialize_error: createFailureMessage,
         },
       });
       this.recordEvent(session.id, 'materialize_failed', {
-        message: createResult.message,
+        message: createFailureMessage,
       });
       return {
         ...this.withSessionMetadata(
@@ -2280,8 +2297,8 @@ export class SupervisorSessionService {
           {
             message: textForLocale(
               locale,
-              `建单没有成功：${createResult.message}\n你可以直接回复我想怎么改计划，或者稍后再试一次。`,
-              `Issue creation did not succeed: ${createResult.message}\nReply with how you want to adjust the plan, or try again later.`,
+              `建单没有成功：${createFailureMessage}\n你可以直接回复我想怎么改计划，或者稍后再试一次。`,
+              `Issue creation did not succeed: ${createFailureMessage}\nReply with how you want to adjust the plan, or try again later.`,
             ),
           },
           'materialize-failed',
@@ -2381,7 +2398,11 @@ export class SupervisorSessionService {
       return this.withSessionMetadata(
         session,
         {
-          message: '当前 transport 没有写权限，所以我不能批准这次计划修订。',
+          message: textForLocale(
+            session.supervisor_locale,
+            '当前 transport 没有写权限，所以我不能批准这次计划修订。',
+            'This transport does not have write permission, so I cannot approve this plan revision.',
+          ),
         },
         'revision-write-blocked',
       );
@@ -2410,7 +2431,11 @@ export class SupervisorSessionService {
     return this.renderMaterializedMessage(
       updated,
       issue,
-      `第 ${session.plan_version} 版计划已批准。我会继续围绕原 root thread 推进，不会新建重复任务。`,
+      textForLocale(
+        session.supervisor_locale,
+        `第 ${session.plan_version} 版计划已批准。我会继续围绕原 root thread 推进，不会新建重复任务。`,
+        `Plan version ${session.plan_version} is approved. I will continue the original root thread without creating duplicate tasks.`,
+      ),
     );
   }
 
@@ -2422,7 +2447,11 @@ export class SupervisorSessionService {
       return this.withSessionMetadata(
         session,
         {
-          message: '当前 transport 没有写权限，所以不能执行这一步。你可以继续改计划或联系 operator。',
+          message: textForLocale(
+            session.supervisor_locale,
+            '当前 transport 没有写权限，所以不能执行这一步。你可以继续改计划或联系 operator。',
+            'This transport does not have write permission, so I cannot run this step. You can keep editing the plan or contact the operator.',
+          ),
         },
         'decision-write-blocked',
       );
@@ -2433,7 +2462,11 @@ export class SupervisorSessionService {
       return this.withSessionMetadata(
         session,
         {
-          message: '我找不到这条计划对应的 root issue，先不要继续执行。',
+          message: textForLocale(
+            session.supervisor_locale,
+            '我找不到这条计划对应的 root issue，先不要继续执行。',
+            'I cannot find the root issue for this plan, so do not continue execution yet.',
+          ),
         },
         'decision-missing-root',
       );
@@ -2454,7 +2487,11 @@ export class SupervisorSessionService {
         return this.withSessionMetadata(
           session,
           {
-            message: `${issue.identifier} 当前没有可自动执行的推荐治理动作。你可以直接回复想怎么改，或者显式要求强制继续。`,
+            message: textForLocale(
+              session.supervisor_locale,
+              `${issue.identifier} 当前没有可自动执行的推荐治理动作。你可以直接回复想怎么改，或者显式要求强制继续。`,
+              `${issue.identifier} has no recommended governance action that can be executed automatically. Reply with how you want to adjust it, or explicitly ask to force continue.`,
+            ),
           },
           'decision-no-action',
         );
@@ -2590,17 +2627,17 @@ export class SupervisorSessionService {
         {
           format: 'telegram_html',
           message: joinHtmlLines([
-            `<b>执行中需要你决定 · ${escapeHtml(issue?.identifier || planCard.title)}</b>`,
-            '这条计划线程在执行中遇到了一个需要你拍板的节点。',
-            session.last_material_outcome?.user_summary ? '<b>监督判断</b>' : null,
-            session.last_material_outcome?.user_summary ? escapeHtml(String(session.last_material_outcome.user_summary)) : null,
+            `<b>${textForLocale(locale, '执行中需要你决定', 'Decision needed during execution')} · ${escapeHtml(issue?.identifier || planCard.title)}</b>`,
+            textForLocale(locale, '这条计划线程在执行中遇到了一个需要你拍板的节点。', 'This plan thread hit a point that needs your decision.'),
+            session.last_material_outcome?.user_summary ? `<b>${textForLocale(locale, '监督判断', 'Supervisor Judgment')}</b>` : null,
+            session.last_material_outcome?.user_summary ? escapeHtml(localizeRuntimeTextForLocale(String(session.last_material_outcome.user_summary), locale)) : null,
             null,
-            '<b>当前计划</b>',
+            `<b>${textForLocale(locale, '当前计划', 'Current Plan')}</b>`,
             escapeHtml(planCard.title),
-            issue?.github_repo ? '<b>仓库</b>' : null,
+            issue?.github_repo ? `<b>${textForLocale(locale, '仓库', 'Repository')}</b>` : null,
             issue?.github_repo ? `<code>${escapeHtml(issue.github_repo)}</code>` : null,
             null,
-            '<b>当前为什么停在这里</b>',
+            `<b>${textForLocale(locale, '当前为什么停在这里', 'Why It Is Paused')}</b>`,
             escapeHtml(describeSupervisorThread({
               session,
               currentChild: issue?.governance_current_child
@@ -2610,12 +2647,12 @@ export class SupervisorSessionService {
               locale: session.supervisor_locale,
             })),
             null,
-            '<b>推荐下一步</b>',
-            escapeHtml(issue?.next_recommended_action || planCard.recommended_option.summary),
-            issue?.governance_summary ? '<b>原因</b>' : null,
-            issue?.governance_summary ? escapeHtml(compact(issue.governance_summary, 240)) : null,
+            `<b>${textForLocale(locale, '推荐下一步', 'Recommended Next Step')}</b>`,
+            escapeHtml(localizeRuntimeTextForLocale(issue?.next_recommended_action || planCard.recommended_option.summary, locale)),
+            issue?.governance_summary ? `<b>${textForLocale(locale, '原因', 'Reason')}</b>` : null,
+            issue?.governance_summary ? escapeHtml(compact(localizeRuntimeTextForLocale(issue.governance_summary, locale), 240)) : null,
             null,
-            '点“按推荐继续”，或者直接回复你想怎么改。',
+            textForLocale(locale, '点“按推荐继续”，或者直接回复你想怎么改。', 'Tap "Continue as recommended", or reply with how you want to adjust it.'),
           ]),
           action_rows: supervisorActionRows(session, issue),
         },
@@ -2630,11 +2667,11 @@ export class SupervisorSessionService {
         {
           format: 'telegram_html',
           message: joinHtmlLines([
-            `<b>计划已取消 · ${escapeHtml(planCard.title)}</b>`,
-            escapeHtml(session.delivery_summary || '这条计划线程已经取消，不会继续自动推进。'),
+            `<b>${textForLocale(locale, '计划已取消', 'Plan cancelled')} · ${escapeHtml(planCard.title)}</b>`,
+            escapeHtml(localizeRuntimeTextForLocale(session.delivery_summary || textForLocale(locale, '这条计划线程已经取消，不会继续自动推进。', 'This plan thread has been cancelled and will not continue automatically.'), locale)),
             null,
-            '如果你要换一个需求，请直接发送：',
-            `<code>新开线程 ${escapeHtml(planCard.title)}</code>`,
+            textForLocale(locale, '如果你要换一个需求，请直接发送：', 'To switch to a different request, send:'),
+            `<code>${textForLocale(locale, '新开线程', 'new thread')} ${escapeHtml(planCard.title)}</code>`,
           ]),
         },
         'cancelled',
@@ -2647,16 +2684,16 @@ export class SupervisorSessionService {
       {
         format: 'telegram_html',
         message: joinHtmlLines([
-          `<b>计划执行中 · ${escapeHtml(planCard.title)}</b>`,
-          `状态：${escapeHtml(session.state)}`,
+          `<b>${textForLocale(locale, '计划执行中', 'Plan running')} · ${escapeHtml(planCard.title)}</b>`,
+          `${textForLocale(locale, '状态：', 'Status: ')}${escapeHtml(session.state)}`,
           lastOutcomeString(session, 'pending_user_notification_summary') ? null : null,
-          lastOutcomeString(session, 'pending_user_notification_summary') ? '<b>监督更新</b>' : null,
+          lastOutcomeString(session, 'pending_user_notification_summary') ? `<b>${textForLocale(locale, '监督更新', 'Supervisor Update')}</b>` : null,
           lastOutcomeString(session, 'pending_user_notification_summary')
-            ? escapeHtml(lastOutcomeString(session, 'pending_user_notification_summary')!)
+            ? escapeHtml(localizeRuntimeTextForLocale(lastOutcomeString(session, 'pending_user_notification_summary')!, locale))
             : null,
-          lastOutcomeString(session, 'latest_dev_instruction') ? '<b>下一轮指令</b>' : null,
+          lastOutcomeString(session, 'latest_dev_instruction') ? `<b>${textForLocale(locale, '下一轮指令', 'Next Round Instruction')}</b>` : null,
           lastOutcomeString(session, 'latest_dev_instruction')
-            ? escapeHtml(lastOutcomeString(session, 'latest_dev_instruction')!)
+            ? escapeHtml(localizeRuntimeTextForLocale(lastOutcomeString(session, 'latest_dev_instruction')!, locale))
             : null,
         ]),
         action_rows: supervisorActionRows(session, issue),
@@ -2676,6 +2713,7 @@ export class SupervisorSessionService {
   ): BotCommandResponse {
     const locale = session.supervisor_locale;
     const planCard = session.plan_card;
+    const localizedResultMessage = localizeRuntimeTextForLocale(resultMessage, locale);
     const currentChild = issue?.governance_current_child
       ?? issue?.governance_child_queue?.find((child) => child.queue_state === 'current')
       ?? null;
@@ -2687,14 +2725,14 @@ export class SupervisorSessionService {
         format: 'telegram_html',
         message: joinHtmlLines([
           `<b>${textForLocale(locale, '计划执行中', 'Plan running')} · ${escapeHtml(issue?.identifier || planCard?.title || 'root')}</b>`,
-          escapeHtml(compact(resultMessage, 260)),
+          escapeHtml(compact(localizedResultMessage, 260)),
           null,
           planCard ? `<b>${textForLocale(locale, '计划', 'Plan')}</b>` : null,
-          planCard ? escapeHtml(planCard.title) : null,
+          planCard ? escapeHtml(localizeRuntimeTextForLocale(planCard.title, locale)) : null,
           issue?.github_repo ? `<b>${textForLocale(locale, '仓库', 'Repository')}</b>` : null,
           issue?.github_repo ? `<code>${escapeHtml(issue.github_repo)}</code>` : null,
           currentChild ? `<b>${textForLocale(locale, '当前子任务', 'Current Child Task')}</b>` : null,
-          currentChild ? `${escapeHtml(currentChild.issue_identifier)} · ${escapeHtml(currentChild.title)}` : null,
+          currentChild ? childIssueLineForLocale(currentChild, locale) : null,
           queue.length > 0 ? `<b>${textForLocale(locale, '队列', 'Queue')}</b>` : null,
           queue.length > 0
             ? escapeHtml(queue.map((child) => `${child.issue_identifier}:${child.queue_state || 'queued'}`).join(' / '))
@@ -2715,12 +2753,13 @@ export class SupervisorSessionService {
     session: SupervisorSessionRecord,
     issue: RuntimeIssueView | null,
   ): BotCommandResponse {
-    const planCard = session.plan_card;
+    const locale = session.supervisor_locale;
+    const planCard = session.plan_card ? localizePlanCardForLocale(session.plan_card, locale) : null;
     if (!planCard) {
       return this.withSessionMetadata(
         session,
         {
-          message: '这条计划线程还没有形成稳定计划卡。',
+          message: textForLocale(locale, '这条计划线程还没有形成稳定计划卡。', 'This plan thread does not have a stable Plan Card yet.'),
         },
         'plan-memory-missing',
       );
@@ -2735,25 +2774,25 @@ export class SupervisorSessionService {
       {
         format: 'telegram_html',
         message: joinHtmlLines([
-          `<b>计划记忆 · v${session.plan_version}</b>`,
-          '这是当前 Telegram 线程里我正在守住的执行计划。',
+          `<b>${textForLocale(locale, '计划记忆', 'Plan Memory')} · v${session.plan_version}</b>`,
+          textForLocale(locale, '这是当前 Telegram 线程里我正在守住的执行计划。', 'This is the execution plan I am holding for the current Telegram thread.'),
           null,
-          '<b>用户目标</b>',
+          `<b>${textForLocale(locale, '用户目标', 'User Goal')}</b>`,
           escapeHtml(planCard.user_goal),
           null,
-          '<b>本次范围</b>',
-          escapeHtml(textList(planCard.in_scope, '按当前目标推进。')),
+          `<b>${textForLocale(locale, '本次范围', 'Scope')}</b>`,
+          escapeHtml(textList(planCard.in_scope, textForLocale(locale, '按当前目标推进。', 'Proceed with the current goal.'))),
           null,
-          '<b>暂不处理</b>',
-          escapeHtml(textList(planCard.out_of_scope, '不扩大到无关模块。')),
+          `<b>${textForLocale(locale, '暂不处理', 'Out of Scope')}</b>`,
+          escapeHtml(textList(planCard.out_of_scope, textForLocale(locale, '不扩大到无关模块。', 'Do not expand into unrelated modules.'))),
           null,
-          '<b>验收标准</b>',
-          escapeHtml(textList(planCard.acceptance, '结果可验证。')),
-          currentChild ? '<b>当前子任务</b>' : null,
-          currentChild ? `${escapeHtml(currentChild.issue_identifier)} · ${escapeHtml(currentChild.title)}` : null,
+          `<b>${textForLocale(locale, '验收标准', 'Acceptance Criteria')}</b>`,
+          escapeHtml(textList(planCard.acceptance, textForLocale(locale, '结果可验证。', 'The result is verifiable.'))),
+          currentChild ? `<b>${textForLocale(locale, '当前子任务', 'Current Child Task')}</b>` : null,
+          currentChild ? childIssueLineForLocale(currentChild, locale) : null,
           null,
-          '<b>下一步</b>',
-          escapeHtml(issue?.next_recommended_action || planCard.recommended_option.summary),
+          `<b>${textForLocale(locale, '下一步', 'Next Step')}</b>`,
+          escapeHtml(localizeRuntimeTextForLocale(issue?.next_recommended_action || planCard.recommended_option.summary, locale)),
         ]),
       },
       `plan-memory:${issue?.identifier ?? 'none'}:${currentChild?.issue_identifier ?? 'none'}`,

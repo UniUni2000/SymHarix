@@ -128,8 +128,12 @@ export function normalizeRuntimeMiniAppSummary(
   return compactPlainText(localizeKnownRuntimeText(raw || fallback, locale), maxLength);
 }
 
-function compactText(value: string | null | undefined, maxLength = 520): string {
-  return normalizeRuntimeMiniAppSummary(value, '', maxLength);
+function compactText(
+  value: string | null | undefined,
+  maxLength = 520,
+  locale?: RuntimeLocale | null,
+): string {
+  return normalizeRuntimeMiniAppSummary(value, '', maxLength, locale);
 }
 
 function isRetryableRuntimeMiniAppFailure(issue: RuntimeIssueView): boolean {
@@ -265,7 +269,7 @@ export function buildRuntimeMiniAppMilestones(issue: RuntimeIssueView): RuntimeM
     milestone(
       issue,
       'plan_ready',
-      compactText(issue.supervisor_plan_summary || issue.title, 160) || (englishOutput
+      compactText(issue.supervisor_plan_summary || issue.title, 160, issue.supervisor_locale) || (englishOutput
         ? 'Plan is ready and waiting for the execution signal.'
         : '计划已形成，等待执行信号。'),
       issue.created_at,
@@ -276,7 +280,7 @@ export function buildRuntimeMiniAppMilestones(issue: RuntimeIssueView): RuntimeM
     items.push(milestone(
       issue,
       'needs_decision',
-      compactText(issue.next_recommended_action || issue.governance_summary, 180) || (englishOutput
+      compactText(issue.next_recommended_action || issue.governance_summary, 180, issue.supervisor_locale) || (englishOutput
         ? 'User confirmation is needed for the next step.'
         : '当前需要用户确认下一步。'),
     ));
@@ -294,7 +298,7 @@ export function buildRuntimeMiniAppMilestones(issue: RuntimeIssueView): RuntimeM
     items.push(milestone(
       issue,
       'delivery_completed',
-      compactText(issue.delivery_summary, 180) || (englishOutput
+      compactText(issue.delivery_summary, 180, issue.supervisor_locale) || (englishOutput
         ? 'Issue is complete and final delivery is closed.'
         : 'Issue 已完成，最终交付已闭环。'),
     ));
@@ -302,7 +306,7 @@ export function buildRuntimeMiniAppMilestones(issue: RuntimeIssueView): RuntimeM
     items.push(milestone(
       issue,
       'proof_satisfied',
-      compactText(issue.delivery_summary, 180) || (englishOutput
+      compactText(issue.delivery_summary, 180, issue.supervisor_locale) || (englishOutput
         ? 'Proof is satisfied and final delivery is pending.'
         : '证据已满足，正在等待最终交付。'),
     ));
@@ -310,7 +314,7 @@ export function buildRuntimeMiniAppMilestones(issue: RuntimeIssueView): RuntimeM
     items.push(milestone(
       issue,
       'review_running',
-      compactText(issue.session?.last_message || issue.next_recommended_action, 180) || (englishOutput
+      compactText(issue.session?.last_message || issue.next_recommended_action, 180, issue.supervisor_locale) || (englishOutput
         ? 'Review is checking delivery quality.'
         : 'Review 正在检查交付质量。'),
       issue.session?.last_event_at || issue.updated_at,
@@ -319,7 +323,7 @@ export function buildRuntimeMiniAppMilestones(issue: RuntimeIssueView): RuntimeM
     items.push(milestone(
       issue,
       'dev_running',
-      compactText(issue.session?.last_message || issue.next_recommended_action, 180) || (englishOutput
+      compactText(issue.session?.last_message || issue.next_recommended_action, 180, issue.supervisor_locale) || (englishOutput
         ? 'The dev agent is advancing the current round.'
         : 'Dev agent 正在推进当前轮次。'),
       issue.session?.last_event_at || issue.updated_at,
@@ -673,7 +677,7 @@ export function buildRuntimeMiniAppIssuePresentation(issue: RuntimeIssueView): R
           ? 'Completed. You can return to Telegram to start the next request.'
           : '已完成。可以回到 Telegram 发起下一条需求。'),
       roundGoal: englishOutput
-        ? `Plan "${issue.title}" is complete. No more dev-agent instructions are needed.`
+        ? `Plan "${localizeKnownRuntimeText(issue.title, issue.supervisor_locale)}" is complete. No more dev-agent instructions are needed.`
         : `当前计划「${issue.title}」已经完成，不再向 dev agent 追加指令。`,
       riskDelta: compactText(issue.riskDelta || issue.risk_delta, 180) || 'stable',
       planStatus: englishOutput ? 'Done' : '完成',
@@ -2765,11 +2769,41 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
               continuePlan[5] ? 'History reminders: ' + localizeSnippet(continuePlan[5]) + '.' : null
             ].filter(Boolean).join(' ');
           }
+          const splitIntoFocusedIssues = text.match(/^将\\s+(.+?)\\s+拆成\\s+2-3\\s+张单，每张单只覆盖一个目标和一套完成证据。?$/);
+          if (splitIntoFocusedIssues) {
+            return 'Split ' + splitIntoFocusedIssues[1] + ' into 2-3 issues, with each issue covering one goal and one proof of completion.';
+          }
+          const governanceFollowUpTitle = text.match(/^\\[GOVERNANCE FOLLOW-UP for ([^\\]]+)\\]\\s+(.+)$/);
+          if (governanceFollowUpTitle) {
+            return '[GOVERNANCE FOLLOW-UP for ' + governanceFollowUpTitle[1] + '] ' + localizeKnownRuntimeText(governanceFollowUpTitle[2]);
+          }
+          const handleGovernanceChild = text.match(/^先处理治理子任务\\s+([A-Z]+-\\d+)(?:；其余子任务会按顺序自动接力。?)?$/);
+          if (handleGovernanceChild) {
+            return 'Handle governance child task ' + handleGovernanceChild[1] + ' first.';
+          }
+          const createdGovernanceChildren = text.match(/^已为\\s+([A-Z]+-\\d+)\\s+创建治理子任务\\s+([^，]+)，当前先处理\\s+([^，]+)，其余子任务会按顺序自动接力，源单仍保持暂停。?$/);
+          if (createdGovernanceChildren) {
+            return 'Created governance child task(s) ' + createdGovernanceChildren[2] + ' for ' + createdGovernanceChildren[1] + '. Handle ' + createdGovernanceChildren[3] + ' first; later child tasks will continue in order and the source issue remains paused.';
+          }
           return text
             .replace(/^当前计划「(.+)」已经完成，不再向 dev agent 追加指令。$/, 'Plan "$1" is complete. No more dev-agent instructions are needed.')
             .replace(/^计划「(.+)」正在推进。$/, 'Plan "$1" is in progress.')
             .replace(/^继续推进计划「(.+)」。$/, 'Continue advancing plan "$1".')
             .replace(/^完成标准：(.+)。?$/, function (_match, body) { return 'Acceptance: ' + localizeSnippet(body) + '.'; })
+            .replace(/^按推荐继续$/, 'Continue as recommended')
+            .replace(/^按推荐拆成更聚焦的任务$/, 'Split into more focused tasks as recommended')
+            .replace(/^按方案拆成两个任务$/, 'Split into two tasks')
+            .replace(/^拆出 runtime\\s*\\/\\s*control-plane 变更$/, 'Split out runtime/control-plane change')
+            .replace(/^网页或 UI 改动拆成单独 issue$/, 'Split web/UI changes into their own issue')
+            .replace(/^bot\\s*\\/\\s*文案\\s*\\/\\s*聊天端体验拆成独立 issue$/, 'Split bot/copy/chat experience into its own issue')
+            .replace(/^大规模 cleanup\\s*\\/\\s*redesign 单独列出来$/, 'Separate large cleanup/redesign work')
+            .replace(/^先把需求改写成一个更聚焦的任务$/, 'Rewrite the request into one more focused task first')
+            .replace(/^先拆出 runtime\\s*\\/\\s*control-plane 变更，单独完成接口或调度主链。?$/, 'First split out the runtime/control-plane change, then complete the interface or dispatch path separately.')
+            .replace(/^把网页或 UI 改动拆成单独 issue，避免和后端调度改动绑在一起。?$/, 'Split the web or UI change into its own issue so it is not bundled with backend dispatch work.')
+            .replace(/^把 bot\\s*\\/\\s*文案\\s*\\/\\s*聊天端体验拆成独立 issue，减少跨层耦合。?$/, 'Split bot, copy, and chat-surface experience work into its own issue to reduce cross-layer coupling.')
+            .replace(/^把大规模 cleanup\\s*\\/\\s*redesign 单独列出来，不要和功能性交付混在同一单里。?$/, 'Separate large cleanup or redesign work from functional delivery instead of mixing them into one issue.')
+            .replace(/^先把 (.+?) 的 cleanup\\s*\\/\\s*narrowing 单独拆出来，再做新的 surface 扩张。?$/, 'First split the cleanup/narrowing work for $1 into its own issue, then continue new surface expansion.')
+            .replace(/^先把 (.+?) 的 cleanup\\s*\\/\\s*interface narrowing 单独拆出来，再继续新的 surface 扩张。?$/, 'First split the cleanup/interface-narrowing work for $1 into its own issue, then continue new surface expansion.')
             .replace(/^证据已满足，正在等待最终交付动作完成。$/, 'Proof is satisfied and final delivery is pending.')
             .replace(/^证据已满足，正在等待最终交付。$/, 'Proof is satisfied and final delivery is pending.')
             .replace(/^Issue 已完成，最终交付已闭环。$/, 'Issue is complete and final delivery is closed.')
@@ -3556,7 +3590,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           const presentation = getPresentation(issue);
           const identifier = issue.identifier || issueId;
           const rawTitle = issue.title || 'Issue';
-          let displayTitle = String(rawTitle);
+          let displayTitle = localizeKnownRuntimeText(String(rawTitle));
           if (displayTitle.indexOf(identifier) === 0) {
             displayTitle = displayTitle.slice(identifier.length).replace(/^\\s*[·:-]?\\s*/, '') || String(rawTitle);
           }

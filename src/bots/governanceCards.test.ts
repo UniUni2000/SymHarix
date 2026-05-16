@@ -73,6 +73,34 @@ describe('governanceCards', () => {
     ]);
   });
 
+  test('renders split governance system suggestions in English for English issues', () => {
+    const issue = createGovernanceBlockedIssue();
+    issue.supervisor_locale = 'en';
+    issue.active_governance_suggestions = [
+      {
+        id: 'suggestion-1',
+        suggestion_type: 'architecture_alignment',
+        status: 'pending',
+        title: '[GOVERNANCE] Split INT-37 before implementation',
+        summary: '先拆出 runtime / control-plane 变更，单独完成接口或调度主链。',
+        can_execute: true,
+        can_dismiss: true,
+      },
+    ];
+
+    const message = buildGovernanceBlockedMessage(issue);
+
+    expect(message.text).toContain('<b>Needs Your Decision · INT-37</b>');
+    expect(message.text).toContain('Current Recommendation');
+    expect(message.text).toContain('System suggestion: First split out the runtime/control-plane change');
+    expect(message.text).not.toContain('先拆出 runtime');
+    expect(message.text).not.toContain('待你处理');
+    expect(message.action_rows).toEqual([
+      [{ label: 'Split into two tasks', callback_data: 'govsel|INT-37|1' }],
+      [{ label: 'Force continue', callback_data: 'govsel|INT-37|2', style: 'danger' }],
+    ]);
+  });
+
   test('renders confirming cards on the same Telegram card with clear confirmation buttons', () => {
     const message = buildGovernanceConfirmingMessage({
       issue: createGovernanceBlockedIssue(),
@@ -155,6 +183,36 @@ describe('governanceCards', () => {
     expect(message.text).toContain('处理完 INT-38 后，会自动接力 INT-39');
     expect(message.text).toContain('先处理治理子任务 INT-38');
     expect(message.action_rows ?? []).toHaveLength(0);
+  });
+
+  test('localizes waiting-on-child child titles and recommendations for English issues', () => {
+    const issue = createGovernanceBlockedIssue();
+    issue.supervisor_locale = 'en';
+    issue.governance_thread_state = 'waiting_on_child';
+    issue.governance_current_child = {
+      issue_id: 'issue-child',
+      issue_identifier: 'TES-127',
+      title: '[GOVERNANCE FOLLOW-UP for TES-126] 网页或 UI 改动拆成单独 issue',
+      tracker_state: 'Todo',
+      orchestrator_state: 'halted',
+      governance_decision: 'accept',
+      governance_summary: 'No constitution blockers detected.',
+      queue_state: 'current',
+      delivery_state: null,
+      delivery_code: null,
+      delivery_summary: null,
+    };
+    issue.governance_child_queue = [issue.governance_current_child];
+    issue.next_recommended_action = '先处理治理子任务 TES-127';
+
+    const message = buildGovernanceWaitingOnChildMessage(issue);
+
+    expect(message.text).toContain('Current Child Task');
+    expect(message.text).toContain('[GOVERNANCE FOLLOW-UP for TES-126] Split web/UI changes into their own issue');
+    expect(message.text).toContain('Recommended Next Step');
+    expect(message.text).toContain('Handle governance child task TES-127 first.');
+    expect(message.text).not.toContain('网页或 UI 改动');
+    expect(message.text).not.toContain('先处理治理子任务');
   });
 
   test('keeps the waiting-on-child card key stable across child retry churn', () => {
