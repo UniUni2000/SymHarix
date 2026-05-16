@@ -14,6 +14,7 @@ import {
 import type { RuntimeControlPlane } from '../runtime/types';
 import type { BotGateway } from '../bots/types';
 import { createRuntimeAccessController } from './runtimeAccess';
+import { clearTelegramThemePreferences, getTelegramThemePreference } from '../bots/telegramThemePreference';
 
 async function readJson<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
@@ -294,6 +295,7 @@ describe('SymHarixServer', () => {
   beforeEach(() => {
     dropAllTables(db);
     initializeSchema(db);
+    clearTelegramThemePreferences();
     createIssueCalls = [];
     stopIssueCalls = [];
     retryIssueCalls = [];
@@ -505,7 +507,7 @@ describe('SymHarixServer', () => {
 
     const html = await response.text();
     expect(html).toContain('telegram-web-app.js');
-    expect(html).toContain('symharix');
+    expect(html).toContain('SymHarix');
     expect(html).toContain('issue cockpit');
     expect(html).toContain('INT-RT-1');
     expect(html).toContain('/api/v1/runtime/issues/INT-RT-1');
@@ -541,6 +543,23 @@ describe('SymHarixServer', () => {
     expect(payload.success).toBe(true);
     expect(payload.data.issue_id).toBe('linear-rt-1');
     expect(payload.data.identifier).toBe('INT-RT-1');
+  });
+
+  test('POST /api/v1/runtime/telegram/theme-preference stores Telegram theme preference', async () => {
+    const response = await request('/api/v1/runtime/telegram/theme-preference', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        conversation_id: '8552378102',
+        theme: 'dark',
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const payload = await readJson<any>(response);
+    expect(payload.success).toBe(true);
+    expect(payload.data.theme).toBe('dark');
+    expect(getTelegramThemePreference('8552378102')).toBe('dark');
   });
 
   test('POST /api/v1/runtime/issues creates a runtime issue', async () => {

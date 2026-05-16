@@ -50,7 +50,7 @@ export type BotWatchTransport = 'telegram' | 'discord';
 export type BotWatchPresetValue = 'default' | 'verbose' | 'failures' | 'status';
 export type BotIssueFollowupRole = 'origin';
 export type BotFollowupCardKind = 'governance_blocked' | 'runtime_issue';
-export type BotFollowupDeliveryKind = 'governance_card' | 'lifecycle_digest';
+export type BotFollowupDeliveryKind = 'governance_card' | 'lifecycle_digest' | 'runtime_entry';
 export type BotLifecycleNotificationClass = 'retrying' | 'failed' | 'done' | 'cancelled';
 export type BotConversationFocusSource =
   | 'explicit_issue'

@@ -694,8 +694,10 @@ describe('Telegram Mini App issue presentation', () => {
     expect(html).toContain('<span class="tab-label">Changes</span>');
     expect(html).toContain('<span class="tab-label">Delivery</span>');
     expect(html).toContain('<span class="tab-label">Usage</span>');
-    expect(html).toContain('symharix issue cockpit');
-    expect(html).toContain('<span>symharix</span>');
+    expect(html).toContain('SymHarix issue cockpit');
+    expect(html).toContain('class="brand-wordmark">SymHarix</span>');
+    expect(html).toContain('class="brand-mark dark-bg"');
+    expect(html).toContain('class="brand-mark light-bg"');
     expect(html).not.toContain('symphonyness');
     expect(html).toContain('id="usage-donut"');
     expect(html).toContain('id="usage-bars"');
@@ -704,19 +706,28 @@ describe('Telegram Mini App issue presentation', () => {
     expect(html).not.toContain('id="usage-equation"');
     expect(html).toContain('function usageTotalFontSize(value)');
     expect(html).toContain('function renderUsage(issue)');
-    expect(html).toContain("chip(issue.active_pr_number ? 'PR #' + issue.active_pr_number : t('prPending'), 'blue')");
-    expect(html).toContain("chip(issue.branch_name || (child && child.issue_identifier) || t('rootIssue'), 'blue')");
+    expect(html).toContain("chip(issue.active_pr_number ? 'PR #' + issue.active_pr_number : t('prPending'), 'blue', 'compact')");
+    expect(html).toContain("chip(issue.branch_name || (child && child.issue_identifier) || t('rootIssue'), 'blue', 'compact')");
     expect(html).toContain('id="theme-toggle"');
     expect(html).toContain('id="language-toggle"');
     expect(html).toContain('class="segmented-control"');
     expect(html).toContain('data-theme-choice="light"');
     expect(html).toContain('data-theme-choice="dark"');
+    expect(html).toContain('data-value="light"');
+    expect(html).toContain('aria-pressed="true"><span class="theme-icon" aria-hidden="true">☀</span>');
     expect(html).toContain('data-lang-choice="zh"');
     expect(html).toContain('data-lang-choice="en"');
     expect(html).toContain('html[data-theme="light"]');
+    expect(html).toContain('<html lang="zh-CN" data-theme="light">');
     expect(html).toContain("const storedLang = window.localStorage.getItem('symphony.miniapp.lang.' + issueId)");
     expect(html).toContain('langInitialized: storedLang === \'en\' || storedLang === \'zh\'');
     expect(html).toContain("state.lang = issue && issue.supervisor_locale === 'en' ? 'en' : 'zh'");
+    expect(html).toContain("themePreference: '/api/v1/runtime/telegram/theme-preference'");
+    expect(html).toContain("theme: telegramColorScheme() || window.localStorage.getItem('symphony.miniapp.theme') || 'light'");
+    expect(html).toContain("function telegramColorScheme()");
+    expect(html).toContain("function telegramConversationId()");
+    expect(html).toContain("async function syncTelegramThemePreference(force)");
+    expect(html).toContain("function applyTelegramThemeParams()");
   });
 
   test('keeps delivery and changes details in their dedicated tab surfaces', () => {
@@ -729,12 +740,21 @@ describe('Telegram Mini App issue presentation', () => {
     expect(html).toContain('改动摘要');
     expect(html).toContain("escapeHtml(t('reason'))");
     expect(html).toContain('class="diff-open-button"');
+    expect(html).toContain('justify-self: start;');
+    expect(html).toContain('max-width: max-content;');
     expect(html).toContain('id="diff-drawer-note"');
     expect(html).toContain("[t('restore'), isRetryableDeliveryFailure(issue) ? t('restorable') : t('noRestore')]");
     expect(html).toContain('class="diff-stat-summary"');
     expect(html).toContain('class="diff-stat-token add"');
     expect(html).toContain('class="diff-stat-token del"');
+    expect(html).toContain('class="diff-row-reason-label"');
+    expect(html).toContain('data-i18n="diffChip">Diff<');
+    expect(html).toContain('data-i18n="checksChip">Checks<');
     expect(html).toContain('background: rgba(255, 255, 255, 0.98);');
+    expect(html).toContain('display: flex;');
+    expect(html).toContain('flex-direction: column;');
+    expect(html).toContain('height: calc(100svh - 72px);');
+    expect(html).toContain('flex: 1 1 auto;');
     expect(html).toContain('background: rgba(248, 251, 255, 0.96);');
     expect(html).toContain('html[data-theme="dark"] .diff-drawer');
     expect(html).toContain('html[data-theme="dark"] .diff-drawer-code');
@@ -791,7 +811,9 @@ describe('Telegram Mini App issue presentation', () => {
     expect(html).toContain("t('stageReview')");
     expect(html).toContain('id="overview-signal"');
     expect(html).toContain('id="signal-pills"');
+    expect(html).toContain('data-i18n="milestonesChip">Milestones<');
     expect(html).toContain("function renderOverviewSignal(issue)");
+    expect(html).toContain("function renderView()");
     expect(html).toContain("el.hero.addEventListener('click'");
   });
 
@@ -808,6 +830,8 @@ describe('Telegram Mini App issue presentation', () => {
     expect(html).toContain('html[data-theme="light"] .tabbar');
     expect(html).toContain('html[data-theme="light"] .tab-button.active');
     expect(html).toContain("state.theme = state.theme === 'light' ? 'dark' : 'light'");
+    expect(html).toContain("state.theme = state.theme === 'light' ? 'dark' : 'light';\n          render();");
+    expect(html).toContain("state.theme = nextTheme;\n            render();");
     expect(html).toContain("state.lang = state.lang === 'en' ? 'zh' : 'en'");
     expect(html).toContain("background: url(\"data:image/svg+xml");
     expect(html).toContain('.hero {');
@@ -862,6 +886,7 @@ describe('Telegram Mini App issue presentation', () => {
     expect(html).toContain("file.drawerMode === 'full' ? t('diffDetails') : t('diffSummary')");
     expect(html).toContain('getPresentation(issue).diffFiles');
     expect(html).toContain('extractDiffFilesFromHistory(state.history)');
+    expect(html).toContain('function formatMilestoneKind(kind)');
     expect(html).toContain('(?:\\s*[:：]\\s*|\\s+)');
     expect(html).toContain('(?:删除|移除|新增|创建|添加|更新|修改|编辑|清空)(?:\\s*[:：]|\\s)');
   });
@@ -1268,7 +1293,7 @@ describe('Telegram Mini App issue presentation', () => {
   test('allows agent and milestone summaries to wrap inside their panels', () => {
     const html = renderRuntimeMiniAppPage('INT-143');
 
-    expect(html).toContain('.agent-row span,');
+    expect(html).toContain('.agent-row > div > span,');
     expect(html).toContain('white-space: normal;');
     expect(html).toContain('overflow-wrap: anywhere;');
   });
@@ -1347,6 +1372,6 @@ describe('Telegram Mini App issue presentation', () => {
     const html = renderRuntimeMiniAppPage('INT-143');
 
     expect(html).toContain("acceptanceMissingBadge: 'Missing'");
-    expect(html).toContain("chip(String(value).toLowerCase().includes('missing') ? t('acceptanceMissingBadge') : '✓'");
+    expect(html).toContain("chip(String(value).toLowerCase().includes('missing') ? t('acceptanceMissingBadge') : '✓', String(value).toLowerCase().includes('missing') ? 'yellow' : 'green', 'compact')");
   });
 });

@@ -8,6 +8,7 @@ import { inferRuntimeLocaleFromText, type RuntimeLocale } from '../i18n/locale';
 import { BotSubscriptionService } from './subscriptions';
 import { buildIssueCardActionRows } from './issueCardActions';
 import { buildSupervisorIssueVisualCard } from '../supervisor/issueVisualCard';
+import { getTelegramThemePreference } from './telegramThemePreference';
 import type {
   BotCommandContext,
   BotCommandRequest,
@@ -156,6 +157,13 @@ function formatIssueCreatedMessage(params: {
   return locale === 'en'
     ? `Got it, created ${identifier}`
     : `已收到，已创建 ${identifier}`;
+}
+
+function cardThemeForContext(context: BotCommandContext): 'light' | 'dark' {
+  if (context.transport !== 'telegram') {
+    return 'light';
+  }
+  return getTelegramThemePreference(context.recipient.conversation_id) ?? 'light';
 }
 
 function parseWatchArgs(inlineArgs: string): {
@@ -486,7 +494,7 @@ export class BotCommandService {
       rawText,
     });
     if (issue) {
-      const visual = buildSupervisorIssueVisualCard(issue);
+      const visual = buildSupervisorIssueVisualCard(issue, { theme: cardThemeForContext(context) });
       return {
         message,
         caption: visual.caption,
@@ -646,7 +654,7 @@ export class BotCommandService {
     this.registerOriginFollowup(context, result);
     const issue = (result.issue_id ? this.runtime.getIssue(result.issue_id) : null) ?? resolveIssue(this.runtime, issueId);
     if (issue) {
-      const visual = buildSupervisorIssueVisualCard(issue);
+      const visual = buildSupervisorIssueVisualCard(issue, { theme: cardThemeForContext(context) });
       return {
         message: result.message,
         caption: visual.caption,

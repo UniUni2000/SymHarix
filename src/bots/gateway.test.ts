@@ -8,6 +8,7 @@ import {
   BotTransportEventRepository,
   BotConversationPreferenceRepository,
   BotIssueFollowupRepository,
+  BotFollowupDeliveryStateRepository,
   BotFollowupMessageStateRepository,
   BotPendingActionRepository,
   SupervisorPendingActionRepository,
@@ -2619,7 +2620,7 @@ describe('DefaultBotGateway', () => {
     gateway.dispose();
   });
 
-  test('replaces a temporary trycloudflare card with a fresh preview card and current runtime view', async () => {
+  test('refreshes a temporary trycloudflare card in place with a fresh preview card and current runtime view', async () => {
     const requests: Array<{ url: string; body: FormData | Record<string, unknown> }> = [];
     const runtimeTexts: string[] = [];
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -2696,22 +2697,20 @@ describe('DefaultBotGateway', () => {
 
     expect(result.status).toBe(200);
     expect(runtimeTexts).toEqual(['INT-1 卡片']);
-    expect(requests).toHaveLength(3);
+    expect(requests).toHaveLength(2);
     expect(requests[0]?.url).toContain('answerCallbackQuery');
     expect(String((requests[0]?.body as Record<string, unknown>).text)).toMatch(/正在更新运行卡片|Updating the runtime card/i);
-    const sendPhoto = requests.find((request) => request.url.includes('sendPhoto'));
-    expect(sendPhoto?.body).toBeInstanceOf(FormData);
-    expect(JSON.parse(String((sendPhoto?.body as FormData).get('reply_markup')))).toEqual({
+    const editPhoto = requests.find((request) => request.url.includes('editMessageMedia'));
+    expect(editPhoto?.body).toBeInstanceOf(FormData);
+    expect((editPhoto?.body as FormData).get('message_id')).toBe('101');
+    expect(JSON.parse(String((editPhoto?.body as FormData).get('reply_markup')))).toEqual({
       inline_keyboard: [
         [{ text: '打开运行视图', style: 'primary', web_app: { url: 'https://fresh.trycloudflare.com/runtime/issues/INT-1/app' } }],
         [{ text: '刷新卡片', callback_data: 'rt|INT-1|refresh' }],
       ],
     });
-    const deleteRequest = requests.find((request) => request.url.includes('deleteMessage'));
-    expect(deleteRequest?.body).toMatchObject({
-      chat_id: '42',
-      message_id: '101',
-    });
+    expect(requests.some((request) => request.url.includes('sendPhoto'))).toBe(false);
+    expect(requests.some((request) => request.url.includes('deleteMessage'))).toBe(false);
 
     gateway.dispose();
   });
@@ -2811,14 +2810,226 @@ describe('DefaultBotGateway', () => {
     expect(firstResult.status).toBe(200);
     expect(secondResult.status).toBe(200);
     expect(runtimeTexts).toEqual(['INT-1 卡片']);
-    expect(requests.filter((request) => request.url.includes('sendPhoto'))).toHaveLength(1);
-    expect(requests.filter((request) => request.url.includes('deleteMessage'))).toHaveLength(1);
+    expect(requests.filter((request) => request.url.includes('editMessageMedia'))).toHaveLength(1);
+    expect(requests.filter((request) => request.url.includes('sendPhoto'))).toHaveLength(0);
+    expect(requests.filter((request) => request.url.includes('deleteMessage'))).toHaveLength(0);
     const answerRequests = requests.filter((request) => request.url.includes('answerCallbackQuery'));
     expect(answerRequests).toHaveLength(2);
     expect(String((answerRequests[0]?.body as Record<string, unknown>).text)).toMatch(/正在更新运行卡片|Updating the runtime card/i);
-    expect(String((answerRequests[1]?.body as Record<string, unknown>).text)).toMatch(/刚刚更新|just refreshed/i);
+    expect(String((answerRequests[1]?.body as Record<string, unknown>).text)).toMatch(/刚刚刷新|just refreshed/i);
 
     gateway.dispose();
+  });
+
+  test('falls back to a lightweight runtime entry when an old temporary card cannot refresh in place', async () => {
+    const requests: Array<{ url: string; body: FormData | Record<string, unknown> }> = [];
+    const runtimeTexts: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const rawBody = init?.body;
+      requests.push({
+        url,
+        body: rawBody instanceof FormData ? rawBody : JSON.parse(String(rawBody || '{}')),
+      });
+      if (url.includes('editMessageMedia')) {
+        return new Response(JSON.stringify({ ok: false, description: 'Bad Request: message to edit not found' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 889 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(['9']),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        supervisorAgentRuntimeService: {
+          respond: async ({ text }) => {
+            runtimeTexts.push(text);
+            return {
+              message: 'Issue Card · INT-1',
+              caption: '<b>INT-1 · Fresh card</b>',
+              format: 'telegram_html',
+              media_key: 'issue-card|INT-1|open-ephemeral-edit-fails',
+              issue_id: 'issue-1',
+              photo: {
+                bytes: new Uint8Array([137, 80, 78, 71]),
+                filename: 'INT-1-fallback-card.png',
+                content_type: 'image/png',
+              },
+              show_caption_above_media: false,
+              action_rows: [
+                [{ label: '打开运行视图', style: 'primary', web_app: { url: '/runtime/issues/INT-1/app' } }],
+                [{ label: '刷新卡片', callback_data: 'rt|INT-1|refresh' }],
+              ],
+            };
+          },
+        } as unknown as SupervisorAgentRuntimeService,
+      },
+    );
+    (gateway as any).telegramPublicBaseUrl = 'https://fresh.trycloudflare.com';
+
+    const result = await gateway.handleTelegramWebhook(
+      {
+        callback_query: {
+          id: 'callback-runtime-open-edit-fails',
+          data: 'rt|INT-1|open',
+          message: {
+            chat: { id: 42 },
+            message_id: 101,
+            caption: 'issue card',
+          },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(result.status).toBe(200);
+    expect(runtimeTexts).toEqual(['INT-1 卡片']);
+    expect(requests.filter((request) => request.url.includes('editMessageMedia'))).toHaveLength(1);
+    expect(requests.filter((request) => request.url.includes('sendPhoto'))).toHaveLength(0);
+    expect(requests.filter((request) => request.url.includes('deleteMessage'))).toHaveLength(0);
+    const sendMessage = requests.find((request) => request.url.includes('sendMessage'));
+    expect(sendMessage?.body).toMatchObject({
+      text: '这是当前最新的临时运行入口。如果又看到 1033，请等隧道恢复后再试。',
+    });
+
+    gateway.dispose();
+  });
+
+  test('reuses the same lightweight runtime entry message when temporary card refresh keeps failing', async () => {
+    const requests: Array<{ url: string; body: FormData | Record<string, unknown> }> = [];
+    const runtimeTexts: string[] = [];
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const followupDeliveryStates = new BotFollowupDeliveryStateRepository(db);
+
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const rawBody = init?.body;
+      requests.push({
+        url,
+        body: rawBody instanceof FormData ? rawBody : JSON.parse(String(rawBody || '{}')),
+      });
+      if (url.includes('editMessageMedia')) {
+        return new Response(JSON.stringify({ ok: false, description: 'Bad Request: message to edit not found' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 889 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(['9']),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        supervisorAgentRuntimeService: {
+          respond: async ({ text }) => {
+            runtimeTexts.push(text);
+            return {
+              message: 'Issue Card · INT-1',
+              caption: '<b>INT-1 · Fresh card</b>',
+              format: 'telegram_html',
+              media_key: 'issue-card|INT-1|open-ephemeral-edit-fails-reused',
+              issue_id: 'issue-1',
+              photo: {
+                bytes: new Uint8Array([137, 80, 78, 71]),
+                filename: 'INT-1-fallback-card.png',
+                content_type: 'image/png',
+              },
+              show_caption_above_media: false,
+              action_rows: [
+                [{ label: '打开运行视图', style: 'primary', web_app: { url: '/runtime/issues/INT-1/app' } }],
+                [{ label: '刷新卡片', callback_data: 'rt|INT-1|refresh' }],
+              ],
+            };
+          },
+        } as unknown as SupervisorAgentRuntimeService,
+        followupDeliveryStateRepository: followupDeliveryStates,
+        telegramRuntimeOpenCooldownMs: 0,
+      },
+    );
+    (gateway as any).telegramPublicBaseUrl = 'https://fresh.trycloudflare.com';
+
+    const webhookBody = {
+      callback_query: {
+        id: 'callback-runtime-open-edit-fails-reused',
+        data: 'rt|INT-1|open',
+        message: {
+          chat: { id: 42 },
+          message_id: 101,
+          caption: 'issue card',
+        },
+        from: { id: 9, username: 'alice' },
+      },
+    };
+    const headers = {
+      'x-telegram-bot-api-secret-token': 'secret',
+    };
+
+    const firstResult = await gateway.handleTelegramWebhook(webhookBody, headers);
+    const secondResult = await gateway.handleTelegramWebhook(
+      {
+        callback_query: {
+          ...webhookBody.callback_query,
+          id: 'callback-runtime-open-edit-fails-reused-second',
+        },
+      },
+      headers,
+    );
+
+    expect(firstResult.status).toBe(200);
+    expect(secondResult.status).toBe(200);
+    expect(runtimeTexts).toEqual(['INT-1 卡片', 'INT-1 卡片']);
+    expect(requests.filter((request) => request.url.includes('editMessageMedia'))).toHaveLength(2);
+    expect(requests.filter((request) => request.url.includes('sendPhoto'))).toHaveLength(0);
+    expect(requests.filter((request) => request.url.includes('sendMessage'))).toHaveLength(1);
+    expect(requests.filter((request) => request.url.includes('editMessageText'))).toHaveLength(1);
+    const deliveryState = followupDeliveryStates.findByKey({
+      transport: 'telegram',
+      conversation_id: '42',
+      root_issue_id: 'issue-1',
+      delivery_kind: 'runtime_entry',
+    });
+    expect(deliveryState?.last_message_id).toBe('889');
+
+    gateway.dispose();
+    db.close();
   });
 
   test('edits Telegram visual card captions with editMessageCaption when media is unchanged', async () => {
