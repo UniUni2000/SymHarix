@@ -1,17 +1,19 @@
 [Unit]
-Description=SymHarix Harnessed Code Development Platform
-After=network.target
+Description=SymHarix Telegram-first AI Supervisor
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=%USER%
-WorkingDirectory=/home/%USER%/symharix
-Environment=PATH=/usr/bin:/home/%USER%/.bun/bin
-ExecStart=/home/%USER%/.bun/bin/bun run start
+User=__SYMHARIX_USER__
+WorkingDirectory=__SYMHARIX_WORKDIR__
+Environment="PATH=__SYMHARIX_PATH__"
+Environment="PORT=3000"
+ExecStart=__SYMHARIX_BUN__ --env-file=__SYMHARIX_WORKDIR__/.env run __SYMHARIX_WORKDIR__/src/cli/index.ts --port 3000
 Restart=always
 RestartSec=10
-StandardOutput=append:/home/%USER%/symharix/symharix.log
-StandardError=append:/home/%USER%/symharix/symharix.log
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

@@ -3,17 +3,24 @@ profiles:
   - review
 
 commands:
-  setup: bun install
-  dev: bun run dev
+  setup: bun run setup
   test: bun test
   build: bun run build
-  review_checks: bun test src/agent/supervisor.test.ts src/runtime/hub.test.ts src/change-pack/service.test.ts
+  review_checks: bun test src/agent/supervisor.test.ts src/agent/embeddedClaudeRuntime.test.ts src/supervisor/agentRuntime.test.ts src/runtime/hub.test.ts src/runtime/miniAppPage.test.ts src/change-pack/service.test.ts src/contracts/repositoryContracts.test.ts scripts/claude-adapter.test.js
 
 artifacts:
   - dist/index.js
+  - src/cli/index.ts
+  - src/cli/startLocal.ts
   - src/orchestrator/index.ts
+  - src/supervisor/agentRuntime.ts
+  - src/bots/gateway.ts
   - src/runtime/page.ts
+  - src/runtime/miniAppPage.ts
   - src/server/routes/runtime.ts
+  - src/server/routes/bots.ts
+  - scripts/claude-adapter.cjs
+  - scripts/check-runtime.sh
 
 verification:
   required_commands:
@@ -23,7 +30,5 @@ verification:
     - dist/index.js
 
 runtime_hints:
-  url: http://localhost:8080/runtime
-  ready_log:
-    - "[orchestrator] Started"
-    - "SymHarix Server started on"
+  url: http://localhost:3000/runtime
+  ready_signal: "Runtime UI: http://localhost:"

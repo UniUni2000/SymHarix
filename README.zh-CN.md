@@ -1,7 +1,11 @@
 # ✨ SymHarix — Telegram-First AI Supervisor
 
 <p align="center">
-  <img src="./assets/logo_dark.svg" alt="SymHarix" width="220">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/logo_light.png">
+    <source media="(prefers-color-scheme: light)" srcset="./assets/logo_dark.png">
+    <img src="./assets/logo_dark.png" alt="SymHarix" width="220">
+  </picture>
 </p>
 
 <p align="center">
@@ -23,16 +27,16 @@
 
 ## SymHarix 是什么
 
-SymHarix 是一个可部署在本机或服务器上的代码执行控制平面。用户通过 Telegram Bot 提需求，Supervisor 负责澄清、推荐计划或展示 Plan Card；用户批准后，任务会按配置路由到 GitHub 仓库，并通过内置的 Claude Code 兼容 runtime 执行。
+SymHarix 是一个可部署在本机或服务器上的代码执行控制平面。用户通过 Telegram Bot 提需求，Supervisor 负责澄清、推荐计划或展示 Plan Card；用户批准后，任务会按配置路由到 GitHub 仓库，并通过内置 Claude-compatible runtime 执行。
 
 Telegram 是主要用户交互闭环。Runtime Deck 是诊断和控制界面。Linear 与 GitHub 负责保存任务、分支、PR、review 证据和交付状态。
 
 ## 快速开始
 
 ```bash
-bun run setup:local
+bun run setup
 # 编辑 .env 和 WORKFLOW.md
-bun run start:local
+bun run start
 ```
 
 打开 Runtime Deck：
@@ -44,13 +48,26 @@ http://localhost:3000/runtime
 只有端口冲突时才换端口：
 
 ```bash
-PORT=4000 bun run start:local
+PORT=4000 bun run start
 ```
 
 停止本地服务：
 
 ```bash
 bun run stop
+```
+
+检查内置 runtime：
+
+```bash
+bash scripts/check-runtime.sh
+```
+
+在 Linux 服务器上，安装 systemd service 后 SSH 断开也会继续运行：
+
+```bash
+bash scripts/install-systemd-service.sh
+sudo journalctl -u symharix -f
 ```
 
 ## 核心链路
@@ -61,7 +78,7 @@ Telegram / Runtime Deck / Linear poll
   -> Orchestrator and approval policy
   -> AgentRunner
   -> scripts/claude-adapter.cjs
-  -> claude-code/bin/claude-haha
+  -> bundled Claude-compatible runtime
   -> GitHub / Linear / Runtime history
 ```
 
@@ -71,7 +88,7 @@ Telegram / Runtime Deck / Linear poll
 - Runtime Deck 展示 issue 状态、时间线、token 使用量、近期 agent 进展、交付阻塞和安全写操作。
 - Mini App issue 页面会展示当前阶段、active PR、回放历史，并在 workspace 或 PR head 可用时展示文件 diff。
 - 仓库路由必须显式配置，并且缺失时 fail closed。Linear `project_slug` 必须映射到 `WORKFLOW.md` 中的 GitHub 仓库。
-- Claude Code 兼容执行链路通过 `scripts/claude-adapter.cjs` 运行；只读仓库理解默认也使用这个 adapter，除非显式覆盖。
+- Agent 执行链路通过 `scripts/claude-adapter.cjs` 运行，并由它启动内置 Claude-compatible runtime；只读仓库理解默认也使用这个 adapter，除非显式覆盖。
 
 ## 配置
 

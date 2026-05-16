@@ -24,6 +24,25 @@ describe('embeddedClaudeRuntime', () => {
     ).toBe(false);
   });
 
+  test('verifies the SymHarix runtime entrypoint before the legacy claude-haha entrypoint', () => {
+    const verified: string[] = [];
+    ensureEmbeddedClaudeRuntimeReady({
+      projectRoot: '/repo',
+      codexCommand: 'node ./scripts/claude-adapter.cjs',
+      fileExists: (targetPath) =>
+        targetPath === '/repo/claude-code/package.json'
+        || targetPath === '/repo/claude-code/node_modules/lodash-es/sumBy.js'
+        || targetPath === '/repo/claude-code/bin/claude-symharix'
+        || targetPath === '/repo/claude-code/bin/claude-haha',
+      verifyRuntime: (entrypoint) => {
+        verified.push(entrypoint);
+        return { status: 0 };
+      },
+    });
+
+    expect(verified).toEqual(['/repo/claude-code/bin/claude-symharix']);
+  });
+
   test('bootstraps embedded claude-code dependencies when the local runtime is selected and deps are missing', () => {
     const calls: string[] = [];
     const result = ensureEmbeddedClaudeRuntimeReady({

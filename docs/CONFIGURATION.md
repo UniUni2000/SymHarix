@@ -17,20 +17,41 @@ Use `SYMHARIX_*` for new operator-facing environment variables. Legacy `SYMPHONY
 ## Local Commands
 
 ```bash
-bun run setup:local
-bun run start:local
+bun run setup
+bun run start
 bun run stop
 bun run health
+bash scripts/install-systemd-service.sh
 ```
 
-`start:local` is the preferred local entrypoint. It keeps existing files, prepares Telegram proxy/tunnel behavior, starts the service, and prints a Telegram startup summary when possible.
+`start` is the preferred local entrypoint. It keeps existing files, prepares Telegram proxy/tunnel behavior, starts the service, and prints a Telegram startup summary when possible.
 
 Use another port with:
 
 ```bash
-PORT=4000 bun run start:local
+PORT=4000 bun run start
 PORT=4000 bun run health
 ```
+
+On Linux servers, `bash scripts/install-systemd-service.sh` installs and starts a systemd service. Use this when the process must survive SSH disconnects and machine reboots.
+
+Service controls:
+
+```bash
+sudo systemctl status ${SYMHARIX_SERVICE_NAME:-symharix} --no-pager
+sudo journalctl -u ${SYMHARIX_SERVICE_NAME:-symharix} -f
+sudo systemctl restart ${SYMHARIX_SERVICE_NAME:-symharix}
+sudo systemctl stop ${SYMHARIX_SERVICE_NAME:-symharix}
+```
+
+Install-time overrides:
+
+| Variable | Meaning |
+| --- | --- |
+| `SYMHARIX_SERVICE_NAME` | systemd unit name, default `symharix`. |
+| `SYMHARIX_SERVICE_USER` | Linux user that runs the service, default current user. |
+| `SYMHARIX_SERVICE_PORT` | HTTP port rendered into the unit, default `3000`. |
+| `SYMHARIX_BUN_BIN` | Explicit Bun binary path. |
 
 ## Startup Minimums
 
@@ -40,7 +61,7 @@ The fastest way to reason about startup is by responsibility:
 | --- | --- | --- |
 | Tracker | `SYMHARIX_TRACKER_KIND=linear`, `SYMHARIX_TRACKER_API_KEY`, `SYMHARIX_TRACKER_PROJECT_SLUG` | Linear supplies the work-item state machine and the default project for Telegram/Runtime-created issues. |
 | GitHub access | `GITHUB_TOKEN` | The token must reach every repository declared in `WORKFLOW.md -> repositories.routing`. |
-| Agent runtime | `ANTHROPIC_API_KEY` | The bundled Claude Code-compatible runtime uses it for execution and repo understanding unless the runner is replaced. |
+| Agent runtime | `ANTHROPIC_API_KEY` | The bundled Claude-compatible runtime uses it for execution and repo understanding unless the runner is replaced. |
 | Repository routing | `WORKFLOW.md -> repositories.routing` | The route key must match the Linear `project_slug`; missing routes fail closed before workspace creation. |
 | Telegram transport | `SYMHARIX_TELEGRAM_BOT_TOKEN`, `SYMHARIX_TELEGRAM_WEBHOOK_SECRET`, `SYMHARIX_TELEGRAM_OPERATOR_IDS` | The token enables Telegram, the secret protects webhook ingress, and operator ids restrict write-capable actions. |
 | Public ingress | `SYMHARIX_PUBLIC_BASE_URL` or temporary tunnel mode | Webhook and Mini App features need a stable publicly reachable HTTPS URL in production. |
@@ -65,7 +86,7 @@ The fastest way to reason about startup is by responsibility:
 | `GITHUB_OWNER` | optional | Older fallback path only. Prefer `WORKFLOW.md -> repositories.routing`. |
 | `GITHUB_REPO` | optional | Older fallback path only. Prefer `WORKFLOW.md -> repositories.routing`. |
 
-### Claude Code-Compatible Runtime
+### Claude-Compatible Runtime
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
@@ -77,6 +98,12 @@ The fastest way to reason about startup is by responsibility:
 | `SYMHARIX_ADAPTER_DEBUG` | debugging | Agent I/O diagnostics. |
 
 The adapter supplies runtime defaults such as simple mode, disabled background tasks, disabled auto memory, and read-only mode for read-only Supervisor sessions.
+
+Before publishing or deploying a fresh checkout, verify that the adapter can spawn the bundled runtime:
+
+```bash
+bash scripts/check-runtime.sh
+```
 
 ### Runtime Deck
 
@@ -109,9 +136,9 @@ Common deployment shapes:
 | Server with public IP, domain, TLS, and reverse proxy to SymHarix | Set `SYMHARIX_PUBLIC_BASE_URL=https://your-domain.example`; no temporary Cloudflare tunnel is needed. |
 | Server without public IP but with a stable public tunnel or load balancer | Works if the HTTPS URL is reachable by Telegram and users. |
 | Server with outbound-only access to Telegram | Not enough for the current webhook mode; it would need a polling/getUpdates transport. |
-| Local development without a stable public URL | Leave `SYMHARIX_PUBLIC_BASE_URL` empty and let `start:local` try a temporary `cloudflared` tunnel. |
+| Local development without a stable public URL | Leave `SYMHARIX_PUBLIC_BASE_URL` empty and let `start` try a temporary `cloudflared` tunnel. |
 
-If `SYMHARIX_PUBLIC_BASE_URL` is empty and Telegram is enabled, `start:local` tries to create a temporary `cloudflared` tunnel before starting the app. For temporary `trycloudflare.com` URLs, `start:local` also runs a watchdog that checks the public URL and Telegram manifest. If the tunnel becomes stale or unreachable, it provisions a fresh tunnel and restarts the local service process.
+If `SYMHARIX_PUBLIC_BASE_URL` is empty and Telegram is enabled, `start` tries to create a temporary `cloudflared` tunnel before starting the app. For temporary `trycloudflare.com` URLs, `start` also runs a watchdog that checks the public URL and Telegram manifest. If the tunnel becomes stale or unreachable, it provisions a fresh tunnel and restarts the local service process.
 
 Tunnel and webhook knobs:
 
@@ -186,7 +213,7 @@ SYMHARIX_SUPERVISOR_AGENT_*
 
 ### Supervisor Claude Runtime And Repo Understanding
 
-The Telegram Supervisor can use a top-level Claude Code-compatible runtime as the assistant brain. Repository access in repo-understanding paths is read-only. Business actions still go through supervisor/orchestrator tools and confirmation policy.
+The Telegram Supervisor can use a top-level Claude-compatible runtime as the assistant brain. Repository access in repo-understanding paths is read-only. Business actions still go through supervisor/orchestrator tools and confirmation policy.
 
 | Variable | Meaning |
 | --- | --- |
@@ -198,7 +225,7 @@ The Telegram Supervisor can use a top-level Claude Code-compatible runtime as th
 | `SYMHARIX_SUPERVISOR_READONLY_ADVISOR_COMMAND` | Per-turn read-only repo advisor command. |
 | `SYMHARIX_SUPERVISOR_READONLY_ADVISOR_TIMEOUT_MS` | Default `120000`. |
 
-Blank command values use `node scripts/claude-adapter.cjs`, which invokes `claude-code/bin/claude-haha`.
+Blank command values use `node scripts/claude-adapter.cjs`, which invokes the bundled Claude-compatible runtime. The preferred internal entrypoint is `claude-code/bin/claude-symharix`; a legacy entrypoint remains available only as a compatibility fallback.
 
 Internal Supervisor MCP bridge variables such as `SYMHARIX_SUPERVISOR_CONTEXT_*` and `SYMHARIX_SUPERVISOR_ORCHESTRATOR_*` are generated by the runtime. Do not set them in `.env` unless debugging the bridge directly; legacy `SYMPHONY_*` bridge names are still accepted internally.
 
@@ -248,7 +275,7 @@ These delays keep startup responsive and reduce contention with live verificatio
 Start from:
 
 ```bash
-bun run setup:local
+bun run setup
 ```
 
 ### Repository Routing
@@ -284,7 +311,7 @@ agent_runner:
   command: node ./scripts/claude-adapter.cjs
 ```
 
-Change this only when intentionally replacing the Claude Code-compatible runner. Older workflows may still use `codex.command`; it remains accepted as a legacy alias.
+Change this only when intentionally replacing the Claude-compatible runner. Older workflows may still use `codex.command`; it remains accepted as a legacy alias.
 
 ### Verification Scenarios
 

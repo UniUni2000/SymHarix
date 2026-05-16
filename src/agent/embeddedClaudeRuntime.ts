@@ -20,7 +20,7 @@ interface EnsureEmbeddedClaudeRuntimeReadyOptions {
   codexCommand: string;
   fileExists?: (targetPath: string) => boolean;
   installRuntime?: (runtimeRoot: string) => EmbeddedClaudeRuntimeCommandResult;
-  verifyRuntime?: (runtimeRoot: string) => EmbeddedClaudeRuntimeCommandResult;
+  verifyRuntime?: (runtimeEntrypoint: string) => EmbeddedClaudeRuntimeCommandResult;
   log?: (message: string) => void;
 }
 
@@ -30,6 +30,23 @@ export function shouldBootstrapEmbeddedClaudeRuntime(codexCommand: string): bool
 
 export function getEmbeddedClaudeRuntimeRoot(projectRoot: string): string {
   return path.join(projectRoot, 'claude-code');
+}
+
+export function getEmbeddedClaudeRuntimeEntrypoint(
+  runtimeRoot: string,
+  fileExists: (targetPath: string) => boolean = existsSync,
+): string {
+  const preferred = path.join(runtimeRoot, 'bin', 'claude-symharix');
+  if (fileExists(preferred)) {
+    return preferred;
+  }
+
+  const legacy = path.join(runtimeRoot, 'bin', 'claude-haha');
+  if (fileExists(legacy)) {
+    return legacy;
+  }
+
+  return preferred;
 }
 
 export function hasEmbeddedClaudeRuntimeDependencies(
@@ -63,7 +80,7 @@ export function ensureEmbeddedClaudeRuntimeReady(
   }
 
   if (hasEmbeddedClaudeRuntimeDependencies(options.projectRoot, fileExists)) {
-    verifyEmbeddedClaudeRuntime(runtimeRoot, options.verifyRuntime);
+    verifyEmbeddedClaudeRuntime(runtimeRoot, fileExists, options.verifyRuntime);
     return {
       attempted: false,
       installed: false,
@@ -85,7 +102,7 @@ export function ensureEmbeddedClaudeRuntimeReady(
     throw new Error(`Embedded Claude runtime bootstrap failed with exit code ${result.status ?? 'unknown'}`);
   }
 
-  verifyEmbeddedClaudeRuntime(runtimeRoot, options.verifyRuntime);
+  verifyEmbeddedClaudeRuntime(runtimeRoot, fileExists, options.verifyRuntime);
 
   return {
     attempted: true,
@@ -96,19 +113,21 @@ export function ensureEmbeddedClaudeRuntimeReady(
 
 function verifyEmbeddedClaudeRuntime(
   runtimeRoot: string,
-  verifyRuntime?: (runtimeRoot: string) => EmbeddedClaudeRuntimeCommandResult,
+  fileExists: (targetPath: string) => boolean,
+  verifyRuntime?: (runtimeEntrypoint: string) => EmbeddedClaudeRuntimeCommandResult,
 ): void {
-  const runVerification = verifyRuntime ?? ((cwd: string) => spawnSync(
-    path.join(cwd, 'bin', 'claude-haha'),
+  const entrypoint = getEmbeddedClaudeRuntimeEntrypoint(runtimeRoot, fileExists);
+  const runVerification = verifyRuntime ?? ((runtimeEntrypoint: string) => spawnSync(
+    runtimeEntrypoint,
     ['--help'],
     {
-      cwd,
+      cwd: runtimeRoot,
       env: process.env,
       encoding: 'utf8',
     },
   ));
 
-  const result = runVerification(runtimeRoot);
+  const result = runVerification(entrypoint);
   if (result.error) {
     throw new Error(`Embedded Claude runtime verification failed: ${result.error.message}`);
   }

@@ -6,6 +6,7 @@
  */
 
 const cp = require('child_process');
+const fs = require('fs');
 const readline = require('readline');
 const path = require('path');
 
@@ -71,6 +72,22 @@ function buildClaudeCliArgs(options = {}) {
   }
 
   return args;
+}
+
+function resolveClaudeRuntimeCliPath(runtimeRoot, options = {}) {
+  const fileExists = options.fileExists || fs.existsSync;
+  const candidates = [
+    path.join(runtimeRoot, 'bin', 'claude-symharix'),
+    path.join(runtimeRoot, 'bin', 'claude-haha'),
+  ];
+
+  for (const candidate of candidates) {
+    if (fileExists(candidate)) {
+      return candidate;
+    }
+  }
+
+  return candidates[0];
 }
 
 function isAdapterDebugEnabled(env = process.env) {
@@ -1177,9 +1194,9 @@ function startAdapter({
         runtime.turnUsageByResponse.clear();
         runtime.nextUsageResponseOrdinal = 1;
         runtime.lastCumulativeUsage = makeTokenUsage();
-        emitDebugLog(`Received thread/start. Spawning Claude Code at ${cwd}`);
+        emitDebugLog(`Received thread/start. Spawning bundled Claude-compatible runtime at ${cwd}`);
 
-        const cliPath = path.resolve(__dirname, '../claude-code/bin/claude-haha');
+        const cliPath = resolveClaudeRuntimeCliPath(path.resolve(__dirname, '../claude-code'));
         const args = buildClaudeCliArgs({
           mcpConfig: msg.params?.mcpConfig,
           tools: msg.params?.tools,
@@ -1345,6 +1362,7 @@ module.exports = {
   isAdapterDebugEnabled,
   normalizeApiUsageTokens,
   normalizeToolName,
+  resolveClaudeRuntimeCliPath,
   startAdapter,
 };
 

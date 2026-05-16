@@ -2,6 +2,20 @@ const { describe, expect, test } = require('bun:test');
 const adapter = require('./claude-adapter.cjs');
 
 describe('claude-adapter supervisor launch args', () => {
+  test('resolves the SymHarix runtime entrypoint before the legacy claude-haha entrypoint', () => {
+    const runtimeRoot = '/repo/claude-code';
+    expect(adapter.resolveClaudeRuntimeCliPath(runtimeRoot, {
+      fileExists: (targetPath) => targetPath === '/repo/claude-code/bin/claude-symharix',
+    })).toBe('/repo/claude-code/bin/claude-symharix');
+  });
+
+  test('falls back to the legacy claude-haha runtime entrypoint', () => {
+    const runtimeRoot = '/repo/claude-code';
+    expect(adapter.resolveClaudeRuntimeCliPath(runtimeRoot, {
+      fileExists: (targetPath) => targetPath === '/repo/claude-code/bin/claude-haha',
+    })).toBe('/repo/claude-code/bin/claude-haha');
+  });
+
   test('builds Claude CLI args with MCP config, allowed tools, and supervisor system prompt', () => {
     const args = adapter.buildClaudeCliArgs({
       mcpConfig: JSON.stringify({

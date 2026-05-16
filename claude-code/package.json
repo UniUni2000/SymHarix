@@ -1,17 +1,16 @@
 {
-  "name": "claude-code-local",
-  "version": "999.0.0-local",
+  "name": "@symharix/claude-compatible-runtime",
+  "version": "1.0.0-runtime",
   "private": true,
   "type": "module",
   "bin": {
+    "claude-symharix": "./bin/claude-symharix",
     "claude-haha": "./bin/claude-haha"
   },
   "scripts": {
+    "claude-symharix": "bun run ./bin/claude-symharix",
     "claude-haha": "bun run ./bin/claude-haha",
-    "start": "bun run ./bin/claude-haha",
-    "docs:dev": "vitepress dev docs",
-    "docs:build": "vitepress build docs",
-    "docs:preview": "vitepress preview docs"
+    "start": "bun run ./bin/claude-symharix"
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "^0.0.44",
@@ -77,9 +76,5 @@
     "xss": "^1.0.15",
     "yaml": "^2.8.3",
     "zod": "^4.3.6"
-  },
-  "devDependencies": {
-    "vitepress": "^1.6.3",
-    "vue": "^3.5.13"
   }
 }

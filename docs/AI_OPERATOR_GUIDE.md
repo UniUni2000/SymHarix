@@ -33,7 +33,7 @@ SymHarix is a self-hostable control plane with a Telegram-first Supervisor.
 - Runtime issue detail and Mini App history are the best place to inspect persisted agent-run usage, replay summaries, active PR context, and file diffs.
 - Multi-repo context is explicit: Telegram can list configured routes, switch the chat default project, and read a named repo through the read-only advisor.
 - Orchestrator owns dispatch, retry, dev/review handoff, delivery cleanup, and repair.
-- Claude Code-compatible execution runs through `scripts/claude-adapter.cjs`.
+- Claude-compatible execution runs through `scripts/claude-adapter.cjs`.
 
 The Supervisor is not just a model call and not just a Claude Code process. It is durable session state plus optional LLM and read-only repo-understanding paths.
 
@@ -42,8 +42,8 @@ The Supervisor is not just a model call and not just a Claude Code process. It i
 Preferred local path:
 
 ```bash
-bun run setup:local
-bun run start:local
+bun run setup
+bun run start
 ```
 
 Stop:
@@ -55,7 +55,7 @@ bun run stop
 Use another port only when `3000` is busy:
 
 ```bash
-PORT=4000 bun run start:local
+PORT=4000 bun run start
 PORT=4000 bun run health
 ```
 
@@ -78,7 +78,7 @@ For Telegram, verify:
 
 If Telegram replies but the local manifest has an empty webhook URL, another bot process or deployment may be answering with the same token.
 
-If the public base URL is a temporary `trycloudflare.com` address, treat HTTP 530, stale webhook URLs, DNS errors, and repeated pending updates as tunnel-layer failures first. Let `start:local` recover the tunnel before changing application code.
+If the public base URL is a temporary `trycloudflare.com` address, treat HTTP 530, stale webhook URLs, DNS errors, and repeated pending updates as tunnel-layer failures first. Let `start` recover the tunnel before changing application code.
 
 ## Live E2E Rules
 
@@ -179,7 +179,7 @@ If missing or failed, verify:
 - route local path or source cache
 - `SYMHARIX_SUPERVISOR_REPO_UNDERSTANDING_COMMAND`
 - `SYMHARIX_SUPERVISOR_READONLY_ADVISOR_COMMAND`
-- `claude-code/bin/claude-haha --help` from this checkout
+- `claude-code/bin/claude-symharix --help` from this checkout
 - readable repository path and valid Git `HEAD`
 
 Repo understanding is read-only. It should improve conversation and recommendations, but must not create issues or edit code before a Plan Card is approved.
@@ -206,7 +206,7 @@ The resolver accepts project slug, full `owner/repo`, or repo name. If a route i
 True runner path:
 
 ```text
-Orchestrator -> AgentRunner -> scripts/claude-adapter.cjs -> claude-code/bin/claude-haha
+Orchestrator -> AgentRunner -> scripts/claude-adapter.cjs -> bundled Claude-compatible runtime
 ```
 
 Check:

@@ -1,6 +1,7 @@
 # Dependencies
 node_modules/
 bun_modules/
+/package-lock.json
 
 # Build output
 dist/
@@ -8,6 +9,8 @@ build/
 
 # Environment files
 .env
+.env.*
+!.env.example
 .env.local
 .env.*.local
 WORKFLOW.md
@@ -58,6 +61,28 @@ __pycache__/
 symphony.db
 symphony.db-shm
 symphony.db-wal
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Temporary tunnel/runtime metadata
+.tunnel-url
+.tunnel-url.*
+.telegram-tunnel-url
+.telegram-tunnel-url.*
+.symharix-tunnel-url
+.symharix-tunnel-url.*
+.cloudflared/
+cloudflared.log
+
+# Runtime caches
+.cache/
+.claude-cache/
+.claude-runtime-cache/
+.runtime-cache/
+.symharix-cache/
 
 # SymHarix workspaces
 workspaces/

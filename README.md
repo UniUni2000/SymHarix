@@ -1,7 +1,11 @@
 # ✨ SymHarix — Telegram-First AI Supervisor
 
 <p align="center">
-  <img src="./assets/logo_dark.svg" alt="SymHarix" width="220">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/logo_light.png">
+    <source media="(prefers-color-scheme: light)" srcset="./assets/logo_dark.png">
+    <img src="./assets/logo_dark.png" alt="SymHarix" width="220">
+  </picture>
 </p>
 
 <p align="center">
@@ -21,16 +25,16 @@
 
 ## What SymHarix Is
 
-SymHarix is a self-hostable control plane for supervised coding work. The user talks to a Telegram bot, the Supervisor clarifies or prepares a Plan Card, and approved work is routed to the configured GitHub repository through the bundled Claude Code-compatible runtime.
+SymHarix is a self-hostable control plane for supervised coding work. The user talks to a Telegram bot, the Supervisor clarifies or prepares a Plan Card, and approved work is routed to the configured GitHub repository through the bundled Claude-compatible runtime.
 
 Telegram is the primary user loop. Runtime Deck is the diagnostics and control surface. Linear and GitHub remain the durable records for work items, branches, PRs, review evidence, and delivery state.
 
 ## Quick Start
 
 ```bash
-bun run setup:local
+bun run setup
 # edit .env and WORKFLOW.md
-bun run start:local
+bun run start
 ```
 
 Open Runtime Deck:
@@ -42,13 +46,26 @@ http://localhost:3000/runtime
 Use another port only when needed:
 
 ```bash
-PORT=4000 bun run start:local
+PORT=4000 bun run start
 ```
 
 Stop local services:
 
 ```bash
 bun run stop
+```
+
+Check the bundled runtime:
+
+```bash
+bash scripts/check-runtime.sh
+```
+
+On a Linux server, install a systemd service so SymHarix keeps running after SSH disconnects:
+
+```bash
+bash scripts/install-systemd-service.sh
+sudo journalctl -u symharix -f
 ```
 
 ## Core Flow
@@ -59,7 +76,7 @@ Telegram / Runtime Deck / Linear poll
   -> Orchestrator and approval policy
   -> AgentRunner
   -> scripts/claude-adapter.cjs
-  -> claude-code/bin/claude-haha
+  -> bundled Claude-compatible runtime
   -> GitHub / Linear / Runtime history
 ```
 
@@ -69,7 +86,7 @@ The main behavior:
 - Runtime Deck shows issue state, timelines, token usage, recent agent progress, delivery blockers, and safe write actions.
 - Mini App issue views expose active stage, active PR context, replay history, and file diffs when a workspace or PR head is available.
 - Repository routing is explicit and fail-closed. A Linear `project_slug` must map to a GitHub repository in `WORKFLOW.md`.
-- Claude Code-compatible execution runs through `scripts/claude-adapter.cjs`; read-only repo understanding uses the same adapter unless overridden.
+- Agent execution runs through `scripts/claude-adapter.cjs`, which launches the bundled Claude-compatible runtime. Read-only repo understanding uses the same adapter unless overridden.
 
 ## Configuration
 

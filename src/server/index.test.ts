@@ -330,6 +330,32 @@ describe('SymHarixServer', () => {
     expect(payload.data.checks.database).toBe(true);
   });
 
+  test('GET /api/v1/health does not degrade only because the heap is near its current allocation', async () => {
+    const originalMemoryUsage = process.memoryUsage;
+    Object.defineProperty(process, 'memoryUsage', {
+      configurable: true,
+      value: () => ({
+        rss: 96 * 1024 * 1024,
+        heapTotal: 100,
+        heapUsed: 95,
+        external: 0,
+        arrayBuffers: 0,
+      }),
+    });
+
+    try {
+      const response = await request('/api/v1/health');
+      const payload = await readJson<any>(response);
+      expect(payload.data.status).toBe('healthy');
+      expect(payload.data.checks.memory).toBe(true);
+    } finally {
+      Object.defineProperty(process, 'memoryUsage', {
+        configurable: true,
+        value: originalMemoryUsage,
+      });
+    }
+  });
+
   test('GET /api/v1/work-items returns control-plane work items', async () => {
     const workItemRepo = new WorkItemRepository(db);
     workItemRepo.create({

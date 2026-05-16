@@ -7,14 +7,14 @@
 ## 0. 最短路径
 
 ```bash
-bun run setup:local
+bun run setup
 # 编辑 .env 和 WORKFLOW.md
-bun run start:local
+bun run start
 ```
 
-`setup:local` 会安装依赖，并且只在 `.env` / `WORKFLOW.md` 不存在时创建它们。
+`setup` 会安装依赖，并且只在 `.env` / `WORKFLOW.md` 不存在时创建它们。
 
-`start:local` 会重新执行安全初始化检查，在可能时停止同端口旧实例，准备 Telegram 代理配置，在需要时创建临时 `cloudflared` 隧道，启动服务，并且只在当前进程中使用临时隧道地址，不写回 `.env`。
+`start` 会重新执行安全初始化检查，在可能时停止同端口旧实例，准备 Telegram 代理配置，在需要时创建临时 `cloudflared` 隧道，启动服务，并且只在当前进程中使用临时隧道地址，不写回 `.env`。
 
 如果已有的 `trycloudflare.com` 地址过期，startup watchdog 会在公网 URL 或 Telegram webhook 退化时尝试换新隧道。
 
@@ -25,7 +25,7 @@ bun run start:local
 - Bun。
 - Git，以及目标 GitHub 仓库权限。
 - Linear API key。
-- 用于内置 Claude Code 兼容 runtime 的 Anthropic API key。
+- 用于内置 Claude-compatible runtime 的 Anthropic API key。
 
 可选：
 
@@ -35,7 +35,13 @@ bun run start:local
 初始化：
 
 ```bash
-bun run setup:local
+bun run setup
+```
+
+准备全新服务器或公开 demo 前，可以检查内置 runtime：
+
+```bash
+bash scripts/check-runtime.sh
 ```
 
 ## 2. 配置仓库路由
@@ -97,7 +103,7 @@ ANTHROPIC_API_KEY=...
 | `SYMHARIX_TRACKER_API_KEY` | 创建一个能访问目标 workspace/project 的 Linear API key。 | 让控制平面读取和更新 work item、状态与项目元数据。 |
 | `SYMHARIX_TRACKER_PROJECT_SLUG` | 使用 Telegram/Runtime 创建任务时默认进入的 Linear project slug。 | 给新 issue 提供默认项目，并且必须匹配 `WORKFLOW.md -> repositories.routing`。 |
 | `GITHUB_TOKEN` | 使用能访问 `WORKFLOW.md` 中所有目标仓库的 GitHub token。 | 让 SymHarix 读取仓库信息、准备 workspace，并对正确仓库执行交付。 |
-| `ANTHROPIC_API_KEY` | 使用内置 Claude Code 兼容 runtime 所需的 API key。 | 驱动 agent 执行和只读仓库理解，除非你显式替换 runtime command。 |
+| `ANTHROPIC_API_KEY` | 使用内置 Claude-compatible runtime 所需的 API key。 | 驱动 agent 执行和只读仓库理解，除非你显式替换 runtime command。 |
 
 推荐 runtime 默认值：
 
@@ -131,7 +137,7 @@ SYMHARIX_TELEGRAM_OPERATOR_IDS=<your-telegram-user-id>
 Webhook 选择：
 
 - 如果有自己的公网 HTTPS 地址，设置 `SYMHARIX_PUBLIC_BASE_URL=https://...`。
-- 如果没有，留空并安装 `cloudflared`；`start:local` 会尝试临时隧道。
+- 如果没有，留空并安装 `cloudflared`；`start` 会尝试临时隧道。
 - 如果你自己管理 Telegram webhook 注册，设置 `SYMHARIX_TELEGRAM_BOOTSTRAP=off`。
 
 SymHarix 不要求公网 IP，但 Telegram webhook 和 Mini App 功能需要一个稳定、可公网访问的 HTTPS URL。生产环境建议使用域名 + HTTPS 反向代理，或 named Cloudflare Tunnel。快速的 `trycloudflare.com` 隧道适合本地开发和 demo，不适合作为 24/7 生产入口。
@@ -178,7 +184,7 @@ SYMHARIX_SUPERVISOR_READONLY_ADVISOR_COMMAND=
 ## 6. 启动
 
 ```bash
-bun run start:local
+bun run start
 ```
 
 打开：
@@ -190,7 +196,7 @@ http://localhost:3000/runtime
 只在需要时更换本地端口：
 
 ```bash
-PORT=4000 bun run start:local
+PORT=4000 bun run start
 PORT=4000 bun run health
 ```
 
@@ -205,6 +211,27 @@ curl http://localhost:3000/api/v1/bots/manifest
 ```
 
 只有当 `/api/v1/bots/manifest` 显示 Telegram transport healthy，并且 `webhook_url` 非空且指向当前 public base URL 时，Telegram 才真正接到本地服务。
+
+### Linux 服务器服务
+
+真正部署到服务器时，不建议把 SymHarix 放在 SSH 前台 shell 里跑。推荐安装成 systemd service：
+
+```bash
+bash scripts/install-systemd-service.sh
+```
+
+安装脚本会基于当前 checkout 生成 `/etc/systemd/system/symharix.service`，立即启动，并设置开机自启。SSH 断开后 service 仍会继续运行。
+
+常用 service 命令：
+
+```bash
+sudo systemctl status ${SYMHARIX_SERVICE_NAME:-symharix} --no-pager
+sudo journalctl -u ${SYMHARIX_SERVICE_NAME:-symharix} -f
+sudo systemctl restart ${SYMHARIX_SERVICE_NAME:-symharix}
+sudo systemctl stop ${SYMHARIX_SERVICE_NAME:-symharix}
+```
+
+安装 service 前先配置 `.env` 和 `WORKFLOW.md`。生产环境应把 `SYMHARIX_PUBLIC_BASE_URL` 设置为稳定 HTTPS 域名或 named Cloudflare Tunnel。安装时可以用 `SYMHARIX_SERVICE_NAME`、`SYMHARIX_SERVICE_USER`、`SYMHARIX_SERVICE_PORT`、`SYMHARIX_BUN_BIN` 自定义 service 名、运行用户、端口和 Bun 路径。
 
 ## 7. 使用 Telegram
 

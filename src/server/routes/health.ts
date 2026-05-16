@@ -6,6 +6,16 @@ import { Hono } from 'hono';
 import type { Database } from 'bun:sqlite';
 import type { HealthResponse, ApiResponse } from '../types';
 
+const DEFAULT_HEALTH_MAX_RSS_MB = 1536;
+
+function resolveHealthMaxRssBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const configured = Number(env.SYMHARIX_HEALTH_MAX_RSS_MB);
+  const maxRssMb = Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_HEALTH_MAX_RSS_MB;
+  return maxRssMb * 1024 * 1024;
+}
+
 /**
  * Create health check routes
  */
@@ -30,10 +40,10 @@ export function createHealthRoutes(db: Database): Hono {
       checks.database = false;
     }
 
-    // Check memory usage (degraded if over 90%)
+    // Check memory usage. Heap ratio is intentionally not used here because
+    // Bun/V8 can keep heapTotal near heapUsed until the heap grows.
     const memUsage = process.memoryUsage();
-    const heapUsedRatio = memUsage.heapUsed / memUsage.heapTotal;
-    checks.memory = heapUsedRatio < 0.9;
+    checks.memory = memUsage.rss < resolveHealthMaxRssBytes();
 
     // Determine overall health status
     let status: HealthResponse['status'] = 'healthy';

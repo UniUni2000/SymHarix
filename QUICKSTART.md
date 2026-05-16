@@ -7,14 +7,14 @@ This guide takes a fresh checkout to a working Runtime Deck and Telegram-first S
 ## 0. Fast Path
 
 ```bash
-bun run setup:local
+bun run setup
 # edit .env and WORKFLOW.md
-bun run start:local
+bun run start
 ```
 
-`setup:local` installs dependencies and creates `.env` / `WORKFLOW.md` only when they do not already exist.
+`setup` installs dependencies and creates `.env` / `WORKFLOW.md` only when they do not already exist.
 
-`start:local` reruns the safe setup guard, stops an older local listener on the same port when possible, prepares Telegram proxy settings, creates a temporary `cloudflared` tunnel when needed, starts the service, and keeps the temporary tunnel URL in process memory instead of writing it back to `.env`.
+`start` reruns the safe setup guard, stops an older local listener on the same port when possible, prepares Telegram proxy settings, creates a temporary `cloudflared` tunnel when needed, starts the service, and keeps the temporary tunnel URL in process memory instead of writing it back to `.env`.
 
 If an existing `trycloudflare.com` URL is stale, the startup watchdog can recover with a fresh tunnel when the public URL or Telegram webhook degrades.
 
@@ -25,7 +25,7 @@ Required:
 - Bun.
 - Git and access to the target GitHub repository.
 - A Linear API key.
-- An Anthropic API key for the bundled Claude Code-compatible runtime.
+- An Anthropic API key for the bundled Claude-compatible runtime.
 
 Optional:
 
@@ -35,7 +35,13 @@ Optional:
 Initialize:
 
 ```bash
-bun run setup:local
+bun run setup
+```
+
+Check the bundled runtime when preparing a fresh server or public demo:
+
+```bash
+bash scripts/check-runtime.sh
 ```
 
 ## 2. Route Repositories
@@ -97,7 +103,7 @@ Why these values are needed:
 | `SYMHARIX_TRACKER_API_KEY` | Create a Linear API key with access to the workspace/project you want SymHarix to manage. | Lets the control plane read and update work items, states, and project metadata. |
 | `SYMHARIX_TRACKER_PROJECT_SLUG` | Use the Linear project slug that should receive Telegram/Runtime-created work. | Provides the default project for new issues and must match `WORKFLOW.md -> repositories.routing`. |
 | `GITHUB_TOKEN` | Use a GitHub token with access to every target repository listed in `WORKFLOW.md`. | Lets SymHarix fetch repository metadata, prepare workspaces, and drive delivery against the right repo. |
-| `ANTHROPIC_API_KEY` | Use the API key for the bundled Claude Code-compatible runtime. | Powers agent execution and read-only repo understanding unless you intentionally override the runtime command. |
+| `ANTHROPIC_API_KEY` | Use the API key for the bundled Claude-compatible runtime. | Powers agent execution and read-only repo understanding unless you intentionally override the runtime command. |
 
 Recommended runtime defaults:
 
@@ -131,7 +137,7 @@ Why these values are needed:
 Webhook choices:
 
 - With your own public HTTPS URL, set `SYMHARIX_PUBLIC_BASE_URL=https://...`.
-- Without one, leave it empty and install `cloudflared`; `start:local` will try a temporary tunnel.
+- Without one, leave it empty and install `cloudflared`; `start` will try a temporary tunnel.
 - If you manage Telegram webhook registration yourself, set `SYMHARIX_TELEGRAM_BOOTSTRAP=off`.
 
 SymHarix does not require a public IP, but Telegram webhook and Mini App features require a stable publicly reachable HTTPS URL. For production, use a domain with HTTPS reverse proxy or a named Cloudflare Tunnel. Quick trycloudflare.com tunnels are intended for local development and demos, not 24/7 production.
@@ -178,7 +184,7 @@ Blank command values use `node scripts/claude-adapter.cjs`. The tool-router time
 ## 6. Start
 
 ```bash
-bun run start:local
+bun run start
 ```
 
 Open:
@@ -190,7 +196,7 @@ http://localhost:3000/runtime
 Use a different port only when needed:
 
 ```bash
-PORT=4000 bun run start:local
+PORT=4000 bun run start
 PORT=4000 bun run health
 ```
 
@@ -205,6 +211,27 @@ curl http://localhost:3000/api/v1/bots/manifest
 ```
 
 Telegram is ready only when `/api/v1/bots/manifest` shows a healthy Telegram transport and a non-empty `webhook_url` pointing at the current public base URL.
+
+### Linux Server Service
+
+For a real server, do not keep SymHarix running in an SSH foreground shell. Install it as a systemd service:
+
+```bash
+bash scripts/install-systemd-service.sh
+```
+
+The installer renders `/etc/systemd/system/symharix.service` from the current checkout, starts it immediately, and enables it for reboot. The service keeps running after SSH disconnects.
+
+Useful service commands:
+
+```bash
+sudo systemctl status ${SYMHARIX_SERVICE_NAME:-symharix} --no-pager
+sudo journalctl -u ${SYMHARIX_SERVICE_NAME:-symharix} -f
+sudo systemctl restart ${SYMHARIX_SERVICE_NAME:-symharix}
+sudo systemctl stop ${SYMHARIX_SERVICE_NAME:-symharix}
+```
+
+Configure `.env` and `WORKFLOW.md` before installing the service. In production, set `SYMHARIX_PUBLIC_BASE_URL` to a stable HTTPS domain or named Cloudflare Tunnel. You can customize install-time values with `SYMHARIX_SERVICE_NAME`, `SYMHARIX_SERVICE_USER`, `SYMHARIX_SERVICE_PORT`, and `SYMHARIX_BUN_BIN`.
 
 ## 7. Use Telegram
 
