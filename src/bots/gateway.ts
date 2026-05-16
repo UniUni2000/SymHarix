@@ -391,11 +391,6 @@ function withAbsoluteTelegramRuntimeViewUrl(
   };
 }
 
-function isTelegramDeleteMessageNotFoundError(error: unknown): boolean {
-  return error instanceof Error
-    && /deleteMessage failed with status 400: .*message to delete not found/i.test(error.message);
-}
-
 function buildTelegramInlineKeyboard(
   message: BotTransportMessage,
   publicBaseUrl: string | null = null,
@@ -1887,8 +1882,8 @@ export class DefaultBotGateway implements BotGateway {
                 guard.reason === 'cooldown'
                   ? textForIssueLocale(
                       callbackIssue,
-                      '这张卡刚刚更新，请直接打开最新那张。',
-                      'This card was just refreshed. Open the latest one.',
+                      '这张卡刚刚刷新，请再点一次打开。',
+                      'This card was just refreshed. Tap it again to open.',
                     )
                   : textForIssueLocale(
                       callbackIssue,
@@ -1962,16 +1957,19 @@ export class DefaultBotGateway implements BotGateway {
                 );
                 const delivered = await this.deliverTelegramCallbackMessage({
                   recipient,
-                  originalMessageId: null,
+                  originalMessageId,
                   message: replacementMessage,
                   issue: callbackResult.issue,
                   materialKey: callbackResult.cardKey,
+                  allowFallback: false,
                 });
-                replacementDelivered = {
-                  ref: delivered.ref,
-                  mode: delivered.mode,
-                  callbackResult,
-                };
+                if (delivered.mode === 'edited') {
+                  replacementDelivered = {
+                    ref: delivered.ref,
+                    mode: delivered.mode,
+                    callbackResult,
+                  };
+                }
               } catch (error) {
                 logger.warn('Telegram ephemeral runtime replacement fell back to direct link delivery', {
                   chat_id: conversationId,
@@ -1991,21 +1989,6 @@ export class DefaultBotGateway implements BotGateway {
                     cardKey: replacementDelivered.callbackResult.cardKey,
                     existingCardState,
                   });
-                }
-                if (originalMessageId) {
-                  try {
-                    await this.telegramNotifier.deleteMessage(recipient, {
-                      provider_message_id: originalMessageId,
-                    });
-                  } catch (error) {
-                    if (!isTelegramDeleteMessageNotFoundError(error)) {
-                      logger.warn('Telegram stale runtime card delete failed after replacement', {
-                        chat_id: conversationId,
-                        issue_identifier: parsedCallback.issueIdentifier,
-                        message_id: originalMessageId,
-                      }, error instanceof Error ? error : undefined);
-                    }
-                  }
                 }
                 runtimeOpenDelivered = true;
                 this.recordTelegramCallbackAudit({
@@ -2027,7 +2010,7 @@ export class DefaultBotGateway implements BotGateway {
                 callbackQuery.id || 'unknown-callback',
                 appUrl
                   ? ephemeralTunnelUrl
-                    ? textForIssueLocale(callbackIssue, '已发送最新地址，请点击下面的新按钮。', 'Sent the latest link below. Tap the new button.')
+                    ? textForIssueLocale(callbackIssue, '这张卡暂时无法原地刷新，已在下面补一条最新入口。', 'This card could not refresh in place. Sent the latest entry below.')
                     : textForIssueLocale(callbackIssue, '运行视图地址已恢复，请刷新卡片后打开。', 'Runtime view URL is ready. Refresh the card, then open it again.')
                   : textForIssueLocale(callbackIssue, 'Mini App 暂时不可用：未配置 SYMPHONY_PUBLIC_BASE_URL。启动 start:local/tunnel 后刷新卡片。', 'Mini App unavailable: SYMPHONY_PUBLIC_BASE_URL is not configured. Start the local tunnel, then refresh the card.'),
               );
@@ -2039,31 +2022,12 @@ export class DefaultBotGateway implements BotGateway {
               });
             }
             if (appUrl && ephemeralTunnelUrl && parsedCallback.issueIdentifier) {
-              await this.telegramNotifier.sendMessage(
+              await this.deliverTelegramRuntimeEntryFallback({
                 recipient,
-                {
-                  text: textForIssueLocale(
-                    callbackIssue,
-                    '这是当前最新的临时运行视图入口。如果又看到 1033，请先刷新卡片再重试。',
-                    'This is the latest temporary runtime view entry. If you hit 1033 again, refresh the card and try again.',
-                  ),
-                  action_rows: [
-                    [
-                      {
-                        label: textForIssueLocale(callbackIssue, '打开运行视图', 'Open Runtime View'),
-                        style: 'primary',
-                        web_app: { url: appUrl },
-                      },
-                    ],
-                    [
-                      {
-                        label: textForIssueLocale(callbackIssue, '刷新卡片', 'Refresh Card'),
-                        callback_data: `rt|${parsedCallback.issueIdentifier}|refresh`,
-                      },
-                    ],
-                  ],
-                },
-              );
+                issue: callbackIssue,
+                issueIdentifier: parsedCallback.issueIdentifier,
+                appUrl,
+              });
               runtimeOpenDelivered = true;
             }
             this.telegramDiagnostics.recordCallbackSuccess();
@@ -2987,6 +2951,62 @@ export class DefaultBotGateway implements BotGateway {
       ref,
       mode: 'sent_fallback',
     };
+  }
+
+  private async deliverTelegramRuntimeEntryFallback(params: {
+    recipient: BotRecipient;
+    issue: RuntimeIssueView;
+    issueIdentifier: string;
+    appUrl: string;
+  }): Promise<void> {
+    const existingDelivery = this.followupDeliveryStates?.findByKey({
+      transport: 'telegram',
+      conversation_id: params.recipient.conversation_id,
+      root_issue_id: params.issue.issue_id,
+      delivery_kind: 'runtime_entry',
+    }) ?? null;
+
+    const materialKey = `runtime_entry|${params.issueIdentifier}|${params.appUrl}`;
+    const delivered = await this.deliverTelegramCallbackMessage({
+      recipient: params.recipient,
+      originalMessageId: existingDelivery?.last_message_id ?? null,
+      message: {
+        text: textForIssueLocale(
+          params.issue,
+          '这是当前最新的临时运行入口。如果又看到 1033，请等隧道恢复后再试。',
+          'This is the latest temporary runtime entry. If you hit 1033 again, wait for the tunnel to recover and try again.',
+        ),
+        action_rows: [
+          [
+            {
+              label: textForIssueLocale(params.issue, '打开运行视图', 'Open Runtime View'),
+              style: 'primary',
+              web_app: { url: params.appUrl },
+            },
+          ],
+          [
+            {
+              label: textForIssueLocale(params.issue, '刷新卡片', 'Refresh Card'),
+              callback_data: `rt|${params.issueIdentifier}|refresh`,
+            },
+          ],
+        ],
+      },
+      issue: params.issue,
+      materialKey,
+      allowFallback: true,
+    });
+
+    this.followupDeliveryStates?.upsert({
+      transport: 'telegram',
+      conversation_id: params.recipient.conversation_id,
+      root_issue_id: params.issue.issue_id,
+      root_issue_identifier: params.issue.identifier,
+      delivery_kind: 'runtime_entry',
+      last_material_key: materialKey,
+      last_notification_class: null,
+      last_message_id: delivered.ref.provider_message_id,
+    });
   }
 
   private buildFallbackGovernanceIssue(

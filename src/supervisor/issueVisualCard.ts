@@ -3,11 +3,18 @@ import type { BotTransportPhoto } from '../bots/types';
 import { runtimeIssueProgressValue } from '../runtime/issueProgress';
 import type { RuntimeIssueView } from '../runtime/types';
 import { inferRuntimeLocaleFromText, localizeKnownRuntimeText, type RuntimeLocale } from '../i18n/locale';
+import { symHarixLogoDarkThemeDataUri, symHarixLogoLightThemeDataUri } from '../branding/symharixLogo';
 
 export interface SupervisorIssueVisualCard {
   media_key: string;
   caption: string;
   photo: BotTransportPhoto;
+}
+
+export type SupervisorIssueVisualTheme = 'light' | 'dark';
+
+export interface SupervisorIssueVisualCardOptions {
+  theme?: SupervisorIssueVisualTheme;
 }
 
 function escapeXml(value: string): string {
@@ -199,18 +206,18 @@ function statusLabel(issue: RuntimeIssueView, locale: RuntimeLocale | null | und
 
 function statusTone(issue: RuntimeIssueView): { pill: string; text: string; progress: string; debt: string } {
   if (isCanceled(issue)) {
-    return { pill: '#3B3420', text: '#FFD45E', progress: '#6AB5FF', debt: '#E8C558' };
+    return { pill: '#3B3420', text: '#B78618', progress: '#1F78FF', debt: '#B78618' };
   }
   if (isDone(issue)) {
-    return { pill: '#123B2B', text: '#69E6A3', progress: '#69E6A3', debt: '#69E6A3' };
+    return { pill: '#123B2B', text: '#16955A', progress: '#16955A', debt: '#16955A' };
   }
   if (isFailed(issue) || issue.active_decision_kind || issue.governance_status === 'blocked') {
-    return { pill: '#3A271C', text: '#FFB36B', progress: '#FFB36B', debt: '#FFCC66' };
+    return { pill: '#3A271C', text: '#D98518', progress: '#D98518', debt: '#D98518' };
   }
   if (issue.phase === 'REVIEW' || /review/i.test(issue.tracker_state)) {
-    return { pill: '#17304A', text: '#89CFFF', progress: '#89CFFF', debt: '#E8C558' };
+    return { pill: '#17304A', text: '#1F78FF', progress: '#1F78FF', debt: '#D98518' };
   }
-  return { pill: '#143B2B', text: '#70E4A2', progress: '#70E4A2', debt: '#E8C558' };
+  return { pill: '#143B2B', text: '#16955A', progress: '#16955A', debt: '#D98518' };
 }
 
 function detailChips(issue: RuntimeIssueView): string[] {
@@ -331,33 +338,54 @@ function signalRowSvg(params: {
   title: string;
   detail: string;
   accent: string;
+  surface?: string;
+  border?: string;
+  theme?: SupervisorIssueVisualTheme;
 }): string {
-  const titleLines = wrapText(params.title, 32, 2);
-  const detailLines = titleLines.length > 1 ? [] : wrapText(params.detail, 42, 1);
+  const titleLines = wrapVisualText(params.title, 28, 2);
+  const detailLines = titleLines.length > 1 ? [] : wrapVisualText(params.detail, 36, 1);
+  const surface = params.surface ?? '#F8FBFE';
+  const border = params.border ?? '#D9E4EF';
+  const theme = params.theme ?? 'light';
+  const labelFill = theme === 'dark' ? '#8FA1B3' : '#7B8EA4';
+  const titleFill = theme === 'dark' ? '#EEF4FA' : '#1A2638';
+  const detailFill = theme === 'dark' ? '#AEBCC8' : '#73869A';
   return `
     <g transform="translate(82 ${params.y})">
-      <rect x="0" y="0" width="916" height="102" rx="20" fill="#111820" stroke="#223243" stroke-width="2"/>
+      <rect x="0" y="0" width="916" height="102" rx="20" fill="${surface}" stroke="${border}" stroke-width="2"/>
       <rect x="0" y="0" width="7" height="102" rx="4" fill="${params.accent}"/>
-      <text x="38" y="38" fill="#8FA1B3" font-size="21" font-weight="850" letter-spacing="2">${escapeXml(params.label)}</text>
-      ${textLines({ x: 206, y: 39, lines: titleLines, size: 25, fill: '#EEF4FA', weight: 820, lineHeight: 31 })}
-      ${detailLines.length > 0 ? textLines({ x: 206, y: 78, lines: detailLines, size: 19, fill: '#AEBCC8', weight: 640, lineHeight: 26 }) : ''}
+      <text x="38" y="38" fill="${labelFill}" font-size="21" font-weight="850" letter-spacing="2">${escapeXml(params.label)}</text>
+      ${textLines({ x: 206, y: 39, lines: titleLines, size: 25, fill: titleFill, weight: 820, lineHeight: 31 })}
+      ${detailLines.length > 0 ? textLines({ x: 206, y: 78, lines: detailLines, size: 19, fill: detailFill, weight: 640, lineHeight: 26 }) : ''}
     </g>
   `;
 }
 
 type ChipTone = 'green' | 'blue' | 'yellow' | 'neutral';
 
-function chipColors(tone: ChipTone): { fill: string; stroke: string; text: string } {
+function chipColors(tone: ChipTone, theme: SupervisorIssueVisualTheme = 'light'): { fill: string; stroke: string; text: string } {
+  if (theme === 'dark') {
+    if (tone === 'green') {
+      return { fill: '#0D382A', stroke: '#1D6D4B', text: '#59E69B' };
+    }
+    if (tone === 'blue') {
+      return { fill: '#102B44', stroke: '#2B5D85', text: '#6BB4FF' };
+    }
+    if (tone === 'yellow') {
+      return { fill: '#332B16', stroke: '#6F5C25', text: '#FFD166' };
+    }
+    return { fill: '#141C25', stroke: '#2A3949', text: '#B8C7D5' };
+  }
   if (tone === 'green') {
-    return { fill: '#0D382A', stroke: '#1D6D4B', text: '#59E69B' };
+    return { fill: '#E8F7EF', stroke: '#B7EBCB', text: '#16844E' };
   }
   if (tone === 'blue') {
-    return { fill: '#102B44', stroke: '#2B5D85', text: '#6BB4FF' };
+    return { fill: '#E7F0FF', stroke: '#BFD8FF', text: '#225CA8' };
   }
   if (tone === 'yellow') {
-    return { fill: '#332B16', stroke: '#6F5C25', text: '#FFD166' };
+    return { fill: '#FFF5E1', stroke: '#F2D79A', text: '#9A6500' };
   }
-  return { fill: '#141C25', stroke: '#2A3949', text: '#B8C7D5' };
+  return { fill: '#F2F6FA', stroke: '#D4DFEA', text: '#51667D' };
 }
 
 function statusChipTone(issue: RuntimeIssueView): ChipTone {
@@ -368,22 +396,30 @@ function statusChipTone(issue: RuntimeIssueView): ChipTone {
   return 'neutral';
 }
 
-function chipSvg(chip: string, x: number, y: number, width: number, tone: ChipTone): string {
-  const colors = chipColors(tone);
+function chipSvg(chip: string, x: number, y: number, width: number, tone: ChipTone, theme: SupervisorIssueVisualTheme = 'light'): string {
+  const colors = chipColors(tone, theme);
   return `
     <rect x="${x}" y="${y}" width="${width}" height="54" rx="16" fill="${colors.fill}" stroke="${colors.stroke}" stroke-width="2"/>
     <text x="${x + 24}" y="${y + 35}" fill="${colors.text}" font-size="22" font-weight="820">${escapeXml(compact(chip, Math.max(8, Math.floor(width / 15))))}</text>
   `;
 }
 
-function statusChipSvg(chip: string, x: number, y: number, width: number, tone: ChipTone): string {
-  const colors = tone === 'green'
-    ? { fill: '#0C3F2C', stroke: '#2EBA74', text: '#72F0AA', dot: '#56E39F' }
-    : tone === 'blue'
-      ? { fill: '#102F4D', stroke: '#2F94FF', text: '#9BD5FF', dot: '#2F94FF' }
-      : tone === 'yellow'
-        ? { fill: '#3A2D14', stroke: '#F3B53F', text: '#FFD166', dot: '#FFD166' }
-        : { fill: '#141C25', stroke: '#3A4B5C', text: '#D0DCE7', dot: '#94A3B8' };
+function statusChipSvg(chip: string, x: number, y: number, width: number, tone: ChipTone, theme: SupervisorIssueVisualTheme = 'light'): string {
+  const colors = theme === 'dark'
+    ? tone === 'green'
+      ? { fill: '#0C3F2C', stroke: '#2EBA74', text: '#72F0AA', dot: '#56E39F' }
+      : tone === 'blue'
+        ? { fill: '#102F4D', stroke: '#2F94FF', text: '#9BD5FF', dot: '#2F94FF' }
+        : tone === 'yellow'
+          ? { fill: '#3A2D14', stroke: '#F3B53F', text: '#FFD166', dot: '#FFD166' }
+          : { fill: '#141C25', stroke: '#3A4B5C', text: '#D0DCE7', dot: '#94A3B8' }
+    : tone === 'green'
+      ? { fill: '#E8F7EF', stroke: '#2EBA74', text: '#16844E', dot: '#2EBA74' }
+      : tone === 'blue'
+        ? { fill: '#E7F0FF', stroke: '#2F94FF', text: '#225CA8', dot: '#2F94FF' }
+        : tone === 'yellow'
+          ? { fill: '#FFF5E1', stroke: '#F3B53F', text: '#9A6500', dot: '#F3B53F' }
+          : { fill: '#F2F6FA', stroke: '#B7C7D8', text: '#51667D', dot: '#94A3B8' };
   return `
     <rect x="${x}" y="${y - 2}" width="${width}" height="58" rx="18" fill="${colors.fill}" stroke="${colors.stroke}" stroke-width="3"/>
     <circle cx="${x + 30}" cy="${y + 27}" r="7" fill="${colors.dot}"/>
@@ -396,12 +432,18 @@ function stepSvg(params: {
   y: number;
   label: string;
   state: 'done' | 'active' | 'idle';
+  theme?: SupervisorIssueVisualTheme;
 }): string {
   const done = params.state === 'done';
   const active = params.state === 'active';
-  const fill = done || active ? '#2F94FF' : '#0D1117';
-  const stroke = done || active ? '#2F94FF' : '#475569';
-  const text = done ? '#75E8AA' : active ? '#6BB4FF' : '#94A3B8';
+  const theme = params.theme ?? 'light';
+  const fill = done || active ? '#2F94FF' : theme === 'dark' ? '#0D1117' : '#FFFFFF';
+  const stroke = done || active ? '#2F94FF' : theme === 'dark' ? '#475569' : '#97ABC0';
+  const text = theme === 'dark'
+    ? done ? '#75E8AA' : active ? '#6BB4FF' : '#94A3B8'
+    : done ? '#11824E' : active ? '#225CA8' : '#6D8096';
+  const haloStroke = done || active ? '#2F94FF' : theme === 'dark' ? '#334155' : '#C7D5E3';
+  const haloOpacity = done || active ? '0.16' : theme === 'dark' ? '0.35' : '0.6';
   const glyph = done
     ? '<path d="M-8 0L-2 6L10 -7" fill="none" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>'
     : active
@@ -410,7 +452,7 @@ function stepSvg(params: {
   return `
     <g transform="translate(${params.x} ${params.y})">
       <circle cx="0" cy="0" r="26" fill="${fill}" stroke="${stroke}" stroke-width="5"/>
-      <circle cx="0" cy="0" r="36" fill="none" stroke="${done || active ? '#2F94FF' : '#334155'}" stroke-width="7" opacity="${done || active ? '0.16' : '0.35'}"/>
+      <circle cx="0" cy="0" r="36" fill="none" stroke="${haloStroke}" stroke-width="7" opacity="${haloOpacity}"/>
       ${glyph}
       <text x="0" y="66" text-anchor="middle" fill="${text}" font-size="22" font-weight="${done || active ? '820' : '700'}">${escapeXml(params.label)}</text>
     </g>
@@ -430,18 +472,18 @@ function stepStates(issue: RuntimeIssueView): Array<'done' | 'active' | 'idle'> 
   return ['active', 'idle', 'idle', 'idle'];
 }
 
-export function buildSupervisorIssueVisualCardSvg(issue: RuntimeIssueView): string {
+export function buildSupervisorIssueVisualCardSvg(issue: RuntimeIssueView, theme: SupervisorIssueVisualTheme = 'light'): string {
   const locale = issueLocale(issue);
   const tone = statusTone(issue);
   const titleLines = wrapVisualText(issue.title, 18.5, 2);
   const titleIsMultiline = titleLines.length > 1;
   const titleFontSize = titleIsMultiline ? 40 : 48;
   const titleLineHeight = titleIsMultiline ? 48 : 58;
-  const titleY = titleIsMultiline ? 276 : 290;
+  const titleY = titleIsMultiline ? 252 : 266;
   const titleBottom = titleY + Math.max(0, titleLines.length - 1) * titleLineHeight + Math.round(titleFontSize * 0.56);
-  const chipY = Math.max(392, titleBottom + 46);
+  const chipY = Math.max(330, titleBottom + 18);
   const progressTextY = chipY + 128;
-  const progressRailY = chipY + 162;
+  const progressRailY = chipY + 184;
   const progressStepY = progressRailY + 5;
   const chips = detailChips(issue);
   const progress = progressValue(issue);
@@ -455,11 +497,12 @@ export function buildSupervisorIssueVisualCardSvg(issue: RuntimeIssueView): stri
   const next = nextSignal(issue);
   const evidence = evidenceSignal(issue, locale);
   const status = statusLabel(issue, locale);
+  const isDark = theme === 'dark';
   const chipRow = [
-    statusChipSvg(status, 82, chipY, 196, statusChipTone(issue)),
-    chips[0] ? chipSvg(chips[0], 300, chipY, 180, 'blue') : '',
-    chips[1] ? chipSvg(chips[1], 502, chipY, 252, 'blue') : '',
-    chipSvg(evidence, 776, chipY, 222, isDone(issue) ? 'green' : 'neutral'),
+    statusChipSvg(status, 82, chipY, 196, statusChipTone(issue), theme),
+    chips[0] ? chipSvg(chips[0], 300, chipY, 180, 'blue', theme) : '',
+    chips[1] ? chipSvg(chips[1], 502, chipY, 252, 'blue', theme) : '',
+    chipSvg(evidence, 776, chipY, 222, isDone(issue) ? 'green' : 'neutral', theme),
   ].join('');
   const labels = [
     textForLocale(locale, 'Plan', 'Plan'),
@@ -472,54 +515,57 @@ export function buildSupervisorIssueVisualCardSvg(issue: RuntimeIssueView): stri
 <svg width="1080" height="1080" viewBox="0 0 1080 1080" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <linearGradient id="cardBg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#141C26"/>
-      <stop offset="0.48" stop-color="#0B1016"/>
-      <stop offset="1" stop-color="#080C11"/>
+      <stop offset="0" stop-color="${isDark ? '#141C26' : '#FFFFFF'}"/>
+      <stop offset="0.52" stop-color="${isDark ? '#0B1016' : '#F6FAFD'}"/>
+      <stop offset="1" stop-color="${isDark ? '#080C11' : '#EDF3F8'}"/>
     </linearGradient>
     <linearGradient id="liveRail" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#56E39F"/>
+      <stop offset="0" stop-color="${isDark ? '#56E39F' : '#1DB56F'}"/>
       <stop offset="0.62" stop-color="#2F94FF"/>
-      <stop offset="1" stop-color="#1EA967"/>
+      <stop offset="1" stop-color="${isDark ? '#1EA967' : '#138856'}"/>
     </linearGradient>
     <style>
       text { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif; letter-spacing: 0; }
     </style>
   </defs>
-  <rect width="1080" height="1080" fill="#071018"/>
-  <rect x="34" y="34" width="1012" height="1012" rx="42" fill="url(#cardBg)" stroke="#263647" stroke-width="3"/>
-  <path d="M74 126 C92 88 126 90 144 126 S196 164 216 126 S268 88 288 126" fill="none" stroke="#2F94FF" stroke-width="13" stroke-linecap="round"/>
-  <text x="326" y="135" fill="#F6FAFD" font-size="34" font-weight="840">symharix</text>
+  <rect width="1080" height="1080" fill="${isDark ? '#071018' : '#EEF3F8'}"/>
+  <rect x="34" y="34" width="1012" height="1012" rx="42" fill="url(#cardBg)" stroke="${isDark ? '#263647' : '#D5E0EA'}" stroke-width="3"/>
+  <image x="74" y="72" width="64" height="64" href="${isDark ? symHarixLogoDarkThemeDataUri : symHarixLogoLightThemeDataUri}" preserveAspectRatio="xMidYMid meet"/>
+  <text x="166" y="116" fill="${isDark ? '#F6FAFD' : '#182337'}" font-size="34" font-weight="780">SymHarix</text>
 
-  <text x="82" y="226" fill="#2F94FF" font-size="34" font-weight="850">${escapeXml(issue.identifier)}</text>
+  <text x="82" y="194" fill="${isDark ? '#2F94FF' : '#2C73D5'}" font-size="34" font-weight="850">${escapeXml(issue.identifier)}</text>
   ${textLines({
     x: 82,
     y: titleY,
     lines: titleLines,
     size: titleFontSize,
-    fill: '#F4F8FB',
-    weight: 880,
+    fill: isDark ? '#F4F8FB' : '#172233',
+    weight: 860,
     lineHeight: titleLineHeight,
   })}
 
   ${chipRow}
 
   <text x="82" y="${progressTextY}" fill="${tone.text}" font-size="${progressFontSize}" font-weight="850">${progress}%</text>
-  <text x="${progressLabelX}" y="${progressLabelY}" fill="#9BAABC" font-size="25" font-weight="780">${escapeXml(textForLocale(locale, '实时进度', 'Live progress'))}</text>
-  <rect x="106" y="${progressRailY}" width="856" height="10" rx="5" fill="#26313D"/>
+  <text x="${progressLabelX}" y="${progressLabelY}" fill="${isDark ? '#9BAABC' : '#7D8EA4'}" font-size="25" font-weight="780">${escapeXml(textForLocale(locale, '实时进度', 'Live progress'))}</text>
+  <rect x="106" y="${progressRailY}" width="856" height="10" rx="5" fill="${isDark ? '#26313D' : '#D7E1EB'}"/>
   <rect x="106" y="${progressRailY}" width="${progressWidth}" height="10" rx="5" fill="url(#liveRail)"/>
-  ${stepSvg({ x: 106, y: progressStepY, label: labels[0]!, state: states[0]! })}
-  ${stepSvg({ x: 392, y: progressStepY, label: labels[1]!, state: states[1]! })}
-  ${stepSvg({ x: 678, y: progressStepY, label: labels[2]!, state: states[2]! })}
-  ${stepSvg({ x: 962, y: progressStepY, label: labels[3]!, state: states[3]! })}
+  ${stepSvg({ x: 106, y: progressStepY, label: labels[0]!, state: states[0]!, theme })}
+  ${stepSvg({ x: 392, y: progressStepY, label: labels[1]!, state: states[1]!, theme })}
+  ${stepSvg({ x: 678, y: progressStepY, label: labels[2]!, state: states[2]!, theme })}
+  ${stepSvg({ x: 962, y: progressStepY, label: labels[3]!, state: states[3]!, theme })}
 
-  <text x="82" y="670" fill="#E8F0F7" font-size="31" font-weight="860">${escapeXml(textForLocale(locale, '状态概览', 'Status Overview'))}</text>
-  <text x="998" y="670" text-anchor="end" fill="#8393A3" font-size="21" font-weight="720">${escapeXml(textForLocale(locale, 'Telegram 预览', 'Telegram Preview'))}</text>
+  <text x="82" y="670" fill="${isDark ? '#E8F0F7' : '#18263A'}" font-size="31" font-weight="860">${escapeXml(textForLocale(locale, '状态概览', 'Status Overview'))}</text>
+  <text x="998" y="670" text-anchor="end" fill="${isDark ? '#8393A3' : '#8A9AAF'}" font-size="21" font-weight="720">${escapeXml(textForLocale(locale, 'Telegram 预览', 'Telegram Preview'))}</text>
   ${signalRowSvg({
     y: 704,
     label: textForLocale(locale, 'NOW', 'NOW'),
     title: now,
     detail: status,
     accent: isDone(issue) ? '#56E39F' : issue.phase === 'REVIEW' ? '#2F94FF' : '#FFD166',
+    surface: isDark ? '#111820' : isDone(issue) ? '#F0FAF4' : issue.phase === 'REVIEW' ? '#EEF4FF' : '#FFF8E9',
+    border: isDark ? '#223243' : isDone(issue) ? '#C8EFD8' : issue.phase === 'REVIEW' ? '#D3E2FF' : '#F1DFB1',
+    theme,
   })}
   ${signalRowSvg({
     y: 820,
@@ -527,6 +573,9 @@ export function buildSupervisorIssueVisualCardSvg(issue: RuntimeIssueView): stri
     title: latest,
     detail: issue.github_repo || textForLocale(locale, 'Runtime 控制面', 'Runtime control plane'),
     accent: '#2F94FF',
+    surface: isDark ? '#111820' : '#EEF4FF',
+    border: isDark ? '#223243' : '#D3E2FF',
+    theme,
   })}
   ${signalRowSvg({
     y: 936,
@@ -534,13 +583,17 @@ export function buildSupervisorIssueVisualCardSvg(issue: RuntimeIssueView): stri
     title: next,
     detail: textForLocale(locale, '打开 Mini App 可查看完整日志和 diff。', 'Open Mini App for full logs and diff.'),
     accent: isFailed(issue) || issue.actions.can_retry ? '#FFD166' : '#56E39F',
+    surface: isDark ? '#111820' : isFailed(issue) || issue.actions.can_retry ? '#FFF8E9' : '#F0FAF4',
+    border: isDark ? '#223243' : isFailed(issue) || issue.actions.can_retry ? '#F1DFB1' : '#C8EFD8',
+    theme,
   })}
 </svg>`;
 }
 
-export function buildSupervisorIssueVisualCard(issue: RuntimeIssueView): SupervisorIssueVisualCard {
+export function buildSupervisorIssueVisualCard(issue: RuntimeIssueView, options: SupervisorIssueVisualCardOptions = {}): SupervisorIssueVisualCard {
   const locale = issueLocale(issue);
-  const svg = buildSupervisorIssueVisualCardSvg(issue);
+  const theme = options.theme ?? 'light';
+  const svg = buildSupervisorIssueVisualCardSvg(issue, theme);
   const png = new Resvg(svg, {
     fitTo: {
       mode: 'width',
@@ -548,6 +601,7 @@ export function buildSupervisorIssueVisualCard(issue: RuntimeIssueView): Supervi
     },
   }).render().asPng();
   const stateKey = [
+    theme,
     issue.updated_at,
     issue.phase,
     issue.tracker_state,
@@ -564,7 +618,9 @@ export function buildSupervisorIssueVisualCard(issue: RuntimeIssueView): Supervi
     caption: `<b>${escapeXml(issue.identifier)} · ${escapeXml(compact(issue.title, 56))}</b>\n${escapeXml(status)}\n${escapeXml(latest)}\n${escapeXml(next)}`,
     photo: {
       bytes: png,
-      filename: `${safeFilenamePart(issue.identifier)}-issue-card.png`,
+      filename: theme === 'dark'
+        ? `${safeFilenamePart(issue.identifier)}-issue-card-dark.png`
+        : `${safeFilenamePart(issue.identifier)}-issue-card.png`,
       content_type: 'image/png',
     },
   };

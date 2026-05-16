@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { ApiResponse } from '../types';
 import type { RuntimeControlPlane } from '../../runtime/types';
 import { buildRuntimeManifest, type RuntimeAccessController } from '../runtimeAccess';
+import { rememberTelegramThemePreference } from '../../bots/telegramThemePreference';
 
 type RuntimeRouteStatus = 200 | 201 | 202 | 400 | 403 | 404 | 409;
 
@@ -107,6 +108,50 @@ export function createRuntimeRoutes(
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache, no-transform',
         Connection: 'keep-alive',
+      },
+    });
+  });
+
+  runtime.post('/telegram/theme-preference', async (c) => {
+    const body = await c.req.json().catch(() => null);
+    if (!body || typeof body !== 'object') {
+      return c.json(
+        {
+          success: false,
+          error: 'Invalid JSON body',
+        },
+        400,
+      );
+    }
+
+    const payload = body as Record<string, unknown>;
+    const conversationId = typeof payload.conversation_id === 'string' ? payload.conversation_id.trim() : '';
+    const theme = payload.theme === 'dark' ? 'dark' : payload.theme === 'light' ? 'light' : null;
+    if (!conversationId) {
+      return c.json(
+        {
+          success: false,
+          error: 'conversation_id is required',
+        },
+        400,
+      );
+    }
+    if (!theme) {
+      return c.json(
+        {
+          success: false,
+          error: 'theme must be light or dark',
+        },
+        400,
+      );
+    }
+
+    rememberTelegramThemePreference(conversationId, theme);
+    return c.json({
+      success: true,
+      data: {
+        conversation_id: conversationId,
+        theme,
       },
     });
   });

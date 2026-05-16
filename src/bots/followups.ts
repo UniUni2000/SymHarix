@@ -8,6 +8,7 @@ import type {
 import type { RuntimeControlPlane, RuntimeIssueView, RuntimeStreamEvent, RuntimeTimelineEvent } from '../runtime/types';
 import { isRuntimeIssueCompleted } from '../runtime/issueProgress';
 import { buildSupervisorIssueVisualCard } from '../supervisor/issueVisualCard';
+import { getTelegramThemePreference } from './telegramThemePreference';
 import {
   buildGovernanceBlockedMessage,
   buildGovernanceCardKey,
@@ -133,8 +134,12 @@ function runtimeIssueCardState(issue: RuntimeIssueView): 'open' | 'resolved' | '
   return (isTerminalIssue(issue) || isRuntimeIssueCompleted(issue)) ? 'resolved' : 'open';
 }
 
-function buildRuntimeIssueCardMessage(issue: RuntimeIssueView): BotTransportMessage {
-  const visual = buildSupervisorIssueVisualCard(issue);
+function buildRuntimeIssueCardMessage(issue: RuntimeIssueView, recipient: BotRecipient): BotTransportMessage {
+  const visual = buildSupervisorIssueVisualCard(issue, {
+    theme: recipient.transport === 'telegram'
+      ? (getTelegramThemePreference(recipient.conversation_id) ?? 'light')
+      : 'light',
+  });
   return {
     text: visual.caption,
     caption: visual.caption,
@@ -1073,11 +1078,11 @@ export class BotFollowupService {
       return;
     }
 
-    const message = buildRuntimeIssueCardMessage(issue);
-    const materialKey = message.media_key ?? `runtime_issue_card|${issue.identifier}|${issue.updated_at}`;
     const cardState = runtimeIssueCardState(issue);
 
     await Promise.allSettled(recipients.map(async (recipient) => {
+      const message = buildRuntimeIssueCardMessage(issue, recipient);
+      const materialKey = message.media_key ?? `runtime_issue_card|${issue.identifier}|${issue.updated_at}`;
       const notifier = this.notifiers[recipient.transport];
       if (!notifier) {
         return;

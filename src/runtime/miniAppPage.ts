@@ -4,6 +4,10 @@ import type {
   RuntimeMilestoneView,
   RuntimeToolActivity,
 } from './types';
+import {
+  symHarixLogoDarkThemeDataUri,
+  symHarixLogoLightThemeDataUri,
+} from '../branding/symharixLogo';
 import { localizeKnownRuntimeText, type RuntimeLocale } from '../i18n/locale';
 import {
   isRuntimeIssueCompleted,
@@ -753,12 +757,12 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
   const historyApi = `/api/v1/runtime/issues/${encodedIssueId}/history`;
 
   return `<!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="dark light" />
-    <title>symharix issue cockpit · ${escapedIssueId}</title>
+    <title>SymHarix issue cockpit · ${escapedIssueId}</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
       :root {
@@ -830,7 +834,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         max-width: var(--miniapp-width);
         min-height: 100svh;
         margin: 0 auto;
-        padding: calc(12px + env(safe-area-inset-top)) 23px calc(86px + env(safe-area-inset-bottom));
+        padding: calc(6px + env(safe-area-inset-top)) 23px calc(86px + env(safe-area-inset-bottom));
         padding-bottom: calc(86px + env(safe-area-inset-bottom));
         overflow-x: hidden;
       }
@@ -838,14 +842,14 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         position: sticky;
         top: 0;
         z-index: 20;
-        margin: -2px -2px 12px;
-        padding: 8px 2px 8px;
+        margin: -2px -2px 8px;
+        padding: 4px 2px 6px;
         background: var(--header-gradient);
         backdrop-filter: blur(18px);
       }
       .preference-controls {
         position: absolute;
-        top: 40px;
+        top: 28px;
         right: 7px;
         display: flex;
         justify-content: flex-end;
@@ -884,7 +888,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         background: transparent;
         cursor: pointer;
         font-size: 12px;
-        font-weight: 780;
+        font-weight: 680;
         line-height: 1;
         transition: color 180ms ease;
       }
@@ -902,9 +906,9 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       .hero {
         display: grid;
         grid-template-columns: minmax(0, 1fr);
-        gap: 22px;
+        gap: 18px;
         align-items: start;
-        padding: 36px 8px 12px;
+        padding: 24px 8px 10px;
         border: 0;
         border-radius: 0;
         background: transparent;
@@ -921,23 +925,46 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       .brand {
         display: flex;
         align-items: center;
-        gap: 10px;
-        min-height: 34px;
-        margin-bottom: 18px;
+        gap: 11px;
+        min-height: 42px;
+        margin-bottom: 14px;
         color: var(--ink);
-        font-weight: 760;
+        font-weight: 650;
         font-size: 15px;
       }
-      .wave {
-        width: 36px;
-        height: 24px;
+      .brand-mark-frame {
+        position: relative;
+        width: 34px;
+        height: 42px;
+        flex: 0 0 34px;
+      }
+      .brand-mark {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+        object-fit: contain;
+      }
+      .brand-mark.light-bg {
+        display: none;
+      }
+      html[data-theme="light"] .brand-mark.dark-bg {
+        display: none;
+      }
+      html[data-theme="light"] .brand-mark.light-bg {
+        display: block;
+      }
+      .brand-wordmark {
+        font-weight: 720;
+        letter-spacing: -0.01em;
       }
       .issue-eyebrow {
         margin: 0;
         color: #2f94ff;
-        font-size: 12px;
-        line-height: 16px;
-        font-weight: 720;
+        font-size: 13px;
+        line-height: 18px;
+        font-weight: 620;
       }
       .issue-topline {
         display: flex;
@@ -958,7 +985,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         color: var(--blue);
         background: var(--blue-soft);
         font-size: 11px;
-        font-weight: 860;
+        font-weight: 720;
         line-height: 1;
         letter-spacing: 0.04em;
         text-transform: uppercase;
@@ -982,9 +1009,9 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       .issue-title {
         margin: 0 0 10px;
         padding-right: 6px;
-        font-size: clamp(22px, 5.9vw, 24px);
+        font-size: clamp(24px, 6.3vw, 26px);
         line-height: 1.16;
-        font-weight: 820;
+        font-weight: 700;
         letter-spacing: 0;
         overflow-wrap: anywhere;
       }
@@ -1030,25 +1057,33 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         overflow: hidden;
         white-space: nowrap;
         text-overflow: ellipsis;
-        font-weight: 720;
+        font-weight: 620;
       }
       .chip {
         display: inline-flex;
-        min-height: 24px;
+        min-height: 30px;
         align-items: center;
-        gap: 6px;
+        gap: 7px;
         max-width: 100%;
-        padding: 5px 10px;
+        padding: 6px 13px;
         border: 1px solid var(--line);
-        border-radius: 7px;
+        border-radius: 10px;
         background: rgba(255, 255, 255, 0.045);
         color: var(--soft);
-        font-size: 10.5px;
+        font-size: 12px;
         font-weight: 650;
-        line-height: 1.2;
+        line-height: 1;
         overflow: hidden;
         white-space: nowrap;
         text-overflow: ellipsis;
+      }
+      .chip.compact {
+        min-height: 24px;
+        gap: 5px;
+        padding: 4px 9px;
+        border-radius: 8px;
+        font-size: 10.5px;
+        font-weight: 620;
       }
       .chip.green { color: var(--green); background: var(--green-soft); border-color: rgba(86, 227, 159, 0.2); }
       .chip.blue { color: var(--blue); background: var(--blue-soft); border-color: rgba(107, 180, 255, 0.22); }
@@ -1069,7 +1104,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         display: none;
         color: var(--muted);
         font-size: 10px;
-        font-weight: 800;
+        font-weight: 700;
         letter-spacing: 0.18em;
         text-transform: uppercase;
       }
@@ -1086,7 +1121,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         margin: 0 0 3px;
         color: var(--muted);
         font-size: 13px;
-        font-weight: 720;
+        font-weight: 620;
       }
       .progress-track {
         grid-column: 1 / -1;
@@ -1150,7 +1185,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       }
       .progress-step.active {
         color: #2490ff;
-        font-weight: 750;
+        font-weight: 680;
       }
       .judgment {
         display: grid;
@@ -1189,7 +1224,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         background: transparent;
         cursor: pointer;
         font-size: 11px;
-        font-weight: 780;
+        font-weight: 700;
         line-height: 1.1;
         letter-spacing: 0;
       }
@@ -1252,7 +1287,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         color: var(--ink);
         font-size: 16px;
         line-height: 1.25;
-        font-weight: 780;
+        font-weight: 690;
       }
       .panel-copy {
         margin: 0;
@@ -1272,13 +1307,13 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       }
       .signal-pill {
         display: inline-flex;
-        min-height: 28px;
+        min-height: 24px;
         align-items: center;
-        padding: 0 10px;
+        padding: 0 9px;
         border-radius: 999px;
         border: 1px solid var(--line);
-        font-size: 12px;
-        font-weight: 780;
+        font-size: 11px;
+        font-weight: 660;
       }
       .signal-pill.green {
         color: var(--green);
@@ -1315,7 +1350,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         color: var(--ink);
         font-size: 15px;
         line-height: 1.26;
-        font-weight: 790;
+        font-weight: 690;
         overflow-wrap: anywhere;
         word-break: break-word;
       }
@@ -1335,7 +1370,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       .signal-key {
         color: var(--muted);
         font-size: 11px;
-        font-weight: 800;
+        font-weight: 700;
         letter-spacing: 0.12em;
         text-transform: uppercase;
       }
@@ -1360,7 +1395,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         color: var(--ink);
         font-size: 15px;
         line-height: 1.24;
-        font-weight: 790;
+        font-weight: 690;
       }
       .signal-acceptance span {
         display: block;
@@ -1405,7 +1440,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         color: var(--ink);
         font-size: var(--usage-total-font-size, 25px);
         line-height: 1;
-        font-weight: 820;
+        font-weight: 700;
         text-align: center;
         overflow-wrap: anywhere;
       }
@@ -1414,7 +1449,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         margin-top: 5px;
         color: var(--muted);
         font-size: 10px;
-        font-weight: 780;
+        font-weight: 680;
         letter-spacing: 0.1em;
         text-transform: uppercase;
         text-align: center;
@@ -1441,7 +1476,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       .usage-bar-head span {
         color: var(--muted);
         font-size: 12px;
-        font-weight: 760;
+        font-weight: 660;
       }
       .usage-bar-track {
         height: 9px;
@@ -1529,7 +1564,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       .event-time {
         color: var(--soft);
         font-size: 12px;
-        font-weight: 760;
+        font-weight: 660;
       }
       .event-node {
         display: block;
@@ -1591,12 +1626,12 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       .child-row:first-of-type {
         border-top: 0;
       }
-      .file-row strong,
-      .agent-row strong,
-      .milestone-row strong,
-      .diff-row strong,
-      .delivery-row strong,
-      .child-row strong {
+      .file-row > div > strong,
+      .agent-row > div > strong,
+      .milestone-row > div > strong,
+      .diff-row > div > strong,
+      .delivery-row > div > strong,
+      .child-row > div > strong {
         display: block;
         overflow: hidden;
         font-size: 13px;
@@ -1604,20 +1639,20 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         white-space: nowrap;
         text-overflow: ellipsis;
       }
-      .file-row span,
-      .agent-row span,
-      .milestone-row span,
-      .diff-row span,
-      .delivery-row span,
-      .child-row span {
+      .file-row > div > span,
+      .agent-row > div > span,
+      .milestone-row > div > span,
+      .diff-row > div > span,
+      .delivery-row > div > span,
+      .child-row > div > span {
         display: block;
         margin-top: 3px;
         color: var(--muted);
         font-size: 12px;
         line-height: 1.42;
       }
-      .agent-row span,
-      .milestone-row span {
+      .agent-row > div > span,
+      .milestone-row > div > span {
         white-space: normal;
         overflow-wrap: anywhere;
         word-break: break-word;
@@ -1625,27 +1660,47 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       .diff-row {
         align-items: start;
       }
+      .diff-row > div {
+        display: grid;
+        gap: 8px;
+      }
       .diff-open-button {
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        margin-top: 7px;
-        padding: 4px 9px;
+        justify-self: start;
+        min-height: 32px;
+        width: auto;
+        max-width: max-content;
+        padding: 0 14px;
         border: 1px solid rgba(107, 180, 255, 0.24);
-        border-radius: 8px;
+        border-radius: 10px;
         color: var(--blue);
         background: rgba(107, 180, 255, 0.08);
         cursor: pointer;
         font-size: 12px;
-        font-weight: 760;
-        line-height: 1.1;
+        font-weight: 680;
+        line-height: 1;
       }
       .diff-row strong {
         font-family: "SF Mono", "Menlo", "Consolas", monospace;
         color: var(--ink);
       }
-      .diff-row span {
+      .diff-row > div > span {
         line-height: 1.45;
+      }
+      .diff-row-reason {
+        display: grid;
+        gap: 4px;
+        min-width: 0;
+      }
+      .diff-row-reason-label {
+        display: inline-block;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 680;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
       }
       .expandable-copy {
         display: block;
@@ -1668,7 +1723,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         background: rgba(107, 180, 255, 0.11);
         cursor: pointer;
         font-size: 12px;
-        font-weight: 760;
+        font-weight: 680;
         line-height: 1.1;
       }
       .diff-detail {
@@ -1685,15 +1740,15 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         white-space: normal;
       }
       .diff-stat {
-        min-width: 34px;
-        padding: 5px 8px;
+        min-width: 30px;
+        padding: 4px 7px;
         border-radius: 8px;
         color: var(--green);
         background: rgba(86, 227, 159, 0.12);
         text-align: center;
         font-family: "SF Mono", "Menlo", "Consolas", monospace;
-        font-size: 12px;
-        font-weight: 820;
+        font-size: 11px;
+        font-weight: 700;
       }
       .diff-stat.blue { color: var(--blue); background: var(--blue-soft); }
       .diff-stat.yellow { color: var(--yellow); background: var(--yellow-soft); }
@@ -1701,48 +1756,60 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       .diff-stat-summary {
         display: inline-flex;
         align-items: center;
-        gap: 8px;
-        min-width: 52px;
-        padding: 5px 10px;
-        border: 1px solid rgba(156, 179, 204, 0.18);
-        border-radius: 10px;
-        background: rgba(107, 180, 255, 0.08);
-        text-align: center;
+        gap: 6px;
+        min-width: 0;
+        padding: 0;
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        text-align: left;
         font-family: "SF Mono", "Menlo", "Consolas", monospace;
         font-size: 12px;
-        font-weight: 820;
+        font-weight: 760;
       }
       .diff-stat-summary[hidden] {
         display: none;
       }
+      .diff-stat-token {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 48px;
+        padding: 5px 10px;
+        border: 1px solid rgba(156, 179, 204, 0.18);
+        border-radius: 999px;
+        line-height: 1;
+        background: rgba(255, 255, 255, 0.055);
+      }
       .diff-stat-token.add {
         color: var(--green);
+        border-color: rgba(86, 227, 159, 0.22);
+        background: rgba(86, 227, 159, 0.12);
       }
       .diff-stat-token.del {
         color: var(--red);
+        border-color: rgba(255, 123, 123, 0.18);
+        background: rgba(255, 123, 123, 0.1);
       }
       .diff-row-stats {
         display: inline-flex;
-        vertical-align: middle;
-        margin-right: 4px;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
       }
-      .diff-row-separator {
-        color: var(--muted);
-      }
-      html[data-theme="dark"] .diff-stat-summary {
-        border-color: rgba(134, 161, 191, 0.18);
-        background: rgba(255, 255, 255, 0.06);
+      html[data-theme="dark"] .diff-stat-token {
+        background: rgba(255, 255, 255, 0.045);
       }
       .mini-badge {
-        min-width: 34px;
-        max-width: 72px;
-        padding: 5px 8px;
-        border-radius: 8px;
+        min-width: 30px;
+        max-width: 68px;
+        padding: 4px 7px;
+        border-radius: 7px;
         color: var(--green);
         background: var(--green-soft);
         text-align: center;
-        font-size: 12px;
-        font-weight: 760;
+        font-size: 11px;
+        font-weight: 650;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -1767,7 +1834,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         background: rgba(107, 180, 255, 0.1);
         cursor: pointer;
         font-size: 12px;
-        font-weight: 720;
+        font-weight: 650;
       }
       #diff-drawer-close-button {
         position: absolute;
@@ -1807,7 +1874,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       .history-entry time {
         color: var(--muted);
         font-size: 12px;
-        font-weight: 760;
+        font-weight: 660;
       }
       .history-entry strong {
         display: block;
@@ -1841,9 +1908,12 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         right: auto;
         bottom: 0;
         z-index: 41;
+        display: flex;
+        flex-direction: column;
         width: min(100vw, var(--miniapp-width));
-        height: min(660px, calc(100svh - 184px));
-        padding: 40px 17px calc(88px + env(safe-area-inset-bottom));
+        height: calc(100svh - 72px);
+        max-height: calc(100svh - 72px);
+        padding: 40px 17px calc(20px + env(safe-area-inset-bottom));
         border: 1px solid rgba(203, 213, 225, 0.9);
         border-bottom: 0;
         border-radius: 28px 28px 0 0;
@@ -1876,7 +1946,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         margin: 0;
         color: var(--muted);
         font-size: 11px;
-        font-weight: 800;
+        font-weight: 700;
         letter-spacing: 0.18em;
         text-transform: uppercase;
       }
@@ -1886,7 +1956,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         color: var(--ink);
         font-family: "SF Mono", "Menlo", "Consolas", monospace;
         font-size: 20px;
-        font-weight: 850;
+        font-weight: 760;
         line-height: 1.45;
         overflow-wrap: anywhere;
         word-break: break-word;
@@ -1918,7 +1988,8 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
       }
       .diff-drawer-body {
         margin-top: 14px;
-        height: calc(100% - 190px);
+        flex: 1 1 auto;
+        min-height: 0;
         padding: 12px 12px 14px;
         border: 1px solid rgba(203, 213, 225, 0.78);
         border-radius: 10px;
@@ -1951,7 +2022,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         margin: 8px 0 6px;
         color: #64748b;
         font-size: 10px;
-        font-weight: 780;
+        font-weight: 680;
         letter-spacing: 0.12em;
         text-transform: uppercase;
       }
@@ -2003,9 +2074,6 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           border-bottom: 0;
           border-left: 0;
         }
-        .diff-drawer-body {
-          height: calc(100% - 190px);
-        }
       }
       .actions {
         display: grid;
@@ -2027,7 +2095,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         background: rgba(255, 255, 255, 0.055);
         text-decoration: none;
         font-size: 13px;
-        font-weight: 760;
+        font-weight: 680;
         line-height: 1.18;
         white-space: nowrap;
       }
@@ -2053,7 +2121,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         .judgment { grid-template-columns: minmax(0, 1fr); }
         .layout { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
         .layout > .panel:first-child { min-height: 0; }
-        .issue-title { font-size: 28px; }
+        .issue-title { font-size: 30px; }
         .actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       }
       @keyframes tabIn {
@@ -2066,9 +2134,9 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
     <main class="shell" data-issue-id="${escapedIssueId}" data-issue-api="${issueApi}" data-timeline-api="${timelineApi}" data-history-api="${historyApi}">
       <header class="fixed-header">
         <div class="preference-controls" aria-label="Display preferences">
-          <div id="theme-toggle" class="segmented-control" data-value="dark" role="group" aria-label="切换日间夜间模式">
-            <button class="segmented-option" type="button" data-theme-choice="light" aria-label="日间模式" aria-pressed="false"><span class="theme-icon" aria-hidden="true">☀</span></button>
-            <button class="segmented-option" type="button" data-theme-choice="dark" aria-label="夜间模式" aria-pressed="true"><span class="theme-icon" aria-hidden="true">☾</span></button>
+          <div id="theme-toggle" class="segmented-control" data-value="light" role="group" aria-label="切换日间夜间模式">
+            <button class="segmented-option" type="button" data-theme-choice="light" aria-label="日间模式" aria-pressed="true"><span class="theme-icon" aria-hidden="true">☀</span></button>
+            <button class="segmented-option" type="button" data-theme-choice="dark" aria-label="夜间模式" aria-pressed="false"><span class="theme-icon" aria-hidden="true">☾</span></button>
           </div>
           <div id="language-toggle" class="segmented-control" data-value="zh" role="group" aria-label="切换中英文">
             <button class="segmented-option" type="button" data-lang-choice="zh" aria-pressed="true">中</button>
@@ -2078,10 +2146,11 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         <section id="hero" class="hero collapsed" role="button" tabindex="0" aria-expanded="false">
           <div class="hero-main">
             <div class="brand">
-              <svg class="wave" viewBox="0 0 70 42" aria-hidden="true">
-                <path d="M4 23 C12 5 26 8 27 24 C29 42 47 39 50 19 C53 2 63 9 66 21" fill="none" stroke="#2c93ff" stroke-width="6" stroke-linecap="round"/>
-              </svg>
-              <span>symharix</span>
+              <span class="brand-mark-frame" aria-hidden="true">
+                <img class="brand-mark dark-bg" src="${symHarixLogoDarkThemeDataUri}" alt="" />
+                <img class="brand-mark light-bg" src="${symHarixLogoLightThemeDataUri}" alt="" />
+              </span>
+              <span class="brand-wordmark">SymHarix</span>
             </div>
             <div class="issue-topline">
               <p id="issue-eyebrow" class="issue-eyebrow">${escapedIssueId}</p>
@@ -2180,7 +2249,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
               <div id="agent-list"></div>
             </section>
             <section class="panel pad">
-              <h2 class="panel-title"><span data-i18n="milestones">关键节点</span> <span class="chip yellow">milestones</span></h2>
+              <h2 class="panel-title"><span data-i18n="milestones">关键节点</span> <span class="chip yellow" data-i18n="milestonesChip">Milestones</span></h2>
               <div id="milestone-list"></div>
             </section>
           </section>
@@ -2195,7 +2264,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           </section>
 
           <section class="panel pad">
-            <h2 class="panel-title"><span data-i18n="codeChanges">代码改动</span> <span class="chip green">diff</span></h2>
+            <h2 class="panel-title"><span data-i18n="codeChanges">代码改动</span> <span class="chip green" data-i18n="diffChip">Diff</span></h2>
             <div id="diff-list"></div>
           </section>
         </div>
@@ -2209,7 +2278,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           </section>
 
           <section class="panel pad">
-            <h2 class="panel-title"><span data-i18n="acceptanceCriteria">验收标准</span> <span class="chip green">checks</span></h2>
+            <h2 class="panel-title"><span data-i18n="acceptanceCriteria">验收标准</span> <span class="chip green" data-i18n="checksChip">Checks</span></h2>
             <div id="acceptance-list"></div>
           </section>
 
@@ -2283,13 +2352,62 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           issue: ${JSON.stringify(issueApi)},
           timeline: ${JSON.stringify(timelineApi)},
           history: ${JSON.stringify(historyApi)},
-          stream: '/api/v1/runtime/stream'
+          stream: '/api/v1/runtime/stream',
+          themePreference: '/api/v1/runtime/telegram/theme-preference'
         };
         const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+        function applyTelegramThemeParams() {
+          if (!tg) return;
+          document.documentElement.style.setProperty('--tg-bg', tg.themeParams && tg.themeParams.bg_color || '#061018');
+        }
         if (tg) {
           tg.ready();
           tg.expand();
-          document.documentElement.style.setProperty('--tg-bg', tg.themeParams && tg.themeParams.bg_color || '#061018');
+          applyTelegramThemeParams();
+        }
+
+        function telegramColorScheme() {
+          const scheme = tg && typeof tg.colorScheme === 'string' ? tg.colorScheme.toLowerCase() : '';
+          return scheme === 'dark' ? 'dark' : scheme === 'light' ? 'light' : null;
+        }
+        function telegramConversationId() {
+          if (!tg || !tg.initDataUnsafe) return null;
+          const chatId = tg.initDataUnsafe.chat && tg.initDataUnsafe.chat.id != null ? String(tg.initDataUnsafe.chat.id) : '';
+          const receiverId = tg.initDataUnsafe.receiver && tg.initDataUnsafe.receiver.id != null ? String(tg.initDataUnsafe.receiver.id) : '';
+          const userId = tg.initDataUnsafe.user && tg.initDataUnsafe.user.id != null ? String(tg.initDataUnsafe.user.id) : '';
+          return chatId || receiverId || userId || null;
+        }
+        const themePreferenceState = {
+          inFlightKey: null,
+          lastSyncedKey: null
+        };
+        async function syncTelegramThemePreference(force) {
+          const conversationId = telegramConversationId();
+          const theme = telegramColorScheme() || (state.theme === 'dark' ? 'dark' : 'light');
+          if (!conversationId) return;
+          const key = conversationId + ':' + theme;
+          if (!force && (themePreferenceState.lastSyncedKey === key || themePreferenceState.inFlightKey === key)) {
+            return;
+          }
+          themePreferenceState.inFlightKey = key;
+          try {
+            const response = await fetch(urls.themePreference, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                conversation_id: conversationId,
+                theme
+              })
+            });
+            if (response.ok) {
+              themePreferenceState.lastSyncedKey = key;
+            }
+          } catch (_error) {
+          } finally {
+            if (themePreferenceState.inFlightKey === key) {
+              themePreferenceState.inFlightKey = null;
+            }
+          }
         }
 
         const storedLang = window.localStorage.getItem('symphony.miniapp.lang.' + issueId);
@@ -2301,7 +2419,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           activeTab: 'overview',
           heroExpanded: false,
           renderedDiffFiles: [],
-          theme: window.localStorage.getItem('symphony.miniapp.theme') || 'dark',
+          theme: telegramColorScheme() || window.localStorage.getItem('symphony.miniapp.theme') || 'light',
           lang: storedLang || null,
           langInitialized: storedLang === 'en' || storedLang === 'zh'
         };
@@ -2379,10 +2497,13 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             agentProgress: 'Agent 进度',
             latestThree: '最近 3 条',
             milestones: '关键节点',
+            milestonesChip: 'Milestones',
             fileActivity: '文件活动',
             recent: '最近',
             codeChanges: '代码改动',
+            diffChip: 'Diff',
             acceptanceCriteria: '验收标准',
+            checksChip: 'Checks',
             deliveryClosure: '交付闭环',
             deliverySummaryTitle: '交付总结',
             childQueue: '子任务队列',
@@ -2504,10 +2625,13 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             agentProgress: 'Agent Progress',
             latestThree: 'Latest 3',
             milestones: 'Milestones',
+            milestonesChip: 'Milestones',
             fileActivity: 'File Activity',
             recent: 'Recent',
             codeChanges: 'Code Changes',
+            diffChip: 'Diff',
             acceptanceCriteria: 'Acceptance Criteria',
+            checksChip: 'Checks',
             deliveryClosure: 'Delivery',
             deliverySummaryTitle: 'Delivery Summary',
             childQueue: 'Child Queue',
@@ -2633,6 +2757,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           const lang = state.lang === 'en' ? 'en' : 'zh';
           state.theme = theme;
           state.lang = lang;
+          applyTelegramThemeParams();
           document.documentElement.setAttribute('data-theme', theme);
           document.documentElement.setAttribute('lang', lang === 'en' ? 'en' : 'zh-CN');
           document.querySelectorAll('[data-i18n]').forEach((node) => {
@@ -2651,6 +2776,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           if (state.langInitialized) {
             window.localStorage.setItem('symphony.miniapp.lang.' + issueId, lang);
           }
+          void syncTelegramThemePreference(false);
         }
         function applyIssueDefaultLanguage(issue) {
           if (state.langInitialized) return;
@@ -3412,8 +3538,9 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         function githubMark() {
           return '<svg class="github-mark" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0.2a8 8 0 0 0-2.53 15.59c0.4 0.07 0.55-0.17 0.55-0.38v-1.49c-2.24 0.49-2.71-0.95-2.71-0.95-0.36-0.92-0.88-1.16-0.88-1.16-0.72-0.49 0.05-0.48 0.05-0.48 0.8 0.06 1.22 0.82 1.22 0.82 0.71 1.21 1.86 0.86 2.31 0.66 0.07-0.52 0.28-0.86 0.5-1.06-1.79-0.2-3.67-0.89-3.67-3.98 0-0.88 0.31-1.6 0.82-2.16-0.08-0.2-0.36-1.02 0.08-2.13 0 0 0.67-0.21 2.2 0.82A7.62 7.62 0 0 1 8 4.03c0.68 0 1.36 0.09 2 0.27 1.52-1.03 2.19-0.82 2.19-0.82 0.44 1.11 0.16 1.93 0.08 2.13 0.51 0.56 0.82 1.28 0.82 2.16 0 3.1-1.89 3.77-3.69 3.97 0.29 0.25 0.55 0.74 0.55 1.5v2.22c0 0.21 0.15 0.46 0.56 0.38A8 8 0 0 0 8 0.2Z"/></svg>';
         }
-        function chip(label, tone) {
-          return '<span class="chip ' + escapeHtml(tone || '') + '">' + escapeHtml(label) + '</span>';
+        function chip(label, tone, variant) {
+          const variantClass = variant === 'compact' ? ' compact' : '';
+          return '<span class="chip' + variantClass + ' ' + escapeHtml(tone || '') + '">' + escapeHtml(label) + '</span>';
         }
         function signalPill(label, tone) {
           return '<span class="signal-pill ' + escapeHtml(tone || '') + '">' + escapeHtml(label) + '</span>';
@@ -3570,9 +3697,9 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           el.repoLine.innerHTML = githubMark() + '<span>' + escapeHtml(t('repository')) + '</span><span class="repo-name">' + escapeHtml(issue.github_repo || 'repo pending') + '</span>';
           const child = issue.governance_current_child || (Array.isArray(issue.governance_child_queue) ? issue.governance_child_queue.find((item) => item.queue_state === 'current') : null);
           el.statusLine.innerHTML = [
-            chip(presentation.stateLabel, presentation.stateTone),
-            chip(issue.active_pr_number ? 'PR #' + issue.active_pr_number : t('prPending'), 'blue'),
-            chip(issue.branch_name || (child && child.issue_identifier) || t('rootIssue'), 'blue')
+            chip(presentation.stateLabel, presentation.stateTone, 'compact'),
+            chip(issue.active_pr_number ? 'PR #' + issue.active_pr_number : t('prPending'), 'blue', 'compact'),
+            chip(issue.branch_name || (child && child.issue_identifier) || t('rootIssue'), 'blue', 'compact')
           ].join('');
           const progress = presentation.progress;
           el.progressValue.textContent = progress + '%';
@@ -3826,7 +3953,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             });
           });
           el.diffList.innerHTML = state.renderedDiffFiles.map((file, index) => (
-            '<div class="diff-row"><div><strong>' + escapeHtml(file.path) + '</strong><span>' + (file.statsMarkup ? ('<span class="diff-row-stats"><span class="diff-stat-summary">' + file.statsMarkup + '</span></span><span class="diff-row-separator"> · </span>') : '') + escapeHtml(t('reason')) + ': ' + expandableCopy(file.summary || 'modified', 'modified', 130) + '</span><button class="diff-open-button" type="button" data-diff-open="' + String(index) + '">' + escapeHtml(file.drawerMode === 'full' ? t('diffDetails') : t('diffSummary')) + '</button></div><b class="diff-stat ' + escapeHtml(file.tone || '') + '">' + escapeHtml(file.badge) + '</b></div>'
+            '<div class="diff-row"><div><strong>' + escapeHtml(file.path) + '</strong>' + (file.statsMarkup ? ('<div class="diff-row-stats"><span class="diff-stat-summary">' + file.statsMarkup + '</span></div>') : '') + '<div class="diff-row-reason"><span class="diff-row-reason-label">' + escapeHtml(t('reason')) + '</span>' + expandableCopy(file.summary || 'modified', 'modified', 130) + '</div><button class="diff-open-button" type="button" data-diff-open="' + String(index) + '">' + escapeHtml(file.drawerMode === 'full' ? t('diffDetails') : t('diffSummary')) + '</button></div><b class="diff-stat ' + escapeHtml(file.tone || '') + '">' + escapeHtml(file.badge) + '</b></div>'
           )).join('');
         }
         function findExpandedHistoryText(summary) {
@@ -3858,13 +3985,18 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           )).join('');
         }
         function renderMilestones(issue) {
+          function formatMilestoneKind(kind) {
+            const normalized = String(kind || 'milestone').replace(/[_-]+/g, ' ').trim();
+            if (!normalized) return 'Milestone';
+            return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+          }
           const milestones = getPresentation(issue).visibleMilestones;
           if (!milestones.length) {
             el.milestoneList.innerHTML = '<p class="panel-copy">' + escapeHtml(t('noMilestones')) + '</p>';
             return;
           }
           el.milestoneList.innerHTML = milestones.map((item) => (
-            '<div class="milestone-row"><div><strong>' + escapeHtml(item.kind || 'milestone') + '</strong><span>' + expandableCopy(item.summary || item.key, 'recorded', 180) + '</span></div><span>' + escapeHtml(shortTime(item.timestamp)) + '</span></div>'
+            '<div class="milestone-row"><div><strong>' + escapeHtml(formatMilestoneKind(item.kind)) + '</strong><span>' + expandableCopy(item.summary || item.key, 'recorded', 180) + '</span></div><span>' + escapeHtml(shortTime(item.timestamp)) + '</span></div>'
           )).join('');
         }
         function renderDelivery(issue) {
@@ -3883,7 +4015,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
                 [t('restore'), isRetryableDeliveryFailure(issue) ? t('restorable') : t('noRestore')]
               ];
           el.deliveryList.innerHTML = rows.map(([label, value]) => (
-            '<div class="delivery-row"><div><strong>' + escapeHtml(label) + '</strong><span>' + escapeHtml(value) + '</span></div>' + chip(completed ? '✓' : '›', completed ? 'green' : '') + '</div>'
+            '<div class="delivery-row"><div><strong>' + escapeHtml(label) + '</strong><span>' + escapeHtml(value) + '</span></div>' + chip(completed ? '✓' : '›', completed ? 'green' : '', 'compact') + '</div>'
           )).join('');
           renderExpandableText(el.deliverySummary, issue.delivery_summary || presentation.judgmentSummary, t('waitingDelivery'), 220);
           if (issue.github_repo && issue.active_pr_number) {
@@ -3904,7 +4036,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             ? missing.map((item) => [item.label || item.id || t('missingRequirement'), item.status || 'missing'])
             : [[t('acceptanceProgress'), satisfied], [t('status'), isCompletedIssue(issue) ? t('completed') : t('validating')]];
           el.acceptanceList.innerHTML = rows.map(([label, value]) => (
-            '<div class="delivery-row"><div><strong>' + escapeHtml(label) + '</strong><span>' + escapeHtml(value) + '</span></div>' + chip(String(value).toLowerCase().includes('missing') ? t('acceptanceMissingBadge') : '✓', String(value).toLowerCase().includes('missing') ? 'yellow' : 'green') + '</div>'
+            '<div class="delivery-row"><div><strong>' + escapeHtml(label) + '</strong><span>' + escapeHtml(value) + '</span></div>' + chip(String(value).toLowerCase().includes('missing') ? t('acceptanceMissingBadge') : '✓', String(value).toLowerCase().includes('missing') ? 'yellow' : 'green', 'compact') + '</div>'
           )).join('');
         }
         function renderChildren(issue) {
@@ -3915,7 +4047,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             return;
           }
           el.childList.innerHTML = queue.map((child, index) => (
-            '<div class="child-row"><div><strong>Child ' + String(index + 1) + ' · ' + escapeHtml(child.issue_identifier || 'pending') + '</strong><span>' + escapeHtml(child.title || child.governance_summary || 'queued') + '</span></div>' + chip(child.queue_state || 'queued', child.queue_state === 'current' ? 'blue' : '') + '</div>'
+            '<div class="child-row"><div><strong>Child ' + String(index + 1) + ' · ' + escapeHtml(child.issue_identifier || 'pending') + '</strong><span>' + escapeHtml(child.title || child.governance_summary || 'queued') + '</span></div>' + chip(child.queue_state || 'queued', child.queue_state === 'current' ? 'blue' : '', 'compact') + '</div>'
           )).join('');
         }
         function usageBar(label, value, total, tone) {
@@ -3977,9 +4109,8 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           setRuntimeAction(el.requestButton, 'request', t('addRequirement'), 'primary');
           setRuntimeAction(el.backButton, 'back', t('backTelegram'), '');
         }
-        function render() {
+        function renderView() {
           if (!state.issue) return;
-          applyPreferences();
           renderHero(state.issue);
           renderOverviewSignal(state.issue);
           renderRound(state.issue);
@@ -3995,6 +4126,10 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           renderUsage(state.issue);
           renderActions(state.issue);
           setActiveTab(state.activeTab);
+        }
+        function render() {
+          applyPreferences();
+          renderView();
         }
         async function load() {
           const [issue, timeline, history] = await Promise.all([
@@ -4100,12 +4235,11 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         el.themeToggle.addEventListener('click', (event) => {
           event.preventDefault();
           state.theme = state.theme === 'light' ? 'dark' : 'light';
-          applyPreferences();
+          render();
         });
         el.languageToggle.addEventListener('click', (event) => {
           event.preventDefault();
           state.lang = state.lang === 'en' ? 'zh' : 'en';
-          applyPreferences();
           render();
         });
         el.historyCloseButton.addEventListener('click', () => {
@@ -4117,6 +4251,14 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         el.diffDrawerBackdrop.addEventListener('click', () => {
           closeDiffDrawer();
         });
+        if (tg && typeof tg.onEvent === 'function') {
+          tg.onEvent('themeChanged', function () {
+            const nextTheme = telegramColorScheme();
+            if (!nextTheme) return;
+            state.theme = nextTheme;
+            render();
+          });
+        }
         applyPreferences();
         load().then(openStream).catch((error) => {
           el.timelineList.innerHTML = '<div class="loading">' + escapeHtml(error.message || 'Load failed') + '</div>';
