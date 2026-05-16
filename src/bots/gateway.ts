@@ -55,6 +55,7 @@ import type {
   BotGateway,
   BotMessageEditFailureKind,
   BotRecipient,
+  BotTransportAction,
   BotTransportMessageRef,
   BotTransportMessage,
   BotTransportNotifier,
@@ -119,6 +120,29 @@ function textForLocale(locale: RuntimeLocale | null | undefined, zh: string, en:
 
 function textForIssueLocale(issue: RuntimeIssueView | null | undefined, zh: string, en: string): string {
   return isEnglishRuntimeIssue(issue) ? en : zh;
+}
+
+function isTelegramAnswerCallbackBadRequest(error: unknown): boolean {
+  return error instanceof Error
+    && /Telegram answerCallbackQuery failed with status 400/i.test(error.message);
+}
+
+function buildTelegramCallbackFailureFallbackText(
+  issue: RuntimeIssueView | null | undefined,
+  error: unknown,
+): string {
+  if (isTelegramAnswerCallbackBadRequest(error)) {
+    return textForIssueLocale(
+      issue,
+      '这次按钮点击已过期，请直接打开最新卡片，或再试一次。',
+      'This button tap expired. Open the latest card or try again.',
+    );
+  }
+  return textForIssueLocale(
+    issue,
+    '这次 Telegram 按钮操作失败了，请稍后重试。',
+    'This Telegram button action failed. Please try again shortly.',
+  );
 }
 import {
   createClaudeCodeRepoUnderstandingRunner,
@@ -306,6 +330,10 @@ function normalizePublicBaseUrl(value: string | null | undefined): string | null
   return trimmed.replace(/\/+$/, '');
 }
 
+function isEphemeralTryCloudflareUrl(value: string | null | undefined): boolean {
+  return Boolean(value && /^https:\/\/[a-z0-9.-]+trycloudflare\.com$/i.test(value));
+}
+
 function isTelegramClearRepoConversationCommand(text: string): boolean {
   return /^\/clear(?:@[\w_]+)?(?:\s|$)/i.test(text.trim());
 }
@@ -341,6 +369,33 @@ function runtimeWebAppFallbackCallbackData(url: string): string | null {
   return `rt|${issueIdentifier.toUpperCase()}|open`;
 }
 
+function withAbsoluteTelegramRuntimeViewUrl(
+  message: BotTransportMessage,
+  issueIdentifier: string,
+  appUrl: string,
+): BotTransportMessage {
+  const runtimeOpenCallback = `rt|${issueIdentifier.toUpperCase()}|open`;
+  const replaceAction = (action: BotTransportAction): BotTransportAction => (
+    action.web_app && runtimeWebAppFallbackCallbackData(action.web_app.url) === runtimeOpenCallback
+      ? {
+          ...action,
+          web_app: { url: appUrl },
+        }
+      : action
+  );
+
+  return {
+    ...message,
+    actions: message.actions?.map(replaceAction),
+    action_rows: message.action_rows?.map((row) => row.map(replaceAction)),
+  };
+}
+
+function isTelegramDeleteMessageNotFoundError(error: unknown): boolean {
+  return error instanceof Error
+    && /deleteMessage failed with status 400: .*message to delete not found/i.test(error.message);
+}
+
 function buildTelegramInlineKeyboard(
   message: BotTransportMessage,
   publicBaseUrl: string | null = null,
@@ -368,12 +423,16 @@ function buildTelegramInlineKeyboard(
           return button;
         }
         if (action.web_app?.url) {
+          const fallbackCallbackData = runtimeWebAppFallbackCallbackData(action.web_app.url);
+          if (fallbackCallbackData && isEphemeralTryCloudflareUrl(publicBaseUrl)) {
+            button.callback_data = fallbackCallbackData;
+            return button;
+          }
           const url = resolveTelegramActionUrl(action.web_app.url, publicBaseUrl);
           if (url) {
             button.web_app = { url };
             return button;
           }
-          const fallbackCallbackData = runtimeWebAppFallbackCallbackData(action.web_app.url);
           if (fallbackCallbackData) {
             button.callback_data = fallbackCallbackData;
             return button;
@@ -726,6 +785,44 @@ class TelegramNotifier implements BotTransportNotifier {
       throw new Error(`Telegram answerCallbackQuery failed with status ${response.status}`);
     }
   }
+
+  async deleteMessage(recipient: BotRecipient, messageRef: BotTransportMessageRef): Promise<void> {
+    if (!this.config.botToken) {
+      throw new Error('Telegram bot token is not configured');
+    }
+
+    const response = await this.telegramFetch(
+      `https://api.telegram.org/bot${this.config.botToken}/deleteMessage`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          chat_id: recipient.conversation_id,
+          message_id: messageRef.provider_message_id,
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      let description: string | null = null;
+      try {
+        const raw = await response.text();
+        if (raw.trim()) {
+          try {
+            const payload = JSON.parse(raw) as { description?: string };
+            description = typeof payload.description === 'string' ? payload.description : raw;
+          } catch {
+            description = raw;
+          }
+        }
+      } catch {
+        description = null;
+      }
+      throw new Error(`Telegram deleteMessage failed with status ${response.status}${description ? `: ${description}` : ''}`);
+    }
+  }
 }
 
 class DiscordNotifier implements BotTransportNotifier {
@@ -1032,8 +1129,11 @@ export class DefaultBotGateway implements BotGateway {
   private readonly queuedTelegramTextResponses = new Map<string, QueuedTelegramTextResponse>();
   private readonly seenTelegramUpdateIds = new Set<string>();
   private readonly seenTelegramUpdateOrder: string[] = [];
+  private readonly activeTelegramRuntimeOpenKeys = new Set<string>();
+  private readonly recentTelegramRuntimeOpenCooldownUntil = new Map<string, number>();
   private readonly runtimeIssueCardLock = new RuntimeIssueCardLock();
   private readonly supervisorSessionCardLock = new SupervisorSessionCardLock();
+  private readonly telegramRuntimeOpenCooldownMs: number;
   private telegramPublicBaseUrl: string | null = normalizePublicBaseUrl(readSymHarixEnv('SYMPHONY_PUBLIC_BASE_URL') || null);
   private telegramWebhookUsedTunnel: boolean | null = null;
   private startupRepairTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1080,6 +1180,7 @@ export class DefaultBotGateway implements BotGateway {
       telegramBootstrapService?: TelegramWebhookBootstrapService | null;
       telegramTextProcessingAckDelayMs?: number | null;
       telegramTextCoalesceDelayMs?: number | null;
+      telegramRuntimeOpenCooldownMs?: number | null;
       startupRepairDelayMs?: number | null;
     } = {},
   ) {
@@ -1105,6 +1206,12 @@ export class DefaultBotGateway implements BotGateway {
         ?? 3_000,
     );
     this.telegramTextCoalesceDelayMs = Math.max(0, options.telegramTextCoalesceDelayMs ?? 0);
+    this.telegramRuntimeOpenCooldownMs = Math.max(
+      0,
+      options.telegramRuntimeOpenCooldownMs
+        ?? parsePositiveInteger(readSymHarixEnv('SYMPHONY_TELEGRAM_RUNTIME_OPEN_COOLDOWN_MS'))
+        ?? 5_000,
+    );
     const supervisorMemories = options.supervisorMemoryRepository ?? null;
     const supervisorJobs = options.supervisorJobRepository ?? null;
     this.telegramNotifier = telegramConfig.botToken
@@ -1452,6 +1559,8 @@ export class DefaultBotGateway implements BotGateway {
     this.pendingTelegramTextResponses.clear();
     this.activeTelegramTextResponseKeys.clear();
     this.queuedTelegramTextResponses.clear();
+    this.activeTelegramRuntimeOpenKeys.clear();
+    this.recentTelegramRuntimeOpenCooldownUntil.clear();
     this.subscriptions.dispose();
     this.followups?.dispose();
     this.supervisorWorker?.dispose();
@@ -1753,30 +1862,219 @@ export class DefaultBotGateway implements BotGateway {
       let releaseRuntimeCallbackCardLock: (() => void) | null = null;
       try {
         if (parsedCallback.kind === 'runtime_action' && parsedCallback.runtimeAction === 'open') {
+          const recipient = {
+            transport: 'telegram' as const,
+            conversation_id: conversationId,
+          };
+          const originalMessageId = messageId !== undefined && messageId !== null ? String(messageId) : null;
           const appUrl = parsedCallback.issueIdentifier
             ? resolveTelegramActionUrl(
                 `/runtime/issues/${encodeURIComponent(parsedCallback.issueIdentifier)}/app`,
                 this.telegramPublicBaseUrl,
               )
             : null;
-          await this.telegramNotifier.answerCallbackQuery(
-            callbackQuery.id || 'unknown-callback',
-            appUrl
-              ? textForIssueLocale(callbackIssue, '运行视图地址已恢复，请刷新卡片后打开。', 'Runtime view URL is ready. Refresh the card, then open it again.')
-              : textForIssueLocale(callbackIssue, 'Mini App 暂时不可用：未配置 SYMPHONY_PUBLIC_BASE_URL。启动 start:local/tunnel 后刷新卡片。', 'Mini App unavailable: SYMPHONY_PUBLIC_BASE_URL is not configured. Start the local tunnel, then refresh the card.'),
-          );
-          this.recordTelegramCallbackAudit({
-            ...auditBase,
-            result: 'acked',
-            error_message: null,
-            timestamp: new Date().toISOString(),
-          });
-          this.telegramDiagnostics.recordCallbackSuccess();
-          return {
-            ok: true,
-            status: 200,
-            body: { ok: true },
-          };
+          const ephemeralTunnelUrl = isEphemeralTryCloudflareUrl(this.telegramPublicBaseUrl);
+          const runtimeOpenReplayKey = appUrl && ephemeralTunnelUrl
+            ? this.telegramRuntimeOpenReplayKey(conversationId, originalMessageId, callbackQuery.data)
+            : null;
+          let releaseRuntimeOpenGuard: ((successful: boolean) => void) | null = null;
+          let runtimeOpenDelivered = false;
+          if (runtimeOpenReplayKey) {
+            const guard = this.acquireTelegramRuntimeOpenGuard(runtimeOpenReplayKey);
+            if (!guard.accepted) {
+              await this.telegramNotifier.answerCallbackQuery(
+                callbackQuery.id || 'unknown-callback',
+                guard.reason === 'cooldown'
+                  ? textForIssueLocale(
+                      callbackIssue,
+                      '这张卡刚刚更新，请直接打开最新那张。',
+                      'This card was just refreshed. Open the latest one.',
+                    )
+                  : textForIssueLocale(
+                      callbackIssue,
+                      '这张卡正在更新，请等几秒再试。',
+                      'This card is already updating. Give it a few seconds.',
+                    ),
+              );
+              this.recordTelegramCallbackAudit({
+                ...auditBase,
+                result: 'acked',
+                error_message: null,
+                timestamp: new Date().toISOString(),
+              });
+              this.telegramDiagnostics.recordCallbackSuccess();
+              return {
+                ok: true,
+                status: 200,
+                body: { ok: true, deduplicated: true },
+              };
+            }
+            releaseRuntimeOpenGuard = guard.release ?? null;
+          }
+          let callbackAnswered = false;
+          try {
+            if (appUrl && ephemeralTunnelUrl && parsedCallback.issueIdentifier) {
+              try {
+                await this.telegramNotifier.answerCallbackQuery(
+                  callbackQuery.id || 'unknown-callback',
+                  textForIssueLocale(
+                    callbackIssue,
+                    '正在更新运行卡片…',
+                    'Updating the runtime card...',
+                  ),
+                );
+                callbackAnswered = true;
+                this.recordTelegramCallbackAudit({
+                  ...auditBase,
+                  result: 'acked',
+                  error_message: null,
+                  timestamp: new Date().toISOString(),
+                });
+              } catch (error) {
+                logger.warn('Telegram callback toast failed before ephemeral runtime card replacement', {
+                  callback_id: callbackQuery.id || 'unknown-callback',
+                  chat_id: conversationId,
+                }, error instanceof Error ? error : undefined);
+              }
+              let replacementDelivered:
+                | {
+                    ref: BotTransportMessageRef;
+                    mode: TelegramCallbackDeliveryMode;
+                    callbackResult: Awaited<ReturnType<DefaultBotGateway['handleTelegramCallback']>>;
+                  }
+                | null = null;
+              try {
+                const callbackResult = await this.handleTelegramCallback(
+                  context,
+                  {
+                    ...parsedCallback,
+                    runtimeAction: 'refresh',
+                  },
+                  callbackIssue,
+                  existingCardState,
+                  originalMessageId,
+                  callbackQuery.message?.text ?? callbackQuery.message?.caption ?? null,
+                );
+                const replacementMessage = withAbsoluteTelegramRuntimeViewUrl(
+                  callbackResult.outbound,
+                  parsedCallback.issueIdentifier,
+                  appUrl,
+                );
+                const delivered = await this.deliverTelegramCallbackMessage({
+                  recipient,
+                  originalMessageId: null,
+                  message: replacementMessage,
+                  issue: callbackResult.issue,
+                  materialKey: callbackResult.cardKey,
+                });
+                replacementDelivered = {
+                  ref: delivered.ref,
+                  mode: delivered.mode,
+                  callbackResult,
+                };
+              } catch (error) {
+                logger.warn('Telegram ephemeral runtime replacement fell back to direct link delivery', {
+                  chat_id: conversationId,
+                  issue_identifier: parsedCallback.issueIdentifier,
+                  message_id: originalMessageId,
+                }, error instanceof Error ? error : undefined);
+              }
+
+              if (replacementDelivered) {
+                if (replacementDelivered.callbackResult.issue) {
+                  this.persistFollowupMessageState({
+                    conversationId,
+                    issue: replacementDelivered.callbackResult.issue,
+                    deliveredMessageId: replacementDelivered.ref.provider_message_id,
+                    cardKind: replacementDelivered.callbackResult.cardKind,
+                    cardState: replacementDelivered.callbackResult.cardState,
+                    cardKey: replacementDelivered.callbackResult.cardKey,
+                    existingCardState,
+                  });
+                }
+                if (originalMessageId) {
+                  try {
+                    await this.telegramNotifier.deleteMessage(recipient, {
+                      provider_message_id: originalMessageId,
+                    });
+                  } catch (error) {
+                    if (!isTelegramDeleteMessageNotFoundError(error)) {
+                      logger.warn('Telegram stale runtime card delete failed after replacement', {
+                        chat_id: conversationId,
+                        issue_identifier: parsedCallback.issueIdentifier,
+                        message_id: originalMessageId,
+                      }, error instanceof Error ? error : undefined);
+                    }
+                  }
+                }
+                runtimeOpenDelivered = true;
+                this.recordTelegramCallbackAudit({
+                  ...auditBase,
+                  result: telegramCallbackDeliveryResult(replacementDelivered.mode),
+                  error_message: null,
+                  timestamp: new Date().toISOString(),
+                });
+                this.telegramDiagnostics.recordCallbackSuccess();
+                return {
+                  ok: true,
+                  status: 200,
+                  body: { ok: true },
+                };
+              }
+            }
+            if (!callbackAnswered) {
+              await this.telegramNotifier.answerCallbackQuery(
+                callbackQuery.id || 'unknown-callback',
+                appUrl
+                  ? ephemeralTunnelUrl
+                    ? textForIssueLocale(callbackIssue, '已发送最新地址，请点击下面的新按钮。', 'Sent the latest link below. Tap the new button.')
+                    : textForIssueLocale(callbackIssue, '运行视图地址已恢复，请刷新卡片后打开。', 'Runtime view URL is ready. Refresh the card, then open it again.')
+                  : textForIssueLocale(callbackIssue, 'Mini App 暂时不可用：未配置 SYMPHONY_PUBLIC_BASE_URL。启动 start:local/tunnel 后刷新卡片。', 'Mini App unavailable: SYMPHONY_PUBLIC_BASE_URL is not configured. Start the local tunnel, then refresh the card.'),
+              );
+              this.recordTelegramCallbackAudit({
+                ...auditBase,
+                result: 'acked',
+                error_message: null,
+                timestamp: new Date().toISOString(),
+              });
+            }
+            if (appUrl && ephemeralTunnelUrl && parsedCallback.issueIdentifier) {
+              await this.telegramNotifier.sendMessage(
+                recipient,
+                {
+                  text: textForIssueLocale(
+                    callbackIssue,
+                    '这是当前最新的临时运行视图入口。如果又看到 1033，请先刷新卡片再重试。',
+                    'This is the latest temporary runtime view entry. If you hit 1033 again, refresh the card and try again.',
+                  ),
+                  action_rows: [
+                    [
+                      {
+                        label: textForIssueLocale(callbackIssue, '打开运行视图', 'Open Runtime View'),
+                        style: 'primary',
+                        web_app: { url: appUrl },
+                      },
+                    ],
+                    [
+                      {
+                        label: textForIssueLocale(callbackIssue, '刷新卡片', 'Refresh Card'),
+                        callback_data: `rt|${parsedCallback.issueIdentifier}|refresh`,
+                      },
+                    ],
+                  ],
+                },
+              );
+              runtimeOpenDelivered = true;
+            }
+            this.telegramDiagnostics.recordCallbackSuccess();
+            return {
+              ok: true,
+              status: 200,
+              body: { ok: true },
+            };
+          } finally {
+            releaseRuntimeOpenGuard?.(runtimeOpenDelivered);
+          }
         }
 
         if (parsedCallback.kind === 'supervisor_action') {
@@ -1924,16 +2222,18 @@ export class DefaultBotGateway implements BotGateway {
           timestamp: new Date().toISOString(),
         });
 
-        try {
-          await this.telegramNotifier.answerCallbackQuery(
-            callbackQuery.id || 'unknown-callback',
-            '执行失败，请稍后重试',
-          );
-        } catch (toastError) {
-          logger.warn('Telegram callback failure toast failed', {
-            callback_id: callbackQuery.id || 'unknown-callback',
-            chat_id: conversationId,
-          }, toastError instanceof Error ? toastError : undefined);
+        if (!isTelegramAnswerCallbackBadRequest(error)) {
+          try {
+            await this.telegramNotifier.answerCallbackQuery(
+              callbackQuery.id || 'unknown-callback',
+              textForIssueLocale(callbackIssue, '执行失败，请稍后重试', 'Action failed. Please try again.'),
+            );
+          } catch (toastError) {
+            logger.warn('Telegram callback failure toast failed', {
+              callback_id: callbackQuery.id || 'unknown-callback',
+              chat_id: conversationId,
+            }, toastError instanceof Error ? toastError : undefined);
+          }
         }
 
         try {
@@ -1943,7 +2243,7 @@ export class DefaultBotGateway implements BotGateway {
               conversation_id: conversationId,
             },
             {
-              text: `处理 Telegram 按钮时失败：${error instanceof Error ? error.message : 'unknown error'}`,
+              text: buildTelegramCallbackFailureFallbackText(callbackIssue, error),
             },
           );
         } catch (sendError) {
@@ -2005,6 +2305,50 @@ export class DefaultBotGateway implements BotGateway {
         this.seenTelegramUpdateIds.delete(expired);
       }
     }
+  }
+
+  private telegramRuntimeOpenReplayKey(
+    conversationId: string,
+    messageId: string | null,
+    callbackData: string,
+  ): string {
+    return ['telegram-runtime-open', conversationId, messageId ?? 'none', callbackData].join(':');
+  }
+
+  private acquireTelegramRuntimeOpenGuard(key: string): {
+    accepted: boolean;
+    reason: 'in_flight' | 'cooldown' | null;
+    release?: (successful: boolean) => void;
+  } {
+    const now = Date.now();
+    const cooldownUntil = this.recentTelegramRuntimeOpenCooldownUntil.get(key) ?? 0;
+    if (cooldownUntil <= now) {
+      this.recentTelegramRuntimeOpenCooldownUntil.delete(key);
+    }
+    if (this.activeTelegramRuntimeOpenKeys.has(key)) {
+      return { accepted: false, reason: 'in_flight' };
+    }
+    if ((this.recentTelegramRuntimeOpenCooldownUntil.get(key) ?? 0) > now) {
+      return { accepted: false, reason: 'cooldown' };
+    }
+
+    this.activeTelegramRuntimeOpenKeys.add(key);
+    let released = false;
+    return {
+      accepted: true,
+      reason: null,
+      release: (successful: boolean) => {
+        if (released) {
+          return;
+        }
+        released = true;
+        this.activeTelegramRuntimeOpenKeys.delete(key);
+        if (!successful || this.telegramRuntimeOpenCooldownMs <= 0) {
+          return;
+        }
+        this.recentTelegramRuntimeOpenCooldownUntil.set(key, Date.now() + this.telegramRuntimeOpenCooldownMs);
+      },
+    };
   }
 
   private async handleRuntimeIssueCardAction(
