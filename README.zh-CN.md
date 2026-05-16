@@ -13,6 +13,10 @@
 </p>
 
 <p align="center">
+  <strong>Telegram-first supervised coding control plane.</strong>
+</p>
+
+<p align="center">
   <a href="#快速开始"><img src="https://img.shields.io/badge/Quick_Start-Bun-000000?style=for-the-badge&logo=bun&logoColor=white" alt="Quick Start"></a>
   <a href="#telegram-supervisor"><img src="https://img.shields.io/badge/Telegram-first-229ED9?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram first"></a>
   <a href="#核心链路"><img src="https://img.shields.io/badge/Runtime-Deck-6D5DFC?style=for-the-badge" alt="Runtime Deck"></a>
@@ -21,6 +25,14 @@
 
 <p align="center">
   <strong>语言：</strong> <a href="./README.md">English</a> | 中文
+</p>
+
+<p align="center">
+  <img src="./assets/readme/concept-flow.png" alt="SymHarix Telegram-first supervised coding control plane conceptual flow" width="920">
+</p>
+
+<p align="center">
+  <em>Conceptual flow illustration; actual Telegram, Runtime Deck, and Mini App screens may differ.</em>
 </p>
 
 可自托管、Telegram 优先的 coding agent 监督控制平面。
@@ -73,13 +85,16 @@ sudo journalctl -u symharix -f
 ## 核心链路
 
 ```text
-Telegram / Runtime Deck / Linear poll
-  -> Supervisor session and tool router
-  -> Orchestrator and approval policy
-  -> AgentRunner
-  -> scripts/claude-adapter.cjs
+Telegram / Runtime Deck / Linear issue
+  -> Supervisor session, repo routing, Plan Card, approval
+  -> Issue-scoped run in Runtime history
+  -> Workspace checkout + feature branch
+  -> AgentRunner -> scripts/claude-adapter.cjs
   -> bundled Claude-compatible runtime
-  -> GitHub / Linear / Runtime history
+  -> Code changes + tests + evidence
+  -> GitHub branch -> pull request -> review
+  -> Merge or delivery blocker
+  -> Linear state + Runtime Deck + Mini App updated
 ```
 
 主要行为：
@@ -87,6 +102,7 @@ Telegram / Runtime Deck / Linear poll
 - Telegram 负责对话、澄清、切换仓库、Plan Card、审批和简洁的生命周期更新。
 - Runtime Deck 展示 issue 状态、时间线、token 使用量、近期 agent 进展、交付阻塞和安全写操作。
 - Mini App issue 页面会展示当前阶段、active PR、回放历史，并在 workspace 或 PR head 可用时展示文件 diff。
+- 用户批准后，任务会变成一个 issue-scoped coding run：SymHarix 准备 workspace、创建或跟踪 feature branch、保存验证证据、创建或跟踪 GitHub PR，并持续展示 review 与 merge 状态。
 - 仓库路由必须显式配置，并且缺失时 fail closed。Linear `project_slug` 必须映射到 `WORKFLOW.md` 中的 GitHub 仓库。
 - Agent 执行链路通过 `scripts/claude-adapter.cjs` 运行，并由它启动内置 Claude-compatible runtime；只读仓库理解默认也使用这个 adapter，除非显式覆盖。
 

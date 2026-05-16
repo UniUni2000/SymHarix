@@ -13,6 +13,10 @@
 </p>
 
 <p align="center">
+  <strong>Telegram-first supervised coding control plane.</strong>
+</p>
+
+<p align="center">
   <a href="#quick-start"><img src="https://img.shields.io/badge/Quick_Start-Bun-000000?style=for-the-badge&logo=bun&logoColor=white" alt="Quick Start"></a>
   <a href="#telegram-supervisor"><img src="https://img.shields.io/badge/Telegram-first-229ED9?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram first"></a>
   <a href="#core-flow"><img src="https://img.shields.io/badge/Runtime-Deck-6D5DFC?style=for-the-badge" alt="Runtime Deck"></a>
@@ -21,6 +25,14 @@
 
 <p align="center">
   <strong>Language:</strong> English | <a href="./README.zh-CN.md">Chinese</a>
+</p>
+
+<p align="center">
+  <img src="./assets/readme/concept-flow.png" alt="SymHarix Telegram-first supervised coding control plane conceptual flow" width="920">
+</p>
+
+<p align="center">
+  <em>Conceptual flow illustration; actual Telegram, Runtime Deck, and Mini App screens may differ.</em>
 </p>
 
 ## What SymHarix Is
@@ -71,13 +83,16 @@ sudo journalctl -u symharix -f
 ## Core Flow
 
 ```text
-Telegram / Runtime Deck / Linear poll
-  -> Supervisor session and tool router
-  -> Orchestrator and approval policy
-  -> AgentRunner
-  -> scripts/claude-adapter.cjs
+Telegram / Runtime Deck / Linear issue
+  -> Supervisor session, repo routing, Plan Card, approval
+  -> Issue-scoped run in Runtime history
+  -> Workspace checkout + feature branch
+  -> AgentRunner -> scripts/claude-adapter.cjs
   -> bundled Claude-compatible runtime
-  -> GitHub / Linear / Runtime history
+  -> Code changes + tests + evidence
+  -> GitHub branch -> pull request -> review
+  -> Merge or delivery blocker
+  -> Linear state + Runtime Deck + Mini App updated
 ```
 
 The main behavior:
@@ -85,6 +100,7 @@ The main behavior:
 - Telegram handles conversation, clarification, repo switching, Plan Cards, approval, and concise lifecycle updates.
 - Runtime Deck shows issue state, timelines, token usage, recent agent progress, delivery blockers, and safe write actions.
 - Mini App issue views expose active stage, active PR context, replay history, and file diffs when a workspace or PR head is available.
+- Approved work becomes an issue-scoped coding run: SymHarix prepares the workspace, creates or tracks a feature branch, captures verification evidence, opens or follows a GitHub PR, and keeps review and merge state visible.
 - Repository routing is explicit and fail-closed. A Linear `project_slug` must map to a GitHub repository in `WORKFLOW.md`.
 - Agent execution runs through `scripts/claude-adapter.cjs`, which launches the bundled Claude-compatible runtime. Read-only repo understanding uses the same adapter unless overridden.
 
