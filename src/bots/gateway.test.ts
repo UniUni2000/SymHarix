@@ -1304,6 +1304,101 @@ describe('DefaultBotGateway', () => {
     db.close();
   });
 
+  test('sends an English explicit issue card request as a photo even when a runtime panel is active', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const supervisorRuns = new SupervisorRunRepository(db);
+    const supervisorRunEvents = new SupervisorRunEventRepository(db);
+    const supervisorToolCalls = new SupervisorToolCallRepository(db);
+    const supervisorPendingActions = new SupervisorPendingActionRepository(db);
+    const followupMessageStates = new BotFollowupMessageStateRepository(db);
+    followupMessageStates.upsert({
+      transport: 'telegram',
+      conversation_id: '42',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      message_id: '90',
+      card_kind: 'runtime_issue',
+      card_key: 'issue-card|INT-1|old',
+      card_state: 'open',
+    });
+
+    const requests: Array<{ url: string; body: BodyInit | null | undefined }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: init?.body,
+      });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 102 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(['9']),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        followupMessageStateRepository: followupMessageStates,
+        supervisorRunRepository: supervisorRuns,
+        supervisorRunEventRepository: supervisorRunEvents,
+        supervisorToolCallRepository: supervisorToolCalls,
+        supervisorPendingActionRepository: supervisorPendingActions,
+        assistantModel: {
+          decide: async () => JSON.stringify({
+            intent: {
+              kind: 'show_issue_card',
+              issue_id: 'INT-1',
+            },
+          }),
+          getDiagnostics: () => ({
+            provider: 'test',
+            model: 'test-router',
+            configured: true,
+            health: 'healthy',
+            fallback_available: true,
+            last_error_code: null,
+          }),
+        },
+      },
+    );
+
+    const result = await gateway.handleTelegramWebhook(
+      {
+        message: {
+          text: 'show me the card of int 1',
+          chat: { id: 42 },
+          from: { id: 9, username: 'alice' },
+        },
+      },
+      {
+        'x-telegram-bot-api-secret-token': 'secret',
+      },
+    );
+
+    expect(result.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(requests.some((request) => request.url.includes('sendPhoto'))).toBe(true);
+    expect(requests.some((request) => request.url.includes('sendMessage'))).toBe(false);
+
+    gateway.dispose();
+    db.close();
+  });
+
   test('sends a safe recovery reply for non-command Telegram assistant failures without backend jargon', async () => {
     const db = new Database(':memory:');
     initializeSchema(db);

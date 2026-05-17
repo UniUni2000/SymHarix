@@ -13,8 +13,14 @@ fi
 
 # Force recovery CLI (simple readline REPL, no Ink TUI).
 if [[ "${CLAUDE_CODE_FORCE_RECOVERY_CLI:-0}" == "1" ]]; then
-  exec bun "${env_args[@]}" ./src/localRecoveryCli.ts "$@"
+  if [[ ${#env_args[@]} -gt 0 ]]; then
+    exec bun "${env_args[@]}" ./src/localRecoveryCli.ts "$@"
+  fi
+  exec bun ./src/localRecoveryCli.ts "$@"
 fi
 
 # Default: full CLI with Ink TUI.
-exec bun "${env_args[@]}" ./src/entrypoints/cli.tsx "$@"
+if [[ ${#env_args[@]} -gt 0 ]]; then
+  exec bun "${env_args[@]}" ./src/entrypoints/cli.tsx "$@"
+fi
+exec bun ./src/entrypoints/cli.tsx "$@"

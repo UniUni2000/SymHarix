@@ -958,10 +958,14 @@ function buildDiscordCommandRequest(interaction: DiscordInteraction): BotCommand
 
 function isExplicitRuntimeIssueCardRequest(text: string): boolean {
   const normalized = text.trim().replace(/\s+/g, ' ').toLowerCase();
+  const hasCardNoun = /(?:\b(?:card|panel)\b|卡片|面板)/i.test(normalized);
+  const hasIssueReference = /(?:\b[a-z][a-z0-9]+[-\s]?\d+\b|\b\d+\b)/i.test(normalized);
+  const hasCardAction = /(?:\b(?:show|send|refresh|open|view|display|get|give)\b|给我|发我|看看|看一下|查看|刷新|打开)/i.test(normalized);
   return /^(?:卡片给我|卡片发我|把卡片发我|把当前卡片发我|发我卡片|发一下卡片|当前卡片|查看当前计划|看当前计划|当前计划|查看计划卡|看计划卡|计划卡给我)$/i.test(normalized)
     || /^(?:发|给|看看|看一下|查看|刷新|打开|show|send|refresh|open).{0,16}(?:运行面板|运行卡片|runtime panel|runtime card|issue card|卡片|面板)$/i.test(normalized)
     || /^(?:运行面板|运行卡片|runtime panel|runtime card|issue card|卡片|面板).{0,16}(?:发我|给我|看看|看一下|查看|刷新|打开|show|send|refresh|open)$/i.test(normalized)
-    || /^(?:给我看|查看|看一下|刷新).{0,12}(?:[A-Z]+-\d+|\d+).{0,12}(?:卡片|面板|issue card|runtime card)$/i.test(normalized);
+    || /^(?:给我看|查看|看一下|刷新).{0,12}(?:[A-Z]+-\d+|\d+).{0,12}(?:卡片|面板|issue card|runtime card)$/i.test(normalized)
+    || (hasCardNoun && hasIssueReference && hasCardAction);
 }
 
 const ACTIVE_SUPERVISOR_SESSION_CARD_STATES = new Set<SupervisorSessionState>([
