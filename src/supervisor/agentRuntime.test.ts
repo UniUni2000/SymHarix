@@ -393,6 +393,66 @@ describe('SupervisorAgentRuntimeService', () => {
     expect(modelCalls).toBe(0);
   });
 
+  test('answers identity greetings locally instead of generic no-action copy', async () => {
+    let modelCalls = 0;
+    const h = createHarness(async () => {
+      modelCalls += 1;
+      return {
+        type: 'final_answer',
+        message: 'generic model reply',
+      };
+    });
+
+    for (const text of ['Hi, who are you', 'hello who are you']) {
+      const response = await h.service.respond({
+        context: h.context,
+        text,
+      });
+
+      expect(response.message).toContain("I'm your SymHarix Runtime Operator Copilot");
+      expect(response.message).not.toContain('does not require me to execute an action');
+      expect(response.message).not.toContain('generic model reply');
+      expectAssistantSafeMessage(response.message);
+    }
+    expect(modelCalls).toBe(0);
+  });
+
+  test('answers issue creation how-to questions without creating a pending issue', async () => {
+    let modelCalls = 0;
+    const h = createHarness(async () => {
+      modelCalls += 1;
+      return {
+        type: 'tool_call',
+        tool: 'create_issue',
+        args: {
+          title: 'How can I create a new issue?',
+          description: 'Incorrectly treated as a write request.',
+        },
+        reason: 'Model misclassified a how-to question.',
+      };
+    });
+
+    for (const text of [
+      'How can I create a new issue?',
+      'I want to create a new issue, could you teach me how?',
+    ]) {
+      const response = await h.service.respond({
+        context: h.context,
+        text,
+      });
+
+      expect(response.message).toContain('To create a new issue');
+      expect(response.message).toContain('create an issue:');
+      expect(response.message).not.toContain('Action: create issue');
+      expectAssistantSafeMessage(response.message);
+      expect(h.pendingActions.findOpenByConversation({
+        transport: 'telegram',
+        conversation_id: 'chat-1',
+      })).toBeNull();
+    }
+    expect(modelCalls).toBe(0);
+  });
+
   test('treats create issue text with cleanup-smoke file names as a new issue request', async () => {
     const h = createHarness();
 

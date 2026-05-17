@@ -16,6 +16,26 @@ export function isCapabilityQuestion(text: string): boolean {
   return /(?:你能|可以|会).{0,12}(?:做什么|干什么|帮我什么|能力|功能)|(?:what|which).{0,12}(?:can|could).{0,12}(?:you|u).{0,12}(?:do|help)|what\s+are\s+your\s+(?:capabilities|features)|help\b|capabilities\b/i.test(text.trim());
 }
 
+export function isIdentityQuestion(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized || normalized.length > 120) {
+    return false;
+  }
+  return /(?:你是谁|你是.+(?:谁|什么)|你叫什么|介绍(?:下|一下)你自己|who\s+are\s+you|what\s+are\s+you|what'?s\s+your\s+name|introduce\s+yourself)/i.test(normalized);
+}
+
+export function isIssueCreationHelpQuestion(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized) {
+    return false;
+  }
+  const mentionsIssueCreation = /(?:创建|新建|新增|建|开|提).{0,24}(?:issue|任务|工单|单子)|(?:create|open|make|file|submit).{0,24}(?:an?\s+|the\s+|new\s+|a\s+new\s+)?(?:issue|task|ticket)/i.test(normalized);
+  if (!mentionsIssueCreation) {
+    return false;
+  }
+  return /(?:怎么|如何|怎样|教程|教我|告诉我|说明|指南|帮助|help|how\s+(?:can|do|should|would)\s+i|how\s+to|teach\s+me|show\s+me\s+how|tell\s+me\s+how|walk\s+me\s+through|guide\s+me|what'?s\s+the\s+(?:best\s+)?way)/i.test(normalized);
+}
+
 export function isGreetingLikeText(text: string): boolean {
   const normalized = text.trim().toLowerCase().replace(/\s+/g, ' ');
   const compacted = normalized.replace(/[!！,.，。?？~\s'"`]+/g, '');
@@ -57,6 +77,36 @@ export function buildGreetingAssistantReply(text: string, attentionLine: string 
   ].filter(Boolean).join('\n');
 }
 
+export function buildIdentityAssistantReply(text: string): string {
+  const locale = inferRuntimeLocaleFromText(text);
+  if (isEnglishLocale(locale)) {
+    return [
+      "I'm your SymHarix Runtime Operator Copilot.",
+      'I can answer questions, inspect runtime context, show issue cards, help you create well-scoped issues, and ask for confirmation before write actions.',
+    ].join('\n');
+  }
+  return [
+    '我是你的 SymHarix Runtime Operator Copilot。',
+    '我可以回答问题、查看运行时上下文、展示 issue 卡片、帮你整理可执行的 issue，并在写入动作前先让你确认。',
+  ].join('\n');
+}
+
+export function buildIssueCreationHelpReply(text: string): string {
+  const locale = inferRuntimeLocaleFromText(text);
+  if (isEnglishLocale(locale)) {
+    return [
+      'To create a new issue, tell me the target and the outcome you want.',
+      'For example: create an issue: fix the Mini App loading fallback. Goal: show a clear retry message when runtime data cannot load.',
+      'I will draft the issue and ask you to Confirm or Cancel before creating it.',
+    ].join('\n');
+  }
+  return [
+    '要创建新 issue，直接告诉我目标和期望结果即可。',
+    '例如：创建一个 issue：修复 Mini App 加载失败兜底。目标：运行数据加载失败时展示清晰的重试提示。',
+    '我会先整理成待确认动作，等你点确认或回复“确认”后再创建。',
+  ].join('\n');
+}
+
 function buildCapabilityReply(locale: RuntimeLocale | null | undefined): string {
   if (isEnglishLocale(locale)) {
     return [
@@ -87,6 +137,14 @@ function buildCapabilityReply(locale: RuntimeLocale | null | undefined): string 
 export function buildNoActionAssistantReply(text: string): string {
   const trimmed = text.trim();
   const locale = inferRuntimeLocaleFromText(trimmed);
+  if (isIdentityQuestion(trimmed)) {
+    return buildIdentityAssistantReply(trimmed);
+  }
+
+  if (isIssueCreationHelpQuestion(trimmed)) {
+    return buildIssueCreationHelpReply(trimmed);
+  }
+
   if (isCapabilityQuestion(trimmed)) {
     return buildCapabilityReply(locale);
   }

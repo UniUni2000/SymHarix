@@ -862,6 +862,16 @@ describe('Telegram Mini App issue presentation', () => {
     expect(() => new Function(scriptMatch?.[1] || '')).not.toThrow();
   });
 
+  test('renders Mini App load recovery for flaky tunnel or API responses', () => {
+    const html = renderRuntimeMiniAppPage('INT-155');
+
+    expect(html).toContain('async function fetchJsonOnce(url, options)');
+    expect(html).toContain('async function fetchJson(url, options)');
+    expect(html).toContain('function renderLoadError(error)');
+    expect(html).toContain('Promise.allSettled');
+    expect(html).toContain("action === 'reload'");
+  });
+
   test('extracts deleted and modified files from history for the code diff panel', () => {
     const html = renderRuntimeMiniAppPage('INT-155');
 

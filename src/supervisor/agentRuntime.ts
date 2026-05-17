@@ -42,6 +42,8 @@ import {
 } from './repoProfileService';
 import {
   buildGreetingAssistantReply,
+  buildIdentityAssistantReply,
+  buildIssueCreationHelpReply,
   buildNoActionAssistantReply,
   formatDuplicateToolRecovery,
   formatPendingActionReminder,
@@ -51,6 +53,8 @@ import {
   formatUnsupportedToolRecovery,
   isCapabilityQuestion,
   isGreetingLikeText,
+  isIdentityQuestion,
+  isIssueCreationHelpQuestion,
 } from './assistantReliability';
 import { buildSupervisorIssueVisualCard } from './issueVisualCard';
 import { inferRuntimeLocaleFromText, type RuntimeLocale } from '../i18n/locale';
@@ -271,6 +275,9 @@ function isCloseRequest(text: string): boolean {
 }
 
 function isCreateIssueRequest(text: string): boolean {
+  if (isIssueCreationHelpQuestion(text)) {
+    return false;
+  }
   return /(?:创建|新建|新增).{0,24}issue/i.test(text) ||
     /(?:帮我|请你|请|麻烦|我要|我想|直接|给我).{0,16}(?:建|开|提|创建|新建|新增).{0,24}issue/i.test(text) ||
     /(?:^|[\s，。！？!?])(?:建|开|提)(?:一个|个|一条|条)?\s*issue\b/i.test(text) ||
@@ -2395,6 +2402,12 @@ export class SupervisorAgentRuntimeService {
   }
 
   private immediateConversationalReply(text: string): string | null {
+    if (isIdentityQuestion(text)) {
+      return buildIdentityAssistantReply(text);
+    }
+    if (isIssueCreationHelpQuestion(text)) {
+      return buildIssueCreationHelpReply(text);
+    }
     if (isGreetingLikeText(text)) {
       return buildGreetingAssistantReply(text);
     }

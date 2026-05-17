@@ -2577,6 +2577,10 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             stageDevNeedsAction: '阶段 · DEV 需处理',
             stageReviewNeedsAction: '阶段 · REVIEW 需处理',
             stagePreparing: '阶段 · 准备中',
+            loadFailedTitle: '运行视图加载失败',
+            loadFailedDetail: '可能是临时公网入口或运行时 API 短暂不可用。可以重试，或回到 Telegram 刷新卡片后再打开。',
+            retryLoad: '重新加载',
+            loading: '加载中…',
             reviewRunning: 'Review 正在检查交付质量。',
             devRunning: 'Dev agent 正在推进当前轮次。',
             readingIssue: '正在读取当前 issue 状态。',
@@ -2705,6 +2709,10 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             stageDevNeedsAction: 'STAGE · DEV NEEDS ACTION',
             stageReviewNeedsAction: 'STAGE · REVIEW NEEDS ACTION',
             stagePreparing: 'STAGE · PREPARING',
+            loadFailedTitle: 'Runtime view could not load',
+            loadFailedDetail: 'The temporary public URL or runtime API may be briefly unavailable. Retry, or return to Telegram and refresh the card before opening it again.',
+            retryLoad: 'Reload',
+            loading: 'Loading...',
             reviewRunning: 'Review is checking delivery quality.',
             devRunning: 'The dev agent is advancing this round.',
             readingIssue: 'Loading the current issue state.',
@@ -2994,13 +3002,38 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         function usageDegrees(value, total) {
           return Math.round(usagePercent(value, total) * 3.6);
         }
-        async function fetchJson(url) {
-          const response = await fetch(url);
-          const payload = await response.json();
+        function sleep(ms) {
+          return new Promise((resolve) => setTimeout(resolve, ms));
+        }
+        async function fetchJsonOnce(url, options) {
+          const response = await fetch(url, options);
+          const raw = await response.text();
+          let payload = null;
+          try {
+            payload = raw ? JSON.parse(raw) : null;
+          } catch (_error) {
+            throw new Error(response.ok ? 'Runtime response was not JSON.' : 'Runtime endpoint returned HTTP ' + String(response.status));
+          }
           if (!response.ok || !payload.success) {
-            throw new Error(payload.error || 'Request failed');
+            throw new Error(payload && payload.error ? payload.error : 'Runtime endpoint returned HTTP ' + String(response.status));
           }
           return payload.data;
+        }
+        async function fetchJson(url, options) {
+          const method = options && options.method ? String(options.method).toUpperCase() : 'GET';
+          const attempts = method === 'GET' ? 3 : 1;
+          let lastError = null;
+          for (let attempt = 0; attempt < attempts; attempt += 1) {
+            try {
+              return await fetchJsonOnce(url, options);
+            } catch (error) {
+              lastError = error;
+              if (attempt < attempts - 1) {
+                await sleep(300 * (attempt + 1));
+              }
+            }
+          }
+          throw lastError || new Error('Request failed');
         }
         function isCompletedIssue(issue) {
           if (!issue) return false;
@@ -4165,17 +4198,39 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           applyPreferences();
           renderView();
         }
+        function renderLoadError(error) {
+          const message = error && error.message ? String(error.message) : 'Load failed';
+          el.issueEyebrow.textContent = 'SymHarix';
+          el.issueTitle.textContent = t('loadFailedTitle');
+          el.stageBadge.textContent = t('status');
+          el.stageBadge.className = 'stage-badge yellow';
+          el.statusLine.innerHTML = chip(t('waiting'), 'yellow') + '<span>' + escapeHtml(t('loadFailedDetail')) + '</span>';
+          el.progressValue.textContent = '0%';
+          el.progressCopy.textContent = t('loading');
+          el.progressFill.style.width = '0%';
+          el.signalAcceptanceCopy.textContent = t('loadFailedDetail');
+          el.judgmentCopy.textContent = message;
+          el.nextCopy.textContent = t('loadFailedDetail');
+          el.timelineList.innerHTML = '<div class="loading">' + escapeHtml(message) + '</div>';
+          setRuntimeAction(el.pauseButton, 'reload', t('retryLoad'), 'primary');
+          setRuntimeAction(el.requestButton, 'request', t('addRequirement'), 'primary');
+          setRuntimeAction(el.backButton, 'back', t('backTelegram'), '');
+          setActiveTab('overview');
+        }
         async function load() {
-          const [issue, timeline, history] = await Promise.all([
-            fetchJson(urls.issue),
+          const issue = await fetchJson(urls.issue);
+          const [timelineResult, historyResult] = await Promise.allSettled([
             fetchJson(urls.timeline),
             fetchJson(urls.history)
           ]);
           state.issue = issue;
           applyIssueDefaultLanguage(issue);
-          state.timeline = Array.isArray(timeline) ? timeline : [];
-          state.history = history;
+          state.timeline = timelineResult.status === 'fulfilled' && Array.isArray(timelineResult.value) ? timelineResult.value : [];
+          state.history = historyResult.status === 'fulfilled' ? historyResult.value : null;
           render();
+          if (timelineResult.status === 'rejected') {
+            el.timelineList.innerHTML = '<div class="loading">' + escapeHtml(timelineResult.reason && timelineResult.reason.message ? timelineResult.reason.message : t('waitingEvents')) + '</div>';
+          }
         }
         function openStream() {
           try {
@@ -4226,6 +4281,13 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
             }
             if (action === 'history') {
               renderHistoryPanel();
+            }
+            if (action === 'reload') {
+              button.disabled = true;
+              button.textContent = t('loading');
+              load().then(openStream).catch((error) => {
+                renderLoadError(error);
+              });
             }
             if (action === 'retry') {
               button.disabled = true;
@@ -4295,7 +4357,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         }
         applyPreferences();
         load().then(openStream).catch((error) => {
-          el.timelineList.innerHTML = '<div class="loading">' + escapeHtml(error.message || 'Load failed') + '</div>';
+          renderLoadError(error);
         });
       })();
     </script>
