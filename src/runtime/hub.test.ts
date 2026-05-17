@@ -890,6 +890,131 @@ describe('RuntimeHub', () => {
     hub.dispose();
   });
 
+  test('localizes split governance recommendations for English runtime issue views', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workItemRepository = new WorkItemRepository(db);
+    const governanceSuggestions = new GovernanceSuggestionRepository(db);
+
+    workItemRepository.create({
+      id: 'issue-en-split',
+      linear_issue_id: 'issue-en-split',
+      linear_identifier: 'TES-126',
+      linear_title: 'Build a typing speed test web app using HTML/CSS/JS',
+      linear_state: 'Todo',
+      github_repo: 'DingfangHu/my-symphony-test',
+      orchestrator_state: 'halted',
+      governance_status: 'blocked',
+      governance_decision: 'split_before_implement',
+      governance_summary: 'This issue spans multiple objectives across different parts of the system. Please split it before dispatch.',
+      supervisor_locale: 'en',
+    });
+    governanceSuggestions.create({
+      id: 'suggestion-en-split',
+      work_item_id: 'issue-en-split',
+      issue_id: 'issue-en-split',
+      suggestion_type: 'architecture_alignment',
+      status: 'pending',
+      title: '[GOVERNANCE] Split TES-126 before implementation',
+      summary: '先拆出 runtime / control-plane 变更，单独完成接口或调度主链。',
+      detail_json: {},
+    });
+
+    const controller = new FakeController();
+    controller.getStateSnapshot = () => ({
+      generated_at: '2026-01-01T00:00:00.000Z',
+      counts: { running: 0, retrying: 0 },
+      running: [],
+      retrying: [],
+      codex_totals: {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        seconds_running: 0,
+      },
+      rate_limits: null,
+    });
+
+    const hub = new RuntimeHub(db, controller);
+    const issue = hub.getIssue('TES-126');
+
+    expect(issue?.next_recommended_action).toBe('Split into more focused tasks as recommended');
+    expect(issue?.roundGoal).toBe('Split into more focused tasks as recommended');
+    expect(issue?.active_governance_suggestions?.[0]?.summary).toBe(
+      'First split out the runtime/control-plane change, then complete the interface or dispatch path separately.',
+    );
+    expect(JSON.stringify(issue)).not.toContain('按推荐拆成更聚焦的任务');
+    expect(JSON.stringify(issue)).not.toContain('先拆出 runtime / control-plane 变更');
+
+    hub.dispose();
+  });
+
+  test('localizes existing split child titles for English runtime issue views', () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workItemRepository = new WorkItemRepository(db);
+    workItemRepository.create({
+      id: 'issue-root-title',
+      linear_issue_id: 'issue-root-title',
+      linear_identifier: 'TES-126',
+      linear_title: '拆出 runtime / control-plane 变更',
+      linear_state: 'In Progress',
+      github_repo: 'DingfangHu/my-symphony-test',
+      orchestrator_state: 'halted',
+      governance_status: 'blocked',
+      governance_decision: 'split_before_implement',
+      governance_summary: 'No constitution blockers detected.',
+      governance_root_issue_id: 'issue-root-title',
+      governance_parent_issue_id: null,
+      governance_generation: 0,
+      supervisor_locale: 'en',
+    });
+    workItemRepository.create({
+      id: 'issue-child-title',
+      linear_issue_id: 'issue-child-title',
+      linear_identifier: 'TES-127',
+      linear_title: '[GOVERNANCE FOLLOW-UP for TES-126] 网页或 UI 改动拆成单独 issue',
+      linear_state: 'Todo',
+      github_repo: 'DingfangHu/my-symphony-test',
+      orchestrator_state: 'halted',
+      governance_status: 'advisory',
+      governance_decision: 'accept',
+      governance_summary: 'No constitution blockers detected.',
+      governance_root_issue_id: 'issue-root-title',
+      governance_parent_issue_id: 'issue-root-title',
+      governance_generation: 1,
+      supervisor_locale: 'en',
+    });
+
+    const controller = new FakeController();
+    controller.getStateSnapshot = () => ({
+      generated_at: '2026-01-01T00:00:00.000Z',
+      counts: { running: 0, retrying: 0 },
+      running: [],
+      retrying: [],
+      codex_totals: {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        seconds_running: 0,
+      },
+      rate_limits: null,
+    });
+
+    const hub = new RuntimeHub(db, controller);
+    const issue = hub.getIssue('TES-126');
+
+    expect(issue?.title).toBe('Split out runtime/control-plane change');
+    expect(issue?.governance_current_child?.title).toBe('[GOVERNANCE FOLLOW-UP for TES-126] Split web/UI changes into their own issue');
+    expect(issue?.next_recommended_action).toBe('Handle governance child task TES-127 first.');
+    expect(JSON.stringify(issue)).not.toContain('网页或 UI 改动');
+    expect(JSON.stringify(issue)).not.toContain('先处理治理子任务');
+
+    hub.dispose();
+  });
+
   test('summarizes queued child handoff in root-thread recommendations and supervisor summary', () => {
     db = new Database(':memory:');
     initializeSchema(db);

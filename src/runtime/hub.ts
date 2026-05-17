@@ -978,9 +978,13 @@ export class RuntimeHub implements RuntimeControlPlane {
     const nextRecommendedAction = governanceThread?.nextRecommendedAction
       ?? (
         workItem.governance_decision === 'split_before_implement'
-          ? '按推荐拆成更聚焦的任务'
+          ? (workItem.supervisor_locale === 'en'
+            ? 'Split into more focused tasks as recommended'
+            : '按推荐拆成更聚焦的任务')
           : workItem.governance_decision === 'accept_with_rewrite'
-            ? '先把需求改写成一个更聚焦的任务'
+            ? (workItem.supervisor_locale === 'en'
+              ? 'Rewrite the request into one more focused task first'
+              : '先把需求改写成一个更聚焦的任务')
             : null
       );
     const round = this.buildRoundView(workItem, supervisorSession, complexity, governanceThread?.childQueue ?? [], nextRecommendedAction);
@@ -996,7 +1000,7 @@ export class RuntimeHub implements RuntimeControlPlane {
       issue_id: workItem.linear_issue_id,
       work_item_id: workItem.id,
       identifier: workItem.linear_identifier,
-      title: workItem.linear_title,
+      title: localizeKnownRuntimeText(workItem.linear_title, workItem.supervisor_locale),
       phase: derivePhase(workItem.linear_state),
       tracker_state: workItem.linear_state,
       orchestrator_state: effectiveOrchestratorState,
@@ -1079,7 +1083,7 @@ export class RuntimeHub implements RuntimeControlPlane {
           suggestion_type: suggestion.suggestion_type,
           status: suggestion.status,
           title: suggestion.title,
-          summary: suggestion.summary,
+          summary: localizeKnownRuntimeText(suggestion.summary, workItem.supervisor_locale),
           can_execute: true,
           can_dismiss: true,
         })),
@@ -1918,7 +1922,7 @@ export class RuntimeHub implements RuntimeControlPlane {
       return {
         issue_id: child.linear_issue_id,
         issue_identifier: child.linear_identifier,
-        title: child.linear_title,
+        title: localizeKnownRuntimeText(child.linear_title, workItem.supervisor_locale),
         tracker_state: child.linear_state,
         orchestrator_state: child.orchestrator_state,
         governance_decision: child.governance_decision,

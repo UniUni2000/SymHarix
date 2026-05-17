@@ -16,6 +16,47 @@ export function isCapabilityQuestion(text: string): boolean {
   return /(?:你能|可以|会).{0,12}(?:做什么|干什么|帮我什么|能力|功能)|(?:what|which).{0,12}(?:can|could).{0,12}(?:you|u).{0,12}(?:do|help)|what\s+are\s+your\s+(?:capabilities|features)|help\b|capabilities\b/i.test(text.trim());
 }
 
+export function isGreetingLikeText(text: string): boolean {
+  const normalized = text.trim().toLowerCase().replace(/\s+/g, ' ');
+  const compacted = normalized.replace(/[!！,.，。?？~\s'"`]+/g, '');
+  if (!normalized || normalized.length > 80) {
+    return false;
+  }
+  if (
+    /\b[A-Z][A-Z0-9]+-\d+\b/i.test(normalized) ||
+    /\b(?:issue|ticket|task|status|progress|repo|repository|project|branch|pr|pull request|create|update|fix|run|start|stop|retry|open|merge|review)\b/i.test(normalized) ||
+    /\b[a-z0-9_-]+\.(?:py|ts|tsx|js|jsx|json|md|yaml|yml|toml|go|rs|java|kt|swift)\b/i.test(normalized) ||
+    /(?:项目|进展|状态|仓库|分支|任务|工单|卡住|失败|中断|重试|创建|更新|修复|开始|停止|合并|评审|审核)/.test(normalized)
+  ) {
+    return false;
+  }
+  if (/^(你好|您好|哈喽|哈啰|嗨|早上好|上午好|中午好|下午好|晚上好|晚安|在吗|在么|在不在)$/.test(compacted)) {
+    return true;
+  }
+  if (/^(你|您)?(?:好吗|好么|怎么样|最近好吗)$/.test(compacted)) {
+    return true;
+  }
+  return /^(?:h+i+|h+e+y+|h+e+l+o+|yo+|hiya+|howdy+|sup+|morning|afternoon|evening|good morning|good afternoon|good evening|good night|what'?s up|wassup|how are you|how r you|how are u|how's it going|how is it going|how do you do)(?: there| again| ace| codex)?[!?.\s]*$/i.test(normalized);
+}
+
+export function buildGreetingAssistantReply(text: string, attentionLine: string | null = null): string {
+  const locale = inferRuntimeLocaleFromText(text);
+  const normalized = text.trim().toLowerCase();
+  const asksAboutAssistant = locale === 'en'
+    ? /\b(?:how are you|how r you|how are u|how's it going|how is it going|what'?s up|wassup)\b/i.test(normalized)
+    : /(?:你|您)?(?:好吗|好么|怎么样|最近好吗)/.test(normalized);
+  return [
+    locale === 'en'
+      ? asksAboutAssistant
+        ? 'Doing well, thanks. What would you like to work on next?'
+        : 'Hello. What would you like to work on next?'
+      : asksAboutAssistant
+        ? '我很好，今天想处理什么？'
+        : '你好，今天想处理什么？',
+    attentionLine,
+  ].filter(Boolean).join('\n');
+}
+
 function buildCapabilityReply(locale: RuntimeLocale | null | undefined): string {
   if (isEnglishLocale(locale)) {
     return [
@@ -50,12 +91,8 @@ export function buildNoActionAssistantReply(text: string): string {
     return buildCapabilityReply(locale);
   }
 
-  if (/^(你好|您好|hello|hi|hey|在吗|在么)/i.test(trimmed)) {
-    return textForLocale(
-      locale,
-      '你好，我在。你可以直接问我 issue 状态、仓库内容，或者让我起草下一步计划。',
-      'Hello. I can help you check issue status, inspect repository context, or draft the next plan.',
-    );
+  if (isGreetingLikeText(trimmed)) {
+    return buildGreetingAssistantReply(trimmed);
   }
 
   if (/^(?:确认|是的|是|对|对的|没错|yes|y|confirm|执行|继续)$/i.test(trimmed)) {

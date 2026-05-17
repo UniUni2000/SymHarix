@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { buildRuntimeMiniAppIssuePresentation } from '../runtime/miniAppPage';
 import type { RuntimeIssueView } from '../runtime/types';
-import { buildSupervisorIssueVisualCardSvg } from './issueVisualCard';
+import { buildSupervisorIssueVisualCard, buildSupervisorIssueVisualCardSvg } from './issueVisualCard';
 
 function issue(overrides: Partial<RuntimeIssueView> = {}): RuntimeIssueView {
   return {
@@ -89,12 +89,14 @@ describe('issue visual cards', () => {
   });
 
   test('renders English issue cards without Chinese labels when the issue locale is English', () => {
-    const svg = buildSupervisorIssueVisualCardSvg(issue({
+    const view = issue({
       supervisor_locale: 'en',
       title: 'smoke test',
       delivery_summary: null,
-      next_recommended_action: null,
-    }));
+      next_recommended_action: '按推荐拆成更聚焦的任务',
+    });
+    const svg = buildSupervisorIssueVisualCardSvg(view);
+    const card = buildSupervisorIssueVisualCard(view);
 
     expect(svg).not.toContain('x="899" y="132" text-anchor="middle" fill="#6BB4FF" font-size="22" font-weight="820">Open Mini App</text>');
     expect(svg).toContain('Status Overview');
@@ -105,6 +107,11 @@ describe('issue visual cards', () => {
     expect(svg).not.toContain('状态概览');
     expect(svg).not.toContain('打开 Mini App');
     expect(svg).not.toContain('实时进度');
+    expect(svg).toContain('Split into more focused tasks as');
+    expect(svg).toContain('recommended');
+    expect(card.caption).toContain('Latest: Split into more focused tasks as recommended');
+    expect(card.caption).toContain('Next: Split into more focused tasks as recommended');
+    expect(card.caption).not.toContain('按推荐拆成更聚焦的任务');
   });
 
   test('keeps completed progress labels from colliding with the live progress caption', () => {

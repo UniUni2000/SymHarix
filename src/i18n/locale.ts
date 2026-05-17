@@ -75,6 +75,33 @@ export function localizeKnownRuntimeText(
     return parts.join(' ');
   }
 
+  const governanceFollowUpTitle = text.match(/^\[GOVERNANCE FOLLOW-UP for ([^\]]+)\]\s+(.+)$/);
+  if (governanceFollowUpTitle) {
+    return `[GOVERNANCE FOLLOW-UP for ${governanceFollowUpTitle[1]}] ${localizeKnownRuntimeText(governanceFollowUpTitle[2], locale)}`;
+  }
+
+  const splitIntoFocusedIssues = text.match(/^将\s+(.+?)\s+拆成\s+2-3\s+张单，每张单只覆盖一个目标和一套完成证据。?$/);
+  if (splitIntoFocusedIssues) {
+    return `Split ${splitIntoFocusedIssues[1]} into 2-3 issues, with each issue covering one goal and one proof of completion.`;
+  }
+
+  const handleGovernanceChild = text.match(/^先处理治理子任务\s+([A-Z]+-\d+)(?:；其余子任务会按顺序自动接力。?)?$/);
+  if (handleGovernanceChild) {
+    return `Handle governance child task ${handleGovernanceChild[1]} first.`;
+  }
+
+  const createdGovernanceChildren = text.match(/^已为\s+([A-Z]+-\d+)\s+创建治理子任务\s+([^，]+)，当前先处理\s+([^，]+)，其余子任务会按顺序自动接力，源单仍保持暂停。?$/);
+  if (createdGovernanceChildren) {
+    const created = createdGovernanceChildren[2]!.replace(/、/g, ', ');
+    return `Created governance child task(s) ${created} for ${createdGovernanceChildren[1]}. Handle ${createdGovernanceChildren[3]} first; later child tasks will continue in order and the source issue remains paused.`;
+  }
+
+  const createdGovernanceChildrenShort = text.match(/^已为\s+([A-Z]+-\d+)\s+创建治理子任务\s+([^，]+)，当前先处理\s+([^，。]+)。?$/);
+  if (createdGovernanceChildrenShort) {
+    const created = createdGovernanceChildrenShort[2]!.replace(/、/g, ', ');
+    return `Created governance child task(s) ${created} for ${createdGovernanceChildrenShort[1]}. Handle ${createdGovernanceChildrenShort[3]} first.`;
+  }
+
   return text
     .replace(/^当前计划「(.+)」已经完成，不再向 dev agent 追加指令。$/, 'Plan "$1" is complete. No more dev-agent instructions are needed.')
     .replace(/^计划「(.+)」正在推进。$/, 'Plan "$1" is in progress.')
@@ -87,6 +114,12 @@ export function localizeKnownRuntimeText(
     .replace(/^先把 Telegram 自然对话、推荐 issue 卡批准、slash 命令边界一起收进一张更像样的 issue，再进入后续执行。$/, 'First fold Telegram conversation, recommended issue-card approval, and slash-command boundaries into a proper issue, then proceed with execution.')
     .replace(/^先把 supervisor 的自然语言收需求、推荐卡展示和 slash 命令边界整理成一版可批准计划，再按批准结果推进实现与监管流程。$/, 'First turn supervisor natural-language intake, recommended-card display, and slash-command boundaries into an approvable plan, then proceed with implementation and oversight after approval.')
     .replace(/^按推荐继续$/, 'Continue as recommended')
+    .replace(/^按推荐拆成更聚焦的任务$/, 'Split into more focused tasks as recommended')
+    .replace(/^按方案拆成两个任务$/, 'Split into two tasks')
+    .replace(/^拆出 runtime\s*\/\s*control-plane 变更$/, 'Split out runtime/control-plane change')
+    .replace(/^网页或 UI 改动拆成单独 issue$/, 'Split web/UI changes into their own issue')
+    .replace(/^bot\s*\/\s*文案\s*\/\s*聊天端体验拆成独立 issue$/, 'Split bot/copy/chat experience into its own issue')
+    .replace(/^大规模 cleanup\s*\/\s*redesign 单独列出来$/, 'Separate large cleanup/redesign work')
     .replace(/^改一下计划$/, 'Edit Plan')
     .replace(/^如果你不想按推荐路径走，我可以先把计划重写得更合适。$/, 'If you do not want the recommended path, I can revise the plan first.')
     .replace(/^按这张精简计划直接开跑。$/, 'Start directly from this compact plan.')
@@ -94,6 +127,13 @@ export function localizeKnownRuntimeText(
     .replace(/^保持单目标推进，避免顺手扩大范围。$/, 'Keep the work focused on one goal and avoid expanding scope.')
     .replace(/^不拆分、不创建 child queue；本轮只创建一张 root-only 验证单。$/, 'Do not split or create a child queue; create only one root-only verification issue in this round.')
     .replace(/^先创建 root issue，再按拆分方案落成顺序 child queue。$/, 'Create the root issue first, then materialize an ordered child queue from the split plan.')
+    .replace(/^先把需求改写成一个更聚焦的任务$/, 'Rewrite the request into one more focused task first')
+    .replace(/^先拆出 runtime\s*\/\s*control-plane 变更，单独完成接口或调度主链。?$/, 'First split out the runtime/control-plane change, then complete the interface or dispatch path separately.')
+    .replace(/^把网页或 UI 改动拆成单独 issue，避免和后端调度改动绑在一起。?$/, 'Split the web or UI change into its own issue so it is not bundled with backend dispatch work.')
+    .replace(/^把 bot\s*\/\s*文案\s*\/\s*聊天端体验拆成独立 issue，减少跨层耦合。?$/, 'Split bot, copy, and chat-surface experience work into its own issue to reduce cross-layer coupling.')
+    .replace(/^把大规模 cleanup\s*\/\s*redesign 单独列出来，不要和功能性交付混在同一单里。?$/, 'Separate large cleanup or redesign work from functional delivery instead of mixing them into one issue.')
+    .replace(/^先把 (.+?) 的 cleanup\s*\/\s*narrowing 单独拆出来，再做新的 surface 扩张。?$/, 'First split the cleanup/narrowing work for $1 into its own issue, then continue new surface expansion.')
+    .replace(/^先把 (.+?) 的 cleanup\s*\/\s*interface narrowing 单独拆出来，再继续新的 surface 扩张。?$/, 'First split the cleanup/interface-narrowing work for $1 into its own issue, then continue new surface expansion.')
     .replace(/^先按计划建一张受控清理任务，执行前明确范围，避免误删有效文件。$/, 'Create a controlled cleanup task from the plan, confirm scope before execution, and avoid deleting valid files.')
     .replace(/^先用更聚焦的标题和描述建单，再继续执行。$/, 'Create the issue with a more focused title and description before continuing execution.')
     .replace(/^先把源目标收成 root thread，再只放行当前 child，其余 child 顺序排队。$/, 'Turn the source goal into a root thread, release only the current child task, and keep the rest queued in order.')

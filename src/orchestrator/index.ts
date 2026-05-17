@@ -114,6 +114,7 @@ import {
 } from '../change-pack/service';
 import {
   inferRuntimeLocaleFromText,
+  localizeKnownRuntimeText,
   normalizeRuntimeLocale,
   runtimeLocaleInstruction,
 } from '../i18n/locale';
@@ -1534,7 +1535,11 @@ export class Orchestrator extends EventEmitter {
       };
     }
 
-    const splitSuggestions = governance.split_suggestions.filter((suggestion) => suggestion.trim());
+    const locale = workItem.supervisor_locale ?? inferRuntimeLocaleFromText(`${issue.title}\n${issue.description ?? ''}`);
+    const englishOutput = locale === 'en';
+    const splitSuggestions = governance.split_suggestions
+      .map((suggestion) => localizeKnownRuntimeText(suggestion, locale))
+      .filter((suggestion) => suggestion.trim());
     if (splitSuggestions.length < 2) {
       return {
         accepted: false,
@@ -1554,7 +1559,7 @@ export class Orchestrator extends EventEmitter {
 
     const createdIdentifiers: string[] = [];
     for (let index = 1; index < splitSuggestions.length; index += 1) {
-      const childDraft = this.buildGovernanceSplitDraft(issue, splitSuggestions[index]!, index, splitSuggestions.length);
+      const childDraft = this.buildGovernanceSplitDraft(issue, splitSuggestions[index]!, index, splitSuggestions.length, locale);
       const existingChild = this.findEquivalentOpenGovernanceChild({
         rootIssueId: workItem.governance_root_issue_id ?? issue.id,
         githubRepo: workItem.github_repo,
@@ -1600,7 +1605,7 @@ export class Orchestrator extends EventEmitter {
       }
     }
 
-    const primaryDraft = this.buildGovernanceSplitDraft(issue, splitSuggestions[0]!, 0, splitSuggestions.length);
+    const primaryDraft = this.buildGovernanceSplitDraft(issue, splitSuggestions[0]!, 0, splitSuggestions.length, locale);
     const updated = await this.tracker.updateIssueContent(issue.id, {
       title: primaryDraft.title,
       description: primaryDraft.description,
@@ -1675,7 +1680,9 @@ export class Orchestrator extends EventEmitter {
           root_issue_identifier: refreshedIssue.identifier,
           created_issue_identifiers: createdIdentifiers,
           next_recommended_action: null,
-          user_summary: `已按拆分方案处理 ${refreshedIssue.identifier}，并重新启动源单开发。`,
+          user_summary: englishOutput
+            ? `Applied the split plan for ${refreshedIssue.identifier} and resumed source issue development.`
+            : `已按拆分方案处理 ${refreshedIssue.identifier}，并重新启动源单开发。`,
         },
       };
     }
@@ -1697,10 +1704,16 @@ export class Orchestrator extends EventEmitter {
         outcome_kind: createdIdentifiers.length > 0 ? 'waiting_on_child' : (refreshedGovernance.blocks_dispatch ? 'child_still_blocked' : 'unblocked'),
         root_issue_identifier: refreshedIssue.identifier,
         created_issue_identifiers: createdIdentifiers,
-        next_recommended_action: createdIdentifiers[0] ? `先处理治理子任务 ${createdIdentifiers[0]}；其余子任务会按顺序自动接力。` : null,
+        next_recommended_action: createdIdentifiers[0]
+          ? (englishOutput
+            ? `Handle governance child task ${createdIdentifiers[0]} first. Later child tasks will continue in order.`
+            : `先处理治理子任务 ${createdIdentifiers[0]}；其余子任务会按顺序自动接力。`)
+          : null,
         user_summary: createdIdentifiers.length > 0
-          ? `已为 ${refreshedIssue.identifier} 创建治理子任务 ${createdIdentifiers.join('、')}，当前先处理 ${createdIdentifiers[0]}，其余子任务会按顺序自动接力，源单仍保持暂停。`
-          : refreshedGovernance.summary,
+          ? (englishOutput
+            ? `Created governance child task(s) ${createdIdentifiers.join(', ')} for ${refreshedIssue.identifier}. Handle ${createdIdentifiers[0]} first; later child tasks will continue in order and the source issue remains paused.`
+            : `已为 ${refreshedIssue.identifier} 创建治理子任务 ${createdIdentifiers.join('、')}，当前先处理 ${createdIdentifiers[0]}，其余子任务会按顺序自动接力，源单仍保持暂停。`)
+          : localizeKnownRuntimeText(refreshedGovernance.summary, locale),
       },
     };
   }
@@ -3894,13 +3907,25 @@ export class Orchestrator extends EventEmitter {
     suggestion: string,
     index: number,
     total: number,
+    locale: WorkItem['supervisor_locale'] = null,
   ): { title: string; description: string; architectural_target: string | null } {
     const normalizedSuggestion = suggestion.replace(/\s+/g, ' ').trim();
-    const shortTitle = normalizedSuggestion
-      .replace(/^(先|将|把)\s*/u, '')
-      .replace(/^先拆出\s*/u, '')
-      .replace(/[，,。.!].*$/u, '')
-      .trim();
+    const englishOutput = locale === 'en';
+    const shortTitle = englishOutput
+      ? normalizedSuggestion
+        .replace(/^First split out the runtime\/control-plane change.*$/i, 'Split out runtime/control-plane change')
+        .replace(/^Split the web or UI change into its own issue.*$/i, 'Split web/UI changes into their own issue')
+        .replace(/^Split bot, copy, and chat-surface experience work into its own issue.*$/i, 'Split bot/copy/chat experience into its own issue')
+        .replace(/^Separate large cleanup or redesign work.*$/i, 'Separate large cleanup/redesign work')
+        .replace(/^First split the cleanup\/narrowing work for (.+?) into its own issue.*$/i, 'Split $1 cleanup/narrowing into its own issue')
+        .replace(/^First split the cleanup\/interface-narrowing work for (.+?) into its own issue.*$/i, 'Split $1 cleanup/interface narrowing into its own issue')
+        .replace(/[.!].*$/u, '')
+        .trim()
+      : normalizedSuggestion
+        .replace(/^(先|将|把)\s*/u, '')
+        .replace(/^先拆出\s*/u, '')
+        .replace(/[，,。.!].*$/u, '')
+        .trim();
     const baseTitle = shortTitle && shortTitle.length <= 120
       ? shortTitle
       : `${issue.title} · Slice ${index + 1}`;
@@ -3908,13 +3933,21 @@ export class Orchestrator extends EventEmitter {
       ? baseTitle
       : `[GOVERNANCE FOLLOW-UP for ${issue.identifier}] ${baseTitle}`;
 
-    const description = [
-      `来源 issue: ${issue.identifier}`,
-      `创建原因: 治理层要求先拆分原任务，再继续主线开发。`,
-      `目标切片 ${index + 1}/${total}: ${normalizedSuggestion}`,
-      '完成这个子任务后，可以帮助源 issue 继续推进。',
-      '保持这个任务只做一件可验证的具体工作。',
-    ].join('\n');
+    const description = englishOutput
+      ? [
+          `Source issue: ${issue.identifier}`,
+          'Reason: governance requires splitting the original task before continuing mainline development.',
+          `Target slice ${index + 1}/${total}: ${normalizedSuggestion}`,
+          'Completing this child task helps the source issue continue.',
+          'Keep this task focused on one concrete, verifiable outcome.',
+        ].join('\n')
+      : [
+          `来源 issue: ${issue.identifier}`,
+          `创建原因: 治理层要求先拆分原任务，再继续主线开发。`,
+          `目标切片 ${index + 1}/${total}: ${normalizedSuggestion}`,
+          '完成这个子任务后，可以帮助源 issue 继续推进。',
+          '保持这个任务只做一件可验证的具体工作。',
+        ].join('\n');
 
     return {
       title,
@@ -3963,6 +3996,14 @@ export class Orchestrator extends EventEmitter {
     if ((currentWorkItem?.governance_generation ?? 0) > 0) {
       return;
     }
+    const locale = currentWorkItem?.supervisor_locale ?? null;
+    const governanceSummary = localizeKnownRuntimeText(governance.summary, locale);
+    const splitSuggestions = governance.split_suggestions.map((suggestion) => (
+      localizeKnownRuntimeText(suggestion, locale)
+    ));
+    const rewriteDescription = governance.rewrite_description
+      ? localizeKnownRuntimeText(governance.rewrite_description, locale)
+      : governance.rewrite_description;
     const targetArea = governance.target_area ?? this.inferGovernanceTargetArea(issue, currentWorkItem);
     const architectureDetail = {
       architectural_target: currentWorkItem?.architectural_target ?? targetArea,
@@ -3981,11 +4022,11 @@ export class Orchestrator extends EventEmitter {
       suggestions.push({
         suggestion_type: 'architecture_alignment',
         title: `[GOVERNANCE] Split ${issue.identifier} before implementation`,
-        summary: governance.split_suggestions[0] || governance.summary,
+        summary: splitSuggestions[0] || governanceSummary,
         detail_json: {
           decision: governance.decision,
-          summary: governance.summary,
-          split_suggestions: governance.split_suggestions,
+          summary: governanceSummary,
+          split_suggestions: splitSuggestions,
           github_repo: route.github_repo_full,
           target_area: targetArea,
           ...architectureDetail,
@@ -3995,12 +4036,12 @@ export class Orchestrator extends EventEmitter {
       suggestions.push({
         suggestion_type: 'architecture_alignment',
         title: `[GOVERNANCE] Rewrite ${issue.identifier} into one concrete task`,
-        summary: governance.rewrite_description || governance.summary,
+        summary: rewriteDescription || governanceSummary,
         detail_json: {
           decision: governance.decision,
-          summary: governance.summary,
+          summary: governanceSummary,
           rewrite_title: governance.rewrite_title,
-          rewrite_description: governance.rewrite_description,
+          rewrite_description: rewriteDescription,
           github_repo: route.github_repo_full,
           target_area: targetArea,
           ...architectureDetail,
@@ -4010,10 +4051,10 @@ export class Orchestrator extends EventEmitter {
       suggestions.push({
         suggestion_type: 'harness_adoption',
         title: `[GOVERNANCE] Adopt formal repo harness for ${route.github_repo_full}`,
-        summary: governance.summary,
+        summary: governanceSummary,
         detail_json: {
           decision: governance.decision,
-          summary: governance.summary,
+          summary: governanceSummary,
           github_repo: route.github_repo_full,
           target_area: targetArea,
           ...architectureDetail,
@@ -4023,10 +4064,10 @@ export class Orchestrator extends EventEmitter {
       suggestions.push({
         suggestion_type: 'architecture_alignment',
         title: `[GOVERNANCE] Realign ${issue.identifier} with the project constitution`,
-        summary: governance.summary,
+        summary: governanceSummary,
         detail_json: {
           decision: governance.decision,
-          summary: governance.summary,
+          summary: governanceSummary,
           constitution_hits: governance.constitution_hits,
           github_repo: route.github_repo_full,
           target_area: targetArea,

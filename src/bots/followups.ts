@@ -122,6 +122,13 @@ function shouldRefreshExistingRuntimeIssueCard(issue: RuntimeIssueView): boolean
     isRuntimeIssueCompleted(issue);
 }
 
+function shouldCreateInitialTerminalRuntimeIssueCard(issue: RuntimeIssueView): boolean {
+  return isRuntimeIssueCompleted(issue) ||
+    isTerminalIssue(issue) ||
+    issue.delivery_state === 'delivery_failed' ||
+    issue.orchestrator_state === 'failed';
+}
+
 function runtimeIssueCardState(issue: RuntimeIssueView): 'open' | 'resolved' | 'failed' {
   if (
     issue.delivery_state === 'delivery_failed' ||
@@ -172,6 +179,13 @@ function hasSupervisorRuntimeProjection(issue: RuntimeIssueView | null | undefin
     issue?.supervisor_job_state ||
     issue?.latest_supervisor_directive ||
     issue?.active_decision_kind,
+  );
+}
+
+function isGovernanceDescendantIssue(issue: RuntimeIssueView): boolean {
+  return Boolean(
+    (issue.governance_root_issue_id && issue.governance_root_issue_id !== issue.issue_id) ||
+    (issue.governance_root_issue_identifier && issue.governance_root_issue_identifier !== issue.identifier),
   );
 }
 
@@ -391,6 +405,19 @@ export class BotFollowupService {
     });
   }
 
+  private registerOriginsForIssue(recipients: BotRecipient[], issue: RuntimeIssueView): void {
+    for (const recipient of recipients) {
+      this.followups?.upsert({
+        transport: recipient.transport,
+        conversation_id: recipient.conversation_id,
+        issue_id: issue.issue_id,
+        issue_identifier: issue.identifier,
+        user_id: null,
+        role: 'origin',
+      });
+    }
+  }
+
   private async handleRuntimeEvent(event: RuntimeStreamEvent): Promise<void> {
     if (event.type === 'overview' || event.type === 'snapshot') {
       return;
@@ -404,6 +431,14 @@ export class BotFollowupService {
       if (recipients.length === 0) {
         return;
       }
+      if (isGovernanceDescendantIssue(event.data)) {
+        this.registerOriginsForIssue(recipients, event.data);
+        await this.upsertRuntimeIssueCards(recipients, event.data, {
+          allowAdditionalRuntimeCard: true,
+          allowInitialTerminalCard: true,
+        });
+      }
+      await this.upsertGovernanceChildRuntimeCards(recipients, threadIssue);
       if (this.isSupervisorManagedIssue(threadIssue)) {
         return;
       }
@@ -461,6 +496,14 @@ export class BotFollowupService {
     if (recipients.length === 0) {
       return;
     }
+    if (isGovernanceDescendantIssue(eventIssue)) {
+      this.registerOriginsForIssue(recipients, eventIssue);
+      await this.upsertRuntimeIssueCards(recipients, eventIssue, {
+        allowAdditionalRuntimeCard: true,
+        allowInitialTerminalCard: true,
+      });
+    }
+    await this.upsertGovernanceChildRuntimeCards(recipients, threadIssue);
     if (this.isSupervisorManagedIssue(threadIssue)) {
       return;
     }
@@ -627,6 +670,41 @@ export class BotFollowupService {
         ? `先处理治理子任务 ${governanceCurrentChild.issue_identifier}`
         : rootIssue.next_recommended_action,
     };
+  }
+
+  private governanceChildIssuesForRuntimeCards(threadIssue: RuntimeIssueView): RuntimeIssueView[] {
+    const childRefs = [
+      threadIssue.governance_current_child,
+      ...(threadIssue.governance_child_queue ?? []),
+      ...(threadIssue.governance_child_issues ?? []),
+    ].filter(Boolean);
+    const seen = new Set<string>();
+    const issues: RuntimeIssueView[] = [];
+
+    for (const child of childRefs) {
+      const issue = this.runtime.getIssue(child.issue_id) ?? this.runtime.getIssue(child.issue_identifier);
+      if (!issue || issue.issue_id === threadIssue.issue_id || seen.has(issue.issue_id)) {
+        continue;
+      }
+      seen.add(issue.issue_id);
+      issues.push(issue);
+    }
+
+    return issues;
+  }
+
+  private async upsertGovernanceChildRuntimeCards(
+    recipients: BotRecipient[],
+    threadIssue: RuntimeIssueView,
+  ): Promise<void> {
+    const childIssues = this.governanceChildIssuesForRuntimeCards(threadIssue);
+    for (const childIssue of childIssues) {
+      this.registerOriginsForIssue(recipients, childIssue);
+      await this.upsertRuntimeIssueCards(recipients, childIssue, {
+        allowAdditionalRuntimeCard: true,
+        allowInitialTerminalCard: true,
+      });
+    }
   }
 
   private collectRecipients(issueId: string): BotRecipient[] {
@@ -1068,8 +1146,21 @@ export class BotFollowupService {
     }));
   }
 
-  private async upsertRuntimeIssueCards(recipients: BotRecipient[], issue: RuntimeIssueView): Promise<void> {
-    if (!this.messageStates || !shouldRefreshExistingRuntimeIssueCard(issue)) {
+  private async upsertRuntimeIssueCards(
+    recipients: BotRecipient[],
+    issue: RuntimeIssueView,
+    options: {
+      allowAdditionalRuntimeCard?: boolean;
+      allowInitialTerminalCard?: boolean;
+    } = {},
+  ): Promise<void> {
+    const canCreateInitialTerminalCard =
+      Boolean(options.allowInitialTerminalCard) &&
+      shouldCreateInitialTerminalRuntimeIssueCard(issue);
+    if (
+      !this.messageStates ||
+      (!shouldRefreshExistingRuntimeIssueCard(issue) && !canCreateInitialTerminalCard)
+    ) {
       return;
     }
 
@@ -1098,10 +1189,10 @@ export class BotFollowupService {
         conversation_id: recipient.conversation_id,
         issue_id: issue.issue_id,
       }) ?? null;
-      if (!existing && !shouldRefreshRuntimeIssueCard(issue)) {
+      if (!existing && !shouldRefreshRuntimeIssueCard(issue) && !canCreateInitialTerminalCard) {
         return;
       }
-      if (!existing && this.hasActiveRuntimeIssueCard(recipient)) {
+      if (!existing && !options.allowAdditionalRuntimeCard && this.hasActiveRuntimeIssueCard(recipient)) {
         return;
       }
 
