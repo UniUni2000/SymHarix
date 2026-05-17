@@ -5,7 +5,6 @@
 
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { logger } from 'hono/logger';
 import type { Database } from 'bun:sqlite';
 import { createHealthRoutes } from './routes/health';
 import { createWorkItemRoutes } from './routes/work-items';
@@ -31,6 +30,19 @@ const DEFAULT_CONFIG: ServerConfig = {
   hostname: '0.0.0.0',
   corsOrigins: ['*'],
 };
+
+const QUIET_ACCESS_LOG_PATHS = new Set([
+  '/',
+  '/api/v1/bots/manifest',
+]);
+
+export function shouldLogAccessRequest(method: string, pathname: string): boolean {
+  const normalizedPath = pathname.trim() || '/';
+  if (method.toUpperCase() === 'GET' && QUIET_ACCESS_LOG_PATHS.has(normalizedPath)) {
+    return false;
+  }
+  return true;
+}
 
 /**
  * SymHarixServer class
@@ -70,8 +82,15 @@ export class SymHarixServer {
    * Setup middleware
    */
   private setupMiddleware(): void {
-    // Logger middleware
-    this.app.use('*', logger());
+    this.app.use('*', async (c, next) => {
+      const startedAt = Date.now();
+      await next();
+      const url = new URL(c.req.url);
+      if (!shouldLogAccessRequest(c.req.method, url.pathname)) {
+        return;
+      }
+      console.log(`[http] ${c.req.method} ${url.pathname} ${c.res.status} ${Date.now() - startedAt}ms`);
+    });
 
     // CORS middleware
     this.app.use('*', cors({

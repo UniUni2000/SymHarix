@@ -183,6 +183,14 @@ describe('claude-adapter timeline helpers', () => {
     );
   });
 
+  test('starts supervisor child sessions without continuing the latest local Claude conversation', () => {
+    const args = buildClaudeCliArgs();
+
+    expect(args).not.toContain('-c');
+    expect(args).not.toContain('--continue');
+    expect(args).toContain('--no-session-persistence');
+  });
+
   test('does not complete a turn on assistant thinking or tool_use messages before the final result', async () => {
     const originalSpawn = childProcess.spawn;
     const originalExit = process.exit;

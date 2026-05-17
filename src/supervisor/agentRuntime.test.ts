@@ -359,13 +359,13 @@ function expectAssistantSafeMessage(message: string): void {
 }
 
 describe('SupervisorAgentRuntimeService', () => {
-  test('keeps English greetings and capability replies local before the model router', async () => {
+  test('routes greetings and capability questions through the supervisor model when configured', async () => {
     let modelCalls = 0;
-    const h = createHarness(async () => {
+    const h = createHarness(async ({ text }) => {
       modelCalls += 1;
       return {
         type: 'final_answer',
-        message: '你好！我是 SymHarix Runtime Operator Copilot。',
+        message: `supervisor model answered: ${text}`,
       };
     });
 
@@ -373,33 +373,29 @@ describe('SupervisorAgentRuntimeService', () => {
       context: h.context,
       text: 'hheeelllooo',
     });
-    expect(greeting.message).toBe('Hello. What would you like to work on next?');
-    expect(greeting.message).not.toMatch(/[\u3400-\u9fff]/);
+    expect(greeting.message).toBe('supervisor model answered: hheeelllooo');
 
     const howAreYou = await h.service.respond({
       context: h.context,
       text: 'How are you?',
     });
-    expect(howAreYou.message).toBe('Doing well, thanks. What would you like to work on next?');
-    expect(howAreYou.message).not.toMatch(/[\u3400-\u9fff]/);
+    expect(howAreYou.message).toBe('supervisor model answered: How are you?');
 
     const capability = await h.service.respond({
       context: h.context,
       text: 'What can you do?',
     });
-    expect(capability.message).toContain("I'm your SymHarix Runtime Operator Copilot");
-    expect(capability.message).toContain('Create issues');
-    expect(capability.message).not.toMatch(/[\u3400-\u9fff]/);
-    expect(modelCalls).toBe(0);
+    expect(capability.message).toBe('supervisor model answered: What can you do?');
+    expect(modelCalls).toBe(3);
   });
 
-  test('answers identity greetings locally instead of generic no-action copy', async () => {
+  test('routes identity questions through the supervisor model instead of generic no-action copy', async () => {
     let modelCalls = 0;
-    const h = createHarness(async () => {
+    const h = createHarness(async ({ text }) => {
       modelCalls += 1;
       return {
         type: 'final_answer',
-        message: 'generic model reply',
+        message: `identity via supervisor model: ${text}`,
       };
     });
 
@@ -409,18 +405,27 @@ describe('SupervisorAgentRuntimeService', () => {
         text,
       });
 
-      expect(response.message).toContain("I'm your SymHarix Runtime Operator Copilot");
+      expect(response.message).toContain('identity via supervisor model');
       expect(response.message).not.toContain('does not require me to execute an action');
-      expect(response.message).not.toContain('generic model reply');
       expectAssistantSafeMessage(response.message);
     }
-    expect(modelCalls).toBe(0);
+    expect(modelCalls).toBe(2);
   });
 
-  test('answers issue creation how-to questions without creating a pending issue', async () => {
+  test('lets the model see issue creation how-to questions but blocks mistaken writes', async () => {
     let modelCalls = 0;
-    const h = createHarness(async () => {
+    const h = createHarness(async ({ text }) => {
       modelCalls += 1;
+      if (/teach me how/i.test(text)) {
+        return {
+          type: 'tool_call',
+          tool: 'read_repo_with_claude',
+          args: {
+            question: text,
+          },
+          reason: 'Model misclassified an issue creation tutorial as repo analysis.',
+        };
+      }
       return {
         type: 'tool_call',
         tool: 'create_issue',
@@ -450,7 +455,7 @@ describe('SupervisorAgentRuntimeService', () => {
         conversation_id: 'chat-1',
       })).toBeNull();
     }
-    expect(modelCalls).toBe(0);
+    expect(modelCalls).toBe(2);
   });
 
   test('treats create issue text with cleanup-smoke file names as a new issue request', async () => {
@@ -974,6 +979,54 @@ describe('SupervisorAgentRuntimeService', () => {
       expect(toolCalls.map((call) => call.tool_name)).toEqual(['list_issues']);
       expect(toolCalls[0]?.args).toEqual({ active_only: true, state_filter: 'active' });
     }
+  });
+
+  test('treats broad what is going on follow-ups as active issue progress', async () => {
+    const h = createHarness();
+
+    const response = await h.service.respond({
+      context: h.context,
+      text: "What's going on?",
+    });
+
+    expect(response.message).toContain('INT-158');
+    expect(response.message).not.toContain('does not require me to execute an action');
+    expect(response.message).not.toContain('Repo answer');
+
+    const run = h.runs.findLatestByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name).sort()).toEqual([
+      'diagnose_issue',
+      'get_issue',
+    ]);
+  });
+
+  test('does not turn model help intent into mechanical no-action for progress questions', async () => {
+    const h = createHarness(createSupervisorToolRouterModel({
+      decide: async () => ({
+        intent: { kind: 'help' },
+      }),
+    }));
+
+    const response = await h.service.respond({
+      context: h.context,
+      text: "What's going on?",
+    });
+
+    expect(response.message).toContain('INT-158');
+    expect(response.message).not.toContain('does not require me to execute an action');
+
+    const run = h.runs.findLatestByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    });
+    expect(h.events.listByRun(run!.id).map((event) => event.event_kind)).toContain('model_fallback');
+    expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name).sort()).toEqual([
+      'diagnose_issue',
+      'get_issue',
+    ]);
   });
 
   test('routes broad control-plane questions to runtime summaries instead of read-only repo Claude', async () => {

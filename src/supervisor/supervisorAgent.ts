@@ -225,6 +225,20 @@ export function shouldUseReadOnlyClaudeForText(value: string): boolean {
     || chineseTriggers.some((pattern) => pattern.test(value));
 }
 
+function isRepoPurposeQuestion(value: string): boolean {
+  const normalized = value.toLowerCase();
+  const englishTriggers = [
+    /\bwhat\s+(?:does|is)\s+(?:this\s+)?(?:repo|repository|project|codebase)\s+(?:do|for|about)\b/,
+    /\bwhat(?:'s|\s+is)\s+(?:this\s+)?(?:repo|repository|project|codebase)\s+(?:for|about)\b/,
+    /\bwhat\s+(?:does|is)\s+(?:the\s+)?(?:repo|repository|project|codebase)\s+(?:do|for|about)\b/,
+  ];
+  const chineseTriggers = [
+    /(?:这个|该)?(?:仓库|项目|代码库).{0,16}(?:干啥|做什么|是干什么|是做什么|有什么用|用途|主要做什么|主要是啥|是啥|关于什么)/,
+  ];
+  return englishTriggers.some((pattern) => pattern.test(normalized))
+    || chineseTriggers.some((pattern) => pattern.test(value));
+}
+
 function shouldAllowExternalResearch(value: string): boolean {
   const normalized = value.toLowerCase();
   return /\b(latest|official docs?|official documentation|web|internet|search|look up|api docs?)\b/.test(normalized)
@@ -414,23 +428,33 @@ function parseResult(
 function repoProfileFallbackAnswer(
   repoRef: string | null,
   profile: RepoProfile | null,
+  locale: RuntimeLocale = 'zh',
 ): SupervisorAgentResult | null {
   if (!repoRef || !profile) {
     return null;
   }
 
-  const details = [
-    profile.signals.readme_title ? `README: ${profile.signals.readme_title}` : null,
-    profile.project_type !== 'unknown' ? `类型：${profile.project_type}` : null,
-    profile.tech_stack.length > 0 ? `技术栈：${profile.tech_stack.join(', ')}` : null,
-    profile.key_paths.length > 0 ? `关键路径：${profile.key_paths.slice(0, 5).join(', ')}` : null,
-  ].filter(Boolean);
+  const details = locale === 'en'
+    ? [
+        profile.signals.readme_title ? `README: ${profile.signals.readme_title}` : null,
+        profile.project_type !== 'unknown' ? `Type: ${profile.project_type}` : null,
+        profile.tech_stack.length > 0 ? `Tech stack: ${profile.tech_stack.join(', ')}` : null,
+        profile.key_paths.length > 0 ? `Key paths: ${profile.key_paths.slice(0, 5).join(', ')}` : null,
+      ].filter(Boolean)
+    : [
+        profile.signals.readme_title ? `README: ${profile.signals.readme_title}` : null,
+        profile.project_type !== 'unknown' ? `类型：${profile.project_type}` : null,
+        profile.tech_stack.length > 0 ? `技术栈：${profile.tech_stack.join(', ')}` : null,
+        profile.key_paths.length > 0 ? `关键路径：${profile.key_paths.slice(0, 5).join(', ')}` : null,
+      ].filter(Boolean);
 
   return {
     mode: 'repo_answer',
     repoRef,
     answer: [
-      `${repoRef} 主要是：${profile.summary}`,
+      locale === 'en'
+        ? `${repoRef} is mainly: ${profile.summary}`
+        : `${repoRef} 主要是：${profile.summary}`,
       ...details,
     ].join('\n'),
     citations: profile.key_paths.length > 0
@@ -471,6 +495,7 @@ export class DefaultSupervisorAgentService implements SupervisorAgentService {
     if (!normalizedUserText) {
       return null;
     }
+    const locale = inferRuntimeLocaleFromText(normalizedUserText);
 
     const resolvedRepoRef = input.repoRef ?? input.defaultRepoRef;
     const needsReadOnlyClaude = Boolean(input.forceReadOnlyClaude)
@@ -496,6 +521,14 @@ export class DefaultSupervisorAgentService implements SupervisorAgentService {
           localPath: resolvedLocalPath,
         })
       : null;
+
+    if (needsReadOnlyClaude && isRepoPurposeQuestion(normalizedUserText)) {
+      const fallback = repoProfileFallbackAnswer(resolvedRepoRef, repoProfile, locale);
+      if (fallback) {
+        return fallback;
+      }
+    }
+
     const repoUnderstanding = resolvedRepoRef && this.options.resolveRepoUnderstanding
       ? await this.options.resolveRepoUnderstanding({
           repoRef: resolvedRepoRef,
@@ -531,15 +564,26 @@ export class DefaultSupervisorAgentService implements SupervisorAgentService {
     };
 
     const usedReadOnlyAdvisor = Boolean(needsReadOnlyClaude && this.options.adviseWithReadOnlyClaude);
-    const rawResult = usedReadOnlyAdvisor
-      ? await this.options.adviseWithReadOnlyClaude(normalizedInput)
-      : await this.options.analyze(normalizedInput);
+    let rawResult: SupervisorAgentBackendResult;
+    try {
+      rawResult = usedReadOnlyAdvisor
+        ? await this.options.adviseWithReadOnlyClaude(normalizedInput)
+        : await this.options.analyze(normalizedInput);
+    } catch (error) {
+      if (usedReadOnlyAdvisor) {
+        const fallback = repoProfileFallbackAnswer(resolvedRepoRef, repoProfile, locale);
+        if (fallback) {
+          return fallback;
+        }
+      }
+      throw error;
+    }
     const parsedResult = parseResult(rawResult, resolvedRepoRef);
     if (parsedResult) {
       return parsedResult;
     }
     return usedReadOnlyAdvisor
-      ? repoProfileFallbackAnswer(resolvedRepoRef, repoProfile)
+      ? repoProfileFallbackAnswer(resolvedRepoRef, repoProfile, locale)
       : null;
   }
 }

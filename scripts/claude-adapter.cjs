@@ -43,12 +43,12 @@ function normalizeStringArray(value) {
 function buildClaudeCliArgs(options = {}) {
   const args = [
     '--bare',
-    '-c',
     '-p',
     '--verbose',
     '--input-format', 'stream-json',
     '--output-format', 'stream-json',
     '--replay-user-messages',
+    '--no-session-persistence',
     '--permission-mode', 'default',
     '--permission-prompt-tool', 'stdio',
   ];

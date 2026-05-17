@@ -4,7 +4,7 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { SymHarixServer } from './index';
+import { SymHarixServer, shouldLogAccessRequest } from './index';
 import { initializeSchema, dropAllTables } from '../database/schema';
 import {
   AgentRunRepository,
@@ -736,6 +736,12 @@ describe('SymHarixServer', () => {
     expect(payload.data.assistant.configured).toBe(false);
     expect(payload.data.assistant.health).toBe('unconfigured');
     expect(payload.data.assistant.fallback_available).toBe(true);
+  });
+
+  test('access logger skips noisy tunnel and manifest health probes', () => {
+    expect(shouldLogAccessRequest('GET', '/')).toBe(false);
+    expect(shouldLogAccessRequest('GET', '/api/v1/bots/manifest')).toBe(false);
+    expect(shouldLogAccessRequest('POST', '/api/v1/bots/telegram/webhook')).toBe(true);
   });
 
   test('POST /api/v1/bots/telegram/webhook proxies Telegram updates to the bot gateway', async () => {

@@ -1013,20 +1013,8 @@ function parseNonNegativeInteger(value: string | null | undefined): number | nul
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
-function isPureRepositoryQuestionText(text: string): boolean {
-  const normalized = text.trim();
-  if (!normalized || normalized.startsWith('/')) {
-    return false;
-  }
-  if (/(?:创建|新建|建|开|提|执行|开始|批准|取消|关闭|关掉|关了|作废|废弃|不要|不用|不做|清理|清空|删除|移除|重试|重新|停止|做成|实现|修复|修掉|改成|发布|部署|跑一下|create|open|start|approve|cancel|close|cleanup|delete|remove|retry|rerun|stop|ship|deploy)/i.test(normalized)) {
-    return false;
-  }
-  return shouldUseReadOnlyClaudeForText(normalized) ||
-    /(?:这个|当前|默认)?仓库.*(?:干啥|干什么|是干嘛|是什么|有啥|有什么|有哪些)|(?:文件|函数|模块|目录|代码).*(?:有什么用|干啥|干什么|定义|是什么)|(?:what|why|how).*(?:repo|repository|file|function|module)/i.test(normalized);
-}
-
 function shouldSendTelegramProcessingAck(text: string): boolean {
-  return !isPureRepositoryQuestionText(text);
+  return Boolean(text.trim());
 }
 
 function waitForTelegramRetry(): Promise<void> {

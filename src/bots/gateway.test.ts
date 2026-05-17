@@ -1751,7 +1751,7 @@ describe('DefaultBotGateway', () => {
     expect(String(requests[1]?.body.text)).toContain('No active work right now.');
   });
 
-  test('does not send a slow acknowledgement for pure repo questions before the direct answer', async () => {
+  test('sends a repository-context acknowledgement when a pure repo question is slow', async () => {
     const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
     const db = new Database(':memory:');
     initializeSchema(db);
@@ -1849,15 +1849,17 @@ describe('DefaultBotGateway', () => {
 
     expect(result.status).toBe(200);
     await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(requests).toHaveLength(0);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toContain('sendMessage');
+    expect(String(requests[0]?.body.text)).toContain('正在读取最新仓库信息');
 
     resolveAgent?.();
     await new Promise((resolve) => setTimeout(resolve, 0));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(requests).toHaveLength(1);
-    expect(requests[0]?.url).toContain('sendMessage');
-    expect(String(requests[0]?.body.text)).toContain('README.md');
+    expect(requests).toHaveLength(2);
+    expect(requests[1]?.url).toContain('editMessageText');
+    expect(String(requests[1]?.body.text)).toContain('README.md');
     gateway.dispose();
     db.close();
   });

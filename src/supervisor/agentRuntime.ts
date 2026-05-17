@@ -259,7 +259,7 @@ function isDirectExecutionText(text: string): boolean {
 }
 
 function isStatusQuestion(text: string): boolean {
-  return /怎么样|状态|进度|status|stuck|blocked|卡住|卡在哪|卡到哪|到哪(?:里)?了|doing|progress|review\s*(?:到哪|状态|进度|status|progress)|审核.*(?:到哪|状态|进度)|评审.*(?:到哪|状态|进度)/i.test(text);
+  return /怎么样|状态|进度|status|stuck|blocked|卡住|卡在哪|卡到哪|到哪(?:里)?了|doing|progress|what(?:'s|\s+is)\s+going\s+on|what(?:'s|\s+is)\s+happening|what(?:'s|\s+is)\s+the\s+latest|latest\s+update|any\s+updates?|review\s*(?:到哪|状态|进度|status|progress)|审核.*(?:到哪|状态|进度)|评审.*(?:到哪|状态|进度)/i.test(text);
 }
 
 function isRetryRequest(text: string): boolean {
@@ -1103,7 +1103,14 @@ function botIntentToSupervisorTurn(
         reason: 'LLM router selected default project summary.',
       };
     case 'help':
-      return { type: 'final_answer', message: buildNoActionAssistantReply(input.text) };
+      return (
+        isCapabilityQuestion(input.text) ||
+        isGreetingLikeText(input.text) ||
+        isIdentityQuestion(input.text) ||
+        isIssueCreationHelpQuestion(input.text)
+      )
+        ? { type: 'final_answer', message: buildNoActionAssistantReply(input.text) }
+        : null;
     default:
       return null;
   }
@@ -1797,7 +1804,7 @@ export class SupervisorAgentRuntimeService {
 
   private async executeRun(request: SupervisorRuntimeRespondRequest): Promise<BotCommandResponse> {
     const run = this.createRun(request);
-    const immediateReply = this.immediateConversationalReply(request.text);
+    const immediateReply = this.options.model ? null : this.immediateConversationalReply(request.text);
     if (immediateReply) {
       return this.completeRun(run.id, { message: immediateReply }, 'completed');
     }
@@ -1852,6 +1859,25 @@ export class SupervisorAgentRuntimeService {
         message: turn.type,
         payload: turn as unknown as Record<string, unknown>,
       });
+
+      if (this.shouldBlockIssueCreationHelpToolUse(request.text, turn)) {
+        const message = buildIssueCreationHelpReply(request.text);
+        this.options.events.create({
+          run_id: run.id,
+          event_kind: 'final_answer',
+          message,
+          payload: {
+            guard: 'issue_creation_help_question',
+            blocked_turn_type: turn.type,
+            blocked_tool: turn.type === 'tool_call'
+              ? turn.tool
+              : turn.type === 'confirm_action'
+                ? turn.action.tool
+                : null,
+          },
+        });
+        return this.completeRun(run.id, { message }, 'completed');
+      }
 
       if (turn.type === 'progress_update') {
         const previousRun = this.options.runs.findById(run.id);
@@ -2417,6 +2443,19 @@ export class SupervisorAgentRuntimeService {
     return null;
   }
 
+  private shouldBlockIssueCreationHelpToolUse(text: string, turn: SupervisorTurn): boolean {
+    if (!isIssueCreationHelpQuestion(text)) {
+      return false;
+    }
+    if (turn.type === 'tool_call') {
+      return true;
+    }
+    if (turn.type === 'confirm_action') {
+      return true;
+    }
+    return false;
+  }
+
   private detectControlTurn(text: string, contextualIssueId: string | null = null): SupervisorTurn | null {
     const issueIds = extractIssueIdentifiers(text);
     const targetIssueId = issueIds[0] ?? contextualIssueId;
@@ -2680,6 +2719,14 @@ export class SupervisorAgentRuntimeService {
       return [{
         type: 'final_answer',
         message: buildIssueProgressUsageAnswer(text),
+      }];
+    }
+    if (isStatusQuestion(text)) {
+      return [{
+        type: 'tool_call',
+        tool: 'summarize_control_plane',
+        args: { intent_kind: 'runtime_status' },
+        reason: 'User asked for current runtime progress without naming one issue.',
       }];
     }
     if (

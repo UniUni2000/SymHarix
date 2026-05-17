@@ -594,7 +594,7 @@ describe('DefaultSupervisorAgentService', () => {
       localPath: null,
       repoRef: null,
       defaultRepoRef: 'UniUni2000/test2',
-      userText: 'test2 仓库是干啥的呢？',
+      userText: '这个仓库有哪些文件？',
       projectContext: 'default_project=test2',
       runtimeContext: {
         source: 'telegram_chat',
@@ -622,6 +622,176 @@ describe('DefaultSupervisorAgentService', () => {
         '类型：python',
         '技术栈：Python',
         '关键路径：README.md, stellar_mass_luminosity.py, tests',
+      ].join('\n'),
+      citations: ['README.md', 'stellar_mass_luminosity.py', 'tests'],
+    });
+    expect(sourceCalls).toBe(1);
+    expect(advisorCalls).toBe(1);
+    expect(analyzeCalls).toBe(0);
+  });
+
+  test('answers simple repo purpose questions from repo profile without waiting for read-only Claude', async () => {
+    let analyzeCalls = 0;
+    let sourceCalls = 0;
+    let advisorCalls = 0;
+    const agent = new DefaultSupervisorAgentService({
+      resolveRepoProfile: async ({ repoRef, localPath }) => {
+        expect(repoRef).toBe('UniUni2000/test2');
+        expect(localPath).toBe('/tmp/workspaces/uniuni2000__test2/source');
+        return {
+          ...repoProfile,
+          repo_ref: 'UniUni2000/test2',
+          summary: 'Telegram-first runtime supervisor for repository-aware project operations.',
+          project_type: 'node_typescript',
+          tech_stack: ['Bun', 'TypeScript', 'Telegram Bot API'],
+          key_paths: ['README.md', 'src/supervisor', 'src/bots'],
+          signals: {
+            ...repoProfile.signals,
+            readme_title: 'SymHarix',
+          },
+        };
+      },
+      resolveRepoSource: async () => {
+        sourceCalls += 1;
+        return {
+          project_slug: 'test2',
+          repo_ref: 'UniUni2000/test2',
+          configured_local_path: null,
+          analysis_path: '/tmp/workspaces/uniuni2000__test2/source',
+          source_path: '/tmp/workspaces/uniuni2000__test2/source',
+          commit_sha: 'abc123',
+          status: 'ready',
+          last_sync_error: null,
+          updated_at: '2026-05-07T00:00:00.000Z',
+        };
+      },
+      adviseWithReadOnlyClaude: async () => {
+        advisorCalls += 1;
+        throw new Error('should not wait for read-only advisor on simple purpose questions');
+      },
+      analyze: async () => {
+        analyzeCalls += 1;
+        return null;
+      },
+    });
+
+    const result = await agent.respond({
+      localPath: null,
+      repoRef: null,
+      defaultRepoRef: 'UniUni2000/test2',
+      userText: 'what does this repo do',
+      projectContext: 'default_project=test2',
+      runtimeContext: {
+        source: 'telegram_chat',
+        defaultProjectSlug: 'test2',
+        activeIssueId: null,
+      },
+      route: {
+        project_slug: 'test2',
+        project_name: null,
+        github_owner: 'UniUni2000',
+        github_repo: 'test2',
+        github_repo_full: 'UniUni2000/test2',
+        local_path: null,
+        cache_key: 'uniuni2000__test2',
+        require_repo_harness: false,
+      },
+    });
+
+    expect(result).toEqual({
+      mode: 'repo_answer',
+      repoRef: 'UniUni2000/test2',
+      answer: [
+        'UniUni2000/test2 is mainly: Telegram-first runtime supervisor for repository-aware project operations.',
+        'README: SymHarix',
+        'Type: node_typescript',
+        'Tech stack: Bun, TypeScript, Telegram Bot API',
+        'Key paths: README.md, src/supervisor, src/bots',
+      ].join('\n'),
+      citations: ['README.md', 'src/supervisor', 'src/bots'],
+    });
+    expect(sourceCalls).toBe(1);
+    expect(advisorCalls).toBe(0);
+    expect(analyzeCalls).toBe(0);
+  });
+
+  test('falls back to repo profile when read-only Claude throws after resolving source cache', async () => {
+    let analyzeCalls = 0;
+    let sourceCalls = 0;
+    let advisorCalls = 0;
+    const agent = new DefaultSupervisorAgentService({
+      resolveRepoProfile: async ({ repoRef, localPath }) => {
+        expect(repoRef).toBe('UniUni2000/test2');
+        expect(localPath).toBe('/tmp/workspaces/uniuni2000__test2/source');
+        return {
+          ...repoProfile,
+          repo_ref: 'UniUni2000/test2',
+          summary: 'Stellar mass-luminosity calculator with Python tests.',
+          project_type: 'python',
+          tech_stack: ['Python'],
+          key_paths: ['README.md', 'stellar_mass_luminosity.py', 'tests'],
+          signals: {
+            ...repoProfile.signals,
+            readme_title: 'Stellar Mass Luminosity',
+          },
+        };
+      },
+      resolveRepoSource: async () => {
+        sourceCalls += 1;
+        return {
+          project_slug: 'test2',
+          repo_ref: 'UniUni2000/test2',
+          configured_local_path: null,
+          analysis_path: '/tmp/workspaces/uniuni2000__test2/source',
+          source_path: '/tmp/workspaces/uniuni2000__test2/source',
+          commit_sha: 'abc123',
+          status: 'ready',
+          last_sync_error: null,
+          updated_at: '2026-05-07T00:00:00.000Z',
+        };
+      },
+      adviseWithReadOnlyClaude: async () => {
+        advisorCalls += 1;
+        throw new Error('Turn timed out');
+      },
+      analyze: async () => {
+        analyzeCalls += 1;
+        return null;
+      },
+    });
+
+    const result = await agent.respond({
+      localPath: null,
+      repoRef: null,
+      defaultRepoRef: 'UniUni2000/test2',
+      userText: 'what files are in this repo?',
+      projectContext: 'default_project=test2',
+      runtimeContext: {
+        source: 'telegram_chat',
+        defaultProjectSlug: 'test2',
+        activeIssueId: null,
+      },
+      route: {
+        project_slug: 'test2',
+        project_name: null,
+        github_owner: 'UniUni2000',
+        github_repo: 'test2',
+        github_repo_full: 'UniUni2000/test2',
+        local_path: null,
+        cache_key: 'uniuni2000__test2',
+        require_repo_harness: false,
+      },
+    });
+
+    expect(result).toEqual({
+      mode: 'repo_answer',
+      repoRef: 'UniUni2000/test2',
+      answer: [
+        'UniUni2000/test2 is mainly: Stellar mass-luminosity calculator with Python tests.',
+        'README: Stellar Mass Luminosity',
+        'Type: python',
+        'Tech stack: Python',
+        'Key paths: README.md, stellar_mass_luminosity.py, tests',
       ].join('\n'),
       citations: ['README.md', 'stellar_mass_luminosity.py', 'tests'],
     });
