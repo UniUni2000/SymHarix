@@ -18,7 +18,7 @@
 
 ## Demo Video
 
-Watch the walkthrough: [SymHarix demo video](https://www.youtube.com/watch?v=VIDEO_ID_PLACEHOLDER).
+Watch the walkthrough: [SymHarix demo video](https://youtu.be/1dCix6hFUY0).
 
 The video shows the full loop from Telegram intake to Plan Card approval, runtime progress, Mini App inspection, Harness review evidence, and a verified GitHub pull request.
 
