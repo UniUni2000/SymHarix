@@ -1,19 +1,7 @@
 # ✨ SymHarix — Telegram-First AI Supervisor
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./assets/logo_light.png">
-    <source media="(prefers-color-scheme: light)" srcset="./assets/logo_dark.png">
-    <img src="./assets/logo_dark.png" alt="SymHarix" width="220">
-  </picture>
-</p>
-
-<p align="center">
-  <strong>PLAN. APPROVE. SHIP.</strong>
-</p>
-
-<p align="center">
-  <strong>Telegram-first supervised coding control plane.</strong>
+  <img src="./assets/readme/logo.gif" alt="SymHarix logo animation" width="720">
 </p>
 
 <p align="center">
