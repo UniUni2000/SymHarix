@@ -16,6 +16,12 @@
   <em>Conceptual flow illustration; actual Telegram, Runtime Deck, and Mini App screens may differ.</em>
 </p>
 
+## Demo Video
+
+Watch the walkthrough: [SymHarix demo video](https://www.youtube.com/watch?v=VIDEO_ID_PLACEHOLDER).
+
+The video shows the full loop from Telegram intake to Plan Card approval, runtime progress, Mini App inspection, Harness review evidence, and a verified GitHub pull request.
+
 ## What SymHarix Is
 
 SymHarix is a self-hostable control plane for supervised coding work. The user talks to a Telegram bot, the Supervisor clarifies or prepares a Plan Card, and approved work is routed to the configured GitHub repository through the bundled Claude-compatible runtime.

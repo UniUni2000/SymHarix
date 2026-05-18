@@ -16,6 +16,12 @@
   <em>Conceptual flow illustration; actual Telegram, Runtime Deck, and Mini App screens may differ.</em>
 </p>
 
+## 演示视频
+
+查看完整演示：[SymHarix demo video](https://www.youtube.com/watch?v=VIDEO_ID_PLACEHOLDER)。
+
+视频展示从 Telegram 需求输入到 Plan Card 审批、运行进展、Mini App 查看、Harness review 证据，以及最终 verified GitHub pull request 的完整闭环。
+
 可自托管、Telegram 优先的 coding agent 监督控制平面。
 
 ## SymHarix 是什么
