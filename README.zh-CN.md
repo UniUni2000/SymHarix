@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="./assets/readme/concept-flow.png" alt="SymHarix Telegram-first supervised coding control plane conceptual flow" width="920">
+  <img src="./assets/readme/concept-flow.png" alt="SymHarix Telegram-first supervised coding control plane conceptual flow" width="720">
 </p>
 
 <p align="center">
