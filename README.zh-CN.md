@@ -1,7 +1,7 @@
 # ✨ SymHarix — Telegram-First AI Supervisor
 
 <p align="center">
-  <img src="./assets/readme/logo.gif" alt="SymHarix logo animation" width="720">
+  <img src="./assets/readme/logo.gif" alt="SymHarix logo animation" width="920">
 </p>
 
 <p align="center">
@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="./assets/readme/concept-flow.png" alt="SymHarix Telegram-first supervised coding control plane conceptual flow" width="720">
+  <img src="./assets/readme/concept-flow.png" alt="SymHarix Telegram-first supervised coding control plane conceptual flow" width="920">
 </p>
 
 <p align="center">
