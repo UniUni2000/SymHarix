@@ -68,7 +68,7 @@ import {
   SyncEventRepository,
   WorkItemRepository
 } from '../database';
-import type { ReviewDecision, SupervisorSessionRecord } from '../database/types';
+import type { ReviewDecision, ServiceLease, SupervisorSessionRecord } from '../database/types';
 import type { WorkItem } from '../database/types';
 import { buildReviewPrompt, parseCanonicalReviewReport } from '../hooks/review-prompt';
 import { buildDevPrompt, judgeComplexity } from '../hooks/dev-prompt';
@@ -2184,7 +2184,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   private async acquireLeadershipLease(): Promise<void> {
-    const result = this.serviceLeaseRepository.acquire({
+    const leaseRequest = {
       lease_key: Orchestrator.PRIMARY_LEASE_KEY,
       holder_id: this.leaseHolderId,
       holder_pid: process.pid,
@@ -2194,7 +2194,12 @@ export class Orchestrator extends EventEmitter {
         workspace_root: this.config.workspaceRoot,
       },
       ttl_ms: this.leaseTtlMs,
-    });
+    };
+    let result = this.serviceLeaseRepository.acquire(leaseRequest);
+
+    if (!result.acquired && this.releaseLocalStaleLeadershipLease(result.lease)) {
+      result = this.serviceLeaseRepository.acquire(leaseRequest);
+    }
 
     if (!result.acquired) {
       const lease = result.lease;
@@ -2208,6 +2213,34 @@ export class Orchestrator extends EventEmitter {
     }
 
     this.hasLeadershipLease = true;
+  }
+
+  private releaseLocalStaleLeadershipLease(lease: ServiceLease | null): boolean {
+    if (!lease?.holder_pid || lease.holder_host !== os.hostname()) {
+      return false;
+    }
+    if (this.isLeaseHolderProcessAlive(lease.holder_pid)) {
+      return false;
+    }
+    const released = this.serviceLeaseRepository.release(
+      Orchestrator.PRIMARY_LEASE_KEY,
+      lease.holder_id,
+    );
+    if (released) {
+      console.warn(
+        `[orchestrator] Released stale primary lease from dead local holder ${lease.holder_host}:${lease.holder_pid}.`,
+      );
+    }
+    return released;
+  }
+
+  private isLeaseHolderProcessAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+    }
   }
 
   private startLeaseRenewalLoop(): void {

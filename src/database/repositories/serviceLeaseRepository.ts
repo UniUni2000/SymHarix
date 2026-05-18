@@ -56,17 +56,23 @@ export class ServiceLeaseRepository {
         this.db.prepare(`
           UPDATE service_leases
           SET holder_id = ?,
-              holder_pid = ?,
-              holder_host = ?,
-              metadata_json = ?,
+              holder_pid = CASE WHEN holder_id = ? THEN COALESCE(?, holder_pid) ELSE ? END,
+              holder_host = CASE WHEN holder_id = ? THEN COALESCE(?, holder_host) ELSE ? END,
+              metadata_json = CASE WHEN holder_id = ? THEN COALESCE(?, metadata_json) ELSE ? END,
               acquired_at = CASE WHEN holder_id = ? THEN acquired_at ELSE ? END,
               heartbeat_at = ?,
               expires_at = ?
           WHERE lease_key = ?
         `).run(
           params.holder_id,
+          params.holder_id,
           params.holder_pid ?? null,
+          params.holder_pid ?? null,
+          params.holder_id,
           params.holder_host ?? null,
+          params.holder_host ?? null,
+          params.holder_id,
+          metadataJson,
           metadataJson,
           params.holder_id,
           nowIso,

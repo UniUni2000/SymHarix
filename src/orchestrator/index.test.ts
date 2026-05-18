@@ -15,6 +15,7 @@ import {
   DebtSignalRepository,
   GovernanceSuggestionRepository,
   ReviewEventRepository,
+  ServiceLeaseRepository,
   SupervisorMemoryRepository,
   SupervisorSessionEventRepository,
   SupervisorSessionRepository,
@@ -726,6 +727,33 @@ describe('Orchestrator Stability', () => {
     await first.orchestrator.stop();
     await expect(second.orchestrator.start()).resolves.toBeUndefined();
     await second.orchestrator.stop();
+  });
+
+  it('recovers a local stale primary lease when the holder process is gone', async () => {
+    const sharedDb = createTestDatabase();
+    const serviceLeaseRepository = new ServiceLeaseRepository(sharedDb);
+    const issue = makeIssue({ state: 'Todo' });
+    const ctx = createOrchestrator(issue, {}, sharedDb);
+    orchestrator = ctx.orchestrator;
+    ctx.tracker.fetchCandidateIssues = mock(async () => ({ issues: [], error: null }));
+    ctx.tracker.fetchIssuesByStates = mock(async () => ({ issues: [], error: null }));
+
+    serviceLeaseRepository.acquire({
+      lease_key: 'orchestrator:primary',
+      holder_id: 'dead-holder',
+      holder_pid: 424242,
+      holder_host: os.hostname(),
+      ttl_ms: 60_000,
+      now: new Date(),
+    });
+    (ctx.orchestrator as any).isLeaseHolderProcessAlive = mock(() => false);
+
+    await expect(ctx.orchestrator.start()).resolves.toBeUndefined();
+
+    expect((ctx.orchestrator as any).isLeaseHolderProcessAlive).toHaveBeenCalledWith(424242);
+    expect(serviceLeaseRepository.findByKey('orchestrator:primary')?.holder_id).not.toBe('dead-holder');
+
+    await ctx.orchestrator.stop();
   });
 
   it('starts serving work without waiting for heavy startup terminal cleanup', async () => {

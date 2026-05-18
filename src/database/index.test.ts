@@ -632,6 +632,32 @@ describe('ServiceLeaseRepository', () => {
     expect(takeover.acquired).toBe(true);
     expect(takeover.lease?.holder_id).toBe('holder-b');
   });
+
+  test('preserves holder process details when renewing a lease', () => {
+    const repository = new ServiceLeaseRepository(db);
+
+    repository.acquire({
+      lease_key: 'orchestrator:primary',
+      holder_id: 'holder-a',
+      holder_pid: 1001,
+      holder_host: 'host-a',
+      metadata_json: { project_root: '/tmp/symharix' },
+      ttl_ms: 30_000,
+      now: new Date('2026-04-21T00:00:00.000Z'),
+    });
+
+    const renewed = repository.renew({
+      lease_key: 'orchestrator:primary',
+      holder_id: 'holder-a',
+      ttl_ms: 30_000,
+      now: new Date('2026-04-21T00:00:10.000Z'),
+    });
+
+    expect(renewed.acquired).toBe(true);
+    expect(renewed.lease?.holder_pid).toBe(1001);
+    expect(renewed.lease?.holder_host).toBe('host-a');
+    expect(renewed.lease?.metadata_json).toEqual({ project_root: '/tmp/symharix' });
+  });
 });
 
 describe('Governance repositories', () => {
