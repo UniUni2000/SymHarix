@@ -5,6 +5,13 @@
 </p>
 
 <p align="center">
+  <a href="#快速开始"><img src="./assets/readme/badge-quick-start.svg" alt="Quick Start"></a>
+  <a href="#telegram-supervisor"><img src="./assets/readme/badge-telegram-first.svg" alt="Telegram first"></a>
+  <a href="#核心链路"><img src="./assets/readme/badge-runtime-deck.svg" alt="Runtime Deck"></a>
+  <a href="./LICENSE"><img src="./assets/readme/badge-license-mit.svg" alt="MIT License"></a>
+</p>
+
+<p align="center">
   <strong>语言：</strong> <a href="./README.md">English</a> | 中文
 </p>
 
