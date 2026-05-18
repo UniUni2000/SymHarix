@@ -5,10 +5,10 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start"><img src="./assets/readme/badge-quick-start.svg" alt="Quick Start"></a>
-  <a href="#telegram-supervisor"><img src="./assets/readme/badge-telegram-first.svg" alt="Telegram first"></a>
-  <a href="#core-flow"><img src="./assets/readme/badge-runtime-deck.svg" alt="Runtime Deck"></a>
-  <a href="./LICENSE"><img src="./assets/readme/badge-license-mit.svg" alt="MIT License"></a>
+  <a href="#quick-start"><img src="https://img.shields.io/badge/Quick_Start-Bun-000000?style=for-the-badge&logo=bun&logoColor=white" alt="Quick Start"></a>
+  <a href="#telegram-supervisor"><img src="https://img.shields.io/badge/Telegram-first-229ED9?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram first"></a>
+  <a href="#core-flow"><img src="https://img.shields.io/badge/Runtime-Deck-6D5DFC?style=for-the-badge" alt="Runtime Deck"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
 </p>
 
 <p align="center">
