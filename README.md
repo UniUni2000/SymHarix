@@ -35,6 +35,32 @@ SymHarix is a self-hostable control plane for supervised coding work. The user t
 
 Telegram is the primary user loop. Runtime Deck is the diagnostics and control surface. Linear and GitHub remain the durable records for work items, branches, PRs, review evidence, and delivery state.
 
+## Guided Tour
+
+  SymHarix is intentionally beginner-friendly: it guides users from a Telegram request into a tracked issue, keeps overall progress visible in preview cards, and lets the operator ask about status or blockers at any time.
+
+<p align="center">
+  <img src="./assets/readme/guided-tour-telegram.gif" alt="Telegram-guided SymHarix conversation and issue context" width="820">
+</p>
+
+  When an issue is too large, SymHarix helps split it into focused child issues. After the user confirms the split, it runs the child issues by priority until the project is complete.
+
+<p align="center">
+  <img src="./assets/readme/guided-tour-supervision.gif" alt="SymHarix issue splitting and supervised child issue execution" width="820">
+</p>
+
+  For deeper visibility, the Mini App shows the live Status Overview, code diffs, stage details, and real-time token usage for the current issue.
+
+<p align="center">
+  <img src="./assets/readme/guided-tour-miniapp.gif" alt="SymHarix Mini App status overview, diffs, and token usage" width="820">
+</p>
+
+  The SymHarix reviewer checks code from the dev agent before delivery can continue. The branch detail view makes review status and reviewer evidence visible before merge.
+
+<p align="center">
+  <img src="./assets/readme/guided-tour-review.gif" alt="SymHarix GitHub review proof and delivery state walkthrough" width="820">
+</p>
+
 ## Quick Start
 
 ```bash
