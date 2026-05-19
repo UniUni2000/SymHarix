@@ -1118,7 +1118,7 @@ describe('Orchestrator Stability', () => {
       source: 'formal' as const,
       config: {
         commands: {
-          setup: 'node -e "const fs=require(\'fs\');const p=\'setup-count.txt\';const n=fs.existsSync(p)?Number(fs.readFileSync(p,\'utf8\'))+1:1;fs.writeFileSync(p,String(n))"',
+          setup: 'p=setup-count.txt; n=1; if [ -f "$p" ]; then n=$(( $(cat "$p") + 1 )); fi; printf "%s" "$n" > "$p"',
         },
       },
       has_verification_requirements: false,
