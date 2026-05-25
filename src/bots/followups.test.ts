@@ -639,6 +639,64 @@ describe('BotFollowupService', () => {
     db.close();
   });
 
+  test('does not send Feishu-origin followups to Telegram operations chat', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const telegramNotifier = new MemoryNotifier();
+    const feishuNotifier = new MemoryNotifier();
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+
+    followups.upsert({
+      transport: 'feishu',
+      conversation_id: 'feishu-origin',
+      issue_id: 'issue-1',
+      issue_identifier: 'INT-1',
+      user_id: 'ou-user-1',
+      role: 'origin',
+    });
+
+    const service = new BotFollowupService(runtime, {
+      telegram: telegramNotifier,
+      feishu: feishuNotifier,
+    }, followups, messageStates, {
+      telegramOperationsChatId: 'telegram-ops',
+      feishuOperationsChatId: 'feishu-ops',
+      bootstrapCurrentGovernanceCards: false,
+    });
+
+    runtime.emit({
+      type: 'timeline',
+      data: {
+        id: 'event-feishu-origin',
+        issue_id: 'issue-1',
+        issue_identifier: 'INT-1',
+        timestamp: '2026-01-01T00:01:00.000Z',
+        level: 'warn',
+        category: 'diagnostic',
+        code: 'governance_blocked',
+        message: 'Split this issue before dispatch.',
+        turn: null,
+        tool_name: null,
+        detail: {
+          decision: 'split_before_implement',
+        },
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(telegramNotifier.messages).toHaveLength(0);
+    expect(feishuNotifier.messages.map((entry) => entry.recipient.conversation_id).sort()).toEqual([
+      'feishu-ops',
+      'feishu-origin',
+    ]);
+
+    service.dispose();
+    db.close();
+  });
+
   test('suppresses follow-up digests for an active supervisor session and leaves card edits to SupervisorWorker', async () => {
     const db = new Database(':memory:');
     initializeSchema(db);

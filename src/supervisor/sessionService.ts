@@ -57,6 +57,11 @@ const CANCEL_WORDS = ['取消当前计划', '取消这条计划', '结束当前�
 const FOCUS_TEXT_PATTERN = /^(?:卡片给我|卡片发我|把卡片发我|把当前卡片发我|发我卡片|发一下卡片|当前卡片|查看当前计划|看当前计划|当前计划|查看计划卡|看计划卡|计划卡给我)$/i;
 const NEW_THREAD_PREFIX = /^(新开线程|开启新线程|新建线程|另开线程)[:：\s]+/;
 const SCOPE_CHANGE_PATTERNS = [/顺便/, /另外/, /再加/, /改成/, /顺手/];
+
+function isChatIntakeSource(source: SupervisorIntakeSource | undefined): boolean {
+  return source === 'telegram_chat' || source === 'feishu_chat';
+}
+
 const ACTIVE_SESSION_STATES = new Set<SupervisorSessionState>([
   'drafting',
   'clarifying',
@@ -1524,7 +1529,7 @@ export class SupervisorSessionService {
   async respond(params: SupervisorServiceResponseParams): Promise<BotCommandResponse | null> {
     const activeSession = this.findActiveSession(params.context);
     if (!activeSession) {
-      if (params.source === 'telegram_chat') {
+      if (isChatIntakeSource(params.source)) {
         if (params.intent?.kind === 'answer_question') {
           return { message: params.intent.answer };
         }
@@ -1910,7 +1915,7 @@ export class SupervisorSessionService {
   ): Promise<BotCommandResponse> {
     const computedPlan = await this.computePlan(session, draft, runtimeContext, source);
     const shouldHoldRecommendationForTelegram = Boolean(
-      source === 'telegram_chat'
+      isChatIntakeSource(source)
       && computedPlan.approvalMode === 'auto'
       && computedPlan.state !== 'clarifying'
       && !session.root_issue_id,
@@ -2061,7 +2066,7 @@ export class SupervisorSessionService {
       && !multiObjective
       && !explicitApprovalRequested
       && governance?.decision !== 'accept_with_rewrite'
-      && source !== 'telegram_chat';
+      && !isChatIntakeSource(source);
 
     let intakeMode: SupervisorIntakeMode = 'direct_run';
     let approvalMode: SupervisorApprovalMode = 'auto';
@@ -2813,9 +2818,10 @@ export class SupervisorSessionService {
       materialKey,
       ...runtimeIssueMaterialParts(visualIssue),
     ].filter(Boolean).join('|');
-    const responseFormat = response.format ?? (session.transport === 'telegram' ? 'telegram_html' : undefined);
+    const supportsRichChatCards = session.transport === 'telegram' || session.transport === 'feishu';
+    const responseFormat = response.format ?? (supportsRichChatCards ? 'telegram_html' : undefined);
     const shouldRenderVisual =
-      session.transport === 'telegram' &&
+      supportsRichChatCards &&
       Boolean(session.plan_card) &&
       materialKey !== 'clarifying' &&
       !materialKey.startsWith('plan-memory');

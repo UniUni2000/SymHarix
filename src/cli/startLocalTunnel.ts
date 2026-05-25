@@ -1,16 +1,37 @@
-import { readSymHarixEnvTrimmed } from '../config/env';
+import { readSymHarixEnvTrimmed, setSymHarixEnv } from '../config/env';
 
 function normalizeEnvValue(value: string | undefined | null): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
 }
 
-function isEphemeralTryCloudflareUrl(value: string | null): boolean {
+export function isEphemeralTryCloudflareUrl(value: string | null): boolean {
   return Boolean(value && /^https:\/\/[a-z0-9.-]+trycloudflare\.com\/?$/i.test(value));
 }
 
 function isRecoverableTunnelWebhookError(value: string | null): boolean {
   return Boolean(value && /530|wrong response from the webhook|cloudflare|tunnel|failed to resolve host|host.*not known|dns|timed out|connection reset|fetch failed|network error/i.test(value));
+}
+
+export type StartLocalBotSurface = 'telegram' | 'feishu';
+
+export function applyStartLocalBotSurfaceIsolation(
+  env: Record<string, string | undefined>,
+  surface: StartLocalBotSurface,
+): void {
+  if (surface === 'feishu') {
+    setSymHarixEnv('SYMPHONY_TELEGRAM_BOT_TOKEN', '', env);
+    setSymHarixEnv('SYMPHONY_TELEGRAM_WEBHOOK_SECRET', '', env);
+    setSymHarixEnv('SYMPHONY_TELEGRAM_OPERATIONS_CHAT_ID', '', env);
+    setSymHarixEnv('SYMPHONY_TELEGRAM_OPERATOR_IDS', '', env);
+    setSymHarixEnv('SYMPHONY_TELEGRAM_BOOTSTRAP', 'off', env);
+    return;
+  }
+
+  setSymHarixEnv('SYMPHONY_FEISHU_APP_ID', '', env);
+  setSymHarixEnv('SYMPHONY_FEISHU_APP_SECRET', '', env);
+  setSymHarixEnv('SYMPHONY_FEISHU_OPERATIONS_CHAT_ID', '', env);
+  setSymHarixEnv('SYMPHONY_FEISHU_OPERATOR_IDS', '', env);
 }
 
 export function buildTelegramStartupSummary(telegram: {
@@ -131,20 +152,61 @@ export function getStartLocalTunnelProbeRecoveryReason(params: {
   return null;
 }
 
+export function getStartLocalTunnelRegistrationWaitReason(params: {
+  expectedPublicBaseUrl?: string | null;
+  status?: number | null;
+  errorMessage?: string | null;
+}): string | null {
+  const expectedBaseUrl = normalizeEnvValue(params.expectedPublicBaseUrl ?? undefined);
+  if (!isEphemeralTryCloudflareUrl(expectedBaseUrl)) {
+    return null;
+  }
+
+  const errorMessage = normalizeEnvValue(params.errorMessage ?? undefined);
+  if (errorMessage) {
+    return `public tunnel not registered yet: ${errorMessage}`;
+  }
+
+  if (params.status === 530) {
+    return 'public tunnel not registered yet: status 530';
+  }
+
+  return null;
+}
+
 export function shouldProvisionStartLocalTunnel(
   env: Record<string, string | undefined>,
+  surface: StartLocalBotSurface = 'telegram',
 ): boolean {
-  if (!readSymHarixEnvTrimmed('SYMPHONY_TELEGRAM_BOT_TOKEN', env)) {
-    return false;
-  }
-  if (readSymHarixEnvTrimmed('SYMPHONY_TELEGRAM_BOOTSTRAP', env)?.toLowerCase() === 'off') {
-    return false;
-  }
   const publicBaseUrl = readSymHarixEnvTrimmed('SYMPHONY_PUBLIC_BASE_URL', env);
   if (publicBaseUrl && !isEphemeralTryCloudflareUrl(publicBaseUrl)) {
     return false;
   }
-  return true;
+
+  if (surface === 'telegram') {
+    if (!readSymHarixEnvTrimmed('SYMPHONY_TELEGRAM_BOT_TOKEN', env)) {
+      return false;
+    }
+    if (readSymHarixEnvTrimmed('SYMPHONY_TELEGRAM_BOOTSTRAP', env)?.toLowerCase() === 'off') {
+      return false;
+    }
+    return true;
+  }
+
+  if (!readSymHarixEnvTrimmed('SYMPHONY_FEISHU_APP_ID', env) || !readSymHarixEnvTrimmed('SYMPHONY_FEISHU_APP_SECRET', env)) {
+    return false;
+  }
+
+  const tunnelMode = readSymHarixEnvTrimmed('SYMPHONY_FEISHU_RUNTIME_TUNNEL', env)?.toLowerCase() ?? 'auto';
+  if (tunnelMode === 'off' || tunnelMode === 'false' || tunnelMode === '0') {
+    return false;
+  }
+  if (tunnelMode === 'on' || tunnelMode === 'true' || tunnelMode === '1') {
+    return true;
+  }
+
+  const openMode = readSymHarixEnvTrimmed('SYMPHONY_FEISHU_RUNTIME_OPEN_MODE', env)?.toLowerCase() ?? 'url';
+  return openMode === 'applink_web_url';
 }
 
 export function hasHttpProxyEnv(env: Record<string, string | undefined>): boolean {

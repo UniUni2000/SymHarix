@@ -18,7 +18,7 @@ import { isSupervisorControlPlaneQuestion } from '../bots/controlPlaneIntent';
 import { readSymHarixEnv } from '../config/env';
 
 export interface SupervisorAgentRuntimeContext {
-  source: 'telegram_chat' | 'slash_command' | 'inline_action';
+  source: 'telegram_chat' | 'feishu_chat' | 'slash_command' | 'inline_action';
   transport?: string;
   conversationId?: string;
   defaultProjectSlug: string | null;

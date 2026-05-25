@@ -4,7 +4,9 @@
   "type": "module",
   "scripts": {
     "setup": "bun install && (test -f .env || cp .env.example .env) && (test -f WORKFLOW.md || cp WORKFLOW.md.example WORKFLOW.md)",
-    "start": "bun run setup && bun --env-file=.env run src/cli/startLocal.ts",
+    "start": "bun run start:telegram",
+    "start:telegram": "bun run setup && bun --env-file=.env run src/cli/startLocal.ts --bot=telegram",
+    "start:feishu": "bun run setup && bun --env-file=.env run src/cli/startLocal.ts --bot=feishu",
     "stop": "bun --env-file=.env run src/cli/index.ts --kill",
     "health": "curl -fsS http://localhost:${PORT:-3000}/api/v1/runtime/manifest && echo && curl -fsS http://localhost:${PORT:-3000}/api/v1/bots/manifest",
     "test": "bun test",
@@ -15,6 +17,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",
+    "@larksuiteoapi/node-sdk": "^1.47.1",
     "@resvg/resvg-js": "^2.6.2",
     "chokidar": "^3.6.0",
     "dotenv": "^17.4.2",

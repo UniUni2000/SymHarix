@@ -1,6 +1,6 @@
 import type { CreateIssueRequest, RuntimeControlPlane, RuntimeStreamEvent } from '../runtime/types';
 
-export type BotTransport = 'telegram' | 'discord';
+export type BotTransport = 'telegram' | 'discord' | 'feishu';
 export type BotWatchPreset = 'default' | 'verbose' | 'failures' | 'status';
 export type BotCommandName =
   | 'help'
@@ -65,6 +65,7 @@ export interface BotTransportMessage {
   reply_to_message_id?: string | number | null;
   actions?: BotTransportAction[];
   action_rows?: BotTransportAction[][];
+  force_card?: boolean;
 }
 
 export type BotMessageEditFailureKind =
@@ -283,6 +284,7 @@ export type RuntimeEventListener = (event: RuntimeStreamEvent) => void;
 
 export type SupervisorIntakeSource =
   | 'telegram_chat'
+  | 'feishu_chat'
   | 'slash_command'
   | 'inline_action';
 

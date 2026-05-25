@@ -767,7 +767,6 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="dark light" />
     <title>SymHarix issue cockpit · ${escapedIssueId}</title>
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
       :root {
         --miniapp-width: 390px;
@@ -2359,15 +2358,28 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           stream: '/api/v1/runtime/stream',
           themePreference: '/api/v1/runtime/telegram/theme-preference'
         };
-        const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+        let tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+        let telegramThemeEventBound = false;
+        let telegramSdkLoadStarted = false;
         function applyTelegramThemeParams() {
           if (!tg) return;
           document.documentElement.style.setProperty('--tg-bg', tg.themeParams && tg.themeParams.bg_color || '#061018');
         }
-        if (tg) {
-          tg.ready();
-          tg.expand();
-          applyTelegramThemeParams();
+        function bindTelegramBridge() {
+          const nextTelegram = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+          if (!nextTelegram) return false;
+          tg = nextTelegram;
+          try {
+            tg.ready();
+            tg.expand();
+            applyTelegramThemeParams();
+          } catch (_error) {
+          }
+          return true;
+        }
+        function hasTelegramLaunchParams() {
+          const launchParams = String(window.location.hash || '') + '&' + String(window.location.search || '');
+          return /(?:^|[&#?])tgWebApp(?:Data|Version|Platform|ThemeParams)=/.test(launchParams);
         }
 
         function telegramColorScheme() {
@@ -2420,6 +2432,7 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           timeline: [],
           history: null,
           stream: null,
+          pollTimer: null,
           activeTab: 'overview',
           heroExpanded: false,
           renderedDiffFiles: [],
@@ -2427,6 +2440,37 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           lang: storedLang || null,
           langInitialized: storedLang === 'en' || storedLang === 'zh'
         };
+        function bindTelegramThemeEvent() {
+          if (!tg || telegramThemeEventBound || typeof tg.onEvent !== 'function') return;
+          telegramThemeEventBound = true;
+          tg.onEvent('themeChanged', function () {
+            const nextTheme = telegramColorScheme();
+            if (!nextTheme) return;
+            state.theme = nextTheme;
+            render();
+          });
+        }
+        function loadTelegramSdkNonBlocking() {
+          if (tg || telegramSdkLoadStarted || !hasTelegramLaunchParams()) return;
+          telegramSdkLoadStarted = true;
+          const script = document.createElement('script');
+          script.src = 'https://telegram.org/js/telegram-web-app.js';
+          script.async = true;
+          script.onload = function () {
+            if (!bindTelegramBridge()) return;
+            const nextTheme = telegramColorScheme();
+            if (nextTheme) {
+              state.theme = nextTheme;
+            }
+            bindTelegramThemeEvent();
+            render();
+            syncTelegramThemePreference(true);
+          };
+          script.onerror = function () {
+            telegramSdkLoadStarted = false;
+          };
+          document.head.appendChild(script);
+        }
         const el = {
           hero: document.getElementById('hero'),
           heroDetails: document.getElementById('hero-details'),
@@ -4233,6 +4277,14 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           }
         }
         function openStream() {
+          if (!hasTelegramLaunchParams()) {
+            if (state.pollTimer) return;
+            state.pollTimer = window.setInterval(() => {
+              load().catch((_error) => {
+              });
+            }, 5000);
+            return;
+          }
           try {
             state.stream = new EventSource(urls.stream);
             state.stream.addEventListener('issue', (event) => {
@@ -4347,14 +4399,9 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         el.diffDrawerBackdrop.addEventListener('click', () => {
           closeDiffDrawer();
         });
-        if (tg && typeof tg.onEvent === 'function') {
-          tg.onEvent('themeChanged', function () {
-            const nextTheme = telegramColorScheme();
-            if (!nextTheme) return;
-            state.theme = nextTheme;
-            render();
-          });
-        }
+        bindTelegramBridge();
+        bindTelegramThemeEvent();
+        loadTelegramSdkNonBlocking();
         applyPreferences();
         load().then(openStream).catch((error) => {
           renderLoadError(error);

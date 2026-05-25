@@ -24,7 +24,7 @@ bun run health
 bash scripts/install-systemd-service.sh
 ```
 
-`start` is the preferred local entrypoint. It keeps existing files, prepares Telegram proxy/tunnel behavior, starts the service, and prints a Telegram startup summary when possible.
+`start` is the default Telegram local entrypoint. Use `bun run start:telegram` explicitly for Telegram, or `bun run start:feishu` for a Feishu-only local run. Each start command isolates the opposite chat surface in the child process environment, so Feishu does not require Telegram variables and Telegram does not require Feishu variables.
 
 Use another port with:
 
@@ -59,11 +59,12 @@ The fastest way to reason about startup is by responsibility:
 
 | Area | Configure | Why |
 | --- | --- | --- |
-| Tracker | `SYMHARIX_TRACKER_KIND=linear`, `SYMHARIX_TRACKER_API_KEY`, `SYMHARIX_TRACKER_PROJECT_SLUG` | Linear supplies the work-item state machine and the default project for Telegram/Runtime-created issues. |
+| Tracker | `SYMHARIX_TRACKER_KIND=linear`, `SYMHARIX_TRACKER_API_KEY`, `SYMHARIX_TRACKER_PROJECT_SLUG` | Linear supplies the work-item state machine and the default project for Telegram/Feishu/Runtime-created issues. |
 | GitHub access | `GITHUB_TOKEN` | The token must reach every repository declared in `WORKFLOW.md -> repositories.routing`. |
 | Agent runtime | `ANTHROPIC_API_KEY` | The bundled Claude-compatible runtime uses it for execution and repo understanding unless the runner is replaced. |
 | Repository routing | `WORKFLOW.md -> repositories.routing` | The route key must match the Linear `project_slug`; missing routes fail closed before workspace creation. |
-| Telegram transport | `SYMHARIX_TELEGRAM_BOT_TOKEN`, `SYMHARIX_TELEGRAM_WEBHOOK_SECRET`, `SYMHARIX_TELEGRAM_OPERATOR_IDS` | The token enables Telegram, the secret protects webhook ingress, and operator ids restrict write-capable actions. |
+| Telegram transport | `SYMHARIX_TELEGRAM_BOT_TOKEN`, `SYMHARIX_TELEGRAM_WEBHOOK_SECRET`, `SYMHARIX_TELEGRAM_OPERATOR_IDS` | Required only for `start:telegram`. The token enables Telegram, the secret protects webhook ingress, and operator ids restrict write-capable actions. |
+| Feishu transport | `SYMHARIX_FEISHU_APP_ID`, `SYMHARIX_FEISHU_APP_SECRET`, `SYMHARIX_FEISHU_OPERATOR_IDS` | Required only for `start:feishu`. App id/secret enable Feishu long connection mode, and operator ids restrict write-capable actions. |
 | Public ingress | `SYMHARIX_PUBLIC_BASE_URL` or temporary tunnel mode | Webhook and Mini App features need a stable publicly reachable HTTPS URL in production. |
 | Runtime writes | `SYMHARIX_RUNTIME_WRITE_TOKEN` | Optional locally, but recommended before exposing Runtime Deck/API write actions publicly. |
 
@@ -115,6 +116,18 @@ bash scripts/check-runtime.sh
 Leaving `SYMHARIX_RUNTIME_WRITE_TOKEN` blank is convenient for local development. Set it before exposing `/runtime` publicly.
 
 Runtime issue detail restores token usage from persisted agent runs, so completed issues can still show usage after the live orchestrator snapshot is gone. Mini App history also tries workspace diffs, merge commits, and active PR heads before falling back to compact history text.
+
+### Chat Surface Selection
+
+Telegram and Feishu are optional product surfaces over the same Supervisor runtime. Configure at least one:
+
+| Goal | Required chat config | Start command |
+| --- | --- | --- |
+| Telegram only | Telegram variables; leave Feishu blank | `bun run start:telegram` or `bun run start` |
+| Feishu only | Feishu variables; leave Telegram blank | `bun run start:feishu` |
+| Both configured in `.env` | Both variable groups | Use the surface-specific start command for the process you want |
+
+`start:feishu` clears Telegram token, webhook, operator, operations-chat, and bootstrap values only inside the launched child process. It does not rewrite `.env`. Follow-up delivery is also origin-scoped: Feishu-origin issues notify Feishu recipients, and Telegram-origin issues notify Telegram recipients.
 
 ### Telegram
 
@@ -172,6 +185,51 @@ curl http://localhost:3000/api/v1/bots/manifest
 ```
 
 Check `health`, `webhook_url`, `public_base_url`, `mini_app_base_url`, pending update count, and last webhook error.
+
+### Feishu
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `SYMHARIX_FEISHU_APP_ID` | for Feishu | Feishu custom app ID. Leave blank to disable Feishu. |
+| `SYMHARIX_FEISHU_APP_SECRET` | for Feishu | Feishu custom app secret used to obtain `tenant_access_token`. |
+| `SYMHARIX_FEISHU_OPERATOR_IDS` | recommended | Comma-separated `open_id`, `user_id`, or `union_id` values allowed to run write actions. |
+| `SYMHARIX_FEISHU_OPERATIONS_CHAT_ID` | optional | Fixed operations chat. You can read the `chat_id` from a Feishu message event. |
+| `SYMHARIX_FEISHU_API_BASE_URL` | optional | OpenAPI base, defaulting to `https://open.feishu.cn/open-apis`. |
+| `SYMHARIX_PUBLIC_BASE_URL` | optional | Only needed if you want Feishu cards to open local Mini App/runtime web URLs through a public HTTPS base. Not required for long connection events. |
+| `SYMHARIX_FEISHU_RUNTIME_OPEN_MODE` | optional | Runtime button open mode. `url` uses a normal link; `applink_web_app` uses a Feishu web app AppLink; `applink_web_url` uses a Feishu web URL AppLink. |
+| `SYMHARIX_FEISHU_RUNTIME_TUNNEL` | optional | `auto` creates a temporary runtime tunnel for `applink_web_url` when no public base is configured, so mobile Feishu can open the runtime view. Use `off` to disable or `on` to force it. |
+| `SYMHARIX_FEISHU_TUNNEL_PROTOCOL` | optional | Runtime tunnel protocol. Defaults to `auto` for Feishu so it does not inherit Telegram's `http2` setting. Try `http2` or `quic` if your network is picky. |
+| `SYMHARIX_FEISHU_TUNNEL_TIMEOUT_MS` / `SYMHARIX_FEISHU_TUNNEL_RETRY_ATTEMPTS` / `SYMHARIX_FEISHU_TUNNEL_RETRY_DELAY_MS` | optional | Timeout and retry controls for creating the temporary Feishu runtime tunnel. Defaults to `45000ms`, `3`, and `1500ms`. |
+| `SYMHARIX_FEISHU_TUNNEL_READY_ATTEMPTS` / `SYMHARIX_FEISHU_TUNNEL_READY_DELAY_MS` | optional | Attempts and delay for waiting until the temporary Cloudflare tunnel stops returning 530 before publishing it to cards. Defaults to `60` attempts at `1000ms`. |
+| `SYMHARIX_FEISHU_RUNTIME_APPLINK_MODE` | optional | AppLink open mode, defaulting to `window`; try `sidebar` if you prefer a side panel. |
+| `SYMHARIX_FEISHU_RUNTIME_APPLINK_WIDTH` / `SYMHARIX_FEISHU_RUNTIME_APPLINK_HEIGHT` | optional | Desktop Feishu AppLink window size. |
+| `SYMHARIX_FEISHU_RUNTIME_APPLINK_TEMPLATE` | optional | Custom AppLink template. Supports `{appId}`, `{url}`, `{path}`, `{encodedUrl}`, and `{encodedPath}`. |
+
+For local Feishu testing, use `bun run start:feishu`. Feishu long connection message intake does not require a public webhook URL, Verification Token, or Encrypt Key. If `applink_web_url` is enabled and `SYMHARIX_PUBLIC_BASE_URL` is blank, the launcher attempts to create a temporary `trycloudflare.com` runtime tunnel and uses it only for Mini App links such as "Open Runtime View"; Feishu events still use persistent connection mode.
+
+If mobile Feishu clients need to open the runtime view remotely, use one of these:
+
+| Mode | Config |
+| --- | --- |
+| Stable public ingress | `SYMHARIX_PUBLIC_BASE_URL=https://your-domain.example` |
+| Local development tunnel | `SYMHARIX_FEISHU_RUNTIME_OPEN_MODE=applink_web_url` and `SYMHARIX_FEISHU_RUNTIME_TUNNEL=auto` or `on` |
+
+To discover your operator id, leave `SYMHARIX_FEISHU_OPERATOR_IDS` blank for the first run, send a message to the Feishu bot, then copy the `user_id=...` value from the SymHarix startup logs into the env var. The received value is normally the sender `open_id` (`ou_...`).
+
+Minimum Feishu app permissions:
+
+| Scope | Purpose |
+| --- | --- |
+| `im:message.group_at_msg.include_bot:readonly` | Receive group messages that mention the current bot and include other bots/users. |
+| `im:message.group_at_msg:readonly` | Receive group messages where users mention the bot. |
+| `im:message.p2p_msg:readonly` | Receive direct messages sent to the bot. |
+| `im:message:send_as_bot` | Reply as the bot. |
+| `im:message:update` | Edit sent messages/cards for Plan Card and runtime-card updates. |
+| `im:resource` | Upload and display card image/file resources. |
+
+After changing permissions, publish the app again and restart SymHarix so the tenant access token is refreshed.
+
+The Feishu adapter mirrors the core Telegram supervisor loop: natural-language intake, slash commands, repo switching, Plan Cards/runtime cards, approval/retry/stop buttons, proactive follow-ups, and a fixed operations chat. Enable bot capability in the Feishu app, set Events and Callbacks to persistent connection mode, then add `im.message.receive_v1` and `card.action.trigger`.
 
 ### Bot LLM
 

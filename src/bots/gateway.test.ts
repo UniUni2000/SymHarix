@@ -21,6 +21,7 @@ import {
 } from '../database';
 import { BotCommandService } from './commandService';
 import { BotSubscriptionService } from './subscriptions';
+import type { FeishuLongConnectionHandlers } from './feishu';
 import { SupervisorAgentRuntimeService, type SupervisorModelLoop } from '../supervisor/agentRuntime';
 import { SupervisorSessionService } from '../supervisor/sessionService';
 
@@ -595,6 +596,21 @@ describe('DefaultBotGateway', () => {
           watch_supported: true,
           write_requires_operator: true,
           inbound_path: '/api/v1/bots/discord/interactions',
+        },
+        feishu: {
+          enabled: false,
+          inbound_enabled: false,
+          outbound_enabled: false,
+          watch_supported: false,
+          write_requires_operator: false,
+          inbound_path: 'long_connection',
+          proactive_followups_supported: false,
+          inline_actions_supported: false,
+          operations_chat_configured: false,
+          health: 'unconfigured',
+          webhook_url: null,
+          public_base_url: null,
+          mini_app_base_url: null,
         },
       },
       commands: ['help', 'clear', 'status', 'new', 'project', 'watch', 'unwatch', 'stop', 'retry', 'close', 'supersede', 'override', 'rewrite', 'split'],
@@ -5056,6 +5072,338 @@ describe('DefaultBotGateway', () => {
 
     expect(result.status).toBe(401);
     expect(result.body.error).toBe('Invalid Telegram webhook secret');
+  });
+
+  test('handles Feishu long connection message events with the same command path as Telegram', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const feishuFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, init });
+      if (url.endsWith('/auth/v3/tenant_access_token/internal')) {
+        return new Response(JSON.stringify({
+          code: 0,
+          msg: 'ok',
+          tenant_access_token: 'tenant-token',
+          expire: 7200,
+        }));
+      }
+      if (url.includes('/im/v1/messages?receive_id_type=chat_id')) {
+        return new Response(JSON.stringify({
+          code: 0,
+          msg: 'ok',
+          data: { message_id: 'om_out' },
+        }));
+      }
+      return new Response(JSON.stringify({ code: 0, msg: 'ok', data: {} }));
+    }) as typeof fetch;
+    let handlers: FeishuLongConnectionHandlers | null = null;
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: null,
+        webhookSecret: null,
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        feishuConfig: {
+          appId: 'cli_a',
+          appSecret: 'secret',
+          operationsChatId: null,
+          operatorIds: new Set(['ou_user']),
+          apiBaseUrl: 'https://open.feishu.test/open-apis',
+          publicBaseUrl: null,
+        },
+        feishuFetch,
+        feishuLongConnectionFactory: () => ({
+          start: async (nextHandlers) => {
+            handlers = nextHandlers;
+          },
+          dispose: () => {},
+        }),
+        startupRepairDelayMs: 10_000,
+      },
+    );
+
+    await gateway.initializeInboundIntegration({ localBaseUrl: 'http://127.0.0.1:3000' });
+    await handlers?.onMessageEvent({
+      event_id: 'event-1',
+      sender: {
+        sender_type: 'user',
+        sender_id: { open_id: 'ou_user' },
+      },
+      message: {
+        message_id: 'om_in',
+        chat_id: 'oc_chat',
+        message_type: 'text',
+        content: JSON.stringify({ text: '/status' }),
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const sendCall = calls.find((call) => call.url.includes('/im/v1/messages?receive_id_type=chat_id'));
+    expect(sendCall).toBeTruthy();
+    const sendBody = JSON.parse(String(sendCall?.init?.body ?? '{}'));
+    expect(sendBody.receive_id).toBe('oc_chat');
+    expect(sendBody.msg_type).toBe('text');
+    expect(JSON.parse(sendBody.content).text).toContain('SymHarix runtime');
+    gateway.dispose();
+  });
+
+  test('handles Feishu long connection card button callbacks by editing the originating message', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const feishuFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, init });
+      if (url.endsWith('/auth/v3/tenant_access_token/internal')) {
+        return new Response(JSON.stringify({
+          code: 0,
+          msg: 'ok',
+          tenant_access_token: 'tenant-token',
+          expire: 7200,
+        }));
+      }
+      return new Response(JSON.stringify({ code: 0, msg: 'ok', data: { message_id: 'om_card' } }));
+    }) as typeof fetch;
+    let handlers: FeishuLongConnectionHandlers | null = null;
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: null,
+        webhookSecret: null,
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        feishuConfig: {
+          appId: 'cli_a',
+          appSecret: 'secret',
+          operationsChatId: null,
+          operatorIds: new Set(['ou_user']),
+          apiBaseUrl: 'https://open.feishu.test/open-apis',
+          publicBaseUrl: null,
+        },
+        feishuFetch,
+        feishuLongConnectionFactory: () => ({
+          start: async (nextHandlers) => {
+            handlers = nextHandlers;
+          },
+          dispose: () => {},
+        }),
+        startupRepairDelayMs: 10_000,
+      },
+    );
+
+    await gateway.initializeInboundIntegration({ localBaseUrl: 'http://127.0.0.1:3000' });
+    const result = await handlers?.onCardActionEvent({
+      event_id: 'event-card-1',
+      operator: {
+        open_id: 'ou_user',
+      },
+      context: {
+        open_chat_id: 'oc_chat',
+        open_message_id: 'om_card',
+      },
+      action: {
+        value: {
+          callback_data: 'rt|INT-1|refresh',
+        },
+      },
+    });
+
+    expect(result?.toast).toEqual({ type: 'info', content: '已刷新' });
+    const editCall = calls.find((call) => call.url.endsWith('/im/v1/messages/om_card'));
+    expect(editCall?.init?.method).toBe('PATCH');
+    const editBody = JSON.parse(String(editCall?.init?.body ?? '{}'));
+    expect(editBody.msg_type).toBeUndefined();
+    expect(JSON.parse(editBody.content).config.update_multi).toBe(true);
+    gateway.dispose();
+  });
+
+  test('handles Feishu pending confirmation cards with the SDK card action operator shape', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const supervisorPendingActions = new SupervisorPendingActionRepository(db);
+    const followupMessageStates = new BotFollowupMessageStateRepository(db);
+    supervisorPendingActions.create({
+      id: 'pending-feishu-1',
+      run_id: 'run-feishu-1',
+      transport: 'feishu',
+      conversation_id: 'oc_chat',
+      user_id: 'ou_user',
+      tool_name: 'create_issue',
+      tool_args: {},
+      policy_decision: { risk: 'write', decision: 'confirm' },
+      reason: 'Create issue from Feishu',
+      summary_message: 'Action: create issue',
+      telegram_message_id: 'om_pending',
+      status: 'pending_confirm',
+      expires_at: new Date(Date.now() + 15 * 60 * 1000),
+    });
+    const issue = {
+      issue_id: 'issue-200',
+      work_item_id: 'issue-200',
+      identifier: 'INT-200',
+      title: 'Update myworld.py output',
+      phase: 'DEV',
+      tracker_state: 'In Progress',
+      orchestrator_state: 'workspace_ready',
+      workspace_path: null,
+      branch_name: 'feature/int-200',
+      github_repo: 'DingfangHu/my-symphony-test',
+      github_issue_number: 200,
+      active_pr_number: null,
+      session: null,
+      actions: {
+        can_stop: true,
+        can_retry: false,
+        can_open_pr: false,
+      },
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+    };
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const feishuFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, init });
+      if (url.endsWith('/auth/v3/tenant_access_token/internal')) {
+        return new Response(JSON.stringify({
+          code: 0,
+          msg: 'ok',
+          tenant_access_token: 'tenant-token',
+          expire: 7200,
+        }));
+      }
+      if (url.endsWith('/im/v1/images')) {
+        return new Response(JSON.stringify({
+          code: 0,
+          msg: 'ok',
+          data: { image_key: 'img_v2_card' },
+        }));
+      }
+      return new Response(JSON.stringify({ code: 0, msg: 'ok', data: { message_id: 'om_pending' } }));
+    }) as typeof fetch;
+    let handlers: FeishuLongConnectionHandlers | null = null;
+    const respondCanWrite: Array<boolean | undefined> = [];
+    const gateway = new DefaultBotGateway(
+      {
+        ...createRuntimeControlPlane(),
+        getIssue: (id: string) => ['issue-200', 'INT-200'].includes(id) ? issue as RuntimeIssueView : null,
+        getOverview: () => ({
+          generated_at: '2026-01-01T00:00:00.000Z',
+          counts: { running: 1, retrying: 0, total: 1 },
+          issues: [issue as RuntimeIssueView],
+        }),
+      } as RuntimeControlPlane,
+      {
+        botToken: null,
+        webhookSecret: null,
+        operationsChatId: null,
+        operatorIds: new Set(),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      {
+        supervisorAgentRuntimeService: {
+          respond: async (request: { canWrite?: boolean }) => {
+            respondCanWrite.push(request.canWrite);
+            return {
+              message: 'Issue Card · INT-200',
+              caption: '<b>INT-200 · Update myworld.py output</b>',
+              format: 'telegram_html',
+              media_key: 'issue-card|INT-200|workspace_ready',
+              photo: {
+                bytes: new Uint8Array([137, 80, 78, 71]),
+                filename: 'INT-200-issue-card.png',
+                content_type: 'image/png',
+              },
+              show_caption_above_media: false,
+              issue_id: 'issue-200',
+              action_rows: [[
+                { label: '刷新卡片', callback_data: 'rt|INT-200|refresh' },
+                { label: '打开运行视图', style: 'primary', web_app: { url: '/runtime/issues/INT-200/app' } },
+              ]],
+            };
+          },
+        } as unknown as SupervisorAgentRuntimeService,
+        supervisorPendingActionRepository: supervisorPendingActions,
+        followupMessageStateRepository: followupMessageStates,
+        feishuConfig: {
+          appId: 'cli_a',
+          appSecret: 'secret',
+          operationsChatId: null,
+          operatorIds: new Set(['ou_user']),
+          apiBaseUrl: 'https://open.feishu.test/open-apis',
+          publicBaseUrl: null,
+        },
+        feishuFetch,
+        feishuLongConnectionFactory: () => ({
+          start: async (nextHandlers) => {
+            handlers = nextHandlers;
+          },
+          dispose: () => {},
+        }),
+        startupRepairDelayMs: 10_000,
+      },
+    );
+
+    await gateway.initializeInboundIntegration({ localBaseUrl: 'http://127.0.0.1:3000' });
+    const result = await handlers?.onCardActionEvent({
+      event_id: 'event-feishu-confirm-1',
+      operator: {
+        open_id: 'ou_user',
+        name: 'Alice',
+      },
+      context: {
+        open_chat_id: 'oc_chat',
+        open_message_id: 'om_pending',
+      },
+      action: {
+        value: {
+          callback_data: 'pending|confirm',
+        },
+      },
+    });
+
+    expect(result?.toast).toEqual({ type: 'info', content: '已执行' });
+    expect(respondCanWrite).toEqual([true]);
+    const editCall = calls.find((call) => call.url.endsWith('/im/v1/messages/om_pending'));
+    expect(editCall?.init?.method).toBe('PATCH');
+    const editBody = JSON.parse(String(editCall?.init?.body ?? '{}'));
+    const card = JSON.parse(String(editBody.content ?? '{}'));
+    expect(card.config.update_multi).toBe(true);
+    expect(JSON.stringify(card)).toContain('INT-200');
+    expect(JSON.stringify(card)).toContain('http://127.0.0.1:3000/runtime/issues/INT-200/app');
+    expect(JSON.stringify(card)).not.toContain('rt|INT-200|open');
+    expect(
+      followupMessageStates.findByConversationIssue({
+        transport: 'feishu',
+        conversation_id: 'oc_chat',
+        issue_id: 'issue-200',
+      })?.message_id,
+    ).toBe('om_pending');
+
+    gateway.dispose();
+    db.close();
   });
 
   test('handles Discord ping and slash commands with a verifier', async () => {

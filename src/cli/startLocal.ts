@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { execSync, spawn, type ChildProcess } from 'child_process';
+import { execSync, spawn, spawnSync, type ChildProcess } from 'child_process';
 import * as net from 'net';
 import * as path from 'path';
 import { createCloudflaredTunnelProvider, type TelegramTunnelHandle } from '../bots/telegramBootstrap';
@@ -15,19 +15,65 @@ import { loadWorkflow, resolveWorkflowPath } from '../workflow/loader';
 import { buildServiceConfig } from '../config/loader';
 import {
   buildTelegramStartupSummary,
+  applyStartLocalBotSurfaceIsolation,
   applyProxyEnv,
   disableProxyEnv,
   ensureNoProxyForLocalhost,
   getStartLocalTunnelProbeRecoveryReason,
+  getStartLocalTunnelRegistrationWaitReason,
   getStartLocalTunnelRecoveryReason,
   hasHttpProxyEnv,
+  isEphemeralTryCloudflareUrl,
   resolveStartLocalPort,
   shouldEmitTelegramStartupSummary,
   shouldProvisionStartLocalTunnel,
+  type StartLocalBotSurface,
 } from './startLocalTunnel';
 
 const projectRoot = path.resolve(__dirname, '../..');
 syncSymHarixEnvAliases(process.env);
+
+function parseStartLocalArgs(args: string[]): {
+  surface: StartLocalBotSurface;
+  serviceArgs: string[];
+} {
+  let surface: StartLocalBotSurface = 'telegram';
+  const serviceArgs: string[] = [];
+  const readSurface = (value: string | undefined): StartLocalBotSurface => {
+    if (value === 'telegram' || value === 'feishu') {
+      return value;
+    }
+    throw new Error(`Unsupported start bot surface: ${value ?? '(missing)'}. Use telegram or feishu.`);
+  };
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === '--bot' || arg === '--surface') {
+      surface = readSurface(args[index + 1]);
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('--bot=')) {
+      surface = readSurface(arg.slice('--bot='.length));
+      continue;
+    }
+    if (arg.startsWith('--surface=')) {
+      surface = readSurface(arg.slice('--surface='.length));
+      continue;
+    }
+    if (arg === '--telegram') {
+      surface = 'telegram';
+      continue;
+    }
+    if (arg === '--feishu') {
+      surface = 'feishu';
+      continue;
+    }
+    serviceArgs.push(arg);
+  }
+
+  return { surface, serviceArgs };
+}
 
 function portHasListener(port: number): boolean {
   try {
@@ -104,24 +150,31 @@ async function detectLocalHttpProxy(): Promise<string | null> {
   return null;
 }
 
-async function configureStartLocalProxyEnv(env: Record<string, string | undefined>): Promise<void> {
+async function configureStartLocalProxyEnv(
+  env: Record<string, string | undefined>,
+  label = 'Telegram',
+): Promise<void> {
   const proxyMode = readSymHarixEnvTrimmed('SYMPHONY_PROXY_MODE', env)?.toLowerCase() || 'auto';
   if (proxyMode === 'off') {
-    setSymHarixEnv('SYMPHONY_TELEGRAM_DISABLE_PROXY', '1', env);
+    if (label === 'Telegram') {
+      setSymHarixEnv('SYMPHONY_TELEGRAM_DISABLE_PROXY', '1', env);
+    }
     console.log(
-      '[symharix] start:local Telegram proxy disabled by SYMHARIX_PROXY_MODE=off (legacy SYMPHONY_PROXY_MODE also accepted)',
+      `[symharix] start:local ${label} proxy disabled by SYMHARIX_PROXY_MODE=off (legacy SYMPHONY_PROXY_MODE also accepted)`,
     );
     return;
   }
 
-  deleteSymHarixEnv('SYMPHONY_TELEGRAM_DISABLE_PROXY', env);
+  if (label === 'Telegram') {
+    deleteSymHarixEnv('SYMPHONY_TELEGRAM_DISABLE_PROXY', env);
+  }
 
   const configuredProxy = readSymHarixEnvTrimmed('SYMPHONY_PROXY_URL', env);
   if (configuredProxy) {
     applyProxyEnv(env, configuredProxy);
     ensureNoProxyForLocalhost(env);
     console.log(
-      `[symharix] start:local using Telegram proxy from SYMHARIX_PROXY_URL (legacy SYMPHONY_PROXY_URL also accepted): ${configuredProxy}`,
+      `[symharix] start:local using ${label} proxy from SYMHARIX_PROXY_URL (legacy SYMPHONY_PROXY_URL also accepted): ${configuredProxy}`,
     );
     return;
   }
@@ -134,7 +187,7 @@ async function configureStartLocalProxyEnv(env: Record<string, string | undefine
       env.HTTPS_PROXY = env.HTTP_PROXY;
     }
     ensureNoProxyForLocalhost(env);
-    console.log('[symharix] start:local using existing HTTP_PROXY/HTTPS_PROXY for Telegram API calls');
+    console.log(`[symharix] start:local using existing HTTP_PROXY/HTTPS_PROXY for ${label}`);
     return;
   }
 
@@ -147,10 +200,10 @@ async function configureStartLocalProxyEnv(env: Record<string, string | undefine
   if (detectedProxy) {
     applyProxyEnv(env, detectedProxy);
     ensureNoProxyForLocalhost(env);
-    console.log(`[symharix] start:local detected local Telegram proxy: ${detectedProxy}`);
+    console.log(`[symharix] start:local detected local ${label} proxy: ${detectedProxy}`);
   } else {
     ensureNoProxyForLocalhost(env);
-    console.log('[symharix] start:local no local Telegram proxy detected; continuing without proxy');
+    console.log(`[symharix] start:local no local ${label} proxy detected; continuing without proxy`);
   }
 }
 
@@ -178,6 +231,26 @@ function resolvePositiveIntegerEnv(
 ): number {
   const parsed = Number.parseInt(readSymHarixEnv(name, env) || '', 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function resolvePositiveIntegerEnvAny(
+  env: Record<string, string | undefined>,
+  names: string[],
+  fallback: number,
+): number {
+  for (const name of names) {
+    const parsed = Number.parseInt(readSymHarixEnv(name, env) || '', 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+  return fallback;
+}
+
+function isQuickTunnelRateLimitedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /quick tunnel|trycloudflare|cloudflare tunnel/i.test(message)
+    && /429|too many requests|error code:\s*1015/i.test(message);
 }
 
 type TelegramManifestSnapshot = {
@@ -229,6 +302,138 @@ async function probePublicTunnelReachability(publicBaseUrl: string): Promise<{
   }
 }
 
+function probePublicTunnelReachabilityWithCurl(
+  publicBaseUrl: string,
+  env: Record<string, string | undefined>,
+): {
+  status: number | null;
+  errorMessage: string | null;
+} {
+  const result = spawnSync(
+    'curl',
+    [
+      '-sS',
+      '-o',
+      '/dev/null',
+      '-w',
+      '%{http_code}',
+      '--max-time',
+      '5',
+      '--connect-timeout',
+      '5',
+      publicBaseUrl,
+    ],
+    {
+      env,
+      encoding: 'utf8',
+    },
+  );
+
+  const rawStatus = result.stdout.trim();
+  const status = /^\d{3}$/.test(rawStatus) && rawStatus !== '000'
+    ? Number.parseInt(rawStatus, 10)
+    : null;
+  if (status !== null) {
+    return { status, errorMessage: null };
+  }
+
+  const stderr = result.stderr.trim();
+  const errorMessage = stderr
+    || result.error?.message
+    || (rawStatus === '000' ? 'curl could not reach public tunnel' : null);
+  return { status: null, errorMessage };
+}
+
+async function probePublicTunnelReachabilityFromEnv(
+  publicBaseUrl: string,
+  env: Record<string, string | undefined>,
+): Promise<{
+  status: number | null;
+  errorMessage: string | null;
+}> {
+  if (hasHttpProxyEnv(env)) {
+    const curlProbe = probePublicTunnelReachabilityWithCurl(publicBaseUrl, env);
+    if (curlProbe.status !== null || curlProbe.errorMessage) {
+      return curlProbe;
+    }
+  }
+  return probePublicTunnelReachability(publicBaseUrl);
+}
+
+async function waitForTemporaryTunnelRegistration(
+  publicBaseUrl: string,
+  env: Record<string, string | undefined>,
+): Promise<void> {
+  const attempts = resolvePositiveIntegerEnvAny(
+    env,
+    ['SYMPHONY_FEISHU_TUNNEL_READY_ATTEMPTS', 'SYMPHONY_TUNNEL_READY_ATTEMPTS'],
+    60,
+  );
+  const delayMs = resolvePositiveIntegerEnvAny(
+    env,
+    ['SYMPHONY_FEISHU_TUNNEL_READY_DELAY_MS', 'SYMPHONY_TUNNEL_READY_DELAY_MS'],
+    1000,
+  );
+  let lastReason: string | null = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const probe = await probePublicTunnelReachabilityFromEnv(publicBaseUrl, env);
+    const waitReason = getStartLocalTunnelRegistrationWaitReason({
+      expectedPublicBaseUrl: publicBaseUrl,
+      status: probe.status,
+      errorMessage: probe.errorMessage,
+    });
+    if (!waitReason) {
+      return;
+    }
+    lastReason = waitReason;
+    if (attempt < attempts) {
+      if (attempt === 1 || attempt % 5 === 0) {
+        console.log(`[symharix] start:local waiting for temporary tunnel registration (${attempt}/${attempts}): ${waitReason}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  throw new Error(lastReason ?? `Timed out waiting for temporary tunnel registration: ${publicBaseUrl}`);
+}
+
+async function waitForLocalServiceStartup(
+  port: number,
+  env: Record<string, string | undefined>,
+): Promise<void> {
+  const attempts = resolvePositiveIntegerEnvAny(
+    env,
+    ['SYMPHONY_START_LOCAL_SERVICE_READY_ATTEMPTS'],
+    60,
+  );
+  const delayMs = resolvePositiveIntegerEnvAny(
+    env,
+    ['SYMPHONY_START_LOCAL_SERVICE_READY_DELAY_MS'],
+    500,
+  );
+  const url = `http://127.0.0.1:${port}/api/v1/runtime/overview`;
+  let lastError: string | null = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetch(url);
+      if (response.status < 500) {
+        return;
+      }
+      lastError = `status ${response.status}`;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+
+    if (attempt < attempts) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  throw new Error(`local service did not become reachable at ${url}: ${lastError ?? 'unknown error'}`);
+}
+
 async function printTelegramStartupSummary(
   port: number,
   expectedPublicBaseUrl: string | null,
@@ -251,6 +456,20 @@ async function printTelegramStartupSummary(
   console.log('[symharix] telegram: unhealthy webhook_url=(none)');
 }
 
+function printFeishuStartupSummary(expectedPublicBaseUrl?: string | null): void {
+  const publicBaseUrl = expectedPublicBaseUrl?.trim() || null;
+  console.log('[symharix] feishu: long connection mode enabled; no public webhook URL is required.');
+  if (publicBaseUrl) {
+    const tunnelNote = isEphemeralTryCloudflareUrl(publicBaseUrl)
+      ? 'temporary tunnel, runtime links only'
+      : 'runtime links';
+    console.log(`[symharix] feishu: public Mini App base enabled (${tunnelNote}): ${publicBaseUrl}`);
+  } else {
+    console.log('[symharix] feishu: Mini App links are local-only; mobile Feishu clients need SYMHARIX_PUBLIC_BASE_URL or SYMHARIX_FEISHU_RUNTIME_TUNNEL=on.');
+  }
+  console.log('[symharix] feishu: configure Feishu Open Platform Events and Callbacks to use persistent connection.');
+}
+
 async function stopChild(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.killed) {
     return;
@@ -271,9 +490,12 @@ async function stopChild(child: ChildProcess): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const args = process.argv.slice(2);
+  const parsedStartArgs = parseStartLocalArgs(process.argv.slice(2));
+  const botSurface = parsedStartArgs.surface;
+  const args = parsedStartArgs.serviceArgs;
   const childEnv = { ...process.env } as Record<string, string | undefined>;
   syncSymHarixEnvAliases(childEnv);
+  applyStartLocalBotSurfaceIsolation(childEnv, botSurface);
   const workflowPath = resolveWorkflowPath();
   const workflowLoad = loadWorkflow(workflowPath);
   const workflowServerPort = workflowLoad.success
@@ -282,9 +504,22 @@ async function main(): Promise<void> {
   const requestedPort = resolveStartLocalPort(args, childEnv, workflowServerPort);
 
   stopExistingSymHarixnessIfNeeded(requestedPort);
-  if (readSymHarixEnvTrimmed('SYMPHONY_TELEGRAM_BOT_TOKEN', childEnv)) {
+  if (botSurface === 'telegram' && readSymHarixEnvTrimmed('SYMPHONY_TELEGRAM_BOT_TOKEN', childEnv)) {
     await configureStartLocalProxyEnv(childEnv);
     configureStartLocalTelegramRetryEnv(childEnv);
+  } else if (botSurface === 'feishu') {
+    if (shouldProvisionStartLocalTunnel(childEnv, botSurface)) {
+      await configureStartLocalProxyEnv(childEnv, 'Feishu runtime tunnel');
+      if (
+        !readSymHarixEnvTrimmed('SYMPHONY_TUNNEL_PROTOCOL', childEnv)
+        && !readSymHarixEnvTrimmed('SYMPHONY_FEISHU_TUNNEL_PROTOCOL', childEnv)
+      ) {
+        setSymHarixEnv('SYMPHONY_FEISHU_TUNNEL_PROTOCOL', 'auto', childEnv);
+        console.log(
+          '[symharix] start:local using Feishu runtime tunnel protocol auto (set SYMHARIX_FEISHU_TUNNEL_PROTOCOL to override)',
+        );
+      }
+    }
   }
 
   let tunnelHandle: TelegramTunnelHandle | null = null;
@@ -336,29 +571,58 @@ async function main(): Promise<void> {
   process.once('SIGINT', () => forwardSignal('SIGINT'));
   process.once('SIGTERM', () => forwardSignal('SIGTERM'));
 
-  const provisionTemporaryTunnel = async (): Promise<TelegramTunnelHandle | null> => {
-    const maxAttempts = resolvePositiveIntegerEnv(
+  const provisionTemporaryTunnel = async (options: {
+    waitUntilReachable?: boolean;
+  } = {}): Promise<TelegramTunnelHandle | null> => {
+    const waitUntilReachable = options.waitUntilReachable ?? botSurface === 'feishu';
+    const maxAttempts = resolvePositiveIntegerEnvAny(
       childEnv,
-      'SYMPHONY_TELEGRAM_TUNNEL_RETRY_ATTEMPTS',
+      botSurface === 'feishu'
+        ? ['SYMPHONY_FEISHU_TUNNEL_RETRY_ATTEMPTS', 'SYMPHONY_TUNNEL_RETRY_ATTEMPTS', 'SYMPHONY_TELEGRAM_TUNNEL_RETRY_ATTEMPTS']
+        : ['SYMPHONY_TUNNEL_RETRY_ATTEMPTS', 'SYMPHONY_TELEGRAM_TUNNEL_RETRY_ATTEMPTS'],
       3,
     );
-    const retryDelayMs = resolvePositiveIntegerEnv(
+    const retryDelayMs = resolvePositiveIntegerEnvAny(
       childEnv,
-      'SYMPHONY_TELEGRAM_TUNNEL_RETRY_DELAY_MS',
+      botSurface === 'feishu'
+        ? ['SYMPHONY_FEISHU_TUNNEL_RETRY_DELAY_MS', 'SYMPHONY_TUNNEL_RETRY_DELAY_MS', 'SYMPHONY_TELEGRAM_TUNNEL_RETRY_DELAY_MS']
+        : ['SYMPHONY_TUNNEL_RETRY_DELAY_MS', 'SYMPHONY_TELEGRAM_TUNNEL_RETRY_DELAY_MS'],
       1500,
+    );
+    const tunnelTimeoutMs = resolvePositiveIntegerEnvAny(
+      childEnv,
+      botSurface === 'feishu'
+        ? ['SYMPHONY_FEISHU_TUNNEL_TIMEOUT_MS', 'SYMPHONY_TUNNEL_TIMEOUT_MS', 'SYMPHONY_TELEGRAM_TUNNEL_TIMEOUT_MS']
+        : ['SYMPHONY_TUNNEL_TIMEOUT_MS', 'SYMPHONY_TELEGRAM_TUNNEL_TIMEOUT_MS'],
+      botSurface === 'feishu' ? 45_000 : 15_000,
     );
     let lastError: unknown = null;
     try {
-      console.log('[symharix] start:local provisioning temporary Telegram tunnel...');
+      console.log(`[symharix] start:local provisioning temporary ${botSurface} tunnel...`);
       const localBaseUrl = `http://127.0.0.1:${requestedPort}`;
-      const tunnelProvider = createCloudflaredTunnelProvider();
+      const tunnelProvider = createCloudflaredTunnelProvider(undefined, tunnelTimeoutMs, childEnv);
       let nextTunnelHandle: TelegramTunnelHandle | null = null;
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         try {
-          nextTunnelHandle = await tunnelProvider(localBaseUrl);
+          const candidateTunnelHandle = await tunnelProvider(localBaseUrl);
+          if (botSurface === 'feishu' && waitUntilReachable) {
+            try {
+              await waitForTemporaryTunnelRegistration(candidateTunnelHandle.publicBaseUrl, childEnv);
+            } catch (error) {
+              await candidateTunnelHandle.dispose();
+              throw error;
+            }
+          }
+          nextTunnelHandle = candidateTunnelHandle;
           break;
         } catch (error) {
           lastError = error;
+          if (isQuickTunnelRateLimitedError(error)) {
+            console.warn(
+              '[symharix] start:local Cloudflare Quick Tunnel is rate limited; skipping immediate retries to avoid extending the limit window.',
+            );
+            throw error;
+          }
           if (attempt >= maxAttempts) {
             throw error;
           }
@@ -374,12 +638,12 @@ async function main(): Promise<void> {
         throw lastError instanceof Error ? lastError : new Error('Telegram tunnel provider did not return a handle');
       }
 
-      console.log(`[symharix] start:local tunnel ready: ${nextTunnelHandle.publicBaseUrl}`);
+      console.log(`[symharix] start:local ${botSurface} tunnel ready: ${nextTunnelHandle.publicBaseUrl}`);
       console.log('[symharix] start:local using temporary tunnel only for this process; .env was not modified.');
       return nextTunnelHandle;
     } catch (error) {
       console.warn(
-        '[symharix] start:local could not pre-provision Telegram tunnel; falling back to normal bootstrap.',
+        `[symharix] start:local could not pre-provision ${botSurface} tunnel; falling back to normal startup.`,
       );
       if (error instanceof Error) {
         console.warn(`[symharix] ${error.message}`);
@@ -423,7 +687,14 @@ async function main(): Promise<void> {
     }
 
     recoveryInFlight = (async () => {
-      console.warn(`[symharix] start:local detected unhealthy Telegram tunnel; recovering. reason=${reason}`);
+      if (reason.startsWith('initial ')) {
+        console.log(`[symharix] start:local preparing ${botSurface} tunnel. reason=${reason}`);
+      } else {
+        console.warn(`[symharix] start:local detected unhealthy ${botSurface} tunnel; recovering. reason=${reason}`);
+      }
+      if (botSurface === 'feishu') {
+        await waitForLocalServiceStartup(requestedPort, childEnv);
+      }
       const nextTunnelHandle = await provisionTemporaryTunnel();
       if (!nextTunnelHandle) {
         console.warn('[symharix] start:local tunnel recovery skipped; keeping the current service running.');
@@ -443,11 +714,25 @@ async function main(): Promise<void> {
         await previousTunnelHandle.dispose();
       }
       spawnServiceChild();
-      void printTelegramStartupSummary(
-        requestedPort,
-        readSymHarixEnvTrimmed('SYMPHONY_PUBLIC_BASE_URL', childEnv),
-        resolveTelegramStartupSummaryAttempts(childEnv),
-      );
+      const expectedPublicBaseUrl = readSymHarixEnvTrimmed('SYMPHONY_PUBLIC_BASE_URL', childEnv);
+      if (botSurface === 'telegram') {
+        void printTelegramStartupSummary(
+          requestedPort,
+          expectedPublicBaseUrl,
+          resolveTelegramStartupSummaryAttempts(childEnv),
+        );
+      } else {
+        if (expectedPublicBaseUrl) {
+          try {
+            await waitForLocalServiceStartup(requestedPort, childEnv);
+            await waitForTemporaryTunnelRegistration(expectedPublicBaseUrl, childEnv);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.warn(`[symharix] feishu: public Mini App tunnel is not reachable yet; runtime links may fail until it recovers. reason=${message}`);
+          }
+        }
+        printFeishuStartupSummary(expectedPublicBaseUrl);
+      }
     })().catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`[symharix] start:local tunnel recovery failed: ${message}`);
@@ -458,18 +743,21 @@ async function main(): Promise<void> {
     await recoveryInFlight;
   };
 
-  const startTelegramTunnelWatchdog = (): void => {
-    if (!shouldProvisionStartLocalTunnel(childEnv)) {
+  const startTunnelWatchdog = (): void => {
+    if (botSurface !== 'telegram') {
       return;
     }
-    const intervalMs = resolvePositiveIntegerEnv(
+    if (!shouldProvisionStartLocalTunnel(childEnv, botSurface)) {
+      return;
+    }
+    const intervalMs = resolvePositiveIntegerEnvAny(
       childEnv,
-      'SYMPHONY_TELEGRAM_TUNNEL_WATCHDOG_INTERVAL_MS',
+      ['SYMPHONY_TUNNEL_WATCHDOG_INTERVAL_MS', 'SYMPHONY_TELEGRAM_TUNNEL_WATCHDOG_INTERVAL_MS'],
       10_000,
     );
-    const degradedPollThreshold = resolvePositiveIntegerEnv(
+    const degradedPollThreshold = resolvePositiveIntegerEnvAny(
       childEnv,
-      'SYMPHONY_TELEGRAM_TUNNEL_WATCHDOG_DEGRADED_POLLS',
+      ['SYMPHONY_TUNNEL_WATCHDOG_DEGRADED_POLLS', 'SYMPHONY_TELEGRAM_TUNNEL_WATCHDOG_DEGRADED_POLLS'],
       2,
     );
     let degradedPolls = 0;
@@ -485,10 +773,13 @@ async function main(): Promise<void> {
           return;
         }
 
-        const telegram = await readTelegramManifestSnapshot(requestedPort);
-        let recoveryReason = telegram
-          ? getStartLocalTunnelRecoveryReason(telegram, expectedPublicBaseUrl)
-          : null;
+        let recoveryReason: string | null = null;
+        if (botSurface === 'telegram') {
+          const telegram = await readTelegramManifestSnapshot(requestedPort);
+          recoveryReason = telegram
+            ? getStartLocalTunnelRecoveryReason(telegram, expectedPublicBaseUrl)
+            : null;
+        }
         if (!recoveryReason) {
           const tunnelProbe = await probePublicTunnelReachability(expectedPublicBaseUrl);
           recoveryReason = getStartLocalTunnelProbeRecoveryReason({
@@ -517,20 +808,39 @@ async function main(): Promise<void> {
     tunnelWatchdog.unref?.();
   };
 
-  if (shouldProvisionStartLocalTunnel(childEnv)) {
-    tunnelHandle = await provisionTemporaryTunnel();
+  const needsStartLocalTunnel = shouldProvisionStartLocalTunnel(childEnv, botSurface);
+  if (needsStartLocalTunnel && (botSurface === 'telegram' || botSurface === 'feishu')) {
+    tunnelHandle = await provisionTemporaryTunnel({
+      waitUntilReachable: botSurface !== 'feishu',
+    });
     if (tunnelHandle) {
       setSymHarixEnv('SYMPHONY_PUBLIC_BASE_URL', tunnelHandle.publicBaseUrl, childEnv);
     }
   }
 
   spawnServiceChild();
-  void printTelegramStartupSummary(
-    requestedPort,
-    readSymHarixEnvTrimmed('SYMPHONY_PUBLIC_BASE_URL', childEnv),
-    resolveTelegramStartupSummaryAttempts(childEnv),
-  );
-  startTelegramTunnelWatchdog();
+  let expectedPublicBaseUrl = readSymHarixEnvTrimmed('SYMPHONY_PUBLIC_BASE_URL', childEnv);
+  if (botSurface === 'telegram') {
+    void printTelegramStartupSummary(
+      requestedPort,
+      expectedPublicBaseUrl,
+      resolveTelegramStartupSummaryAttempts(childEnv),
+    );
+  } else if (botSurface === 'feishu' && tunnelHandle && expectedPublicBaseUrl) {
+    void (async () => {
+      try {
+        await waitForLocalServiceStartup(requestedPort, childEnv);
+        await waitForTemporaryTunnelRegistration(expectedPublicBaseUrl, childEnv);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`[symharix] feishu: public Mini App tunnel is not reachable yet; runtime links may fail until it recovers. reason=${message}`);
+      }
+      printFeishuStartupSummary(expectedPublicBaseUrl);
+    })();
+  } else {
+    printFeishuStartupSummary(expectedPublicBaseUrl);
+  }
+  startTunnelWatchdog();
 }
 
 void main().catch((error) => {

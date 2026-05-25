@@ -862,6 +862,26 @@ describe('Telegram Mini App issue presentation', () => {
     expect(() => new Function(scriptMatch?.[1] || '')).not.toThrow();
   });
 
+  test('loads the Telegram WebApp SDK only for Telegram launch contexts', () => {
+    const html = renderRuntimeMiniAppPage('INT-155');
+
+    expect(html).not.toContain('<script src="https://telegram.org/js/telegram-web-app.js"></script>');
+    expect(html).toContain('function hasTelegramLaunchParams()');
+    expect(html).toContain('function loadTelegramSdkNonBlocking()');
+    expect(html).toContain('!hasTelegramLaunchParams()');
+    expect(html).toContain("script.async = true");
+    expect(html).toContain("script.src = 'https://telegram.org/js/telegram-web-app.js'");
+  });
+
+  test('uses polling instead of a long-lived stream outside Telegram launch contexts', () => {
+    const html = renderRuntimeMiniAppPage('INT-155');
+
+    expect(html).toContain('pollTimer: null');
+    expect(html).toContain('if (!hasTelegramLaunchParams())');
+    expect(html).toContain('state.pollTimer = window.setInterval');
+    expect(html).toContain('state.stream = new EventSource(urls.stream)');
+  });
+
   test('renders Mini App load recovery for flaky tunnel or API responses', () => {
     const html = renderRuntimeMiniAppPage('INT-155');
 
