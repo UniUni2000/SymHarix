@@ -817,10 +817,14 @@ describe('Telegram Mini App issue presentation', () => {
     expect(html).toContain("el.hero.addEventListener('click'");
   });
 
-  test('uses real phone Mini App proportions with a bottom tab bar', () => {
+  test('uses real phone Mini App proportions with a wider desktop shell', () => {
     const html = renderRuntimeMiniAppPage('INT-155');
 
-    expect(html).toContain('--miniapp-width: 390px;');
+    expect(html).toContain('--miniapp-mobile-width: 390px;');
+    expect(html).toContain('--miniapp-desktop-width: calc(100vw - 40px);');
+    expect(html).toContain('--miniapp-width: var(--miniapp-mobile-width);');
+    expect(html).toContain('@media (min-width: 560px)');
+    expect(html).toContain(':root { --miniapp-width: var(--miniapp-desktop-width); }');
     expect(html).toContain('max-width: var(--miniapp-width);');
     expect(html).toContain('min-height: 100svh;');
     expect(html).toContain('padding-bottom: calc(86px + env(safe-area-inset-bottom));');

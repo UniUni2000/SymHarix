@@ -3530,6 +3530,7 @@ export class DefaultBotGateway implements BotGateway {
           [
             {
               label: textForIssueLocale(params.issue, '刷新卡片', 'Refresh Card'),
+              style: 'primary',
               callback_data: `rt|${params.issueIdentifier}|refresh`,
             },
           ],

@@ -1293,7 +1293,7 @@ describe('SupervisorAgentRuntimeService', () => {
         { label: 'Stop', style: 'danger', callback_data: 'rt|INT-158|stop' },
       ],
       [
-        { label: 'Refresh Card', callback_data: 'rt|INT-158|refresh' },
+        { label: 'Refresh Card', style: 'primary', callback_data: 'rt|INT-158|refresh' },
         {
           label: 'Open Runtime View',
           style: 'primary',

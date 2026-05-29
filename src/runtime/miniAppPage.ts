@@ -769,7 +769,9 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
     <title>SymHarix issue cockpit · ${escapedIssueId}</title>
     <style>
       :root {
-        --miniapp-width: 390px;
+        --miniapp-mobile-width: 390px;
+        --miniapp-desktop-width: calc(100vw - 40px);
+        --miniapp-width: var(--miniapp-mobile-width);
         --bottom-nav-height: 56px;
         --glass-radius: 12px;
         --bg: #0b0f14;
@@ -2115,7 +2117,8 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
         place-items: center;
         color: var(--muted);
       }
-      @media (min-width: 720px) {
+      @media (min-width: 560px) {
+        :root { --miniapp-width: var(--miniapp-desktop-width); }
         .shell { padding-left: 12px; padding-right: 12px; }
         .hero { grid-template-columns: minmax(0, 1fr); padding: 15px 14px 14px; }
         .progress-summary { max-width: none; margin-left: 0; }
