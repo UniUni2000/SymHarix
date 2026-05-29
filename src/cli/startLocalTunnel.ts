@@ -205,7 +205,7 @@ export function shouldProvisionStartLocalTunnel(
     return true;
   }
 
-  const openMode = readSymHarixEnvTrimmed('SYMPHONY_FEISHU_RUNTIME_OPEN_MODE', env)?.toLowerCase() ?? 'url';
+  const openMode = readSymHarixEnvTrimmed('SYMPHONY_FEISHU_RUNTIME_OPEN_MODE', env)?.toLowerCase() ?? 'applink_web_url';
   return openMode === 'applink_web_url';
 }
 

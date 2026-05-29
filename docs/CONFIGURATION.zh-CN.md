@@ -196,7 +196,7 @@ curl http://localhost:3000/api/v1/bots/manifest
 | `SYMHARIX_FEISHU_OPERATIONS_CHAT_ID` | 可选 | 固定 operations chat。可从飞书消息事件里的 `chat_id` 获取。 |
 | `SYMHARIX_FEISHU_API_BASE_URL` | 可选 | OpenAPI base，默认 `https://open.feishu.cn/open-apis`。 |
 | `SYMHARIX_PUBLIC_BASE_URL` | 可选 | 只有当飞书卡片需要打开 Mini App/runtime 网页链接时才需要公网 HTTPS base；长连接收事件不需要。 |
-| `SYMHARIX_FEISHU_RUNTIME_OPEN_MODE` | 可选 | 运行视图按钮打开方式。`url` 使用普通链接；`applink_web_app` 使用飞书网页应用 AppLink；`applink_web_url` 使用飞书网页 URL AppLink。 |
+| `SYMHARIX_FEISHU_RUNTIME_OPEN_MODE` | 可选 | 运行视图按钮打开方式。保持默认 `applink_web_url`，让飞书在客户端内部打开运行视图。 |
 | `SYMHARIX_FEISHU_RUNTIME_TUNNEL` | 可选 | `auto` 会在 `applink_web_url` 且未配置公网 base 时为运行视图创建临时 tunnel，方便手机端飞书打开；`off` 禁用，`on` 强制启用。 |
 | `SYMHARIX_FEISHU_TUNNEL_PROTOCOL` | 可选 | 运行视图 tunnel 协议。飞书默认使用 `auto`，避免继承 Telegram 的 `http2` 设置；网络挑剔时可尝试 `http2` 或 `quic`。 |
 | `SYMHARIX_FEISHU_TUNNEL_TIMEOUT_MS` / `SYMHARIX_FEISHU_TUNNEL_RETRY_ATTEMPTS` / `SYMHARIX_FEISHU_TUNNEL_RETRY_DELAY_MS` | 可选 | 创建飞书临时 runtime tunnel 的超时和重试参数。默认 `45000ms`、`3` 次、`1500ms`。 |
@@ -205,7 +205,7 @@ curl http://localhost:3000/api/v1/bots/manifest
 | `SYMHARIX_FEISHU_RUNTIME_APPLINK_WIDTH` / `SYMHARIX_FEISHU_RUNTIME_APPLINK_HEIGHT` | 可选 | 飞书桌面端独立窗口宽高。 |
 | `SYMHARIX_FEISHU_RUNTIME_APPLINK_TEMPLATE` | 可选 | 自定义 AppLink 模板。支持 `{appId}`、`{url}`、`{path}`、`{encodedUrl}`、`{encodedPath}`。 |
 
-本地飞书测试使用 `bun run start:feishu`。飞书长连接收消息不需要公网 webhook URL、Verification Token 或 Encrypt Key。若使用 `applink_web_url` 且 `SYMHARIX_PUBLIC_BASE_URL` 为空，启动器会尝试创建临时 `trycloudflare.com` runtime tunnel，并只把它用于「Open Runtime View」这类 Mini App 页面链接；飞书事件仍然走长连接。
+本地飞书测试使用 `bun run start:feishu`。飞书长连接收消息不需要公网 webhook URL、Verification Token 或 Encrypt Key。运行视图按钮默认使用 `applink_web_url`；当 `SYMHARIX_PUBLIC_BASE_URL` 为空时，启动器会尝试创建临时 `trycloudflare.com` runtime tunnel，并只把它用于「Open Runtime View」这类 Mini App 页面链接；飞书事件仍然走长连接。
 
 如果手机端飞书需要远程打开运行视图，至少满足其一：
 
@@ -213,15 +213,6 @@ curl http://localhost:3000/api/v1/bots/manifest
 | --- | --- |
 | 稳定公网入口 | `SYMHARIX_PUBLIC_BASE_URL=https://your-domain.example` |
 | 本地开发临时入口 | `SYMHARIX_FEISHU_RUNTIME_OPEN_MODE=applink_web_url`，`SYMHARIX_FEISHU_RUNTIME_TUNNEL=auto` 或 `on` |
-
-如果希望运行视图在飞书客户端内部打开，而不是跳到系统浏览器，需要先在飞书开放平台为这个自建应用启用「网页应用」能力，并配置桌面端/移动端主页或可访问域名。随后可设置：
-
-```env
-SYMHARIX_FEISHU_RUNTIME_OPEN_MODE=applink_web_app
-SYMHARIX_FEISHU_RUNTIME_APPLINK_MODE=window
-SYMHARIX_FEISHU_RUNTIME_APPLINK_WIDTH=680
-SYMHARIX_FEISHU_RUNTIME_APPLINK_HEIGHT=900
-```
 
 第一次获取 operator id 时，可以先把 `SYMHARIX_FEISHU_OPERATOR_IDS` 留空，启动后给飞书机器人发一条消息，然后从 SymHarix 启动日志里复制 `user_id=...` 的值填回 `.env`。收到的值通常就是发送者的 `open_id`（`ou_...`）。
 

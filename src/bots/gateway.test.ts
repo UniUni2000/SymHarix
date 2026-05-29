@@ -5225,7 +5225,8 @@ describe('DefaultBotGateway', () => {
       },
     });
 
-    expect(result?.toast).toEqual({ type: 'info', content: '已刷新' });
+    expect(result?.toast).toEqual({ type: 'info', content: '已收到，正在处理' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
     const editCall = calls.find((call) => call.url.endsWith('/im/v1/messages/om_card'));
     expect(editCall?.init?.method).toBe('PATCH');
     const editBody = JSON.parse(String(editCall?.init?.body ?? '{}'));
@@ -5384,7 +5385,8 @@ describe('DefaultBotGateway', () => {
       },
     });
 
-    expect(result?.toast).toEqual({ type: 'info', content: '已执行' });
+    expect(result?.toast).toEqual({ type: 'info', content: '已收到，正在处理' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
     expect(respondCanWrite).toEqual([true]);
     const editCall = calls.find((call) => call.url.endsWith('/im/v1/messages/om_pending'));
     expect(editCall?.init?.method).toBe('PATCH');
@@ -5392,7 +5394,8 @@ describe('DefaultBotGateway', () => {
     const card = JSON.parse(String(editBody.content ?? '{}'));
     expect(card.config.update_multi).toBe(true);
     expect(JSON.stringify(card)).toContain('INT-200');
-    expect(JSON.stringify(card)).toContain('http://127.0.0.1:3000/runtime/issues/INT-200/app');
+    expect(JSON.stringify(card)).toContain('https://applink.feishu.cn/client/web_url/open?');
+    expect(JSON.stringify(card)).toContain('url=http%3A%2F%2F127.0.0.1%3A3000%2Fruntime%2Fissues%2FINT-200%2Fapp');
     expect(JSON.stringify(card)).not.toContain('rt|INT-200|open');
     expect(
       followupMessageStates.findByConversationIssue({

@@ -1043,7 +1043,10 @@ function normalizeFeishuRuntimeOpenMode(value: string | null | undefined): Feish
   if (normalized === 'applink_web_app' || normalized === 'applink_web_url') {
     return normalized;
   }
-  return 'url';
+  if (normalized === 'url') {
+    return 'url';
+  }
+  return 'applink_web_url';
 }
 
 function shouldSendTelegramProcessingAck(text: string): boolean {
@@ -1354,7 +1357,7 @@ export class DefaultBotGateway implements BotGateway {
       operatorIds: new Set(),
       apiBaseUrl: normalizeFeishuApiBaseUrl(null),
       publicBaseUrl: normalizePublicBaseUrl(readSymHarixEnv('SYMPHONY_PUBLIC_BASE_URL') || null),
-      runtimeOpenMode: 'url',
+      runtimeOpenMode: 'applink_web_url',
       runtimeAppLinkMode: null,
       runtimeAppLinkWidth: null,
       runtimeAppLinkHeight: null,
@@ -1743,9 +1746,12 @@ export class DefaultBotGateway implements BotGateway {
         onMessageEvent: async (payload) => {
           await this.handleFeishuLongConnectionEvent('im.message.receive_v1', payload);
         },
-        onCardActionEvent: async (payload) => {
-          const result = await this.handleFeishuLongConnectionEvent('card.action.trigger', payload);
-          return result.body;
+        onCardActionEvent: (payload) => {
+          void this.handleFeishuLongConnectionEvent('card.action.trigger', payload)
+            .catch((error) => {
+              logger.warn('Feishu card action async handling failed', {}, error instanceof Error ? error : undefined);
+            });
+          return this.feishuToast('已收到，正在处理').body;
         },
       });
       this.feishuLongConnectionHealth = 'healthy';

@@ -190,7 +190,7 @@ function feishuRuntimeOpenUrl(
     'appId' | 'runtimeOpenMode' | 'runtimeAppLinkMode' | 'runtimeAppLinkWidth' | 'runtimeAppLinkHeight' | 'runtimeAppLinkTemplate'
   >,
 ): string {
-  const mode = config.runtimeOpenMode ?? 'url';
+  const mode = config.runtimeOpenMode ?? 'applink_web_url';
   if (mode === 'url') {
     return absoluteUrl;
   }
@@ -237,6 +237,36 @@ function feishuButtonType(style: BotTransportAction['style']): 'default' | 'prim
   return 'default';
 }
 
+function escapeFeishuMarkdown(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function feishuStatusColor(style: BotTransportAction['style']): string {
+  if (style === 'success') {
+    return 'green';
+  }
+  if (style === 'danger') {
+    return 'red';
+  }
+  if (style === 'primary') {
+    return 'blue';
+  }
+  return 'grey';
+}
+
+function buildFeishuCardStatus(action: BotTransportAction): Record<string, unknown> {
+  return {
+    tag: 'div',
+    text: {
+      tag: 'lark_md',
+      content: `<font color="${feishuStatusColor(action.style)}">**${escapeFeishuMarkdown(action.label)}**</font>`,
+    },
+  };
+}
+
 function buildFeishuCardAction(
   action: BotTransportAction,
   config: Pick<
@@ -244,6 +274,10 @@ function buildFeishuCardAction(
     'appId' | 'publicBaseUrl' | 'runtimeOpenMode' | 'runtimeAppLinkMode' | 'runtimeAppLinkWidth' | 'runtimeAppLinkHeight' | 'runtimeAppLinkTemplate'
   >,
 ): Record<string, unknown> | null {
+  if (action.disabled) {
+    return null;
+  }
+
   const button: Record<string, unknown> = {
     tag: 'button',
     text: {
@@ -317,6 +351,11 @@ function buildFeishuCard(params: {
   const rows = params.message.action_rows
     ?? (params.message.actions?.length ? params.message.actions.map((action) => [action]) : []);
   for (const row of rows) {
+    const statusItems = row
+      .filter((action) => action.disabled)
+      .map((action) => buildFeishuCardStatus(action));
+    elements.push(...statusItems);
+
     const actions = row
       .map((action) => buildFeishuCardAction(action, params.config))
       .filter((action): action is Record<string, unknown> => action !== null);

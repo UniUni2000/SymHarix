@@ -172,6 +172,14 @@ SYMHARIX_FEISHU_APP_SECRET=...
 SYMHARIX_FEISHU_OPERATOR_IDS=ou_xxx
 ```
 
+How to get these values:
+
+1. Open [Feishu Open Platform](https://open.feishu.cn/) and create a **self-built app** for your organization.
+2. In **Add App Capability**, enable **Bot**. This is the Feishu robot users will chat with.
+3. In **Credentials and Basic Info**, copy **App ID** into `SYMHARIX_FEISHU_APP_ID` and **App Secret** into `SYMHARIX_FEISHU_APP_SECRET`.
+4. In **Events and Callbacks**, set the subscription mode to **persistent connection**, then add `im.message.receive_v1` and `card.action.trigger`.
+5. For `SYMHARIX_FEISHU_OPERATOR_IDS`, first leave it blank, run `bun run start:feishu`, send any message to the bot, and copy the `user_id=ou_...` value printed in the SymHarix terminal logs. Put one or more ids in the env var, separated by commas.
+
 Required Feishu app permissions for the full SymHarix bot flow:
 
 | Scope | Purpose |
@@ -189,7 +197,7 @@ Run Feishu locally with long connection mode:
 bun run start:feishu
 ```
 
-Feishu long connection message intake does not require a public IP or webhook URL. If mobile Feishu clients need to open the runtime view, use a stable public ingress with `SYMHARIX_PUBLIC_BASE_URL=https://your-domain.example`, or set `SYMHARIX_FEISHU_RUNTIME_OPEN_MODE=applink_web_url` during local development so `start:feishu` creates a temporary `trycloudflare.com` tunnel only for Mini App/runtime links. Telegram webhook and Mini App features still require a stable publicly reachable HTTPS URL in production. Use a domain with HTTPS reverse proxy or a named Cloudflare Tunnel; quick `trycloudflare.com` tunnels are intended for local development and demos, not 24/7 production.
+Feishu long connection message intake does not require a public IP or webhook URL. Runtime buttons default to `SYMHARIX_FEISHU_RUNTIME_OPEN_MODE=applink_web_url`; if mobile Feishu clients need to open the runtime view, use a stable public ingress with `SYMHARIX_PUBLIC_BASE_URL=https://your-domain.example`, or let `start:feishu` create a temporary `trycloudflare.com` tunnel only for Mini App/runtime links during local development. Telegram webhook and Mini App features still require a stable publicly reachable HTTPS URL in production. Use a domain with HTTPS reverse proxy or a named Cloudflare Tunnel; quick `trycloudflare.com` tunnels are intended for local development and demos, not 24/7 production.
 
 Example repository route:
 

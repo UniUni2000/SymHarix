@@ -34,6 +34,7 @@ export interface BotRecipient {
 export interface BotTransportAction {
   label: string;
   style?: 'default' | 'primary' | 'success' | 'danger';
+  disabled?: boolean;
   callback_data?: string;
   url?: string;
   web_app?: {

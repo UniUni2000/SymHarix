@@ -174,6 +174,14 @@ SYMHARIX_FEISHU_APP_SECRET=...
 SYMHARIX_FEISHU_OPERATOR_IDS=ou_xxx
 ```
 
+这些值的获取方式：
+
+1. 打开 [飞书开放平台](https://open.feishu.cn/)，为当前组织创建一个「企业自建应用」。
+2. 在「添加应用能力」里启用「机器人」，这个机器人就是用户在飞书里对话的入口。
+3. 在「凭证与基础信息」页复制 **App ID** 到 `SYMHARIX_FEISHU_APP_ID`，复制 **App Secret** 到 `SYMHARIX_FEISHU_APP_SECRET`。
+4. 在「事件与回调」里把订阅方式设置为「长连接」，并添加 `im.message.receive_v1` 和 `card.action.trigger`。
+5. `SYMHARIX_FEISHU_OPERATOR_IDS` 可以先留空，运行 `bun run start:feishu` 后给机器人发任意消息，再从 SymHarix 终端日志里复制 `user_id=ou_...` 的值填回 `.env`。多个 operator id 用英文逗号分隔。
+
 为了保证完整的 SymHarix 机器人流程，飞书应用需要开启这些权限：
 
 | 权限 | 用途 |
@@ -191,7 +199,7 @@ SYMHARIX_FEISHU_OPERATOR_IDS=ou_xxx
 bun run start:feishu
 ```
 
-飞书长连接收消息不要求公网 IP，也不需要 webhook URL。若手机端飞书需要打开运行视图，请使用稳定公网入口 `SYMHARIX_PUBLIC_BASE_URL=https://your-domain.example`，或在本地开发时设置 `SYMHARIX_FEISHU_RUNTIME_OPEN_MODE=applink_web_url`，让 `start:feishu` 自动创建只用于 Mini App/runtime 链接的临时 `trycloudflare.com` tunnel。Telegram webhook 和 Mini App 功能仍然需要稳定、可公网访问的 HTTPS URL。生产环境建议使用域名 + HTTPS 反向代理，或 named Cloudflare Tunnel；快速 `trycloudflare.com` 隧道适合本地开发和 demo，不适合作为 24/7 生产入口。
+飞书长连接收消息不要求公网 IP，也不需要 webhook URL。运行视图按钮默认使用 `SYMHARIX_FEISHU_RUNTIME_OPEN_MODE=applink_web_url`；若手机端飞书需要打开运行视图，请使用稳定公网入口 `SYMHARIX_PUBLIC_BASE_URL=https://your-domain.example`，或在本地开发时让 `start:feishu` 自动创建只用于 Mini App/runtime 链接的临时 `trycloudflare.com` tunnel。Telegram webhook 和 Mini App 功能仍然需要稳定、可公网访问的 HTTPS URL。生产环境建议使用域名 + HTTPS 反向代理，或 named Cloudflare Tunnel；快速 `trycloudflare.com` 隧道适合本地开发和 demo，不适合作为 24/7 生产入口。
 
 仓库路由示例：
 

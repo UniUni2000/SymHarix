@@ -196,7 +196,7 @@ Check `health`, `webhook_url`, `public_base_url`, `mini_app_base_url`, pending u
 | `SYMHARIX_FEISHU_OPERATIONS_CHAT_ID` | optional | Fixed operations chat. You can read the `chat_id` from a Feishu message event. |
 | `SYMHARIX_FEISHU_API_BASE_URL` | optional | OpenAPI base, defaulting to `https://open.feishu.cn/open-apis`. |
 | `SYMHARIX_PUBLIC_BASE_URL` | optional | Only needed if you want Feishu cards to open local Mini App/runtime web URLs through a public HTTPS base. Not required for long connection events. |
-| `SYMHARIX_FEISHU_RUNTIME_OPEN_MODE` | optional | Runtime button open mode. `url` uses a normal link; `applink_web_app` uses a Feishu web app AppLink; `applink_web_url` uses a Feishu web URL AppLink. |
+| `SYMHARIX_FEISHU_RUNTIME_OPEN_MODE` | optional | Runtime button open mode. Keep the default `applink_web_url` so Feishu opens runtime views inside the client. |
 | `SYMHARIX_FEISHU_RUNTIME_TUNNEL` | optional | `auto` creates a temporary runtime tunnel for `applink_web_url` when no public base is configured, so mobile Feishu can open the runtime view. Use `off` to disable or `on` to force it. |
 | `SYMHARIX_FEISHU_TUNNEL_PROTOCOL` | optional | Runtime tunnel protocol. Defaults to `auto` for Feishu so it does not inherit Telegram's `http2` setting. Try `http2` or `quic` if your network is picky. |
 | `SYMHARIX_FEISHU_TUNNEL_TIMEOUT_MS` / `SYMHARIX_FEISHU_TUNNEL_RETRY_ATTEMPTS` / `SYMHARIX_FEISHU_TUNNEL_RETRY_DELAY_MS` | optional | Timeout and retry controls for creating the temporary Feishu runtime tunnel. Defaults to `45000ms`, `3`, and `1500ms`. |
@@ -205,7 +205,7 @@ Check `health`, `webhook_url`, `public_base_url`, `mini_app_base_url`, pending u
 | `SYMHARIX_FEISHU_RUNTIME_APPLINK_WIDTH` / `SYMHARIX_FEISHU_RUNTIME_APPLINK_HEIGHT` | optional | Desktop Feishu AppLink window size. |
 | `SYMHARIX_FEISHU_RUNTIME_APPLINK_TEMPLATE` | optional | Custom AppLink template. Supports `{appId}`, `{url}`, `{path}`, `{encodedUrl}`, and `{encodedPath}`. |
 
-For local Feishu testing, use `bun run start:feishu`. Feishu long connection message intake does not require a public webhook URL, Verification Token, or Encrypt Key. If `applink_web_url` is enabled and `SYMHARIX_PUBLIC_BASE_URL` is blank, the launcher attempts to create a temporary `trycloudflare.com` runtime tunnel and uses it only for Mini App links such as "Open Runtime View"; Feishu events still use persistent connection mode.
+For local Feishu testing, use `bun run start:feishu`. Feishu long connection message intake does not require a public webhook URL, Verification Token, or Encrypt Key. Runtime buttons default to `applink_web_url`; when `SYMHARIX_PUBLIC_BASE_URL` is blank, the launcher attempts to create a temporary `trycloudflare.com` runtime tunnel and uses it only for Mini App links such as "Open Runtime View"; Feishu events still use persistent connection mode.
 
 If mobile Feishu clients need to open the runtime view remotely, use one of these:
 

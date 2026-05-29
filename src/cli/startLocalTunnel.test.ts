@@ -68,12 +68,12 @@ describe('startLocalTunnel', () => {
     })).toBe(true);
   });
 
-  test('does not provision temporary tunnels for Feishu long connection mode by default', () => {
+  test('provisions a runtime tunnel for Feishu AppLink web URL mode by default', () => {
     expect(shouldProvisionStartLocalTunnel({
       SYMPHONY_FEISHU_APP_ID: 'cli_a',
       SYMPHONY_FEISHU_APP_SECRET: 'secret',
       SYMPHONY_PUBLIC_BASE_URL: '',
-    }, 'feishu')).toBe(false);
+    }, 'feishu')).toBe(true);
   });
 
   test('provisions a runtime tunnel for Feishu AppLink web URL mode', () => {
