@@ -285,6 +285,7 @@ function buildFeishuCardAction(
       content: action.label,
     },
     type: feishuButtonType(action.style),
+    width: 'fill',
   };
 
   if (action.callback_data) {
@@ -359,10 +360,10 @@ function buildFeishuCard(params: {
     const actions = row
       .map((action) => buildFeishuCardAction(action, params.config))
       .filter((action): action is Record<string, unknown> => action !== null);
-    if (actions.length > 0) {
+    for (const action of actions) {
       elements.push({
         tag: 'action',
-        actions,
+        actions: [action],
       });
     }
   }
