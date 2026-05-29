@@ -24,7 +24,7 @@ bun run health
 bash scripts/install-systemd-service.sh
 ```
 
-`start` 是推荐的本地入口。它会保留已有文件，准备 Telegram 代理/隧道行为，启动服务，并在可能时打印 Telegram 启动摘要。
+`start` 是默认 Telegram 本地入口。需要明确使用 Telegram 时可运行 `bun run start:telegram`；只运行飞书时运行 `bun run start:feishu`。每个启动命令都会在子进程环境里隔离另一个聊天入口，所以飞书不需要 Telegram 变量，Telegram 也不需要飞书变量。
 
 更换端口：
 
@@ -59,11 +59,12 @@ sudo systemctl stop ${SYMHARIX_SERVICE_NAME:-symharix}
 
 | 模块 | 配置 | 为什么需要 |
 | --- | --- | --- |
-| Tracker | `SYMHARIX_TRACKER_KIND=linear`, `SYMHARIX_TRACKER_API_KEY`, `SYMHARIX_TRACKER_PROJECT_SLUG` | Linear 提供 work item 状态机，并作为 Telegram/Runtime 创建 issue 的默认项目来源。 |
+| Tracker | `SYMHARIX_TRACKER_KIND=linear`, `SYMHARIX_TRACKER_API_KEY`, `SYMHARIX_TRACKER_PROJECT_SLUG` | Linear 提供 work item 状态机，并作为 Telegram/飞书/Runtime 创建 issue 的默认项目来源。 |
 | GitHub 访问 | `GITHUB_TOKEN` | token 必须能访问 `WORKFLOW.md -> repositories.routing` 中声明的所有仓库。 |
 | Agent runtime | `ANTHROPIC_API_KEY` | 内置 Claude-compatible runtime 默认用它执行任务和理解仓库，除非替换 runner。 |
 | 仓库路由 | `WORKFLOW.md -> repositories.routing` | route key 必须匹配 Linear `project_slug`；缺失路由会在创建 workspace 前 fail closed。 |
-| Telegram transport | `SYMHARIX_TELEGRAM_BOT_TOKEN`, `SYMHARIX_TELEGRAM_WEBHOOK_SECRET`, `SYMHARIX_TELEGRAM_OPERATOR_IDS` | token 启用 Telegram，secret 保护 webhook 入口，operator ids 限制可写操作。 |
+| Telegram transport | `SYMHARIX_TELEGRAM_BOT_TOKEN`, `SYMHARIX_TELEGRAM_WEBHOOK_SECRET`, `SYMHARIX_TELEGRAM_OPERATOR_IDS` | 仅 `start:telegram` 需要。token 启用 Telegram，secret 保护 webhook 入口，operator ids 限制可写操作。 |
+| Feishu transport | `SYMHARIX_FEISHU_APP_ID`, `SYMHARIX_FEISHU_APP_SECRET`, `SYMHARIX_FEISHU_OPERATOR_IDS` | 仅 `start:feishu` 需要。app id/secret 启用飞书长连接，operator ids 限制可写操作。 |
 | 公网入口 | `SYMHARIX_PUBLIC_BASE_URL` 或临时 tunnel 模式 | webhook 和 Mini App 生产环境需要稳定、可公网访问的 HTTPS URL。 |
 | Runtime 写操作 | `SYMHARIX_RUNTIME_WRITE_TOKEN` | 本地可选；公开暴露 Runtime Deck/API 写操作前建议设置。 |
 
@@ -115,6 +116,18 @@ bash scripts/check-runtime.sh
 本地开发时 `SYMHARIX_RUNTIME_WRITE_TOKEN` 可以留空。公开暴露 `/runtime` 前应设置。
 
 Runtime issue detail 会从持久化 agent runs 恢复 token 使用量，所以 live orchestrator snapshot 消失后，已完成 issue 仍能显示 usage。Mini App history 也会优先尝试 workspace diff、merge commit 和 active PR head，然后再 fallback 到压缩历史文本。
+
+### 聊天入口选择
+
+Telegram 和飞书都是同一套 Supervisor runtime 之上的可选产品入口。至少配置其中一个：
+
+| 目标 | 需要配置的聊天变量 | 启动命令 |
+| --- | --- | --- |
+| 只用 Telegram | 配置 Telegram 变量；飞书留空 | `bun run start:telegram` 或 `bun run start` |
+| 只用飞书 | 配置飞书变量；Telegram 留空 | `bun run start:feishu` |
+| 两组变量都写在 `.env` | 两组都配置 | 用具体的 surface 启动命令选择本次进程入口 |
+
+`start:feishu` 只会在启动出来的子进程环境里清空 Telegram token、webhook、operator、operations chat 和 bootstrap 配置，不会改写 `.env`。主动 follow-up 也会按来源隔离：飞书来源 issue 只通知飞书收件人，Telegram 来源 issue 只通知 Telegram 收件人。
 
 ### Telegram
 
@@ -172,6 +185,51 @@ curl http://localhost:3000/api/v1/bots/manifest
 ```
 
 检查 `health`、`webhook_url`、`public_base_url`、`mini_app_base_url`、pending update count 和最后一次 webhook error。
+
+### 飞书
+
+| 变量 | 是否需要 | 含义 |
+| --- | --- | --- |
+| `SYMHARIX_FEISHU_APP_ID` | 使用飞书时必填 | 飞书自建应用 App ID。留空则禁用飞书。 |
+| `SYMHARIX_FEISHU_APP_SECRET` | 使用飞书时必填 | 飞书自建应用 App Secret，用于获取 `tenant_access_token`。 |
+| `SYMHARIX_FEISHU_OPERATOR_IDS` | 推荐 | 允许执行写操作的 `open_id`、`user_id` 或 `union_id`，逗号分隔。 |
+| `SYMHARIX_FEISHU_OPERATIONS_CHAT_ID` | 可选 | 固定 operations chat。可从飞书消息事件里的 `chat_id` 获取。 |
+| `SYMHARIX_FEISHU_API_BASE_URL` | 可选 | OpenAPI base，默认 `https://open.feishu.cn/open-apis`。 |
+| `SYMHARIX_PUBLIC_BASE_URL` | 可选 | 只有当飞书卡片需要打开 Mini App/runtime 网页链接时才需要公网 HTTPS base；长连接收事件不需要。 |
+| `SYMHARIX_FEISHU_RUNTIME_OPEN_MODE` | 可选 | 运行视图按钮打开方式。保持默认 `applink_web_url`，让飞书在客户端内部打开运行视图。 |
+| `SYMHARIX_FEISHU_RUNTIME_TUNNEL` | 可选 | `auto` 会在 `applink_web_url` 且未配置公网 base 时为运行视图创建临时 tunnel，方便手机端飞书打开；`off` 禁用，`on` 强制启用。 |
+| `SYMHARIX_FEISHU_TUNNEL_PROTOCOL` | 可选 | 运行视图 tunnel 协议。飞书默认使用 `auto`，避免继承 Telegram 的 `http2` 设置；网络挑剔时可尝试 `http2` 或 `quic`。 |
+| `SYMHARIX_FEISHU_TUNNEL_TIMEOUT_MS` / `SYMHARIX_FEISHU_TUNNEL_RETRY_ATTEMPTS` / `SYMHARIX_FEISHU_TUNNEL_RETRY_DELAY_MS` | 可选 | 创建飞书临时 runtime tunnel 的超时和重试参数。默认 `45000ms`、`3` 次、`1500ms`。 |
+| `SYMHARIX_FEISHU_TUNNEL_READY_ATTEMPTS` / `SYMHARIX_FEISHU_TUNNEL_READY_DELAY_MS` | 可选 | 发布临时 tunnel 到卡片前，等待 Cloudflare 不再返回 530 的次数和间隔。默认 `60` 次、每次 `1000ms`。 |
+| `SYMHARIX_FEISHU_RUNTIME_APPLINK_MODE` | 可选 | AppLink 打开形态，默认 `window`；如需侧边栏可尝试 `sidebar`。 |
+| `SYMHARIX_FEISHU_RUNTIME_APPLINK_WIDTH` / `SYMHARIX_FEISHU_RUNTIME_APPLINK_HEIGHT` | 可选 | 飞书桌面端独立窗口宽高。 |
+| `SYMHARIX_FEISHU_RUNTIME_APPLINK_TEMPLATE` | 可选 | 自定义 AppLink 模板。支持 `{appId}`、`{url}`、`{path}`、`{encodedUrl}`、`{encodedPath}`。 |
+
+本地飞书测试使用 `bun run start:feishu`。飞书长连接收消息不需要公网 webhook URL、Verification Token 或 Encrypt Key。运行视图按钮默认使用 `applink_web_url`；当 `SYMHARIX_PUBLIC_BASE_URL` 为空时，启动器会尝试创建临时 `trycloudflare.com` runtime tunnel，并只把它用于「Open Runtime View」这类 Mini App 页面链接；飞书事件仍然走长连接。
+
+如果手机端飞书需要远程打开运行视图，至少满足其一：
+
+| 方式 | 配置 |
+| --- | --- |
+| 稳定公网入口 | `SYMHARIX_PUBLIC_BASE_URL=https://your-domain.example` |
+| 本地开发临时入口 | `SYMHARIX_FEISHU_RUNTIME_OPEN_MODE=applink_web_url`，`SYMHARIX_FEISHU_RUNTIME_TUNNEL=auto` 或 `on` |
+
+第一次获取 operator id 时，可以先把 `SYMHARIX_FEISHU_OPERATOR_IDS` 留空，启动后给飞书机器人发一条消息，然后从 SymHarix 启动日志里复制 `user_id=...` 的值填回 `.env`。收到的值通常就是发送者的 `open_id`（`ou_...`）。
+
+飞书权限至少需要：
+
+| 权限 | 用途 |
+| --- | --- |
+| `im:message.group_at_msg.include_bot:readonly` | 获取群组中其他机器人和用户 @ 当前机器人的消息。 |
+| `im:message.group_at_msg:readonly` | 获取群组中用户 @ 机器人的消息。 |
+| `im:message.p2p_msg:readonly` | 接收用户发给机器人的单聊消息。 |
+| `im:message:send_as_bot` | 以应用/机器人身份发送消息。 |
+| `im:message:update` | 编辑已发送的卡片或消息，用于 Plan Card/运行卡片原地更新。 |
+| `im:resource` | 获取与上传图片或文件资源，用于卡片图片等内容。 |
+
+权限变更后需要重新发布应用，并重启 SymHarix 以刷新 tenant access token。
+
+当前飞书适配层复刻 Telegram 的核心 supervisor 能力：自然语言下达任务、slash 命令、仓库切换、Plan Card/运行卡片、按钮审批/重试/停止、主动 follow-up 和固定 operations chat。需要在飞书应用中开启机器人能力，把事件和回调都设为长连接，并添加 `im.message.receive_v1` 与 `card.action.trigger`。
 
 ### Bot LLM
 

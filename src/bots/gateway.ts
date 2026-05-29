@@ -55,6 +55,7 @@ import type {
   BotGateway,
   BotMessageEditFailureKind,
   BotRecipient,
+  BotTransport,
   BotTransportAction,
   BotTransportMessageRef,
   BotTransportMessage,
@@ -71,6 +72,14 @@ import {
 import { TelegramWebhookBootstrapService } from './telegramBootstrap';
 import { readSymHarixEnv, syncSymHarixEnvAliases } from '../config/env';
 import { createDefaultTelegramApiFetch } from './telegramHttp';
+import {
+  createDefaultFeishuLongConnectionClient,
+  FeishuNotifier,
+  normalizeFeishuApiBaseUrl,
+  type FeishuAdapterConfig,
+  type FeishuLongConnectionClient,
+  type FeishuLongConnectionFactory,
+} from './feishu';
 import { logger } from '../logging';
 import { SupervisorSessionService, type SupervisorPlanBrain } from '../supervisor/sessionService';
 import type { SupervisorRepoIntelligenceResolver } from '../supervisor/repoIntelligence';
@@ -213,6 +222,16 @@ function hasPendingConfirmationButtons(response: Pick<BotCommandResponse, 'actio
     action.callback_data === 'pending|confirm' ||
     action.callback_data === 'pending|cancel'
   ));
+}
+
+function messageUsesCardPayload(message: BotTransportMessage): boolean {
+  return Boolean(
+    message.force_card ||
+    message.photo ||
+    message.caption ||
+    message.actions?.length ||
+    message.action_rows?.length,
+  );
 }
 
 function runtimeIssueCardStateForResponse(
@@ -979,14 +998,20 @@ const ACTIVE_SUPERVISOR_SESSION_CARD_STATES = new Set<SupervisorSessionState>([
   'awaiting_user_decision',
 ]);
 
+function isSupervisorChatTransport(transport: BotTransport): boolean {
+  return transport === 'telegram' || transport === 'feishu';
+}
+
 function createBotWriteAuthorizer(params: {
   telegramOperatorIds: Set<string>;
   discordOperatorIds: Set<string>;
+  feishuOperatorIds: Set<string>;
 }): (context: BotCommandContext) => boolean {
   return (context) => {
-    const operatorIds =
-      context.transport === 'telegram'
-        ? params.telegramOperatorIds
+    const operatorIds = context.transport === 'telegram'
+      ? params.telegramOperatorIds
+      : context.transport === 'feishu'
+        ? params.feishuOperatorIds
         : params.discordOperatorIds;
     if (operatorIds.size === 0) {
       return true;
@@ -1013,12 +1038,128 @@ function parseNonNegativeInteger(value: string | null | undefined): number | nul
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
+function normalizeFeishuRuntimeOpenMode(value: string | null | undefined): FeishuAdapterConfig['runtimeOpenMode'] {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === 'applink_web_app' || normalized === 'applink_web_url') {
+    return normalized;
+  }
+  if (normalized === 'url') {
+    return 'url';
+  }
+  return 'applink_web_url';
+}
+
 function shouldSendTelegramProcessingAck(text: string): boolean {
   return Boolean(text.trim());
 }
 
 function waitForTelegramRetry(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function stringField(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function nestedRecord(value: Record<string, unknown> | null, key: string): Record<string, unknown> | null {
+  return value ? asRecord(value[key]) : null;
+}
+
+function nestedString(value: Record<string, unknown> | null, ...path: string[]): string | null {
+  let current: Record<string, unknown> | null = value;
+  for (let index = 0; index < path.length; index += 1) {
+    const key = path[index]!;
+    if (index === path.length - 1) {
+      return current ? stringField(current[key]) : null;
+    }
+    current = nestedRecord(current, key);
+  }
+  return null;
+}
+
+function parseJsonRecord(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value !== 'string' || !value.trim()) {
+    return null;
+  }
+  try {
+    return asRecord(JSON.parse(value));
+  } catch {
+    return null;
+  }
+}
+
+function normalizeFeishuIncomingText(value: string): string {
+  return value
+    .replace(/<at\b[^>]*>.*?<\/at>/gi, '')
+    .replace(/\s+\n/g, '\n')
+    .trim();
+}
+
+function extractFeishuMessageText(message: Record<string, unknown> | null): string | null {
+  const content = parseJsonRecord(message?.content);
+  const text = stringField(content?.text) ?? stringField(content?.content);
+  return text ? normalizeFeishuIncomingText(text) : null;
+}
+
+function feishuSenderDisplayName(sender: Record<string, unknown> | null): string | null {
+  return nestedString(sender, 'sender_id', 'open_id')
+    ?? nestedString(sender, 'sender_id', 'user_id')
+    ?? nestedString(sender, 'sender_id', 'union_id')
+    ?? nestedString(sender, 'operator_id', 'open_id')
+    ?? nestedString(sender, 'operator_id', 'user_id')
+    ?? stringField(sender?.open_id)
+    ?? stringField(sender?.user_id)
+    ?? stringField(sender?.union_id)
+    ?? stringField(sender?.name);
+}
+
+function feishuCardActionCallbackData(
+  event: Record<string, unknown>,
+  action: Record<string, unknown> | null,
+): string | null {
+  const value = parseJsonRecord(action?.value);
+  return stringField(value?.callback_data)
+    ?? nestedString(value, 'data', 'callback_data')
+    ?? stringField(action?.value)
+    ?? nestedString(event, 'action', 'value', 'callback_data')
+    ?? nestedString(event, 'action', 'value', 'data', 'callback_data');
+}
+
+function feishuCardActionOperatorId(
+  event: Record<string, unknown>,
+  operator: Record<string, unknown> | null,
+): string | null {
+  return nestedString(operator, 'operator_id', 'open_id')
+    ?? nestedString(operator, 'operator_id', 'user_id')
+    ?? nestedString(operator, 'operator_id', 'union_id')
+    ?? stringField(operator?.open_id)
+    ?? stringField(operator?.user_id)
+    ?? stringField(operator?.union_id)
+    ?? stringField(event.open_id)
+    ?? stringField(event.user_id)
+    ?? stringField(event.union_id);
+}
+
+function normalizeFeishuLongConnectionEvent(payload: unknown): Record<string, unknown> {
+  const record = asRecord(payload) ?? {};
+  return asRecord(record.event) ?? record;
+}
+
+function feishuLongConnectionEventId(eventType: string, event: Record<string, unknown>): string | null {
+  return nestedString(event, 'header', 'event_id')
+    ?? stringField(event.event_id)
+    ?? (eventType === 'im.message.receive_v1'
+      ? nestedString(event, 'message', 'message_id')
+      : null);
 }
 
 function mapReadyRepoUnderstanding(
@@ -1083,6 +1224,8 @@ export class DefaultBotGateway implements BotGateway {
   private readonly subscriptions: BotSubscriptionService;
   private readonly followups: BotFollowupService | null;
   private readonly telegramNotifier: TelegramNotifier | null;
+  private readonly feishuNotifier: FeishuNotifier | null;
+  private readonly feishuLongConnection: FeishuLongConnectionClient | null;
   private readonly discordNotifier: DiscordNotifier | null;
   private readonly followupMessageStates: BotFollowupMessageStateRepository | null;
   private readonly followupDeliveryStates: BotFollowupDeliveryStateRepository | null;
@@ -1109,6 +1252,7 @@ export class DefaultBotGateway implements BotGateway {
   private readonly supervisorPendingActions: SupervisorPendingActionRepository | null;
   private readonly repoClaudeConversations: RepoClaudeConversationRepository | null;
   private readonly botWriteAuthorizer: (context: BotCommandContext) => boolean;
+  private readonly feishuConfig: FeishuAdapterConfig;
   private readonly telegramTextProcessingAckDelayMs: number;
   private readonly telegramTextCoalesceDelayMs: number;
   private readonly pendingTelegramTextResponses = new Map<string, PendingTelegramTextResponse>();
@@ -1118,6 +1262,10 @@ export class DefaultBotGateway implements BotGateway {
   private readonly seenTelegramUpdateOrder: string[] = [];
   private readonly activeTelegramRuntimeOpenKeys = new Set<string>();
   private readonly recentTelegramRuntimeOpenCooldownUntil = new Map<string, number>();
+  private readonly seenFeishuEventIds = new Set<string>();
+  private readonly seenFeishuEventOrder: string[] = [];
+  private feishuLongConnectionStarted = false;
+  private feishuLongConnectionHealth: 'healthy' | 'degraded' | 'unconfigured' = 'unconfigured';
   private readonly runtimeIssueCardLock = new RuntimeIssueCardLock();
   private readonly supervisorSessionCardLock = new SupervisorSessionCardLock();
   private readonly telegramRuntimeOpenCooldownMs: number;
@@ -1163,6 +1311,9 @@ export class DefaultBotGateway implements BotGateway {
       supervisorCcAdvisor?: SupervisorCcAdvisor | null;
       supervisorAgentService?: SupervisorAgentService | null;
       repoUnderstandingService?: SupervisorRepoUnderstandingService | null;
+      feishuConfig?: FeishuAdapterConfig;
+      feishuFetch?: typeof fetch;
+      feishuLongConnectionFactory?: FeishuLongConnectionFactory | null;
       telegramDiagnostics?: TelegramWebhookDiagnosticsService;
       telegramBootstrapService?: TelegramWebhookBootstrapService | null;
       telegramTextProcessingAckDelayMs?: number | null;
@@ -1199,11 +1350,31 @@ export class DefaultBotGateway implements BotGateway {
         ?? parsePositiveInteger(readSymHarixEnv('SYMPHONY_TELEGRAM_RUNTIME_OPEN_COOLDOWN_MS'))
         ?? 5_000,
     );
+    this.feishuConfig = options.feishuConfig ?? {
+      appId: null,
+      appSecret: null,
+      operationsChatId: null,
+      operatorIds: new Set(),
+      apiBaseUrl: normalizeFeishuApiBaseUrl(null),
+      publicBaseUrl: normalizePublicBaseUrl(readSymHarixEnv('SYMPHONY_PUBLIC_BASE_URL') || null),
+      runtimeOpenMode: 'applink_web_url',
+      runtimeAppLinkMode: null,
+      runtimeAppLinkWidth: null,
+      runtimeAppLinkHeight: null,
+      runtimeAppLinkTemplate: null,
+    };
     const supervisorMemories = options.supervisorMemoryRepository ?? null;
     const supervisorJobs = options.supervisorJobRepository ?? null;
     this.telegramNotifier = telegramConfig.botToken
       ? new TelegramNotifier(telegramConfig, () => this.telegramPublicBaseUrl)
       : null;
+    this.feishuNotifier = this.feishuConfig.appId && this.feishuConfig.appSecret
+      ? new FeishuNotifier(this.feishuConfig, options.feishuFetch)
+      : null;
+    this.feishuLongConnection = this.feishuConfig.appId && this.feishuConfig.appSecret && options.feishuLongConnectionFactory !== null
+      ? (options.feishuLongConnectionFactory ?? createDefaultFeishuLongConnectionClient)(this.feishuConfig)
+      : null;
+    this.feishuLongConnectionHealth = this.feishuLongConnection ? 'degraded' : 'unconfigured';
     this.discordNotifier = discordConfig.botToken ? new DiscordNotifier(discordConfig) : null;
     this.telegramDiagnostics = options.telegramDiagnostics
       ?? new DefaultTelegramWebhookDiagnosticsService(telegramConfig.botToken);
@@ -1217,11 +1388,13 @@ export class DefaultBotGateway implements BotGateway {
       : null;
     this.subscriptions = new BotSubscriptionService(runtime, {
       telegram: this.telegramNotifier ?? undefined,
+      feishu: this.feishuNotifier ?? undefined,
       discord: this.discordNotifier ?? undefined,
     }, subscriptionRepository);
     const canWrite = createBotWriteAuthorizer({
       telegramOperatorIds: telegramConfig.operatorIds,
       discordOperatorIds: discordConfig.operatorIds,
+      feishuOperatorIds: this.feishuConfig.operatorIds,
     });
     this.botWriteAuthorizer = canWrite;
     this.commandService = new BotCommandService(
@@ -1363,8 +1536,10 @@ export class DefaultBotGateway implements BotGateway {
     this.followups = options.followupRepository
       ? new BotFollowupService(runtime, {
           telegram: this.telegramNotifier ?? undefined,
+          feishu: this.feishuNotifier ?? undefined,
         }, options.followupRepository, options.followupMessageStateRepository ?? null, {
           telegramOperationsChatId: this.telegramConfig.operationsChatId,
+          feishuOperationsChatId: this.feishuConfig.operationsChatId,
           deliveryStateRepository: options.followupDeliveryStateRepository ?? null,
           transportEventRepository: options.transportEventRepository ?? null,
           supervisorSessionRepository: this.supervisorSessions,
@@ -1379,6 +1554,7 @@ export class DefaultBotGateway implements BotGateway {
           transportEventRepository: this.transportEvents,
           notifiers: {
             telegram: this.telegramNotifier ?? undefined,
+            feishu: this.feishuNotifier ?? undefined,
             discord: this.discordNotifier ?? undefined,
           },
           sessionCardLock: this.supervisorSessionCardLock,
@@ -1412,11 +1588,14 @@ export class DefaultBotGateway implements BotGateway {
   getManifest(): BotManifest {
     const telegramInboundEnabled = Boolean(this.telegramConfig.botToken);
     const telegramOutboundEnabled = Boolean(this.telegramConfig.botToken);
+    const feishuInboundEnabled = Boolean(this.feishuLongConnection);
+    const feishuOutboundEnabled = Boolean(this.feishuNotifier);
     const discordInboundEnabled = Boolean(this.discordConfig.publicKey);
     const discordOutboundEnabled = Boolean(this.discordConfig.botToken);
     this.telegramDiagnostics.maybeRefresh();
     const telegramDiagnostics = this.telegramDiagnostics.getSnapshot();
     const telegramPublicBaseUrl = this.telegramPublicBaseUrl;
+    const feishuPublicBaseUrl = this.feishuConfig.publicBaseUrl;
     const activeSupervisorSessions = (this.supervisorSessions?.findAll() ?? [])
       .filter((session) => (
         session.state !== 'completed' &&
@@ -1460,6 +1639,21 @@ export class DefaultBotGateway implements BotGateway {
           webhook_last_error_message: telegramDiagnostics.webhook_last_error_message,
           webhook_last_error_at: telegramDiagnostics.webhook_last_error_at,
           callback_ingress_recently_ok: telegramDiagnostics.callback_ingress_recently_ok,
+        },
+        feishu: {
+          enabled: feishuInboundEnabled || feishuOutboundEnabled,
+          inbound_enabled: feishuInboundEnabled,
+          outbound_enabled: feishuOutboundEnabled,
+          watch_supported: feishuOutboundEnabled,
+          write_requires_operator: this.feishuConfig.operatorIds.size > 0,
+          inbound_path: 'long_connection',
+          proactive_followups_supported: Boolean(this.feishuNotifier),
+          inline_actions_supported: Boolean(this.feishuNotifier),
+          operations_chat_configured: Boolean(this.feishuConfig.operationsChatId),
+          health: this.feishuLongConnectionHealth,
+          webhook_url: null,
+          public_base_url: feishuPublicBaseUrl,
+          mini_app_base_url: feishuPublicBaseUrl,
         },
         discord: {
           enabled: discordInboundEnabled || discordOutboundEnabled,
@@ -1513,6 +1707,13 @@ export class DefaultBotGateway implements BotGateway {
     const localBaseUrl = params.localBaseUrl.replace(/\/+$/, '');
     this.supervisorClaudeRuntime?.setContextEndpoint?.(`${localBaseUrl}/api/v1/bots/supervisor-context/call`);
     this.supervisorClaudeRuntime?.setOrchestratorEndpoint?.(`${localBaseUrl}/api/v1/bots/supervisor-orchestrator/call`);
+    if (this.feishuNotifier && !this.feishuConfig.publicBaseUrl) {
+      this.feishuConfig.publicBaseUrl = localBaseUrl;
+      logger.info('Feishu runtime Mini App base URL defaulted to local server', {
+        public_base_url: localBaseUrl,
+      });
+    }
+    await this.startFeishuLongConnection();
 
     if (!this.telegramBootstrap) {
       return;
@@ -1535,6 +1736,33 @@ export class DefaultBotGateway implements BotGateway {
     }
   }
 
+  private async startFeishuLongConnection(): Promise<void> {
+    if (!this.feishuLongConnection || this.feishuLongConnectionStarted) {
+      return;
+    }
+    this.feishuLongConnectionStarted = true;
+    try {
+      await this.feishuLongConnection.start({
+        onMessageEvent: async (payload) => {
+          await this.handleFeishuLongConnectionEvent('im.message.receive_v1', payload);
+        },
+        onCardActionEvent: (payload) => {
+          void this.handleFeishuLongConnectionEvent('card.action.trigger', payload)
+            .catch((error) => {
+              logger.warn('Feishu card action async handling failed', {}, error instanceof Error ? error : undefined);
+            });
+          return this.feishuToast('已收到，正在处理').body;
+        },
+      });
+      this.feishuLongConnectionHealth = 'healthy';
+      logger.info('Feishu long connection started');
+    } catch (error) {
+      this.feishuLongConnectionHealth = 'degraded';
+      this.feishuLongConnectionStarted = false;
+      logger.warn('Feishu long connection startup failed', {}, error instanceof Error ? error : undefined);
+    }
+  }
+
   dispose(): void {
     if (this.startupRepairTimer) {
       clearTimeout(this.startupRepairTimer);
@@ -1548,6 +1776,8 @@ export class DefaultBotGateway implements BotGateway {
     this.queuedTelegramTextResponses.clear();
     this.activeTelegramRuntimeOpenKeys.clear();
     this.recentTelegramRuntimeOpenCooldownUntil.clear();
+    this.seenFeishuEventIds.clear();
+    this.seenFeishuEventOrder.length = 0;
     this.subscriptions.dispose();
     this.followups?.dispose();
     this.supervisorWorker?.dispose();
@@ -1555,6 +1785,7 @@ export class DefaultBotGateway implements BotGateway {
     this.supervisorSessionService?.dispose();
     void this.supervisorAgentService?.disposeRepoConversations?.();
     void this.supervisorClaudeRuntime?.dispose?.();
+    void this.feishuLongConnection?.dispose();
     void this.telegramBootstrap?.dispose();
   }
 
@@ -1603,7 +1834,11 @@ export class DefaultBotGateway implements BotGateway {
     const rawContext = payload.context && typeof payload.context === 'object'
       ? payload.context as Record<string, unknown>
       : {};
-    const transport = rawContext.transport === 'discord' ? 'discord' : 'telegram';
+    const transport = rawContext.transport === 'discord'
+      ? 'discord'
+      : rawContext.transport === 'feishu'
+        ? 'feishu'
+        : 'telegram';
     const conversationId = typeof rawContext.conversation_id === 'string' && rawContext.conversation_id.trim()
       ? rawContext.conversation_id.trim()
       : 'supervisor-context';
@@ -1694,7 +1929,11 @@ export class DefaultBotGateway implements BotGateway {
     const rawContext = payload.context && typeof payload.context === 'object'
       ? payload.context as Record<string, unknown>
       : {};
-    const transport = rawContext.transport === 'discord' ? 'discord' : 'telegram';
+    const transport = rawContext.transport === 'discord'
+      ? 'discord'
+      : rawContext.transport === 'feishu'
+        ? 'feishu'
+        : 'telegram';
     const conversationId = typeof rawContext.conversation_id === 'string' && rawContext.conversation_id.trim()
       ? rawContext.conversation_id.trim()
       : 'supervisor-orchestrator';
@@ -1743,6 +1982,293 @@ export class DefaultBotGateway implements BotGateway {
         },
       };
     }
+  }
+
+  private async handleFeishuLongConnectionEvent(
+    eventType: string,
+    payload: unknown,
+  ): Promise<{ ok: boolean; status: number; body: Record<string, unknown> }> {
+    if (!this.feishuNotifier) {
+      return {
+        ok: false,
+        status: 503,
+        body: { ok: false, error: 'Feishu adapter is not configured' },
+      };
+    }
+
+    const event = normalizeFeishuLongConnectionEvent(payload);
+    const eventId = feishuLongConnectionEventId(eventType, event);
+    logger.info('Feishu long connection event received', {
+      event_type: eventType,
+      event_id: eventId,
+    });
+    if (eventId && this.seenFeishuEventIds.has(eventId)) {
+      logger.info('Feishu duplicate event ignored', { event_id: eventId });
+      return {
+        ok: true,
+        status: 200,
+        body: { ok: true, duplicate: true },
+      };
+    }
+    if (eventId) {
+      this.rememberFeishuEventId(eventId);
+    }
+
+    if (eventType === 'im.message.receive_v1') {
+      return this.handleFeishuMessageEvent(event);
+    }
+
+    if (eventType === 'card.action.trigger') {
+      return this.handleFeishuCardActionEvent(event);
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      body: { ok: true, ignored: true },
+    };
+  }
+
+  private rememberFeishuEventId(eventId: string): void {
+    this.seenFeishuEventIds.add(eventId);
+    this.seenFeishuEventOrder.push(eventId);
+    while (this.seenFeishuEventOrder.length > 1_000) {
+      const expired = this.seenFeishuEventOrder.shift();
+      if (expired) {
+        this.seenFeishuEventIds.delete(expired);
+      }
+    }
+  }
+
+  private handleFeishuMessageEvent(event: Record<string, unknown>): { ok: boolean; status: number; body: Record<string, unknown> } {
+    const sender = asRecord(event.sender);
+    if (stringField(sender?.sender_type) === 'bot') {
+      logger.info('Feishu message event ignored because sender is bot');
+      return {
+        ok: true,
+        status: 200,
+        body: { ok: true, ignored: true },
+      };
+    }
+
+    const message = asRecord(event.message);
+    const messageType = stringField(message?.message_type);
+    if (messageType && messageType !== 'text') {
+      logger.info('Feishu message event ignored because message type is unsupported', {
+        message_type: messageType,
+      });
+      return {
+        ok: true,
+        status: 200,
+        body: { ok: true, ignored: true },
+      };
+    }
+
+    const text = extractFeishuMessageText(message);
+    const conversationId = stringField(message?.chat_id)
+      ?? nestedString(event, 'message', 'chat_id');
+    if (!text || !conversationId) {
+      logger.info('Feishu message event ignored because text or chat id is missing', {
+        has_text: Boolean(text),
+        has_chat_id: Boolean(conversationId),
+        message_type: messageType,
+      });
+      return {
+        ok: true,
+        status: 200,
+        body: { ok: true, ignored: true },
+      };
+    }
+
+    const senderId = nestedString(sender, 'sender_id', 'open_id')
+      ?? nestedString(sender, 'sender_id', 'user_id')
+      ?? nestedString(sender, 'sender_id', 'union_id');
+    logger.info('Feishu message event accepted', {
+      chat_id: conversationId,
+      user_id: senderId,
+      message_id: stringField(message?.message_id),
+    });
+    const context = {
+      transport: 'feishu' as const,
+      recipient: {
+        transport: 'feishu' as const,
+        conversation_id: conversationId,
+      },
+      identity: {
+        user_id: senderId,
+        display_name: feishuSenderDisplayName(sender),
+      },
+      message_id: stringField(message?.message_id),
+    };
+    this.queueTelegramTextResponse(context, text);
+
+    return {
+      ok: true,
+      status: 200,
+      body: { ok: true },
+    };
+  }
+
+  private async handleFeishuCardActionEvent(event: Record<string, unknown>): Promise<{ ok: boolean; status: number; body: Record<string, unknown> }> {
+    const action = asRecord(event.action);
+    const callbackData = feishuCardActionCallbackData(event, action);
+    if (!callbackData) {
+      logger.info('Feishu card action ignored because callback data is missing', {
+        action_tag: stringField(action?.tag),
+      });
+      return {
+        ok: true,
+        status: 200,
+        body: { ok: true, ignored: true },
+      };
+    }
+
+    const contextRecord = asRecord(event.context);
+    const conversationId = stringField(event.open_chat_id)
+      ?? stringField(event.chat_id)
+      ?? nestedString(contextRecord, 'open_chat_id')
+      ?? nestedString(contextRecord, 'chat_id');
+    const messageId = stringField(event.open_message_id)
+      ?? nestedString(contextRecord, 'open_message_id')
+      ?? nestedString(contextRecord, 'message_id');
+    if (!conversationId) {
+      logger.info('Feishu card action ignored because chat id is missing', {
+        message_id: messageId,
+        callback_data: callbackData,
+        has_context: Boolean(contextRecord),
+      });
+      return {
+        ok: true,
+        status: 200,
+        body: { ok: true, ignored: true },
+      };
+    }
+
+    const operator = asRecord(event.operator);
+    const operatorId = feishuCardActionOperatorId(event, operator);
+    logger.info('Feishu card action accepted', {
+      chat_id: conversationId,
+      message_id: messageId,
+      user_id: operatorId,
+      callback_data: callbackData,
+    });
+    const context = {
+      transport: 'feishu' as const,
+      recipient: {
+        transport: 'feishu' as const,
+        conversation_id: conversationId,
+      },
+      identity: {
+        user_id: operatorId,
+        display_name: stringField(operator?.name) ?? feishuSenderDisplayName(operator) ?? operatorId,
+      },
+    };
+
+    const existingCardState = messageId
+      ? this.followupMessageStates?.findByConversationMessageId({
+          transport: 'feishu',
+          conversation_id: conversationId,
+          message_id: messageId,
+        }) ?? null
+      : null;
+    const parsedCallback = this.parseTelegramCallbackData(callbackData);
+    const callbackIssue = this.resolveTelegramCallbackIssue({
+      transport: 'feishu',
+      conversationId,
+      existingCardState,
+      issueIdentifier: parsedCallback.issueIdentifier,
+    });
+    const recipient = {
+      transport: 'feishu' as const,
+      conversation_id: conversationId,
+    };
+
+    try {
+      if (parsedCallback.kind === 'supervisor_action') {
+        const supervisorResult = await this.handleSupervisorCallback({
+          context,
+          parsed: parsedCallback,
+        });
+        const delivered = await this.deliverTelegramCallbackMessage({
+          recipient,
+          originalMessageId: messageId,
+          message: supervisorResult.outbound,
+          issue: callbackIssue,
+          materialKey: supervisorResult.materialKey,
+          allowFallback: true,
+        });
+        if (supervisorResult.sessionId) {
+          this.supervisorSessionService?.recordOutboundMessage(
+            supervisorResult.sessionId,
+            delivered.ref.provider_message_id,
+            supervisorResult.materialKey,
+          );
+        }
+        return this.feishuToast(supervisorResult.toastText);
+      }
+
+      const callbackResult = await this.handleTelegramCallback(
+        context,
+        parsedCallback,
+        callbackIssue,
+        existingCardState,
+        messageId,
+        null,
+      );
+      const delivered = await this.deliverTelegramCallbackMessage({
+        recipient,
+        originalMessageId: messageId,
+        message: callbackResult.outbound,
+        issue: callbackResult.issue,
+        materialKey: callbackResult.cardKey,
+        allowFallback: true,
+      });
+      if (callbackResult.issue) {
+        this.persistFollowupMessageState({
+          transport: 'feishu',
+          conversationId,
+          issue: callbackResult.issue,
+          deliveredMessageId: delivered.ref.provider_message_id,
+          cardKind: callbackResult.cardKind,
+          cardState: callbackResult.cardState,
+          cardKey: callbackResult.cardKey,
+          existingCardState,
+        });
+      }
+      if (callbackResult.executeAfterAck?.pendingAction && callbackResult.issue) {
+        this.runTelegramPendingAction({
+          context,
+          recipient,
+          originalMessageId: delivered.ref.provider_message_id,
+          pendingAction: callbackResult.executeAfterAck.pendingAction,
+          actionLabel: callbackResult.executeAfterAck.actionLabel,
+          issue: callbackResult.executeAfterAck.issue,
+          existingCardState,
+          auditBase: null,
+        });
+      }
+      return this.feishuToast(callbackResult.toastText);
+    } catch (error) {
+      logger.warn('Feishu card action failed', {
+        conversation_id: conversationId,
+        message_id: messageId,
+        callback_data: callbackData,
+      }, error instanceof Error ? error : undefined);
+      return this.feishuToast('执行失败，请稍后重试', 'error');
+    }
+  }
+
+  private feishuToast(content: string, type: 'info' | 'success' | 'warning' | 'error' = 'info'): { ok: boolean; status: number; body: Record<string, unknown> } {
+    return {
+      ok: true,
+      status: 200,
+      body: {
+        toast: {
+          type,
+          content,
+        },
+      },
+    };
   }
 
   async handleTelegramWebhook(
@@ -1973,6 +2499,7 @@ export class DefaultBotGateway implements BotGateway {
               if (replacementDelivered) {
                 if (replacementDelivered.callbackResult.issue) {
                   this.persistFollowupMessageState({
+                    transport: 'telegram',
                     conversationId,
                     issue: replacementDelivered.callbackResult.issue,
                     deliveredMessageId: replacementDelivered.ref.provider_message_id,
@@ -2135,6 +2662,7 @@ export class DefaultBotGateway implements BotGateway {
 
         if (callbackResult.issue) {
           this.persistFollowupMessageState({
+            transport: 'telegram',
             conversationId,
             issue: callbackResult.issue,
             deliveredMessageId: delivered.ref.provider_message_id,
@@ -2817,6 +3345,7 @@ export class DefaultBotGateway implements BotGateway {
   }
 
   private resolveTelegramCallbackIssue(params: {
+    transport?: BotTransport;
     conversationId: string;
     existingCardState: ReturnType<BotFollowupMessageStateRepository['findByConversationIssue']> | null;
     issueIdentifier: string | null;
@@ -2836,7 +3365,7 @@ export class DefaultBotGateway implements BotGateway {
     }
 
     const openCards = this.followupMessageStates?.findOpenByConversation({
-      transport: 'telegram',
+      transport: params.transport ?? 'telegram',
       conversation_id: params.conversationId,
     }).filter((record) => record.card_kind === 'governance_blocked') ?? [];
 
@@ -2845,6 +3374,19 @@ export class DefaultBotGateway implements BotGateway {
     }
 
     return null;
+  }
+
+  private getNotifierForTransport(transport: BotTransport): BotTransportNotifier | null {
+    switch (transport) {
+      case 'telegram':
+        return this.telegramNotifier;
+      case 'feishu':
+        return this.feishuNotifier;
+      case 'discord':
+        return this.discordNotifier;
+      default:
+        return null;
+    }
   }
 
   private async deliverTelegramCallbackMessage(params: {
@@ -2858,14 +3400,21 @@ export class DefaultBotGateway implements BotGateway {
   }): Promise<{ ref: BotTransportMessageRef; mode: TelegramCallbackDeliveryMode }> {
     const source = params.source ?? 'callback_update';
     const allowFallback = params.allowFallback ?? true;
+    const notifier = this.getNotifierForTransport(params.recipient.transport);
+    if (!notifier) {
+      throw new Error(`${params.recipient.transport} notifier is not configured`);
+    }
     if (params.originalMessageId) {
       try {
-        const ref = await this.telegramNotifier!.editMessage(
+        const editMessage = params.recipient.transport === 'feishu'
+          ? { ...params.message, force_card: true }
+          : params.message;
+        const ref = await notifier.editMessage(
           params.recipient,
           {
             provider_message_id: params.originalMessageId,
           },
-          params.message,
+          editMessage,
         );
         this.recordTransportEvent({
           recipient: params.recipient,
@@ -2908,12 +3457,14 @@ export class DefaultBotGateway implements BotGateway {
           materialKey: params.materialKey ?? null,
           errorMessage: error instanceof Error ? error.message : String(error),
         });
-        logger.warn('Telegram message edit failed', {
+        logger.warn('Bot message edit failed', {
+          transport: params.recipient.transport,
           conversation_id: params.recipient.conversation_id,
           message_id: params.originalMessageId,
         }, error instanceof Error ? error : undefined);
         if (!allowFallback || getBotMessageEditFailureKind(error) !== 'message_not_found') {
-          logger.warn('Telegram callback kept original message to preserve one-card continuity', {
+          logger.warn('Bot callback kept original message to preserve one-card continuity', {
+            transport: params.recipient.transport,
             conversation_id: params.recipient.conversation_id,
             message_id: params.originalMessageId,
             fallback_allowed: allowFallback,
@@ -2929,7 +3480,7 @@ export class DefaultBotGateway implements BotGateway {
       }
     }
 
-    const ref = await this.telegramNotifier!.sendMessage(params.recipient, params.message);
+    const ref = await notifier.sendMessage(params.recipient, params.message);
     this.recordTransportEvent({
       recipient: params.recipient,
       issue: params.issue ?? null,
@@ -2979,6 +3530,7 @@ export class DefaultBotGateway implements BotGateway {
           [
             {
               label: textForIssueLocale(params.issue, '刷新卡片', 'Refresh Card'),
+              style: 'primary',
               callback_data: `rt|${params.issueIdentifier}|refresh`,
             },
           ],
@@ -3277,14 +3829,15 @@ export class DefaultBotGateway implements BotGateway {
     context: BotCommandContext,
     message: string,
   ): Promise<void> {
-    if (context.transport !== 'telegram' || !this.telegramNotifier) {
+    const notifier = this.getNotifierForTransport(context.transport);
+    if (!isSupervisorChatTransport(context.transport) || !notifier) {
       return;
     }
     const recipient = {
-      transport: 'telegram' as const,
+      transport: context.transport,
       conversation_id: context.recipient.conversation_id,
     };
-    const sent = await this.telegramNotifier.sendMessage(recipient, {
+    const sent = await notifier.sendMessage(recipient, {
       text: message,
     });
     this.recordTransportEvent({
@@ -3299,6 +3852,7 @@ export class DefaultBotGateway implements BotGateway {
   }
 
   private persistFollowupMessageState(params: {
+    transport: BotTransport;
     conversationId: string;
     issue: RuntimeIssueView;
     deliveredMessageId: string;
@@ -3312,7 +3866,7 @@ export class DefaultBotGateway implements BotGateway {
     }
 
     const record = {
-      transport: 'telegram' as const,
+      transport: params.transport,
       conversation_id: params.conversationId,
       issue_id: params.issue.issue_id,
       issue_identifier: params.issue.identifier,
@@ -3324,15 +3878,16 @@ export class DefaultBotGateway implements BotGateway {
 
     if (params.existingCardState) {
       this.followupMessageStates.updateState(record);
-      this.rememberCallbackFocus(params.conversationId, params.issue, params.cardState);
+      this.rememberCallbackFocus(params.transport, params.conversationId, params.issue, params.cardState);
       return;
     }
 
     this.followupMessageStates.upsert(record);
-    this.rememberCallbackFocus(params.conversationId, params.issue, params.cardState);
+    this.rememberCallbackFocus(params.transport, params.conversationId, params.issue, params.cardState);
   }
 
   private rememberCallbackFocus(
+    transport: BotTransport,
     conversationId: string,
     issue: RuntimeIssueView,
     cardState: 'open' | 'confirming' | 'executing' | 'waiting_on_child' | 'resolved' | 'failed',
@@ -3341,7 +3896,7 @@ export class DefaultBotGateway implements BotGateway {
       return;
     }
     this.conversationFocuses.upsert({
-      transport: 'telegram',
+      transport,
       conversation_id: conversationId,
       issue_id: issue.issue_id,
       issue_identifier: issue.identifier,
@@ -3350,24 +3905,26 @@ export class DefaultBotGateway implements BotGateway {
     });
   }
 
-  private hasActiveRuntimeIssueCard(conversationId: string): boolean {
+  private hasActiveRuntimeIssueCard(transport: BotTransport, conversationId: string): boolean {
     return this.followupMessageStates?.findOpenByConversation({
-      transport: 'telegram',
+      transport,
       conversation_id: conversationId,
     }).some((record) => record.card_kind === 'runtime_issue') ?? false;
   }
 
-  private hasActiveSupervisorSessionCard(conversationId: string): boolean {
+  private hasActiveSupervisorSessionCard(transport: BotTransport, conversationId: string): boolean {
     return this.supervisorSessions?.findAll().some((session) => (
-      session.transport === 'telegram'
+      session.transport === transport
       && session.conversation_id === conversationId
       && ACTIVE_SUPERVISOR_SESSION_CARD_STATES.has(session.state)
       && Boolean(session.last_message_id)
     )) ?? false;
   }
 
-  private hasActiveRuntimePanel(conversationId: string): boolean {
-    return this.hasActiveRuntimeIssueCard(conversationId) || this.hasActiveSupervisorSessionCard(conversationId);
+  private hasActiveRuntimePanel(transport: BotTransport | string, conversationId?: string): boolean {
+    const resolvedTransport = conversationId ? transport as BotTransport : 'telegram';
+    const resolvedConversationId = conversationId ?? transport;
+    return this.hasActiveRuntimeIssueCard(resolvedTransport, resolvedConversationId) || this.hasActiveSupervisorSessionCard(resolvedTransport, resolvedConversationId);
   }
 
   private describePendingAction(
@@ -3489,14 +4046,14 @@ export class DefaultBotGateway implements BotGateway {
     actionLabel: string;
     issue: RuntimeIssueView;
     existingCardState: ReturnType<BotFollowupMessageStateRepository['findByConversationIssue']> | null;
-    auditBase: Omit<TelegramCallbackAuditRecord, 'result' | 'error_message' | 'timestamp'>;
+    auditBase: Omit<TelegramCallbackAuditRecord, 'result' | 'error_message' | 'timestamp'> | null;
   }): void {
     void (async () => {
       try {
         const request = params.pendingAction.normalized_payload as BotCommandRequest;
         const result = await this.executePendingRuntimeRequest(params.context, request);
 
-        if (result.accepted && result.issue_id && params.context.transport === 'telegram') {
+        if (result.accepted && result.issue_id && isSupervisorChatTransport(params.context.transport)) {
           this.followups?.registerOrigin({
             transport: params.context.transport,
             conversation_id: params.context.recipient.conversation_id,
@@ -3518,20 +4075,23 @@ export class DefaultBotGateway implements BotGateway {
           materialKey: finalCard.cardKey,
         });
 
-        this.recordTelegramCallbackAudit({
-          ...params.auditBase,
-          result: telegramCallbackDeliveryResult(delivered.mode),
-          error_message: null,
-          timestamp: new Date().toISOString(),
-        });
-        this.recordTelegramCallbackAudit({
-          ...params.auditBase,
-          result: 'completed',
-          error_message: null,
-          timestamp: new Date().toISOString(),
-        });
+        if (params.auditBase) {
+          this.recordTelegramCallbackAudit({
+            ...params.auditBase,
+            result: telegramCallbackDeliveryResult(delivered.mode),
+            error_message: null,
+            timestamp: new Date().toISOString(),
+          });
+          this.recordTelegramCallbackAudit({
+            ...params.auditBase,
+            result: 'completed',
+            error_message: null,
+            timestamp: new Date().toISOString(),
+          });
+        }
 
         this.persistFollowupMessageState({
+          transport: params.context.transport,
           conversationId: params.context.recipient.conversation_id,
           issue: finalCard.issue,
           deliveredMessageId: delivered.ref.provider_message_id,
@@ -3557,14 +4117,17 @@ export class DefaultBotGateway implements BotGateway {
             materialKey: `failed|${buildGovernanceCardKey(failureIssue)}`,
           });
 
-          this.recordTelegramCallbackAudit({
-            ...params.auditBase,
-            result: telegramCallbackDeliveryResult(delivered.mode),
-            error_message: null,
-            timestamp: new Date().toISOString(),
-          });
+          if (params.auditBase) {
+            this.recordTelegramCallbackAudit({
+              ...params.auditBase,
+              result: telegramCallbackDeliveryResult(delivered.mode),
+              error_message: null,
+              timestamp: new Date().toISOString(),
+            });
+          }
 
           this.persistFollowupMessageState({
+            transport: params.context.transport,
             conversationId: params.context.recipient.conversation_id,
             issue: failureIssue,
             deliveredMessageId: delivered.ref.provider_message_id,
@@ -3578,12 +4141,14 @@ export class DefaultBotGateway implements BotGateway {
             card_key: `failed|${buildGovernanceCardKey(failureIssue)}`,
           });
         } finally {
-          this.recordTelegramCallbackAudit({
-            ...params.auditBase,
-            result: 'failed',
-            error_message: error instanceof Error ? error.message : 'unknown governance execution error',
-            timestamp: new Date().toISOString(),
-          });
+          if (params.auditBase) {
+            this.recordTelegramCallbackAudit({
+              ...params.auditBase,
+              result: 'failed',
+              error_message: error instanceof Error ? error.message : 'unknown governance execution error',
+              timestamp: new Date().toISOString(),
+            });
+          }
         }
       }
     })();
@@ -3647,7 +4212,7 @@ export class DefaultBotGateway implements BotGateway {
       existing.timer = setTimeout(() => {
         this.flushCoalescedTelegramTextResponse(key);
       }, this.telegramTextCoalesceDelayMs);
-      logger.info('Telegram text webhook coalesced', {
+      logger.info('Bot text inbound coalesced', {
         chat_id: context.recipient.conversation_id,
         user_id: context.identity.user_id,
         message_count: existing.texts.length,
@@ -3685,7 +4250,7 @@ export class DefaultBotGateway implements BotGateway {
     }
 
     const preemptedSessions = this.supervisorSessionService?.preemptActiveSessionsForNewThread(context, text) ?? 0;
-    logger.info('Telegram text webhook queued', {
+    logger.info('Bot text inbound queued', {
       chat_id: context.recipient.conversation_id,
       user_id: context.identity.user_id,
       is_command: isCommand,
@@ -3707,7 +4272,7 @@ export class DefaultBotGateway implements BotGateway {
     if (existing) {
       existing.context = context;
       existing.texts.push(text);
-      logger.info('Telegram text webhook queued behind active turn', {
+      logger.info('Bot text inbound queued behind active turn', {
         chat_id: context.recipient.conversation_id,
         user_id: context.identity.user_id,
         message_count: existing.texts.length,
@@ -3719,7 +4284,7 @@ export class DefaultBotGateway implements BotGateway {
       context,
       texts: [text],
     });
-    logger.info('Telegram text webhook queued behind active turn', {
+    logger.info('Bot text inbound queued behind active turn', {
       chat_id: context.recipient.conversation_id,
       user_id: context.identity.user_id,
       message_count: 1,
@@ -3759,16 +4324,21 @@ export class DefaultBotGateway implements BotGateway {
     const maxAttempts = outbound.photo
       ? 1
       : Math.max(1, params.maxAttempts ?? 3);
+    const notifier = this.getNotifierForTransport(recipient.transport);
+    if (!notifier) {
+      throw new Error(`${recipient.transport} notifier is not configured`);
+    }
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        return await this.telegramNotifier!.sendMessage(recipient, outbound);
+        return await notifier.sendMessage(recipient, outbound);
       } catch (error) {
         lastError = error;
         if (attempt >= maxAttempts) {
           break;
         }
-        logger.warn('Telegram final reply send failed; retrying', {
+        logger.warn('Bot final reply send failed; retrying', {
+          transport: recipient.transport,
           chat_id: params.context.recipient.conversation_id,
           user_id: params.context.identity.user_id,
           is_command: params.isCommand,
@@ -3778,11 +4348,17 @@ export class DefaultBotGateway implements BotGateway {
         await waitForTelegramRetry();
       }
     }
-    throw lastError instanceof Error ? lastError : new Error('Telegram final reply send failed');
+    throw lastError instanceof Error ? lastError : new Error(`${recipient.transport} final reply send failed`);
   }
 
   private async processTelegramTextResponse(context: BotCommandContext, text: string): Promise<void> {
-    logger.info('Telegram text processing started', {
+    const notifier = this.getNotifierForTransport(context.transport);
+    if (!notifier) {
+      throw new Error(`${context.transport} notifier is not configured`);
+    }
+
+    logger.info('Bot text processing started', {
+      transport: context.transport,
       chat_id: context.recipient.conversation_id,
       user_id: context.identity.user_id,
       is_command: text.startsWith('/'),
@@ -3795,16 +4371,16 @@ export class DefaultBotGateway implements BotGateway {
     const isEnglish = runtimeLocale === 'en';
     const shouldSendProcessingAck = shouldSendTelegramProcessingAck(text);
     const releaseRuntimeConversationCardLock = this.runtimeIssueCardLock.acquireConversation({
-      transport: 'telegram',
+      transport: context.transport,
       conversation_id: context.recipient.conversation_id,
     });
     const processingAckTimer = shouldSendProcessingAck ? setTimeout(() => {
-      if (processingFinished || !this.telegramNotifier) {
+      if (processingFinished) {
         return;
       }
-      processingAckPromise = this.telegramNotifier.sendMessage(
+      processingAckPromise = notifier.sendMessage(
         {
-          transport: 'telegram',
+          transport: context.transport,
           conversation_id: context.recipient.conversation_id,
         },
         {
@@ -3819,7 +4395,7 @@ export class DefaultBotGateway implements BotGateway {
         processingAckRef = sent;
         this.recordTransportEvent({
           recipient: {
-            transport: 'telegram',
+            transport: context.transport,
             conversation_id: context.recipient.conversation_id,
           },
           issue: null,
@@ -3831,7 +4407,8 @@ export class DefaultBotGateway implements BotGateway {
         });
         return sent;
       }).catch((error) => {
-        logger.warn('Telegram text processing acknowledgement failed', {
+        logger.warn('Bot text processing acknowledgement failed', {
+          transport: context.transport,
           chat_id: context.recipient.conversation_id,
           user_id: context.identity.user_id,
         }, error instanceof Error ? error : undefined);
@@ -3848,19 +4425,20 @@ export class DefaultBotGateway implements BotGateway {
         clearTimeout(processingAckTimer);
       }
 
-      logger.info('Telegram text processing finished', {
+      logger.info('Bot text processing finished', {
+        transport: context.transport,
         chat_id: context.recipient.conversation_id,
         user_id: context.identity.user_id,
         is_command: text.startsWith('/'),
       });
 
       const recipient = {
-        transport: 'telegram' as const,
+        transport: context.transport,
         conversation_id: context.recipient.conversation_id,
       };
       const explicitRuntimeIssueCardRequest = isExplicitRuntimeIssueCardRequest(text);
       const suppressRuntimeIssueCard = Boolean(response.photo && response.media_key)
-        && this.hasActiveRuntimePanel(context.recipient.conversation_id)
+        && this.hasActiveRuntimePanel(context.transport, context.recipient.conversation_id)
         && !explicitRuntimeIssueCardRequest;
       const outbound = {
         text: response.message,
@@ -3875,14 +4453,14 @@ export class DefaultBotGateway implements BotGateway {
       };
       const releaseRuntimeIssueCardLock = response.issue_id && outbound.photo && outbound.media_key
         ? this.runtimeIssueCardLock.acquire({
-            transport: 'telegram',
+            transport: context.transport,
             conversation_id: context.recipient.conversation_id,
             issue_id: response.issue_id,
           })
         : null;
       const releaseSupervisorSessionCardLock = response.session_id && outbound.photo && outbound.media_key
         ? this.supervisorSessionCardLock.acquire({
-            transport: 'telegram',
+            transport: context.transport,
             conversation_id: context.recipient.conversation_id,
             session_id: response.session_id,
           })
@@ -3892,10 +4470,11 @@ export class DefaultBotGateway implements BotGateway {
           processingAckRef = await processingAckPromise;
         }
         let sent: BotTransportMessageRef;
-        const shouldEditProcessingAck = Boolean(processingAckRef);
-        if (processingAckRef) {
+        const shouldEditProcessingAck = Boolean(processingAckRef)
+          && !(context.transport === 'feishu' && messageUsesCardPayload(outbound));
+        if (processingAckRef && shouldEditProcessingAck) {
           try {
-            sent = await this.telegramNotifier!.editMessage(
+            sent = await notifier.editMessage(
               recipient,
               processingAckRef,
               outbound,
@@ -3922,7 +4501,8 @@ export class DefaultBotGateway implements BotGateway {
                 materialKey: response.material_key ?? null,
               });
             } else {
-              logger.warn('Telegram text acknowledgement edit failed; sending final response separately', {
+              logger.warn('Bot text acknowledgement edit failed; sending final response separately', {
+                transport: context.transport,
                 chat_id: context.recipient.conversation_id,
                 user_id: context.identity.user_id,
               }, error instanceof Error ? error : undefined);
@@ -3946,6 +4526,17 @@ export class DefaultBotGateway implements BotGateway {
             context,
             isCommand: text.startsWith('/'),
           });
+          if (processingAckRef && !shouldEditProcessingAck) {
+            this.recordTransportEvent({
+              recipient,
+              issue: response.issue_id ? this.runtime.getIssue(response.issue_id) : null,
+              source: 'sync_ack',
+              action: 'fallback',
+              result: 'success',
+              messageId: sent.provider_message_id,
+              materialKey: response.material_key ?? null,
+            });
+          }
         }
         this.bindPendingConfirmationToTelegramMessage(context, response, sent);
         if (response.session_id && outbound.photo && outbound.media_key) {
@@ -3958,6 +4549,7 @@ export class DefaultBotGateway implements BotGateway {
         const issue = response.issue_id ? this.runtime.getIssue(response.issue_id) : null;
         if (issue && outbound.photo && outbound.media_key) {
           this.persistFollowupMessageState({
+            transport: context.transport,
             conversationId: context.recipient.conversation_id,
             issue,
             deliveredMessageId: sent.provider_message_id,
@@ -3965,7 +4557,7 @@ export class DefaultBotGateway implements BotGateway {
             cardState: runtimeIssueCardStateForResponse(response, issue),
             cardKey: outbound.media_key,
             existingCardState: this.followupMessageStates?.findByConversationIssue({
-              transport: 'telegram',
+              transport: context.transport,
               conversation_id: context.recipient.conversation_id,
               issue_id: issue.issue_id,
             }) ?? null,
@@ -3985,7 +4577,8 @@ export class DefaultBotGateway implements BotGateway {
         releaseSupervisorSessionCardLock?.();
       }
 
-      logger.info('Telegram text outbound sent', {
+      logger.info('Bot text outbound sent', {
+        transport: context.transport,
         chat_id: context.recipient.conversation_id,
         user_id: context.identity.user_id,
         is_command: text.startsWith('/'),
@@ -3996,11 +4589,12 @@ export class DefaultBotGateway implements BotGateway {
         clearTimeout(processingAckTimer);
       }
       const recipient = {
-        transport: 'telegram' as const,
+        transport: context.transport,
         conversation_id: context.recipient.conversation_id,
       };
       const message = error instanceof Error ? error.message : 'unknown error';
-      logger.error('Telegram text outbound failed', {
+      logger.error('Bot text outbound failed', {
+        transport: context.transport,
         chat_id: context.recipient.conversation_id,
         user_id: context.identity.user_id,
         is_command: text.startsWith('/'),
@@ -4270,6 +4864,19 @@ export function createBotGatewayFromEnv(
     supervisorCcAdvisor: supervisorCcAdvisor ?? null,
     supervisorAgentService: supervisorAgentService ?? null,
     repoUnderstandingService: repoUnderstandingService ?? null,
+    feishuConfig: {
+      appId: readSymHarixEnv('SYMPHONY_FEISHU_APP_ID') || null,
+      appSecret: readSymHarixEnv('SYMPHONY_FEISHU_APP_SECRET') || null,
+      operationsChatId: readSymHarixEnv('SYMPHONY_FEISHU_OPERATIONS_CHAT_ID') || null,
+      operatorIds: parseOperatorIds(readSymHarixEnv('SYMPHONY_FEISHU_OPERATOR_IDS')),
+      apiBaseUrl: normalizeFeishuApiBaseUrl(readSymHarixEnv('SYMPHONY_FEISHU_API_BASE_URL') || null),
+      publicBaseUrl: normalizePublicBaseUrl(readSymHarixEnv('SYMPHONY_PUBLIC_BASE_URL') || null),
+      runtimeOpenMode: normalizeFeishuRuntimeOpenMode(readSymHarixEnv('SYMPHONY_FEISHU_RUNTIME_OPEN_MODE')),
+      runtimeAppLinkMode: readSymHarixEnv('SYMPHONY_FEISHU_RUNTIME_APPLINK_MODE') || null,
+      runtimeAppLinkWidth: parsePositiveInteger(readSymHarixEnv('SYMPHONY_FEISHU_RUNTIME_APPLINK_WIDTH')),
+      runtimeAppLinkHeight: parsePositiveInteger(readSymHarixEnv('SYMPHONY_FEISHU_RUNTIME_APPLINK_HEIGHT')),
+      runtimeAppLinkTemplate: readSymHarixEnv('SYMPHONY_FEISHU_RUNTIME_APPLINK_TEMPLATE') || null,
+    },
     telegramDiagnostics,
     telegramTextCoalesceDelayMs: parseNonNegativeInteger(readSymHarixEnv('SYMPHONY_TELEGRAM_TEXT_COALESCE_DELAY_MS'))
       ?? 2_000,

@@ -2545,7 +2545,7 @@ export class SupervisorAgentRuntimeService {
           projectContext: route.route ? `default_project=${route.route.project_slug}` : null,
           route: route.route,
           runtimeContext: {
-            source: 'telegram_chat',
+            source: request.context.transport === 'feishu' ? 'feishu_chat' : 'telegram_chat',
             transport: request.context.transport,
             conversationId: request.context.recipient.conversation_id,
             defaultProjectSlug: route.route?.project_slug ?? null,
@@ -3175,7 +3175,7 @@ export function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
           projectContext: route.route ? `default_project=${route.route.project_slug}` : null,
           route: route.route,
           runtimeContext: {
-            source: 'telegram_chat',
+            source: context.context.transport === 'feishu' ? 'feishu_chat' : 'telegram_chat',
             transport: context.context.transport,
             conversationId: context.context.recipient.conversation_id,
             defaultProjectSlug: route.route?.project_slug ?? null,

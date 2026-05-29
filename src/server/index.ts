@@ -3,6 +3,7 @@
  * Minimal Hono REST API for the control plane
  */
 
+import { createServer as createNetServer } from 'node:net';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import type { Database } from 'bun:sqlite';
@@ -42,6 +43,36 @@ export function shouldLogAccessRequest(method: string, pathname: string): boolea
     return false;
   }
   return true;
+}
+
+async function reserveEphemeralPort(hostname: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createNetServer();
+    server.unref();
+    server.once('error', reject);
+    server.listen(0, hostname, () => {
+      const address = server.address();
+      const port = typeof address === 'object' && address ? address.port : null;
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        if (!port) {
+          reject(new Error('Failed to reserve an ephemeral server port'));
+          return;
+        }
+        resolve(port);
+      });
+    });
+  });
+}
+
+async function resolveServePort(port: number, hostname: string): Promise<number> {
+  if (port !== 0) {
+    return port;
+  }
+  return reserveEphemeralPort(hostname);
 }
 
 /**
@@ -186,7 +217,10 @@ export class SymHarixServer {
   }
 
   private getPublicBaseUrl(): string | null {
-    const manifestUrl = this.botGateway?.getManifest().transports.telegram.public_base_url ?? null;
+    const transports = this.botGateway?.getManifest().transports;
+    const manifestUrl = transports?.telegram?.public_base_url
+      ?? transports?.feishu?.public_base_url
+      ?? null;
     const envUrl = readSymHarixEnv('SYMPHONY_PUBLIC_BASE_URL') || null;
     const raw = manifestUrl || envUrl;
     if (!raw) {
@@ -201,8 +235,9 @@ export class SymHarixServer {
   async start(): Promise<{ port: number; hostname: string }> {
     return new Promise((resolve, reject) => {
       void (async () => {
+        const requestedPort = await resolveServePort(this.config.port, this.config.hostname);
         this.server = Bun.serve({
-          port: this.config.port,
+          port: requestedPort,
           hostname: this.config.hostname,
           idleTimeout: 255,
           fetch: this.app.fetch,

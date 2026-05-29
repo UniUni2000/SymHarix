@@ -70,19 +70,30 @@ function isRetryableTunnelWebhookError(error: unknown): boolean {
 }
 
 export function createCloudflaredTunnelProvider(
-  tunnelCommand: string = readSymHarixEnv('SYMPHONY_TELEGRAM_TUNNEL_COMMAND')?.trim() || 'cloudflared',
+  tunnelCommand?: string,
   timeoutMs: number = 15_000,
+  tunnelEnv: Record<string, string | undefined> = process.env,
 ): TelegramTunnelProvider {
   return async (localBaseUrl: string) => {
     return new Promise<TelegramTunnelHandle>((resolve, reject) => {
       let settled = false;
-      const protocol = readSymHarixEnv('SYMPHONY_TELEGRAM_TUNNEL_PROTOCOL')?.trim() || 'http2';
+      let disposeRequested = false;
+      let resolvedPublicBaseUrl: string | null = null;
+      const command = tunnelCommand?.trim()
+        || readSymHarixEnv('SYMPHONY_TUNNEL_COMMAND', tunnelEnv)?.trim()
+        || readSymHarixEnv('SYMPHONY_TELEGRAM_TUNNEL_COMMAND', tunnelEnv)?.trim()
+        || 'cloudflared';
+      const protocol = readSymHarixEnv('SYMPHONY_TUNNEL_PROTOCOL', tunnelEnv)?.trim()
+        || readSymHarixEnv('SYMPHONY_FEISHU_TUNNEL_PROTOCOL', tunnelEnv)?.trim()
+        || readSymHarixEnv('SYMPHONY_TELEGRAM_TUNNEL_PROTOCOL', tunnelEnv)?.trim()
+        || 'http2';
+      let recentOutput = '';
       const child = spawn(
-        tunnelCommand,
+        command,
         ['tunnel', '--url', localBaseUrl, '--protocol', protocol, '--no-autoupdate'],
         {
           stdio: ['ignore', 'pipe', 'pipe'],
-          env: process.env,
+          env: tunnelEnv,
         },
       );
 
@@ -96,6 +107,15 @@ export function createCloudflaredTunnelProvider(
       };
 
       const tryExtractUrl = (chunk: string): void => {
+        recentOutput = `${recentOutput}${chunk}`.slice(-2_000);
+        if (settled && /(?:\bERR\b|\bWRN\b|Registered tunnel connection|failed|error)/i.test(chunk)) {
+          const output = chunk
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (output) {
+            console.warn(`[tunnel-provider] ${output}`);
+          }
+        }
         const match = chunk.match(/https:\/\/(?!api\.)[a-z0-9.-]+trycloudflare\.com/i);
         if (!match?.[0]) {
           return;
@@ -104,10 +124,12 @@ export function createCloudflaredTunnelProvider(
         if (!publicBaseUrl) {
           return;
         }
+        resolvedPublicBaseUrl = publicBaseUrl;
         finish(() => {
           resolve({
             publicBaseUrl,
             dispose: async () => {
+              disposeRequested = true;
               await terminateChild(child);
             },
           });
@@ -121,15 +143,28 @@ export function createCloudflaredTunnelProvider(
         finish(() => reject(error));
       });
       child.once('exit', (code, signal) => {
+        const output = recentOutput
+          .replace(/\s+/g, ' ')
+          .trim();
+        const details = output ? ` output=${output}` : '';
+        if (settled) {
+          if (resolvedPublicBaseUrl && !disposeRequested) {
+            console.warn(
+              `[tunnel-provider] cloudflared tunnel exited after publishing ${resolvedPublicBaseUrl} (code=${code ?? 'null'}, signal=${signal ?? 'null'})${details}`,
+            );
+          }
+          return;
+        }
         finish(() => reject(new Error(
-          `cloudflared tunnel exited before publishing a URL (code=${code ?? 'null'}, signal=${signal ?? 'null'})`,
+          `cloudflared tunnel exited before publishing a URL (code=${code ?? 'null'}, signal=${signal ?? 'null'})${details}`,
         )));
       });
 
       const timeoutHandle = setTimeout(() => {
         finish(() => {
+          disposeRequested = true;
           void terminateChild(child);
-          reject(new Error(`Timed out waiting for ${tunnelCommand} to publish a public URL`));
+          reject(new Error(`Timed out waiting for ${command} to publish a public URL`));
         });
       }, timeoutMs);
     });

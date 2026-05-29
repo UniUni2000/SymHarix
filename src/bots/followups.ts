@@ -30,6 +30,7 @@ import { inferRuntimeLocaleFromText, type RuntimeLocale } from '../i18n/locale';
 
 interface BotFollowupServiceOptions {
   telegramOperationsChatId?: string | null;
+  feishuOperationsChatId?: string | null;
   bootstrapCurrentGovernanceCards?: boolean;
   deliveryStateRepository?: BotFollowupDeliveryStateRepository | null;
   transportEventRepository?: BotTransportEventRepository | null;
@@ -714,7 +715,10 @@ export class BotFollowupService {
 
   private collectRecipients(issueId: string): BotRecipient[] {
     const recipients = new Map<string, BotRecipient>();
-    for (const record of this.followups?.findByIssueId(issueId) ?? []) {
+    const followupRecords = this.followups?.findByIssueId(issueId) ?? [];
+    const originTransports = new Set<BotTransport>();
+    for (const record of followupRecords) {
+      originTransports.add(record.transport);
       if (!this.notifiers[record.transport]) {
         continue;
       }
@@ -723,11 +727,28 @@ export class BotFollowupService {
         conversation_id: record.conversation_id,
       });
     }
+    const shouldIncludeOperationsChat = (transport: BotTransport): boolean =>
+      originTransports.size === 0 || originTransports.has(transport);
 
-    if (this.options.telegramOperationsChatId && this.notifiers.telegram) {
+    if (
+      this.options.telegramOperationsChatId &&
+      this.notifiers.telegram &&
+      shouldIncludeOperationsChat('telegram')
+    ) {
       recipients.set(`telegram:${this.options.telegramOperationsChatId}`, {
         transport: 'telegram',
         conversation_id: this.options.telegramOperationsChatId,
+      });
+    }
+
+    if (
+      this.options.feishuOperationsChatId &&
+      this.notifiers.feishu &&
+      shouldIncludeOperationsChat('feishu')
+    ) {
+      recipients.set(`feishu:${this.options.feishuOperationsChatId}`, {
+        transport: 'feishu',
+        conversation_id: this.options.feishuOperationsChatId,
       });
     }
 

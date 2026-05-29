@@ -476,7 +476,7 @@ export class BotCommandService {
     }
 
     const issue = (result.issue_id ? this.runtime.getIssue(result.issue_id) : null) ?? result.issue;
-    if (result.accepted && result.issue_id && context.transport === 'telegram') {
+    if (result.accepted && result.issue_id && (context.transport === 'telegram' || context.transport === 'feishu')) {
       this.followups?.upsert({
         transport: context.transport,
         conversation_id: context.recipient.conversation_id,
@@ -885,7 +885,11 @@ export class BotCommandService {
     context: BotCommandContext,
     result: { accepted: boolean; issue_id: string | null; issue_identifier: string | null },
   ): void {
-    if (!result.accepted || !result.issue_id || context.transport !== 'telegram') {
+    if (
+      !result.accepted ||
+      !result.issue_id ||
+      (context.transport !== 'telegram' && context.transport !== 'feishu')
+    ) {
       return;
     }
 

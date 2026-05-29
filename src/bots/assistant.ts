@@ -60,6 +60,14 @@ const SUGGESTION_TYPE_ALIASES: Record<string, string[]> = {
   harness_adoption: ['harness adoption', 'harness_adoption', 'repo harness', 'harness'],
 };
 
+function isSupervisorChatTransport(context: BotCommandContext): boolean {
+  return context.transport === 'telegram' || context.transport === 'feishu';
+}
+
+function supervisorIntakeSourceForContext(context: BotCommandContext): SupervisorIntakeSource {
+  return context.transport === 'feishu' ? 'feishu_chat' : 'telegram_chat';
+}
+
 function normalizeText(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
@@ -504,7 +512,7 @@ function shouldProbeActiveSupervisorSession(params: {
   hasActiveSupervisorSession: boolean;
   supervisorSessionService: SupervisorSessionService | null;
 }): boolean {
-  if (params.context.transport !== 'telegram' || !params.supervisorSessionService) {
+  if (!isSupervisorChatTransport(params.context) || !params.supervisorSessionService) {
     return false;
   }
   return params.hasActiveSupervisorSession;
@@ -1747,7 +1755,7 @@ export class BotAssistantService {
     text: string,
     runtimeContext: BotRuntimeCopilotContext,
   ): Promise<SupervisorCcAdvisorResult | null> {
-    if (context.transport !== 'telegram' || !this.supervisorCcAdvisor) {
+    if (!isSupervisorChatTransport(context) || !this.supervisorCcAdvisor) {
       return null;
     }
 
@@ -1799,7 +1807,7 @@ export class BotAssistantService {
           intent: toAdvisorIssueDraftIntent(params.advisorResult, params.runtimeContext),
           runtimeContext: params.runtimeContext,
           canWrite: this.canWrite(params.context),
-          source: 'telegram_chat',
+          source: supervisorIntakeSourceForContext(params.context),
         });
       default:
         return null;
@@ -1811,7 +1819,7 @@ export class BotAssistantService {
     text: string,
     runtimeContext: BotRuntimeCopilotContext,
   ): Promise<SupervisorAgentResult | null> {
-    if (context.transport !== 'telegram' || !this.supervisorAgentService) {
+    if (!isSupervisorChatTransport(context) || !this.supervisorAgentService) {
       return null;
     }
 
@@ -1852,7 +1860,7 @@ export class BotAssistantService {
         controlPlaneSnapshot: buildControlPlaneSnapshot(runtimeContext),
         route,
         runtimeContext: {
-          source: 'telegram_chat',
+          source: supervisorIntakeSourceForContext(context),
           transport: context.transport,
           conversationId: context.recipient.conversation_id,
           defaultProjectSlug: runtimeContext.default_project_slug,
@@ -1873,7 +1881,7 @@ export class BotAssistantService {
     context: BotCommandContext,
     text: string,
   ): Promise<BotCommandResponse> {
-    if (context.transport !== 'telegram' || !this.supervisorAgentService?.clearRepoConversation) {
+    if (!isSupervisorChatTransport(context) || !this.supervisorAgentService?.clearRepoConversation) {
       return {
         message: '当前没有可清空的仓库 Claude 会话。',
       };
@@ -1957,14 +1965,14 @@ export class BotAssistantService {
         intent: null,
         runtimeContext,
         canWrite: this.canWrite(context),
-        source: 'telegram_chat',
+        source: supervisorIntakeSourceForContext(context),
       });
       if (response) {
         return response;
       }
     }
 
-    if (context.transport === 'telegram' && this.supervisorAgentRuntime) {
+    if (isSupervisorChatTransport(context) && this.supervisorAgentRuntime) {
       return this.supervisorAgentRuntime.respond({
         context,
         text,
@@ -1992,7 +2000,7 @@ export class BotAssistantService {
     text: string,
     options: { allowStructuredIntent?: boolean } = {},
   ): Promise<BotCommandResponse | null> {
-    if (context.transport !== 'telegram' || !this.supervisorClaudeRuntime) {
+    if (!isSupervisorChatTransport(context) || !this.supervisorClaudeRuntime) {
       return null;
     }
     const supervisorClaudeResponse = await this.supervisorClaudeRuntime.respond({
@@ -2084,7 +2092,7 @@ export class BotAssistantService {
           intent,
           runtimeContext: params.runtimeContext,
           canWrite: this.canWrite(params.context),
-          source: 'telegram_chat',
+          source: supervisorIntakeSourceForContext(params.context),
         });
       }
       default:
@@ -2172,7 +2180,7 @@ export class BotAssistantService {
         shouldBypassPendingForReadOnlyIssueQuestion(normalized) ||
         isSupervisorSessionFocusText(normalized)
       )) {
-        if (context.transport === 'telegram' && this.supervisorAgentRuntime) {
+        if (isSupervisorChatTransport(context) && this.supervisorAgentRuntime) {
           return this.supervisorAgentRuntime.respond({
             context,
             text,
@@ -2212,7 +2220,7 @@ export class BotAssistantService {
       return this.commandService.execute(context, parseTextCommand(text));
     }
 
-    if (context.transport === 'telegram' && this.supervisorAgentRuntime) {
+    if (isSupervisorChatTransport(context) && this.supervisorAgentRuntime) {
       return this.supervisorAgentRuntime.respond({
         context,
         text,
@@ -2228,7 +2236,7 @@ export class BotAssistantService {
 
     const destructiveControlIntent = detectIssueCloseIntent(normalized);
     if (destructiveControlIntent) {
-      if (context.transport === 'telegram' && this.supervisorAgentRuntime) {
+      if (isSupervisorChatTransport(context) && this.supervisorAgentRuntime) {
         return this.supervisorAgentRuntime.respond({
           context,
           text,
@@ -2278,7 +2286,7 @@ export class BotAssistantService {
       );
     }
 
-    if (context.transport === 'telegram' && this.supervisorAgentRuntime) {
+    if (isSupervisorChatTransport(context) && this.supervisorAgentRuntime) {
       return this.supervisorAgentRuntime.respond({
         context,
         text,
@@ -2299,7 +2307,7 @@ export class BotAssistantService {
       };
     }
     const hasActiveSupervisorSession = Boolean(
-      context.transport === 'telegram'
+      isSupervisorChatTransport(context)
       && this.supervisorSessionService?.hasActiveSession(context),
     );
     let supervisorAttempted = false;
@@ -2316,7 +2324,7 @@ export class BotAssistantService {
         intent: fastHeuristic.intent.kind === 'help' ? null : fastHeuristic.intent,
         runtimeContext,
         canWrite: this.canWrite(context),
-        source: 'telegram_chat',
+        source: supervisorIntakeSourceForContext(context),
       });
       if (supervisorResponse) {
         return supervisorResponse;
@@ -2356,7 +2364,7 @@ export class BotAssistantService {
       supervisorSessionService: this.supervisorSessionService,
     })) {
       supervisorAttempted = true;
-      const source: SupervisorIntakeSource = 'telegram_chat';
+      const source: SupervisorIntakeSource = supervisorIntakeSourceForContext(context);
       const supervisorResponse = await this.supervisorSessionService.respond({
         context,
         text,
@@ -2403,13 +2411,13 @@ export class BotAssistantService {
     }
 
     if (
-      context.transport === 'telegram' &&
+      isSupervisorChatTransport(context) &&
       this.supervisorSessionService &&
       !supervisorAttempted &&
       fastHeuristic.intent.kind === 'create_issue'
     ) {
       supervisorAttempted = true;
-      const source: SupervisorIntakeSource = 'telegram_chat';
+      const source: SupervisorIntakeSource = supervisorIntakeSourceForContext(context);
       const supervisorResponse = await this.supervisorSessionService.respond({
         context,
         text,
@@ -2488,11 +2496,11 @@ export class BotAssistantService {
     }
 
     if (
-      context.transport === 'telegram' &&
+      isSupervisorChatTransport(context) &&
       this.supervisorSessionService &&
       !supervisorAttempted
     ) {
-      const source: SupervisorIntakeSource = 'telegram_chat';
+      const source: SupervisorIntakeSource = supervisorIntakeSourceForContext(context);
       const supervisorResponse = await this.supervisorSessionService.respond({
         context,
         text,

@@ -46,7 +46,7 @@ export type ReviewDecision =
   | 'MERGE_BLOCKED';
 export type SyncTargetSystem = 'linear' | 'github';
 export type SyncResult = 'success' | 'failed';
-export type BotWatchTransport = 'telegram' | 'discord';
+export type BotWatchTransport = 'telegram' | 'discord' | 'feishu';
 export type BotWatchPresetValue = 'default' | 'verbose' | 'failures' | 'status';
 export type BotIssueFollowupRole = 'origin';
 export type BotFollowupCardKind = 'governance_blocked' | 'runtime_issue';

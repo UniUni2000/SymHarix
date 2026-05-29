@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  applyStartLocalBotSurfaceIsolation,
   buildTelegramStartupSummary,
   getStartLocalTunnelProbeRecoveryReason,
+  getStartLocalTunnelRegistrationWaitReason,
   getStartLocalTunnelRecoveryReason,
   resolveStartLocalPort,
   shouldEmitTelegramStartupSummary,
@@ -10,6 +12,48 @@ import {
 } from './startLocalTunnel';
 
 describe('startLocalTunnel', () => {
+  test('isolates Feishu local startup from Telegram credentials and operations chats', () => {
+    const env: Record<string, string | undefined> = {
+      SYMHARIX_TELEGRAM_BOT_TOKEN: 'telegram-token',
+      SYMPHONY_TELEGRAM_BOT_TOKEN: 'telegram-token',
+      SYMHARIX_TELEGRAM_OPERATIONS_CHAT_ID: 'telegram-ops',
+      SYMPHONY_TELEGRAM_OPERATIONS_CHAT_ID: 'telegram-ops',
+      SYMHARIX_FEISHU_APP_ID: 'cli_a',
+      SYMHARIX_FEISHU_APP_SECRET: 'secret',
+    };
+
+    applyStartLocalBotSurfaceIsolation(env, 'feishu');
+
+    expect(env.SYMHARIX_TELEGRAM_BOT_TOKEN).toBe('');
+    expect(env.SYMPHONY_TELEGRAM_BOT_TOKEN).toBe('');
+    expect(env.SYMHARIX_TELEGRAM_OPERATIONS_CHAT_ID).toBe('');
+    expect(env.SYMPHONY_TELEGRAM_OPERATIONS_CHAT_ID).toBe('');
+    expect(env.SYMHARIX_TELEGRAM_BOOTSTRAP).toBe('off');
+    expect(env.SYMHARIX_FEISHU_APP_ID).toBe('cli_a');
+  });
+
+  test('isolates Telegram local startup from Feishu credentials and operations chats', () => {
+    const env: Record<string, string | undefined> = {
+      SYMHARIX_TELEGRAM_BOT_TOKEN: 'telegram-token',
+      SYMHARIX_FEISHU_APP_ID: 'cli_a',
+      SYMPHONY_FEISHU_APP_ID: 'cli_a',
+      SYMHARIX_FEISHU_APP_SECRET: 'secret',
+      SYMPHONY_FEISHU_APP_SECRET: 'secret',
+      SYMHARIX_FEISHU_OPERATIONS_CHAT_ID: 'feishu-ops',
+      SYMPHONY_FEISHU_OPERATIONS_CHAT_ID: 'feishu-ops',
+    };
+
+    applyStartLocalBotSurfaceIsolation(env, 'telegram');
+
+    expect(env.SYMHARIX_TELEGRAM_BOT_TOKEN).toBe('telegram-token');
+    expect(env.SYMHARIX_FEISHU_APP_ID).toBe('');
+    expect(env.SYMPHONY_FEISHU_APP_ID).toBe('');
+    expect(env.SYMHARIX_FEISHU_APP_SECRET).toBe('');
+    expect(env.SYMPHONY_FEISHU_APP_SECRET).toBe('');
+    expect(env.SYMHARIX_FEISHU_OPERATIONS_CHAT_ID).toBe('');
+    expect(env.SYMPHONY_FEISHU_OPERATIONS_CHAT_ID).toBe('');
+  });
+
   test('provisions a temporary tunnel when Telegram bootstrap is enabled and no public base URL is configured', () => {
     expect(shouldProvisionStartLocalTunnel({
       SYMPHONY_TELEGRAM_BOT_TOKEN: 'telegram-token',
@@ -22,6 +66,52 @@ describe('startLocalTunnel', () => {
       SYMHARIX_TELEGRAM_BOT_TOKEN: 'telegram-token',
       SYMHARIX_PUBLIC_BASE_URL: '',
     })).toBe(true);
+  });
+
+  test('provisions a runtime tunnel for Feishu AppLink web URL mode by default', () => {
+    expect(shouldProvisionStartLocalTunnel({
+      SYMPHONY_FEISHU_APP_ID: 'cli_a',
+      SYMPHONY_FEISHU_APP_SECRET: 'secret',
+      SYMPHONY_PUBLIC_BASE_URL: '',
+    }, 'feishu')).toBe(true);
+  });
+
+  test('provisions a runtime tunnel for Feishu AppLink web URL mode', () => {
+    expect(shouldProvisionStartLocalTunnel({
+      SYMPHONY_FEISHU_APP_ID: 'cli_a',
+      SYMPHONY_FEISHU_APP_SECRET: 'secret',
+      SYMPHONY_FEISHU_RUNTIME_OPEN_MODE: 'applink_web_url',
+      SYMPHONY_PUBLIC_BASE_URL: '',
+    }, 'feishu')).toBe(true);
+  });
+
+  test('accepts SYMHARIX aliases for Feishu runtime tunnel provisioning', () => {
+    expect(shouldProvisionStartLocalTunnel({
+      SYMHARIX_FEISHU_APP_ID: 'cli_a',
+      SYMHARIX_FEISHU_APP_SECRET: 'secret',
+      SYMHARIX_FEISHU_RUNTIME_OPEN_MODE: 'applink_web_url',
+      SYMHARIX_PUBLIC_BASE_URL: '',
+    }, 'feishu')).toBe(true);
+  });
+
+  test('supports explicit Feishu runtime tunnel mode for URL links', () => {
+    expect(shouldProvisionStartLocalTunnel({
+      SYMPHONY_FEISHU_APP_ID: 'cli_a',
+      SYMPHONY_FEISHU_APP_SECRET: 'secret',
+      SYMPHONY_FEISHU_RUNTIME_OPEN_MODE: 'url',
+      SYMPHONY_FEISHU_RUNTIME_TUNNEL: 'on',
+      SYMPHONY_PUBLIC_BASE_URL: '',
+    }, 'feishu')).toBe(true);
+  });
+
+  test('skips Feishu runtime tunnel provisioning when disabled', () => {
+    expect(shouldProvisionStartLocalTunnel({
+      SYMPHONY_FEISHU_APP_ID: 'cli_a',
+      SYMPHONY_FEISHU_APP_SECRET: 'secret',
+      SYMPHONY_FEISHU_RUNTIME_OPEN_MODE: 'applink_web_url',
+      SYMPHONY_FEISHU_RUNTIME_TUNNEL: 'off',
+      SYMPHONY_PUBLIC_BASE_URL: '',
+    }, 'feishu')).toBe(false);
   });
 
   test('skips temporary tunnel provisioning when a public base URL is already configured', () => {
@@ -203,6 +293,25 @@ describe('startLocalTunnel', () => {
       status: 404,
     })).toBeNull();
     expect(getStartLocalTunnelProbeRecoveryReason({
+      expectedPublicBaseUrl: 'https://bot.example.test',
+      status: 530,
+    })).toBeNull();
+  });
+
+  test('waits for temporary tunnel registration only on Cloudflare 530 or probe errors', () => {
+    expect(getStartLocalTunnelRegistrationWaitReason({
+      expectedPublicBaseUrl: 'https://fresh.trycloudflare.com',
+      status: 530,
+    })).toBe('public tunnel not registered yet: status 530');
+    expect(getStartLocalTunnelRegistrationWaitReason({
+      expectedPublicBaseUrl: 'https://fresh.trycloudflare.com',
+      errorMessage: 'Could not resolve host',
+    })).toBe('public tunnel not registered yet: Could not resolve host');
+    expect(getStartLocalTunnelRegistrationWaitReason({
+      expectedPublicBaseUrl: 'https://fresh.trycloudflare.com',
+      status: 502,
+    })).toBeNull();
+    expect(getStartLocalTunnelRegistrationWaitReason({
       expectedPublicBaseUrl: 'https://bot.example.test',
       status: 530,
     })).toBeNull();

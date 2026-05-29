@@ -26,6 +26,7 @@ function primaryIssueCardAction(issue: RuntimeIssueView, locale: RuntimeLocale):
     return {
       label: textForLocale(locale, '已取消', 'Cancelled'),
       style: 'success',
+      disabled: true,
       callback_data: `rt|${issue.identifier}|refresh`,
     };
   }
@@ -33,6 +34,7 @@ function primaryIssueCardAction(issue: RuntimeIssueView, locale: RuntimeLocale):
     return {
       label: textForLocale(locale, '已完成', 'Completed'),
       style: 'success',
+      disabled: true,
       callback_data: `rt|${issue.identifier}|refresh`,
     };
   }
@@ -52,6 +54,7 @@ function primaryIssueCardAction(issue: RuntimeIssueView, locale: RuntimeLocale):
   }
   return {
     label: textForLocale(locale, '刷新卡片', 'Refresh Card'),
+    style: 'primary',
     callback_data: `rt|${issue.identifier}|refresh`,
   };
 }
@@ -63,6 +66,7 @@ export function buildIssueCardActionRows(issue: RuntimeIssueView): BotTransportA
     [
       {
         label: textForLocale(locale, '刷新卡片', 'Refresh Card'),
+        style: 'primary',
         callback_data: `rt|${issue.identifier}|refresh`,
       },
       {
