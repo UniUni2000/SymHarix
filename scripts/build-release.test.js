@@ -24,4 +24,10 @@ describe('release package builder', () => {
     expect(launcher).toContain('while [ -L "$SYMHARIX_LAUNCHER" ]');
     expect(launcher).toContain('readlink "$SYMHARIX_LAUNCHER"');
   });
+
+  test('release matrix validates Linux arm64 using the runner uname value', () => {
+    const workflow = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'release.yml'), 'utf8');
+    expect(workflow).toContain('uname_arch: aarch64');
+    expect(workflow).toContain('test "$(uname -m)" = "${{ matrix.uname_arch }}"');
+  });
 });
