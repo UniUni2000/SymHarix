@@ -19,18 +19,23 @@ import {
 } from '../config/installationPaths';
 import {
   buildTelegramStartupSummary,
+  buildStartLocalRuntimeReadHeaders,
   applyStartLocalBotSurfaceIsolation,
   applyProxyEnv,
   disableProxyEnv,
   ensureNoProxyForLocalhost,
-  getStartLocalTunnelProbeRecoveryReason,
   getStartLocalTunnelRegistrationWaitReason,
   getStartLocalTunnelRecoveryReason,
+  getStartLocalTunnelProcessRecoveryReason,
   hasHttpProxyEnv,
   isEphemeralTryCloudflareUrl,
+  isTelegramWebhookRegisteredForBase,
   resolveStartLocalPort,
+  resolveStartLocalWatchdogPollThreshold,
   shouldEmitTelegramStartupSummary,
   shouldProvisionStartLocalTunnel,
+  summarizeStartLocalActiveExecutions,
+  type StartLocalActiveExecutionSummary,
   type StartLocalBotSurface,
 } from './startLocalTunnel';
 
@@ -263,13 +268,19 @@ type TelegramManifestSnapshot = {
   health?: string | null;
   webhook_url?: string | null;
   webhook_last_error_message?: string | null;
+  webhook_error_recent?: boolean;
   webhook_pending_update_count?: number | null;
   public_base_url?: string | null;
 };
 
-async function readTelegramManifestSnapshot(port: number): Promise<TelegramManifestSnapshot | null> {
+async function readTelegramManifestSnapshot(
+  port: number,
+  env: Record<string, string | undefined>,
+): Promise<TelegramManifestSnapshot | null> {
   const manifestUrl = `http://127.0.0.1:${port}/api/v1/bots/manifest`;
-  const response = await fetch(manifestUrl);
+  const response = await fetch(manifestUrl, {
+    headers: buildStartLocalRuntimeReadHeaders(env),
+  });
   if (!response.ok) {
     throw new Error(`manifest returned ${response.status}`);
   }
@@ -281,6 +292,22 @@ async function readTelegramManifestSnapshot(port: number): Promise<TelegramManif
     };
   };
   return payload.data?.transports?.telegram ?? null;
+}
+
+async function readStartLocalActiveExecutionSummary(
+  port: number,
+  env: Record<string, string | undefined>,
+): Promise<StartLocalActiveExecutionSummary> {
+  const response = await fetch(`http://127.0.0.1:${port}/api/v1/runtime/overview`, {
+    headers: buildStartLocalRuntimeReadHeaders(env),
+  });
+  if (!response.ok) {
+    throw new Error(`runtime overview returned ${response.status}`);
+  }
+  const payload = await response.json() as {
+    data?: Parameters<typeof summarizeStartLocalActiveExecutions>[0];
+  };
+  return summarizeStartLocalActiveExecutions(payload.data);
 }
 
 async function probePublicTunnelReachability(publicBaseUrl: string): Promise<{
@@ -350,20 +377,24 @@ function probePublicTunnelReachabilityWithCurl(
   return { status: null, errorMessage };
 }
 
-async function probePublicTunnelReachabilityFromEnv(
+export async function probePublicTunnelReachabilityFromEnv(
   publicBaseUrl: string,
   env: Record<string, string | undefined>,
+  probes: {
+    fetchProbe?: typeof probePublicTunnelReachability;
+    curlProbe?: typeof probePublicTunnelReachabilityWithCurl;
+  } = {},
 ): Promise<{
   status: number | null;
   errorMessage: string | null;
 }> {
   if (hasHttpProxyEnv(env)) {
-    const curlProbe = probePublicTunnelReachabilityWithCurl(publicBaseUrl, env);
+    const curlProbe = (probes.curlProbe ?? probePublicTunnelReachabilityWithCurl)(publicBaseUrl, env);
     if (curlProbe.status !== null || curlProbe.errorMessage) {
       return curlProbe;
     }
   }
-  return probePublicTunnelReachability(publicBaseUrl);
+  return (probes.fetchProbe ?? probePublicTunnelReachability)(publicBaseUrl);
 }
 
 async function waitForTemporaryTunnelRegistration(
@@ -444,11 +475,18 @@ async function printTelegramStartupSummary(
   port: number,
   expectedPublicBaseUrl: string | null,
   attempts: number,
+  env: Record<string, string | undefined>,
 ): Promise<void> {
+  let lastTelegram: TelegramManifestSnapshot | null = null;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      const telegram = await readTelegramManifestSnapshot(port);
-      if (telegram && shouldEmitTelegramStartupSummary(telegram, expectedPublicBaseUrl)) {
+      const telegram = await readTelegramManifestSnapshot(port, env);
+      lastTelegram = telegram;
+      if (
+        telegram
+        && isTelegramWebhookRegisteredForBase(telegram, expectedPublicBaseUrl)
+        && shouldEmitTelegramStartupSummary(telegram, expectedPublicBaseUrl)
+      ) {
         console.log(`[symharix] ${buildTelegramStartupSummary(telegram, expectedPublicBaseUrl)}`);
         return;
       }
@@ -459,7 +497,9 @@ async function printTelegramStartupSummary(
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
-  console.log('[symharix] telegram: unhealthy webhook_url=(none)');
+  console.log(lastTelegram
+    ? `[symharix] ${buildTelegramStartupSummary(lastTelegram, expectedPublicBaseUrl)}`
+    : '[symharix] telegram: unhealthy webhook_url=(none)');
 }
 
 function printFeishuStartupSummary(expectedPublicBaseUrl?: string | null): void {
@@ -534,6 +574,7 @@ async function main(): Promise<void> {
   let finished = false;
   let tunnelWatchdog: NodeJS.Timeout | null = null;
   let recoveryInFlight: Promise<void> | null = null;
+  let telegramWebhookReadyForCurrentTunnel = false;
   const intentionalChildStops = new WeakSet<ChildProcess>();
 
   const cleanup = async (): Promise<void> => {
@@ -701,9 +742,39 @@ async function main(): Promise<void> {
       if (botSurface === 'feishu') {
         await waitForLocalServiceStartup(requestedPort, childEnv);
       }
+
+      const shouldDeferForActiveExecutions = async (): Promise<boolean> => {
+        try {
+          const active = await readStartLocalActiveExecutionSummary(requestedPort, childEnv);
+          if (active.total === 0) {
+            return false;
+          }
+          console.warn(
+            '[symharix] start:local deferring tunnel replacement while active work is in flight; '
+              + `running=${active.orchestratorRunning} retrying=${active.orchestratorRetrying} `
+              + `supervisor=${active.supervisorRunning}. Local execution will continue and the watchdog will retry when idle.`,
+          );
+          return true;
+        } catch {
+          // A stopped or booting service cannot report activity. Continue recovery;
+          // preserving an unreachable child would prevent start:local from healing.
+          return false;
+        }
+      };
+
+      if (await shouldDeferForActiveExecutions()) {
+        return;
+      }
       const nextTunnelHandle = await provisionTemporaryTunnel();
       if (!nextTunnelHandle) {
         console.warn('[symharix] start:local tunnel recovery skipped; keeping the current service running.');
+        return;
+      }
+
+      // Tunnel provisioning can take long enough for a new Agent or Supervisor
+      // turn to start. Re-check immediately before replacing the service child.
+      if (await shouldDeferForActiveExecutions()) {
+        await nextTunnelHandle.dispose();
         return;
       }
 
@@ -716,6 +787,7 @@ async function main(): Promise<void> {
 
       tunnelHandle = nextTunnelHandle;
       setSymHarixEnv('SYMPHONY_PUBLIC_BASE_URL', nextTunnelHandle.publicBaseUrl, childEnv);
+      telegramWebhookReadyForCurrentTunnel = false;
       if (previousTunnelHandle) {
         await previousTunnelHandle.dispose();
       }
@@ -726,6 +798,7 @@ async function main(): Promise<void> {
           requestedPort,
           expectedPublicBaseUrl,
           resolveTelegramStartupSummaryAttempts(childEnv),
+          childEnv,
         );
       } else {
         if (expectedPublicBaseUrl) {
@@ -766,6 +839,11 @@ async function main(): Promise<void> {
       ['SYMPHONY_TUNNEL_WATCHDOG_DEGRADED_POLLS', 'SYMPHONY_TELEGRAM_TUNNEL_WATCHDOG_DEGRADED_POLLS'],
       2,
     );
+    const initialMissingPollThreshold = resolvePositiveIntegerEnvAny(
+      childEnv,
+      ['SYMPHONY_TUNNEL_WATCHDOG_INITIAL_POLLS', 'SYMPHONY_TELEGRAM_TUNNEL_WATCHDOG_INITIAL_POLLS'],
+      18,
+    );
     let degradedPolls = 0;
 
     tunnelWatchdog = setInterval(() => {
@@ -775,24 +853,31 @@ async function main(): Promise<void> {
       void (async () => {
         const expectedPublicBaseUrl = readSymHarixEnvTrimmed('SYMPHONY_PUBLIC_BASE_URL', childEnv);
         if (!expectedPublicBaseUrl) {
-          degradedPolls = 0;
+          const telegram = await readTelegramManifestSnapshot(requestedPort, childEnv);
+          if (telegram?.webhook_url) {
+            telegramWebhookReadyForCurrentTunnel = true;
+            degradedPolls = 0;
+            return;
+          }
+          degradedPolls += 1;
+          if (degradedPolls >= initialMissingPollThreshold) {
+            degradedPolls = 0;
+            await restartServiceWithFreshTunnel('initial telegram webhook is not registered');
+          }
           return;
         }
 
-        let recoveryReason: string | null = null;
-        if (botSurface === 'telegram') {
-          const telegram = await readTelegramManifestSnapshot(requestedPort);
+        let recoveryReason = getStartLocalTunnelProcessRecoveryReason(
+          tunnelHandle?.isAlive?.(),
+        );
+        if (!recoveryReason && botSurface === 'telegram') {
+          const telegram = await readTelegramManifestSnapshot(requestedPort, childEnv);
+          if (telegram && isTelegramWebhookRegisteredForBase(telegram, expectedPublicBaseUrl)) {
+            telegramWebhookReadyForCurrentTunnel = true;
+          }
           recoveryReason = telegram
             ? getStartLocalTunnelRecoveryReason(telegram, expectedPublicBaseUrl)
             : null;
-        }
-        if (!recoveryReason) {
-          const tunnelProbe = await probePublicTunnelReachability(expectedPublicBaseUrl);
-          recoveryReason = getStartLocalTunnelProbeRecoveryReason({
-            expectedPublicBaseUrl,
-            status: tunnelProbe.status,
-            errorMessage: tunnelProbe.errorMessage,
-          });
         }
         if (!recoveryReason) {
           degradedPolls = 0;
@@ -800,7 +885,13 @@ async function main(): Promise<void> {
         }
 
         degradedPolls += 1;
-        if (degradedPolls < degradedPollThreshold) {
+        const requiredPolls = resolveStartLocalWatchdogPollThreshold({
+          webhookReadyForCurrentTunnel: telegramWebhookReadyForCurrentTunnel,
+          degradedPollThreshold,
+          initialPollThreshold: initialMissingPollThreshold,
+          recoveryReason,
+        });
+        if (degradedPolls < requiredPolls) {
           return;
         }
 
@@ -831,6 +922,7 @@ async function main(): Promise<void> {
       requestedPort,
       expectedPublicBaseUrl,
       resolveTelegramStartupSummaryAttempts(childEnv),
+      childEnv,
     );
   } else if (botSurface === 'feishu' && tunnelHandle && expectedPublicBaseUrl) {
     void (async () => {
@@ -849,8 +941,10 @@ async function main(): Promise<void> {
   startTunnelWatchdog();
 }
 
-void main().catch((error) => {
-  console.error('[symharix] start:local wrapper failed.');
-  console.error(error);
-  process.exit(1);
-});
+if (import.meta.main) {
+  void main().catch((error) => {
+    console.error('[symharix] start:local wrapper failed.');
+    console.error(error);
+    process.exit(1);
+  });
+}

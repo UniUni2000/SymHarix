@@ -93,4 +93,23 @@ describe('configuration format validation', () => {
     expect(validateConfigurationField('SYMHARIX_BOT_LLM_MODEL', 'model;echo')[0]?.severity).toBe('error');
     expect(validateConfigurationField('SYMHARIX_BOT_LLM_MODEL', 'vendor/model:v4')).toEqual([]);
   });
+
+  test('fails closed when Telegram is enabled without a strong webhook secret', () => {
+    const missing = validateConfigurationFormats({
+      SYMHARIX_TELEGRAM_BOT_TOKEN: `123456789:${'A'.repeat(30)}`,
+    });
+    expect(missing.find((item) => item.field === 'SYMHARIX_TELEGRAM_WEBHOOK_SECRET')?.severity).toBe('error');
+
+    const unsafe = validateConfigurationField(
+      'SYMHARIX_TELEGRAM_WEBHOOK_SECRET',
+      `${'a'.repeat(32)}!`,
+    );
+    expect(unsafe.find((item) => item.severity === 'error')?.message).toContain('只能包含');
+
+    const oversized = validateConfigurationField(
+      'SYMHARIX_TELEGRAM_WEBHOOK_SECRET',
+      'a'.repeat(257),
+    );
+    expect(oversized.find((item) => item.severity === 'error')?.message).toContain('256');
+  });
 });

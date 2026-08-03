@@ -468,6 +468,7 @@ export class RuntimeHub implements RuntimeControlPlane {
       counts: {
         running: snapshot.counts.running,
         retrying: snapshot.counts.retrying,
+        supervisor_running: this.supervisorJobRepository.countRunning(),
         total: issues.length,
       },
       issues,

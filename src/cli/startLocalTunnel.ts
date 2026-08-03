@@ -91,10 +91,50 @@ export function shouldEmitTelegramStartupSummary(telegram: {
   return false;
 }
 
+export function isTelegramWebhookRegisteredForBase(
+  telegram: { webhook_url?: string | null },
+  expectedPublicBaseUrl?: string | null,
+): boolean {
+  const webhookUrl = normalizeEnvValue(telegram.webhook_url ?? undefined);
+  const expectedBaseUrl = normalizeEnvValue(expectedPublicBaseUrl ?? undefined);
+  if (!webhookUrl) {
+    return false;
+  }
+  return expectedBaseUrl ? webhookUrl.startsWith(`${expectedBaseUrl}/`) : true;
+}
+
+export function resolveStartLocalWatchdogPollThreshold(params: {
+  webhookReadyForCurrentTunnel: boolean;
+  degradedPollThreshold: number;
+  initialPollThreshold: number;
+  recoveryReason?: string | null;
+}): number {
+  if (isStartLocalWebhookRegistrationMismatch(params.recoveryReason)) {
+    return params.initialPollThreshold;
+  }
+  return params.webhookReadyForCurrentTunnel
+    ? params.degradedPollThreshold
+    : params.initialPollThreshold;
+}
+
+export function isStartLocalWebhookRegistrationMismatch(
+  recoveryReason?: string | null,
+): boolean {
+  return recoveryReason === 'telegram webhook is not registered'
+    || Boolean(recoveryReason?.startsWith('stale webhook_url='));
+}
+
+export function getStartLocalTunnelProcessRecoveryReason(
+  tunnelProcessAlive: boolean | null | undefined,
+): string | null {
+  return tunnelProcessAlive === false ? 'public tunnel process exited' : null;
+}
+
 export function getStartLocalTunnelRecoveryReason(telegram: {
   health?: string | null;
   webhook_url?: string | null;
   webhook_last_error_message?: string | null;
+  webhook_error_recent?: boolean;
   public_base_url?: string | null;
   webhook_pending_update_count?: number | null;
 }, expectedPublicBaseUrl?: string | null): string | null {
@@ -104,6 +144,9 @@ export function getStartLocalTunnelRecoveryReason(telegram: {
   }
 
   const webhookUrl = normalizeEnvValue(telegram.webhook_url ?? undefined);
+  if (!webhookUrl) {
+    return 'telegram webhook is not registered';
+  }
   if (webhookUrl && !webhookUrl.startsWith(`${expectedBaseUrl}/`)) {
     return `stale webhook_url=${webhookUrl} expected_base=${expectedBaseUrl}`;
   }
@@ -114,7 +157,7 @@ export function getStartLocalTunnelRecoveryReason(telegram: {
   }
 
   const error = normalizeEnvValue(telegram.webhook_last_error_message ?? undefined);
-  if (isRecoverableTunnelWebhookError(error)) {
+  if (telegram.webhook_error_recent !== false && isRecoverableTunnelWebhookError(error)) {
     return `telegram webhook degraded: ${error}`;
   }
 
@@ -122,12 +165,68 @@ export function getStartLocalTunnelRecoveryReason(telegram: {
     telegram.health === 'degraded' &&
     typeof telegram.webhook_pending_update_count === 'number' &&
     telegram.webhook_pending_update_count > 0 &&
-    error
+    isRecoverableTunnelWebhookError(error)
   ) {
     return `telegram webhook degraded: ${error}`;
   }
 
   return null;
+}
+
+export function buildStartLocalRuntimeReadHeaders(
+  env: Record<string, string | undefined>,
+): Record<string, string> | undefined {
+  const token = readSymHarixEnvTrimmed('SYMPHONY_RUNTIME_VIEWER_TOKEN', env)
+    || readSymHarixEnvTrimmed('SYMPHONY_RUNTIME_WRITE_TOKEN', env);
+  return token ? { Authorization: `Bearer ${token}` } : undefined;
+}
+
+export interface StartLocalRuntimeActivitySnapshot {
+  counts?: {
+    running?: number | null;
+    retrying?: number | null;
+    supervisor_running?: number | null;
+  } | null;
+  issues?: Array<{
+    supervisor_job_state?: string | null;
+  }> | null;
+}
+
+export interface StartLocalActiveExecutionSummary {
+  orchestratorRunning: number;
+  orchestratorRetrying: number;
+  supervisorRunning: number;
+  total: number;
+}
+
+function normalizeActivityCount(value: number | null | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : 0;
+}
+
+/**
+ * Summarize work that would be interrupted or lose an in-memory retry lease if
+ * start:local replaced the service process while recovering a temporary tunnel.
+ */
+export function summarizeStartLocalActiveExecutions(
+  snapshot: StartLocalRuntimeActivitySnapshot | null | undefined,
+): StartLocalActiveExecutionSummary {
+  const orchestratorRunning = normalizeActivityCount(snapshot?.counts?.running);
+  const orchestratorRetrying = normalizeActivityCount(snapshot?.counts?.retrying);
+  const reportedSupervisorRunning = snapshot?.counts?.supervisor_running;
+  const supervisorRunning = typeof reportedSupervisorRunning === 'number'
+    ? normalizeActivityCount(reportedSupervisorRunning)
+    : (snapshot?.issues ?? []).filter((issue) => (
+      /^running(?:$|:)/i.test(issue.supervisor_job_state?.trim() ?? '')
+    )).length;
+
+  return {
+    orchestratorRunning,
+    orchestratorRetrying,
+    supervisorRunning,
+    total: orchestratorRunning + orchestratorRetrying + supervisorRunning,
+  };
 }
 
 export function getStartLocalTunnelProbeRecoveryReason(params: {

@@ -47,6 +47,28 @@ function isVisibleTelegramSend(input: RequestInfo | URL, init?: RequestInit): bo
   return Boolean(method && /^(?:send|copy|forward|edit|delete)/i.test(method));
 }
 
+function isTimeSensitiveCallbackAnswer(input: RequestInfo | URL, init?: RequestInit): boolean {
+  return requestMethod(input, init) === 'POST'
+    && telegramMethodName(input) === 'answerCallbackQuery';
+}
+
+function mustNotRetryTelegramMutation(input: RequestInfo | URL, init?: RequestInit): boolean {
+  return isVisibleTelegramSend(input, init) || isTimeSensitiveCallbackAnswer(input, init);
+}
+
+export function resolveTelegramCurlTimeoutSeconds(
+  input: RequestInfo | URL,
+  configuredValue = readSymHarixEnv('SYMPHONY_TELEGRAM_CURL_TIMEOUT_SECONDS'),
+): number {
+  const configured = Number.parseInt(configuredValue || '', 10);
+  const resolved = Number.isFinite(configured) && configured > 0 ? configured : 15;
+  // A callback query expires quickly. Waiting through the normal 15-second
+  // transport timeout makes a later fallback guaranteed to be stale.
+  return isTimeSensitiveCallbackAnswer(input, { method: 'POST' })
+    ? Math.min(resolved, 5)
+    : resolved;
+}
+
 function hasProxyEnv(): boolean {
   return Boolean(
     process.env.HTTP_PROXY?.trim()
@@ -151,12 +173,12 @@ async function curlFetch(input: RequestInfo | URL, init?: RequestInit): Promise<
   const method = init?.method ?? 'GET';
   const headers = new Headers(init?.headers);
   let stdinValue: string | Buffer = '';
-  const timeoutSeconds = Number.parseInt(readSymHarixEnv('SYMPHONY_TELEGRAM_CURL_TIMEOUT_SECONDS') || '', 10);
+  const timeoutSeconds = resolveTelegramCurlTimeoutSeconds(input);
 
   const args = [
     '-sS',
     '--max-time',
-    String(Number.isFinite(timeoutSeconds) && timeoutSeconds > 0 ? timeoutSeconds : 15),
+    String(timeoutSeconds),
     '-X',
     method,
     url,
@@ -226,7 +248,7 @@ export function createTelegramApiFetch(
     } catch (error) {
       if (
         !isTelegramApiUrl(input)
-        || isVisibleTelegramSend(input, init)
+        || mustNotRetryTelegramMutation(input, init)
         || (!isTelegramTlsVerificationError(error) && !isTelegramNetworkError(error))
       ) {
         throw error;
@@ -249,7 +271,7 @@ export function createTelegramProxyAwareFetch(
       return await proxyFetch(input, init);
     } catch (error) {
       if (
-        isVisibleTelegramSend(input, init)
+        mustNotRetryTelegramMutation(input, init)
         || (!isTelegramTlsVerificationError(error) && !isTelegramNetworkError(error))
       ) {
         throw error;

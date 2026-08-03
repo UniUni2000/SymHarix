@@ -204,4 +204,4 @@ bun run runtime:smoke
 bun run release:check
 ```
 
-前两步不会产生外部写操作或模型费用。`runtime:smoke` 只验证模型链路；`release:check` 验证类型、全部隔离测试、构建和锁定 OpenCode runtime。
+前两步不会产生外部写操作或模型费用。`runtime:smoke` 只验证模型链路；`release:check` 验证依赖安全、类型、全部隔离测试、构建、发布包和锁定 OpenCode runtime。

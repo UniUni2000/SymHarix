@@ -12,4 +12,4 @@ done
 SYMHARIX_PACKAGE_ROOT=$(CDPATH= cd -- "$(dirname -- "$SYMHARIX_LAUNCHER")/.." && pwd)
 export SYMHARIX_APP_ROOT="$SYMHARIX_PACKAGE_ROOT"
 export PATH="$SYMHARIX_PACKAGE_ROOT/bin${PATH:+:$PATH}"
-exec "$SYMHARIX_PACKAGE_ROOT/bin/bun" run "$SYMHARIX_PACKAGE_ROOT/src/cli/distribution.ts" "$@"
+exec "$SYMHARIX_PACKAGE_ROOT/bin/bun" --no-env-file run "$SYMHARIX_PACKAGE_ROOT/src/cli/distribution.ts" "$@"

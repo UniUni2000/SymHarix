@@ -307,6 +307,7 @@ function buildLifecycleMessage(
   tokenUsage?: RuntimeIssueTokenUsage | null,
 ): BotTransportMessage {
   const locale = issueLocale(issue);
+  const turnTokenCeilingReached = issue.delivery_code === 'turn_token_ceiling_reached';
   const headline = notificationClass === 'retrying'
     ? textForLocale(locale, `SymHarix 重试中 · ${issue.identifier}`, `SymHarix retrying · ${issue.identifier}`)
     : notificationClass === 'failed'
@@ -317,7 +318,9 @@ function buildLifecycleMessage(
         ? textForLocale(locale, `SymHarix 已取消 · ${issue.identifier}`, `SymHarix cancelled · ${issue.identifier}`)
         : textForLocale(locale, `SymHarix 完成 · ${issue.identifier}`, `SymHarix completed · ${issue.identifier}`);
   const summary = notificationClass === 'retrying'
-    ? textForLocale(locale, '这张单刚进入重试队列；我会继续盯高信号结果，不再推送同类抖动。', 'This issue just entered the retry queue; I will keep watching for high-signal results without repeating the same noise.')
+    ? turnTokenCeilingReached
+      ? textForLocale(locale, '已根据一次显式重试请求重新入队；本轮会再次调用模型并消耗预算。', 'Requeued after an explicit retry request; this turn will call the model and spend budget again.')
+      : textForLocale(locale, '这张单刚进入重试队列；我会继续盯高信号结果，不再推送同类抖动。', 'This issue just entered the retry queue; I will keep watching for high-signal results without repeating the same noise.')
     : notificationClass === 'failed'
       ? textForLocale(locale, '这张单当前执行失败，等待你处理或下一次显式重试。', 'This issue is currently failed and is waiting for recovery or an explicit retry.')
       : notificationClass === 'delivery_failed'
@@ -331,10 +334,18 @@ function buildLifecycleMessage(
   const tokenUsageLine = notificationClass === 'done'
     ? buildTokenUsageLine(locale, tokenUsage ?? issue.usage ?? issue.session?.tokens)
     : null;
+  const retryCostWarning = notificationClass === 'delivery_failed' && turnTokenCeilingReached
+    ? textForLocale(
+        locale,
+        '自动重试已停止。手工重试会重新调用模型并再次消耗预算；请先调高单轮上限，或确认愿意再消耗一轮。',
+        'Automatic retry is stopped. A manual retry calls the model and spends budget again; raise the single-turn ceiling first or confirm that another turn is worth the cost.',
+      )
+    : null;
   const lines = [
     headline,
     `${issue.title}`,
     summary,
+    retryCostWarning,
     tokenUsageLine,
     failureReason ? `${textForLocale(locale, '失败原因', 'Failure reason')}：${failureReason}` : null,
     `phase ${issue.phase} · tracker ${issue.tracker_state} · orchestrator ${issue.orchestrator_state || 'unknown'}`,

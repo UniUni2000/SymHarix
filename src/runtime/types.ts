@@ -309,6 +309,7 @@ export interface RuntimeOverview {
   counts: {
     running: number;
     retrying: number;
+    supervisor_running?: number;
     total: number;
   };
   issues: RuntimeIssueView[];

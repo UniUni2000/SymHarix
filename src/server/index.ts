@@ -23,6 +23,10 @@ import {
   type RuntimeAccessController,
 } from './runtimeAccess';
 import { readSymHarixEnv } from '../config/env';
+import {
+  createTelegramMiniAppAuthConfigFromEnv,
+  type TelegramMiniAppAuthConfig,
+} from './telegramMiniAppAuth';
 
 const QUIET_ACCESS_LOG_PATHS = new Set([
   '/',
@@ -85,6 +89,7 @@ export class SymHarixServer {
   private runtimeControlPlane: RuntimeControlPlane | null;
   private botGateway: BotGateway | null;
   private runtimeAccessController: RuntimeAccessController | null;
+  private telegramMiniAppAuthConfig: TelegramMiniAppAuthConfig | null;
   private server: ReturnType<typeof Bun.serve> | null = null;
 
   /**
@@ -96,6 +101,9 @@ export class SymHarixServer {
     runtimeControlPlane: RuntimeControlPlane | null = null,
     botGateway: BotGateway | null = runtimeControlPlane ? createBotGatewayFromEnv(runtimeControlPlane, db) : null,
     runtimeAccessController: RuntimeAccessController | null = runtimeControlPlane ? createRuntimeAccessControllerFromEnv() : null,
+    telegramMiniAppAuthConfig: TelegramMiniAppAuthConfig | null = runtimeControlPlane
+      ? createTelegramMiniAppAuthConfigFromEnv()
+      : null,
   ) {
     this.db = db;
     this.config = {
@@ -106,6 +114,7 @@ export class SymHarixServer {
     this.runtimeControlPlane = runtimeControlPlane;
     this.botGateway = botGateway;
     this.runtimeAccessController = runtimeAccessController;
+    this.telegramMiniAppAuthConfig = telegramMiniAppAuthConfig;
     this.app = new Hono();
 
     this.setupMiddleware();
@@ -185,6 +194,7 @@ export class SymHarixServer {
       apiV1.route('/runtime', createRuntimeRoutes(this.runtimeControlPlane, this.runtimeAccessController, {
         getPublicBaseUrl: () => this.getPublicBaseUrl(),
         botGateway: this.botGateway,
+        telegramMiniAppAuth: this.telegramMiniAppAuthConfig,
       }));
     }
     if (this.botGateway) {
@@ -200,7 +210,8 @@ export class SymHarixServer {
         c.header('Cache-Control', 'private, no-store');
         if (!access?.allowed) {
           c.header('WWW-Authenticate', 'Bearer realm="SymHarix Runtime"');
-          return c.html(renderRuntimeLoginPage(new URL(c.req.url).pathname), 401);
+          const requestUrl = new URL(c.req.url);
+          return c.html(renderRuntimeLoginPage(`${requestUrl.pathname}${requestUrl.search}`), 401);
         }
         return c.html(render());
       };

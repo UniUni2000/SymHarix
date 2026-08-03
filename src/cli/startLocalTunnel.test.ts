@@ -1,17 +1,83 @@
 import { describe, expect, test } from 'bun:test';
 import {
   applyStartLocalBotSurfaceIsolation,
+  buildStartLocalRuntimeReadHeaders,
   buildTelegramStartupSummary,
   getStartLocalTunnelProbeRecoveryReason,
+  getStartLocalTunnelProcessRecoveryReason,
   getStartLocalTunnelRegistrationWaitReason,
   getStartLocalTunnelRecoveryReason,
+  isStartLocalWebhookRegistrationMismatch,
+  isTelegramWebhookRegisteredForBase,
   resolveStartLocalPort,
+  resolveStartLocalWatchdogPollThreshold,
   shouldEmitTelegramStartupSummary,
   shouldProvisionStartLocalTunnel,
+  summarizeStartLocalActiveExecutions,
   upsertEnvAssignment,
 } from './startLocalTunnel';
+import { probePublicTunnelReachabilityFromEnv } from './startLocal';
 
 describe('startLocalTunnel', () => {
+  test('uses the proxy-compatible curl probe for startup reachability checks', async () => {
+    let fetchCalls = 0;
+    let curlCalls = 0;
+    const result = await probePublicTunnelReachabilityFromEnv(
+      'https://healthy.trycloudflare.com',
+      { HTTPS_PROXY: 'http://127.0.0.1:7890' },
+      {
+        fetchProbe: async () => {
+          fetchCalls += 1;
+          return { status: null, errorMessage: 'unknown certificate verification error' };
+        },
+        curlProbe: () => {
+          curlCalls += 1;
+          return { status: 200, errorMessage: null };
+        },
+      },
+    );
+
+    expect(result).toEqual({ status: 200, errorMessage: null });
+    expect(curlCalls).toBe(1);
+    expect(fetchCalls).toBe(0);
+  });
+
+  test('waits through initial webhook convergence before enabling fast watchdog recovery', () => {
+    expect(isTelegramWebhookRegisteredForBase({
+      webhook_url: 'https://old.trycloudflare.com/api/v1/bots/telegram/webhook',
+    }, 'https://fresh.trycloudflare.com')).toBe(false);
+    expect(resolveStartLocalWatchdogPollThreshold({
+      webhookReadyForCurrentTunnel: false,
+      degradedPollThreshold: 2,
+      initialPollThreshold: 18,
+    })).toBe(18);
+
+    expect(isTelegramWebhookRegisteredForBase({
+      webhook_url: 'https://fresh.trycloudflare.com/api/v1/bots/telegram/webhook',
+    }, 'https://fresh.trycloudflare.com')).toBe(true);
+    expect(resolveStartLocalWatchdogPollThreshold({
+      webhookReadyForCurrentTunnel: true,
+      degradedPollThreshold: 2,
+      initialPollThreshold: 18,
+    })).toBe(2);
+
+    expect(isStartLocalWebhookRegistrationMismatch('telegram webhook is not registered')).toBe(true);
+    expect(resolveStartLocalWatchdogPollThreshold({
+      webhookReadyForCurrentTunnel: true,
+      degradedPollThreshold: 2,
+      initialPollThreshold: 18,
+      recoveryReason: 'telegram webhook is not registered',
+    })).toBe(18);
+    expect(resolveStartLocalWatchdogPollThreshold({
+      webhookReadyForCurrentTunnel: true,
+      degradedPollThreshold: 2,
+      initialPollThreshold: 18,
+      recoveryReason: 'public tunnel unreachable: status 530',
+    })).toBe(2);
+    expect(getStartLocalTunnelProcessRecoveryReason(true)).toBeNull();
+    expect(getStartLocalTunnelProcessRecoveryReason(false)).toBe('public tunnel process exited');
+  });
+
   test('isolates Feishu local startup from Telegram credentials and operations chats', () => {
     const env: Record<string, string | undefined> = {
       SYMHARIX_TELEGRAM_BOT_TOKEN: 'telegram-token',
@@ -66,6 +132,51 @@ describe('startLocalTunnel', () => {
       SYMHARIX_TELEGRAM_BOT_TOKEN: 'telegram-token',
       SYMHARIX_PUBLIC_BASE_URL: '',
     })).toBe(true);
+  });
+
+  test('authenticates local manifest probes with viewer token and falls back to operator token', () => {
+    expect(buildStartLocalRuntimeReadHeaders({
+      SYMHARIX_RUNTIME_VIEWER_TOKEN: 'viewer-secret',
+      SYMHARIX_RUNTIME_WRITE_TOKEN: 'operator-secret',
+    })).toEqual({ Authorization: 'Bearer viewer-secret' });
+    expect(buildStartLocalRuntimeReadHeaders({
+      SYMHARIX_RUNTIME_WRITE_TOKEN: 'operator-secret',
+    })).toEqual({ Authorization: 'Bearer operator-secret' });
+    expect(buildStartLocalRuntimeReadHeaders({})).toBeUndefined();
+  });
+
+  test('defers service replacement for active Agent retries and Supervisor turns', () => {
+    expect(summarizeStartLocalActiveExecutions({
+      counts: { running: 2, retrying: 1, supervisor_running: 1 },
+      issues: [
+        { supervisor_job_state: 'running:issue_dev_instruction' },
+        { supervisor_job_state: 'succeeded:assess_milestone' },
+      ],
+    })).toEqual({
+      orchestratorRunning: 2,
+      orchestratorRetrying: 1,
+      supervisorRunning: 1,
+      total: 4,
+    });
+  });
+
+  test('falls back to issue projections when an older Runtime omits Supervisor counts', () => {
+    expect(summarizeStartLocalActiveExecutions({
+      counts: { running: 0, retrying: 0 },
+      issues: [{ supervisor_job_state: 'running:verify_handoff' }],
+    }).supervisorRunning).toBe(1);
+  });
+
+  test('treats malformed Runtime activity counts as idle without throwing', () => {
+    expect(summarizeStartLocalActiveExecutions({
+      counts: { running: Number.NaN, retrying: -1 },
+      issues: [{ supervisor_job_state: 'awaiting_user_decision' }],
+    })).toEqual({
+      orchestratorRunning: 0,
+      orchestratorRetrying: 0,
+      supervisorRunning: 0,
+      total: 0,
+    });
   });
 
   test('provisions a runtime tunnel for Feishu AppLink web URL mode by default', () => {
@@ -264,6 +375,34 @@ describe('startLocalTunnel', () => {
     }, 'https://fresh.trycloudflare.com')).toBe(
       'telegram webhook degraded: Wrong response from the webhook: 530 <none>',
     );
+  });
+
+  test('requests recovery when a temporary tunnel has no registered webhook', () => {
+    expect(getStartLocalTunnelRecoveryReason({
+      health: 'unconfigured',
+      webhook_url: null,
+      public_base_url: 'https://fresh.trycloudflare.com',
+    }, 'https://fresh.trycloudflare.com')).toBe('telegram webhook is not registered');
+  });
+
+  test('ignores an old recoverable Telegram error after a successful fresh diagnostic', () => {
+    expect(getStartLocalTunnelRecoveryReason({
+      health: 'healthy',
+      webhook_url: 'https://fresh.trycloudflare.com/api/v1/bots/telegram/webhook',
+      webhook_last_error_message: 'Wrong response from the webhook: 530 <none>',
+      webhook_error_recent: false,
+      public_base_url: 'https://fresh.trycloudflare.com',
+    }, 'https://fresh.trycloudflare.com')).toBeNull();
+  });
+
+  test('never rebuilds a tunnel for an expired outbound callback acknowledgement', () => {
+    expect(getStartLocalTunnelRecoveryReason({
+      health: 'degraded',
+      webhook_url: 'https://fresh.trycloudflare.com/api/v1/bots/telegram/webhook',
+      webhook_last_error_message: 'Telegram answerCallbackQuery failed with status 400',
+      webhook_error_recent: true,
+      webhook_pending_update_count: 1,
+    }, 'https://fresh.trycloudflare.com')).toBeNull();
   });
 
   test('does not request local tunnel recovery for a stable non-tunnel public URL', () => {

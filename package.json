@@ -22,28 +22,33 @@
     "start:feishu": "bun run setup && bun --env-file=.env run src/cli/startLocal.ts --bot=feishu",
     "stop": "bun --env-file=.env run src/cli/index.ts --kill",
     "health": "curl -fsS http://localhost:${PORT:-3000}/api/v1/health/live",
+    "security:audit": "bun audit",
     "typecheck": "tsc --noEmit",
     "test": "node ./scripts/test-all-isolated.cjs",
     "test:fast": "bun --env-file=/dev/null test",
     "build": "bun build --target bun src/cli/index.ts --outdir dist",
     "release:stage": "bun run scripts/build-release.cjs --output build/release-stage",
     "release:package:check": "bun run scripts/build-release.cjs --output build/release-check && SYMHARIX_HOME=build/release-check-home build/release-check/SymHarix/bin/symharix version && SYMHARIX_HOME=build/release-check-home build/release-check/SymHarix/bin/symharix help",
-    "release:check": "bun run typecheck && bun run test && bun run build && bun run runtime:check && bun run release:package:check"
+    "release:check": "bun run security:audit && bun run typecheck && bun run test && bun run build && bun run runtime:check && bun run release:package:check"
   },
   "bin": {
     "symharix": "./scripts/symharix-cli.sh"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.80.0",
-    "@larksuiteoapi/node-sdk": "^1.47.1",
+    "@anthropic-ai/sdk": "^0.115.0",
+    "@larksuiteoapi/node-sdk": "^1.72.0",
     "@resvg/resvg-js": "^2.6.2",
     "chokidar": "^3.6.0",
     "dotenv": "^17.4.2",
-    "graphql": "^16.8.0",
-    "hono": "^4.12.12",
-    "liquidjs": "^10.11.0",
-    "uuid": "^9.0.0",
-    "yaml": "^2.4.0"
+    "graphql": "^16.14.2",
+    "hono": "^4.12.34",
+    "liquidjs": "^10.28.0",
+    "uuid": "^11.1.1",
+    "yaml": "^2.9.0"
+  },
+  "overrides": {
+    "protobufjs": "7.6.5",
+    "ws": "8.21.1"
   },
   "devDependencies": {
     "@types/bun": "^1.3.11",

@@ -40,6 +40,10 @@ export interface RuntimeAccessController {
   authorizeRead(input?: RuntimeRequestInput): RuntimeAccessDecision;
   authorizeMutation(input?: RuntimeRequestInput): RuntimeAccessDecision;
   createTokenSession(token: string, options?: { secure?: boolean }): RuntimeSessionResult;
+  createPrincipalSession(
+    principal: { subject: string; role: RuntimeViewerRole },
+    options?: { secure?: boolean },
+  ): RuntimeSessionResult;
   clearSessionCookie(options?: { secure?: boolean }): string;
 }
 
@@ -261,6 +265,51 @@ export function createRuntimeAccessController(options?: {
     };
   };
 
+  const createPrincipalSession = (
+    principalInput: { subject: string; role: RuntimeViewerRole },
+    sessionOptions: { secure?: boolean } = {},
+  ): RuntimeSessionResult => {
+    const subject = principalInput.subject.trim();
+    if (
+      !subject
+      || subject.length > 256
+      || (principalInput.role !== 'viewer' && principalInput.role !== 'operator')
+    ) {
+      return {
+        allowed: false,
+        access: accessView(null),
+        principal: null,
+        set_cookie: null,
+      };
+    }
+    const issuedAt = Math.floor(now().getTime() / 1000);
+    const expiresAt = issuedAt + sessionTtlMinutes * 60;
+    const payload: SessionPayload = {
+      version: 1,
+      subject,
+      role: principalInput.role,
+      issued_at: issuedAt,
+      expires_at: expiresAt,
+    };
+    const encodedPayload = encodePayload(payload);
+    const sessionValue = `${encodedPayload}.${sessionSignature(encodedPayload, sessionSecret)}`;
+    const sessionPrincipal: RuntimePrincipal = {
+      subject,
+      role: principalInput.role,
+      source: 'session',
+      expires_at: new Date(expiresAt * 1000).toISOString(),
+    };
+    return {
+      allowed: true,
+      access: accessView(sessionPrincipal),
+      principal: sessionPrincipal,
+      set_cookie: serializeSessionCookie(sessionValue, {
+        maxAge: sessionTtlMinutes * 60,
+        secure: sessionOptions.secure === true,
+      }),
+    };
+  };
+
   return {
     hasWriteToken: () => Boolean(writeToken),
     hasReadCredential: () => Boolean(writeToken || viewerToken),
@@ -295,32 +344,9 @@ export function createRuntimeAccessController(options?: {
           set_cookie: null,
         };
       }
-      const issuedAt = Math.floor(now().getTime() / 1000);
-      const expiresAt = issuedAt + sessionTtlMinutes * 60;
-      const payload: SessionPayload = {
-        version: 1,
-        subject: principal.subject,
-        role: principal.role,
-        issued_at: issuedAt,
-        expires_at: expiresAt,
-      };
-      const encodedPayload = encodePayload(payload);
-      const sessionValue = `${encodedPayload}.${sessionSignature(encodedPayload, sessionSecret)}`;
-      const sessionPrincipal: RuntimePrincipal = {
-        ...principal,
-        source: 'session',
-        expires_at: new Date(expiresAt * 1000).toISOString(),
-      };
-      return {
-        allowed: true,
-        access: accessView(sessionPrincipal),
-        principal: sessionPrincipal,
-        set_cookie: serializeSessionCookie(sessionValue, {
-          maxAge: sessionTtlMinutes * 60,
-          secure: sessionOptions.secure === true,
-        }),
-      };
+      return createPrincipalSession(principal, sessionOptions);
     },
+    createPrincipalSession,
     clearSessionCookie(sessionOptions = {}) {
       return serializeSessionCookie('', {
         maxAge: 0,

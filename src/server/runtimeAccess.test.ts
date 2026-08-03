@@ -53,6 +53,28 @@ describe('Runtime access controller', () => {
     expect(result.set_cookie).not.toContain('viewer-secret');
   });
 
+  test('issues a signed operator session for a server-verified transport principal', () => {
+    const access = createRuntimeAccessController({
+      sessionSecret: 'session-secret',
+      sessionTtlMinutes: 5,
+      now: () => new Date('2026-08-01T00:00:00.000Z'),
+    });
+    const result = access.createPrincipalSession({
+      subject: 'telegram:8552378102',
+      role: 'operator',
+    }, { secure: true });
+
+    expect(result.allowed).toBe(true);
+    expect(result.principal).toMatchObject({
+      subject: 'telegram:8552378102',
+      role: 'operator',
+      source: 'session',
+    });
+    expect(result.set_cookie).toContain('HttpOnly');
+    expect(result.set_cookie).toContain('Secure');
+    expect(result.set_cookie).not.toContain('8552378102');
+  });
+
   test('rejects tampered and expired sessions', () => {
     let currentTime = new Date('2026-08-01T00:00:00.000Z');
     const access = createRuntimeAccessController({

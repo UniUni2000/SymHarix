@@ -23,6 +23,15 @@ describe('release package builder', () => {
     const launcher = fs.readFileSync(path.join(__dirname, 'release', 'symharix'), 'utf8');
     expect(launcher).toContain('while [ -L "$SYMHARIX_LAUNCHER" ]');
     expect(launcher).toContain('readlink "$SYMHARIX_LAUNCHER"');
+    expect(launcher).toContain('"$SYMHARIX_PACKAGE_ROOT/bin/bun" --no-env-file run');
+  });
+
+  test('release launchers do not absorb a caller working directory .env', () => {
+    const posix = fs.readFileSync(path.join(__dirname, 'release', 'symharix'), 'utf8');
+    const windows = fs.readFileSync(path.join(__dirname, 'release', 'symharix.cmd'), 'utf8');
+
+    expect(posix).toContain('--no-env-file');
+    expect(windows).toContain('--no-env-file');
   });
 
   test('release matrix validates Linux arm64 using the runner uname value', () => {
