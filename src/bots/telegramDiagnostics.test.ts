@@ -95,4 +95,26 @@ describe('DefaultTelegramWebhookDiagnosticsService', () => {
     now += 16 * 60 * 1000;
     expect(service.getSnapshot().webhook_ingress_recently_ok).toBe(false);
   });
+
+  test('keeps outbound callback failures separate from webhook delivery health', async () => {
+    const now = Date.parse('2026-08-03T06:00:00.000Z');
+    const service = new DefaultTelegramWebhookDiagnosticsService(
+      'telegram-token',
+      (async () => webhookInfo({
+        url: 'https://bot.example.test/api/v1/bots/telegram/webhook',
+        pending_update_count: 1,
+      })) as typeof fetch,
+      { now: () => now },
+    );
+    await service.refreshNow();
+    service.recordCallbackSuccess();
+    service.recordCallbackFailure(new Error('Telegram answerCallbackQuery failed with status 400'));
+
+    expect(service.getSnapshot()).toMatchObject({
+      health: 'healthy',
+      webhook_last_error_message: null,
+      webhook_error_recent: false,
+      callback_ingress_recently_ok: false,
+    });
+  });
 });

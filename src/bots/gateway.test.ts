@@ -2903,15 +2903,23 @@ describe('DefaultBotGateway', () => {
     gateway.dispose();
   });
 
-  test('deduplicates quick repeated temporary runtime open callbacks for the same stale card', async () => {
+  test('deduplicates repeated temporary runtime opens without surfacing an expired duplicate acknowledgement', async () => {
     const requests: Array<{ url: string; body: FormData | Record<string, unknown> }> = [];
     const runtimeTexts: string[] = [];
+    let answerCount = 0;
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const rawBody = init?.body;
+      const url = String(input);
       requests.push({
-        url: String(input),
+        url,
         body: rawBody instanceof FormData ? rawBody : JSON.parse(String(rawBody || '{}')),
       });
+      if (url.includes('answerCallbackQuery') && ++answerCount === 2) {
+        return new Response(JSON.stringify({ ok: false, description: 'Bad Request: query is too old' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
       return new Response(JSON.stringify({ ok: true, result: { message_id: 888 } }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -3000,6 +3008,7 @@ describe('DefaultBotGateway', () => {
     expect(runtimeTexts).toEqual(['INT-1 卡片']);
     expect(requests.filter((request) => request.url.includes('editMessageMedia'))).toHaveLength(1);
     expect(requests.filter((request) => request.url.includes('sendPhoto'))).toHaveLength(0);
+    expect(requests.filter((request) => request.url.includes('sendMessage'))).toHaveLength(0);
     expect(requests.filter((request) => request.url.includes('deleteMessage'))).toHaveLength(0);
     const answerRequests = requests.filter((request) => request.url.includes('answerCallbackQuery'));
     expect(answerRequests).toHaveLength(2);

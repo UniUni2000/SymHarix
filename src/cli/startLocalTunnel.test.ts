@@ -360,6 +360,16 @@ describe('startLocalTunnel', () => {
     }, 'https://fresh.trycloudflare.com')).toBeNull();
   });
 
+  test('never rebuilds a tunnel for an expired outbound callback acknowledgement', () => {
+    expect(getStartLocalTunnelRecoveryReason({
+      health: 'degraded',
+      webhook_url: 'https://fresh.trycloudflare.com/api/v1/bots/telegram/webhook',
+      webhook_last_error_message: 'Telegram answerCallbackQuery failed with status 400',
+      webhook_error_recent: true,
+      webhook_pending_update_count: 1,
+    }, 'https://fresh.trycloudflare.com')).toBeNull();
+  });
+
   test('does not request local tunnel recovery for a stable non-tunnel public URL', () => {
     expect(getStartLocalTunnelRecoveryReason({
       health: 'degraded',

@@ -71,6 +71,7 @@ export class DefaultTelegramWebhookDiagnosticsService implements TelegramWebhook
   private lastRefreshAt = 0;
   private refreshInFlight: Promise<void> | null = null;
   private lastCallbackSuccessAt = 0;
+  private lastCallbackFailureAt = 0;
   private lastIngressSuccessAt = 0;
   private readonly recentAudits: TelegramCallbackAuditRecord[] = [];
 
@@ -102,6 +103,7 @@ export class DefaultTelegramWebhookDiagnosticsService implements TelegramWebhook
     const now = this.options.now?.() ?? Date.now();
     const callbackIngressRecentlyOk =
       this.lastCallbackSuccessAt > 0 &&
+      this.lastCallbackSuccessAt > this.lastCallbackFailureAt &&
       now - this.lastCallbackSuccessAt <= CALLBACK_OK_WINDOW_MS;
     const webhookIngressRecentlyOk =
       this.lastIngressSuccessAt > 0 &&
@@ -179,13 +181,11 @@ export class DefaultTelegramWebhookDiagnosticsService implements TelegramWebhook
     };
   }
 
-  recordCallbackFailure(error?: Error | null): void {
-    const message = error?.message ?? null;
-    this.snapshot = {
-      ...this.snapshot,
-      webhook_last_error_message: this.snapshot.webhook_last_error_message ?? message,
-      webhook_last_error_at: message ? new Date().toISOString() : this.snapshot.webhook_last_error_at,
-    };
+  recordCallbackFailure(_error?: Error | null): void {
+    // Callback acknowledgements are outbound Bot API calls. Their failures must
+    // not be copied into Telegram's inbound webhook delivery diagnostics; doing
+    // so can make the tunnel watchdog restart a healthy ingress path.
+    this.lastCallbackFailureAt = this.options.now?.() ?? Date.now();
   }
 
   recordAudit(record: TelegramCallbackAuditRecord): void {

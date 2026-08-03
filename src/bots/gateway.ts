@@ -2580,20 +2580,33 @@ export class DefaultBotGateway implements BotGateway {
           if (runtimeOpenReplayKey) {
             const guard = this.acquireTelegramRuntimeOpenGuard(runtimeOpenReplayKey);
             if (!guard.accepted) {
-              await telegramNotifier.answerCallbackQuery(
-                callbackQuery.id || 'unknown-callback',
-                guard.reason === 'cooldown'
-                  ? textForIssueLocale(
-                      callbackIssue,
-                      '这张卡刚刚刷新，请再点一次打开。',
-                      'This card was just refreshed. Tap it again to open.',
-                    )
-                  : textForIssueLocale(
-                      callbackIssue,
-                      '这张卡正在更新，请等几秒再试。',
-                      'This card is already updating. Give it a few seconds.',
-                    ),
-              );
+              try {
+                await telegramNotifier.answerCallbackQuery(
+                  callbackQuery.id || 'unknown-callback',
+                  guard.reason === 'cooldown'
+                    ? textForIssueLocale(
+                        callbackIssue,
+                        '这张卡刚刚刷新，请再点一次打开。',
+                        'This card was just refreshed. Tap it again to open.',
+                      )
+                    : textForIssueLocale(
+                        callbackIssue,
+                        '这张卡正在更新，请等几秒再试。',
+                        'This card is already updating. Give it a few seconds.',
+                      ),
+                );
+              } catch (error) {
+                if (!isTelegramAnswerCallbackBadRequest(error)) {
+                  throw error;
+                }
+                // The original open callback already owns the card refresh.
+                // An expired duplicate acknowledgement is harmless and must
+                // not emit another failure message into the conversation.
+                logger.warn('Telegram duplicate runtime open callback expired during card refresh', {
+                  callback_id: callbackQuery.id || 'unknown-callback',
+                  chat_id: conversationId,
+                });
+              }
               this.recordTelegramCallbackAudit({
                 ...auditBase,
                 result: 'acked',

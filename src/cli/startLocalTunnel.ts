@@ -165,7 +165,7 @@ export function getStartLocalTunnelRecoveryReason(telegram: {
     telegram.health === 'degraded' &&
     typeof telegram.webhook_pending_update_count === 'number' &&
     telegram.webhook_pending_update_count > 0 &&
-    error
+    isRecoverableTunnelWebhookError(error)
   ) {
     return `telegram webhook degraded: ${error}`;
   }

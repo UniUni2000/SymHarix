@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
-import { createDefaultTelegramApiFetch, createTelegramApiFetch, createTelegramProxyAwareFetch } from './telegramHttp';
+import {
+  createDefaultTelegramApiFetch,
+  createTelegramApiFetch,
+  createTelegramProxyAwareFetch,
+  resolveTelegramCurlTimeoutSeconds,
+} from './telegramHttp';
 
 describe('createTelegramApiFetch', () => {
   const originalEnv = {
@@ -165,5 +170,32 @@ describe('createTelegramApiFetch', () => {
 
     await expect(telegramFetch('https://api.telegram.org/bottoken/sendMessage')).rejects.toThrow('request body is invalid');
     expect(fallbackFetch).toHaveBeenCalledTimes(0);
+  });
+
+  test('does not retry a time-sensitive callback acknowledgement after a network timeout', async () => {
+    const proxyFetch = mock(async () => {
+      throw new Error('curl: (28) Connection timed out after 5000 milliseconds');
+    });
+    const fallbackFetch = mock(async () =>
+      new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    );
+    const telegramFetch = createTelegramProxyAwareFetch(
+      proxyFetch as unknown as typeof fetch,
+      fallbackFetch as unknown as typeof fetch,
+    );
+
+    await expect(telegramFetch('https://api.telegram.org/bottoken/answerCallbackQuery', {
+      method: 'POST',
+      body: '{}',
+    })).rejects.toThrow('timed out');
+    expect(fallbackFetch).toHaveBeenCalledTimes(0);
+    expect(resolveTelegramCurlTimeoutSeconds(
+      'https://api.telegram.org/bottoken/answerCallbackQuery',
+      '30',
+    )).toBe(5);
+    expect(resolveTelegramCurlTimeoutSeconds(
+      'https://api.telegram.org/bottoken/getWebhookInfo',
+      '30',
+    )).toBe(30);
   });
 });
