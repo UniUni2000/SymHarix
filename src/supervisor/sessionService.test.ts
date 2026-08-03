@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { initializeSchema, SupervisorSessionEventRepository, SupervisorSessionRepository } from '../database';
+import {
+  initializeSchema,
+  SupervisorPlanVersionRepository,
+  SupervisorSessionEventRepository,
+  SupervisorSessionRepository,
+} from '../database';
 import { TrackerProjectResolutionService } from '../tracker/projectResolution';
 import type { RuntimeControlPlane, RuntimeIssueView, RuntimeStreamEvent } from '../runtime/types';
 import type { BotAssistantIntent, BotCommandContext, BotRuntimeCopilotContext } from '../bots/types';
@@ -147,6 +152,16 @@ function createRuntime(): RuntimeControlPlane & {
         issue_id: issue.issue_id,
         issue_identifier: issue.identifier,
         issue,
+      };
+    },
+    applySupervisorPlanRevision: async (id, intent) => {
+      const issue = issues.get(id) ?? [...issues.values()].find((candidate) => candidate.identifier === id) ?? null;
+      return {
+        accepted: Boolean(issue),
+        status: issue ? 'completed' : 'not_found',
+        message: issue ? `Applied ${intent.plan_summary}` : `Issue ${id} not found`,
+        issue_id: issue?.issue_id ?? null,
+        issue_identifier: issue?.identifier ?? null,
       };
     },
     stopIssue: async (id: string) => {
@@ -445,7 +460,9 @@ describe('SupervisorSessionService', () => {
     expect(approved?.format).toBe('telegram_html');
     expect(approved?.message).toContain('INT-1');
     expect(approved?.message).toContain('当前子任务');
-    expect(runtime.createIssueCalls).toHaveLength(3);
+    // One root plus the three explicit parallel objectives: Runtime API,
+    // Runtime web UI, and Telegram copy.
+    expect(runtime.createIssueCalls).toHaveLength(4);
     expect(runtime.createIssueCalls[0]?.supervisor_execution_intent).toEqual(expect.objectContaining({
       root_session_id: session!.id,
       repo_ref: 'test2',
@@ -461,6 +478,108 @@ describe('SupervisorSessionService', () => {
     const eventKinds = events.listBySession(session!.id).map((event) => event.event_kind);
     expect(eventKinds).toContain('execution_intent_approved');
     expect(eventKinds).toContain('materialized_plan_created');
+  });
+
+  test('does not treat negated approval language as permission to materialize', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+    const session = sessions.create({
+      id: 'negated-approval',
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+      state: 'awaiting_user_approval',
+      approval_mode: 'explicit_user_approval',
+      plan_version: 1,
+      plan_card: {
+        title: '安全计划', user_goal: '安全计划', in_scope: ['只改目标文件'], out_of_scope: [],
+        acceptance: ['测试通过'], known_risks: [], execution_strategy: '小步执行。', needs_user_approval: true,
+        repo_ref: 'UniUni2000/test2', project_slug: 'test2', clarification_question: null,
+        materialization_mode: 'root_only', recommended_option: { label: '批准', summary: '批准后执行。' },
+        alternate_option: null, governance_preview: null,
+      },
+    });
+
+    const response = await service.respond({
+      context: createContext(),
+      text: '我还没确认，先不要继续执行',
+      intent: null,
+      runtimeContext: createRuntimeContext(),
+      canWrite: true,
+    });
+
+    expect(response?.message).toContain('还没有批准');
+    expect(runtime.createIssueCalls).toHaveLength(0);
+    expect(sessions.findById(session.id)?.state).toBe('awaiting_user_approval');
+  });
+
+  test('rejects viewer mutations and stale version callbacks', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+    const session = sessions.create({
+      id: 'versioned-plan', transport: 'telegram', conversation_id: 'chat-1', state: 'awaiting_user_approval',
+      approval_mode: 'explicit_user_approval', plan_version: 2,
+      plan_card: {
+        title: 'v2 计划', user_goal: 'v2 计划', in_scope: ['v2'], out_of_scope: [], acceptance: ['v2 验收'],
+        known_risks: [], execution_strategy: '执行 v2。', needs_user_approval: true, repo_ref: 'UniUni2000/test2',
+        project_slug: 'test2', clarification_question: null, materialization_mode: 'root_only',
+        recommended_option: { label: '批准', summary: '执行 v2。' }, alternate_option: null, governance_preview: null,
+      },
+    });
+    const viewer = await service.respondToAction({
+      context: createContext(), sessionId: session.id, action: 'cancel', canWrite: false, expectedPlanVersion: 2,
+    });
+    expect(viewer.message).toContain('写权限');
+    expect(sessions.findById(session.id)?.state).toBe('awaiting_user_approval');
+
+    const stale = await service.respondToAction({
+      context: createContext(), sessionId: session.id, action: 'approve', canWrite: true, expectedPlanVersion: 1,
+    });
+    expect(stale.message).toContain('旧卡片');
+    expect(runtime.createIssueCalls).toHaveLength(0);
+  });
+
+  test('stores immutable plan versions and builds a code-aware PlanSpec', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntime();
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const versions = new SupervisorPlanVersionRepository(db);
+    const service = new SupervisorSessionService(
+      runtime, createProjectResolver(), sessions, events, null, null, undefined, versions,
+      {
+        understand: async () => ({
+          repo_ref: 'UniUni2000/test2', commit_sha: 'abc123', summary: 'TypeScript runtime service', source: 'cache',
+          evidence_paths: ['src/runtime/pageClient.ts'],
+          understanding: {
+            project_purpose: 'Runtime control plane', tech_stack: ['TypeScript', 'Bun'],
+            key_paths: ['src/runtime/pageClient.ts', 'src/server/routes/runtime.ts'], architecture_notes: [],
+            artifact_opportunities: [], test_commands: ['bun test src/runtime'], risks: ['Keep viewer access read-only.'],
+          },
+        }),
+      },
+    );
+
+    const response = await service.respond({
+      context: createContext(), text: '请先给计划，再改 Runtime Planner 页面',
+      intent: { kind: 'create_issue', title: '改 Runtime Planner 页面并先审批', description: '完成后测试通过', project_slug: 'test2' },
+      runtimeContext: createRuntimeContext(), canWrite: true, source: 'telegram_chat',
+    });
+    const session = sessions.findById(response!.session_id!);
+    expect(session?.plan_card?.affected_paths).toContain('src/runtime/pageClient.ts');
+    expect(session?.plan_card?.test_commands).toContain('bun test src/runtime');
+    expect(session?.plan_card?.steps?.length).toBeGreaterThanOrEqual(3);
+    expect(session?.plan_card?.planning_diagnostics?.source).toBe('deterministic');
+    expect(versions.listBySession(session!.id)).toHaveLength(1);
+    expect(versions.listBySession(session!.id)[0]?.plan_card).toEqual(session?.plan_card);
   });
 
   test('limits explicit root plus child queue plans to the two user-visible child deliverables', async () => {
@@ -518,6 +637,49 @@ describe('SupervisorSessionService', () => {
     expect(runtime.createIssueCalls[1]?.title).toContain('docs/supervisor-live-root.md');
     expect(runtime.createIssueCalls[2]?.title).toContain('[SUPERVISOR CHILD 2/2 for INT-1]');
     expect(runtime.createIssueCalls[2]?.title).toContain('docs/supervisor-live-child.md');
+  });
+
+  test('pauses a partially materialized child queue instead of claiming execution started', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntime();
+    const createIssue = runtime.createIssue.bind(runtime);
+    let attempts = 0;
+    runtime.createIssue = async (input) => {
+      attempts += 1;
+      if (attempts === 3) {
+        return { accepted: false, status: 'rejected', message: 'child create failed', issue_id: null, issue_identifier: null, issue: null };
+      }
+      return createIssue(input);
+    };
+    const sessions = new SupervisorSessionRepository(db);
+    const events = new SupervisorSessionEventRepository(db);
+    const service = new SupervisorSessionService(runtime, createProjectResolver(), sessions, events);
+    const session = sessions.create({
+      id: 'partial-queue', transport: 'telegram', conversation_id: 'chat-1', state: 'awaiting_user_approval',
+      approval_mode: 'explicit_user_approval', plan_version: 1,
+      plan_card: {
+        title: '两步计划', user_goal: '完成两步', in_scope: ['第一步', '第二步'], out_of_scope: [],
+        acceptance: ['第一步通过', '第二步通过'], known_risks: [], execution_strategy: '顺序执行。', needs_user_approval: true,
+        repo_ref: 'UniUni2000/test2', project_slug: 'test2', clarification_question: null,
+        materialization_mode: 'root_with_split_queue', recommended_option: { label: '批准', summary: '开始。' },
+        alternate_option: null, governance_preview: null,
+        steps: [
+          { id: 'step-1', title: '第一步', description: '第一步', depends_on: [], affected_paths: [], test_commands: [], acceptance: ['第一步通过'] },
+          { id: 'step-2', title: '第二步', description: '第二步', depends_on: ['step-1'], affected_paths: [], test_commands: [], acceptance: ['第二步通过'] },
+        ],
+      },
+    });
+
+    const response = await service.respondToAction({
+      context: createContext(), sessionId: session.id, action: 'approve', canWrite: true, expectedPlanVersion: 1,
+    });
+    const updated = sessions.findById(session.id);
+    expect(response.message).toContain('部分子任务失败');
+    expect(updated?.state).toBe('awaiting_user_decision');
+    expect(updated?.active_decision_kind).toBe('execution_decision');
+    expect(updated?.last_material_outcome?.split_status).toBe('partial');
+    expect(runtime.stopIssueCalls).toContain('issue-2');
   });
 
   test('folds repo intelligence into the plan card before approval', async () => {
@@ -874,13 +1036,16 @@ describe('SupervisorSessionService', () => {
     expect(firstCard.action_rows?.flat().map((action) => action.label)).toEqual([
       '批准并开始',
       '改一下计划',
-      '打开运行视图',
+      '使用备选方案',
+      '取消计划',
+      '打开计划视图',
     ]);
     expect(firstCard.action_rows?.map((row) => row.map((action) => action.label))).toEqual([
       ['批准并开始'],
-      ['改一下计划', '打开运行视图'],
+      ['改一下计划', '使用备选方案'],
+      ['取消计划', '打开计划视图'],
     ]);
-    expect(firstCard.action_rows?.[1]?.[1]?.web_app?.url).toBe('/runtime/issues/INT-248/app');
+    expect(firstCard.action_rows?.[2]?.[1]?.web_app?.url).toBe(`/runtime?session=${session.id}`);
   });
 
   test('changes the root card material key when Mini App live activity changes', async () => {
@@ -1042,11 +1207,12 @@ describe('SupervisorSessionService', () => {
 
     expect(card.action_rows?.map((row) => row.map((action) => action.label))).toEqual([
       ['已批准开始'],
-      ['改一下计划', '打开运行视图'],
+      ['改一下计划'],
+      ['取消计划', '打开计划视图'],
     ]);
-    expect(card.action_rows?.[0]?.[0]?.callback_data).toBe(`sup|${session.id}|focus`);
-    expect(card.action_rows?.[1]?.[0]?.callback_data).toBe(`sup|${session.id}|edit`);
-    expect(card.action_rows?.[1]?.[1]?.web_app?.url).toBe('/runtime/issues/INT-143/app');
+    expect(card.action_rows?.[0]?.[0]?.callback_data).toBe(`sup|${session.id}|v${session.plan_version}|focus`);
+    expect(card.action_rows?.[1]?.[0]?.callback_data).toBe(`sup|${session.id}|v${session.plan_version}|edit`);
+    expect(card.action_rows?.[2]?.[1]?.web_app?.url).toBe(`/runtime?session=${session.id}`);
   });
 
   test('collapses completed Telegram cards to completion status and runtime view only', async () => {
@@ -1183,7 +1349,8 @@ describe('SupervisorSessionService', () => {
     expect(response.action_rows?.flat().map((action) => action.label)).toEqual([
       '修复交付并重试',
       '改一下计划',
-      '打开运行视图',
+      '取消计划',
+      '打开计划视图',
     ]);
   });
 
@@ -1713,7 +1880,9 @@ describe('SupervisorSessionService', () => {
     expect(first?.action_rows?.flat().map((action) => action.label)).toEqual([
       'Approve and Start',
       'Edit Plan',
-      'Open Runtime View',
+      'Use Alternate',
+      'Cancel Plan',
+      'Open Plan View',
     ]);
     expect(runtime.createIssueCalls).toHaveLength(0);
     const session = sessions.findActiveByConversation({
@@ -2458,6 +2627,8 @@ describe('SupervisorSessionService', () => {
     expect(third?.message).toContain('计划执行中');
     expect(third?.message).toContain('当前子任务');
     expect(third?.message).toContain('我会继续推进，只在关键节点回来找你');
+    // One root plus the two explicit parallel objectives: Runtime API and
+    // Telegram copy. Do not manufacture a third generic lifecycle child.
     expect(runtime.createIssueCalls).toHaveLength(3);
     expect(runtime.splitGovernanceCalls).toEqual([]);
     const finalSession = sessions.findById(session!.id);
@@ -3266,7 +3437,7 @@ describe('SupervisorSessionService', () => {
     ]));
   });
 
-  test('new thread cancels every stale active session in the same Telegram conversation before starting fresh', async () => {
+  test('new thread preserves existing active plans and starts an independent versioned thread', async () => {
     db = new Database(':memory:');
     initializeSchema(db);
     const runtime = createRuntime();
@@ -3319,13 +3490,13 @@ describe('SupervisorSessionService', () => {
     });
 
     expect(response?.message).toContain('计划待你批准');
-    expect(sessions.findById('stale-1')?.state).toBe('cancelled');
-    expect(sessions.findById('stale-2')?.state).toBe('cancelled');
+    expect(sessions.findById('stale-1')?.state).toBe('awaiting_user_decision');
+    expect(sessions.findById('stale-2')?.state).toBe('executing');
     const activeInConversation = sessions.findAll()
       .filter((session) => session.transport === 'telegram' && session.conversation_id === 'chat-1')
       .filter((session) => session.state !== 'cancelled' && session.state !== 'completed');
-    expect(activeInConversation).toHaveLength(1);
-    expect(activeInConversation[0]?.plan_card?.title).toBe('请新增 supervisor live smoke 文档');
+    expect(activeInConversation).toHaveLength(3);
+    expect(activeInConversation.some((candidate) => candidate.plan_card?.title === '请新增 supervisor live smoke 文档')).toBe(true);
   });
 
   test('does not revive a cancelled historical session when its old root issue publishes a runtime update', () => {
@@ -3548,16 +3719,17 @@ describe('SupervisorSessionService', () => {
 
     expect(response?.message).toContain('新计划');
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(sessions.findById('session-old')?.state).toBe('cancelled');
+    expect(sessions.findById('session-old')?.state).toBe('awaiting_user_approval');
     expect(runtime.stopIssueCalls).toEqual([]);
-    expect(runtime.closeIssueCalls).toEqual([{
-      id: 'old-root',
-      reason: 'Supervisor session cancelled by user.',
-    }]);
-    expect(sessions.findActiveByConversation({ transport: 'telegram', conversation_id: 'chat-1' })?.plan_card?.title).toBe('新计划');
+    expect(runtime.closeIssueCalls).toEqual([]);
+    expect(sessions.findAll().some((candidate) => (
+      candidate.transport === 'telegram'
+      && candidate.conversation_id === 'chat-1'
+      && candidate.plan_card?.title === '新计划'
+    ))).toBe(true);
   });
 
-  test('preemptively cancels and stops active sessions as soon as a new-thread Telegram text arrives', async () => {
+  test('does not preempt active sessions when a parallel new-thread request arrives', async () => {
     db = new Database(':memory:');
     initializeSchema(db);
     const runtime = createRuntime();
@@ -3613,15 +3785,12 @@ describe('SupervisorSessionService', () => {
     );
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(cancelled).toBe(1);
-    expect(sessions.findById('session-preempt-old')?.state).toBe('cancelled');
+    expect(cancelled).toBe(0);
+    expect(sessions.findById('session-preempt-old')?.state).toBe('executing');
     expect(runtime.stopIssueCalls).toEqual([]);
-    expect(runtime.closeIssueCalls).toEqual([{
-      id: 'old-child',
-      reason: 'Supervisor session cancelled by user.',
-    }]);
+    expect(runtime.closeIssueCalls).toEqual([]);
     expect(events.listBySession('session-preempt-old').map((event) => event.event_kind))
-      .toContain('session_cancelled_for_new_thread_preemptive');
+      .not.toContain('session_cancelled_for_new_thread_preemptive');
   });
 
   test('records an execution oversight instruction when a running issue publishes a new milestone', () => {

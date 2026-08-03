@@ -211,6 +211,49 @@ function createRuntimeControlPlane(): RuntimeControlPlane & {
 }
 
 describe('BotAssistantService', () => {
+  test('answers natural-language identity queries before model routing', async () => {
+    const runtime = createRuntimeControlPlane();
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const commandService = new BotCommandService(runtime, subscriptions, () => false);
+    const assistant = new BotAssistantService(
+      runtime,
+      commandService,
+      null,
+      null,
+      null,
+      {
+        decide: async () => {
+          throw new Error('identity queries must not reach the model');
+        },
+      },
+      () => false,
+    );
+
+    const response = await assistant.respondToText(
+      {
+        transport: 'feishu',
+        recipient: { transport: 'feishu', conversation_id: 'chat-identity' },
+        identity: { user_id: 'ou_natural_query', display_name: 'Viewer' },
+      },
+      '我的detexted user id是什么',
+    );
+
+    expect(response.message).toContain('Detected user id: ou_natural_query');
+    expect(response.message).toContain('Operator access: read-only');
+
+    const writeAttempt = await assistant.respondToText(
+      {
+        transport: 'feishu',
+        recipient: { transport: 'feishu', conversation_id: 'chat-identity' },
+        identity: { user_id: 'ou_natural_query', display_name: 'Viewer' },
+      },
+      '创建一个测试任务',
+    );
+    expect(writeAttempt.message).toContain('Detected user id: ou_natural_query');
+    expect(writeAttempt.message).toContain('read-only');
+    subscriptions.dispose();
+  });
+
   let db: Database;
 
   afterEach(() => {
@@ -1878,7 +1921,7 @@ describe('BotAssistantService', () => {
     );
 
     expect(agentInput).toMatchObject({
-      forceReadOnlyClaude: true,
+      forceReadOnlyOpenCode: true,
       runtimeContext: {
         transport: 'telegram',
         conversationId: 'chat-agent-follow-up',
@@ -3081,7 +3124,7 @@ describe('BotAssistantService', () => {
     );
 
     expect(agentInput).toMatchObject({
-      forceReadOnlyClaude: true,
+      forceReadOnlyOpenCode: true,
       controlPlaneSnapshot: {
         overview: {
           active_issues: [

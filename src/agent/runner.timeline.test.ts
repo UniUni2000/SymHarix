@@ -34,7 +34,7 @@ function createFakeChildProcess() {
 describe('AgentRunner timeline events', () => {
   test('passes supervisor MCP config, allowed tools, and system prompt through thread start', async () => {
     const runner = new AgentRunner({
-      codexCommand: 'node ./scripts/claude-adapter.cjs',
+      codexCommand: 'node ./scripts/opencode-adapter.cjs',
       approvalPolicy: 'on-request',
       threadSandbox: 'workspace-read',
       mcpConfig: JSON.stringify({
@@ -59,7 +59,7 @@ describe('AgentRunner timeline events', () => {
     });
     const child = createFakeChildProcess();
 
-    const initialized = runner.initializeSession(child, process.cwd());
+    const initialized = runner.initializeSession(child, process.cwd(), 'plan');
 
     queueMicrotask(() => {
       child.stdout.emit('data', Buffer.from(`${JSON.stringify({ id: 1, result: { ok: true } })}\n`));
@@ -82,6 +82,7 @@ describe('AgentRunner timeline events', () => {
       tools: ['Read', 'Grep', 'Glob', 'LS', 'TodoRead'],
       allowedTools: ['Read', 'Grep', 'Glob', 'LS', 'mcp__supervisor-context__list_context_sources', 'mcp__supervisor-orchestrator__show_issue_card'],
       systemPrompt: 'You are the top-level Supervisor Claude Code runtime.',
+      role: 'plan',
     });
     const mcpConfig = JSON.parse(rawMcpConfig);
     expect(mcpConfig.mcpServers['supervisor-context']).toBeTruthy();
@@ -90,7 +91,7 @@ describe('AgentRunner timeline events', () => {
 
   test('maps agent/timeline messages to timeline AgentEvent without breaking turn completion tokens', async () => {
     const runner = new AgentRunner({
-      codexCommand: 'node ./scripts/claude-adapter.cjs',
+      codexCommand: 'node ./scripts/opencode-adapter.cjs',
       turnTimeoutMs: 5000,
       readTimeoutMs: 1000,
       stallTimeoutMs: 5000,
@@ -156,7 +157,7 @@ describe('AgentRunner timeline events', () => {
 
   test('preserves cached token fields from turn completion messages', async () => {
     const runner = new AgentRunner({
-      codexCommand: 'node ./scripts/claude-adapter.cjs',
+      codexCommand: 'node ./scripts/opencode-adapter.cjs',
       turnTimeoutMs: 5000,
       readTimeoutMs: 1000,
       stallTimeoutMs: 5000,
@@ -221,7 +222,7 @@ describe('AgentRunner timeline events', () => {
 
   test('round-trips approval requests and passes timeline/transcript state to the runtime handler', async () => {
     const runner = new AgentRunner({
-      codexCommand: 'node ./scripts/claude-adapter.cjs',
+      codexCommand: 'node ./scripts/opencode-adapter.cjs',
       turnTimeoutMs: 5000,
       readTimeoutMs: 1000,
       stallTimeoutMs: 5000,
@@ -353,7 +354,7 @@ describe('AgentRunner timeline events', () => {
 
   test('round-trips elicitation requests back to the adapter process', async () => {
     const runner = new AgentRunner({
-      codexCommand: 'node ./scripts/claude-adapter.cjs',
+      codexCommand: 'node ./scripts/opencode-adapter.cjs',
       turnTimeoutMs: 5000,
       readTimeoutMs: 1000,
       stallTimeoutMs: 5000,

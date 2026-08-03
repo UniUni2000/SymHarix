@@ -1,4 +1,4 @@
-import type { Database } from 'bun:sqlite';
+import type { Database, SQLQueryBindings } from 'bun:sqlite';
 import type {
   CreateSupervisorRunRecord,
   SupervisorRunConversationKey,
@@ -87,8 +87,8 @@ export class SupervisorRunRepository {
 
   update(record: UpdateSupervisorRunRecord): SupervisorRunRecord | null {
     const fields: string[] = ['updated_at = ?'];
-    const params: unknown[] = [new Date().toISOString()];
-    const assign = (field: string, value: unknown): void => {
+    const params: SQLQueryBindings[] = [new Date().toISOString()];
+    const assign = (field: string, value: SQLQueryBindings): void => {
       fields.push(`${field} = ?`);
       params.push(value);
     };

@@ -184,6 +184,12 @@ export const runtimePageStyles = `
     color: var(--ink);
   }
 
+  .action-button.success {
+    color: #041017;
+    background: linear-gradient(135deg, #c7f9dc 0%, #8ee6b0 100%);
+    border-color: rgba(142, 230, 176, 0.34);
+  }
+
   .action-button.warn {
     color: #fef3c7;
     background: rgba(146, 64, 14, 0.3);
@@ -641,6 +647,35 @@ export const runtimePageStyles = `
     animation: slideIn 180ms ease-out;
   }
 
+  .planner-drawer-panel {
+    width: min(1060px, calc(100vw - 36px));
+  }
+
+  .planner-layout {
+    display: grid;
+    grid-template-columns: minmax(220px, 0.72fr) minmax(0, 1.8fr);
+    gap: 16px;
+  }
+
+  .planner-list,
+  .planner-detail,
+  .planner-steps,
+  .planner-versions,
+  .summary-grid {
+    display: grid;
+    gap: 10px;
+  }
+
+  .summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin: 16px 0;
+  }
+
+  .planner-steps,
+  .planner-versions {
+    margin: 16px 0;
+  }
+
   .drawer-header {
     display: flex;
     justify-content: space-between;
@@ -794,6 +829,11 @@ export const runtimePageStyles = `
 
     .queue-list {
       max-height: none;
+    }
+
+    .planner-layout,
+    .summary-grid {
+      grid-template-columns: 1fr;
     }
   }
 

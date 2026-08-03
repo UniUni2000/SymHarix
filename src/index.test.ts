@@ -148,7 +148,7 @@ describe('Config Layer', () => {
             project_slug: 'TEST'
           },
           agent_runner: {
-            command: 'node ./scripts/claude-adapter.cjs',
+            command: 'node ./scripts/opencode-adapter.cjs',
             turn_timeout_ms: 1234,
           },
           codex: {
@@ -160,7 +160,7 @@ describe('Config Layer', () => {
       };
 
       const preferredConfig = buildServiceConfig(preferredWorkflow);
-      expect(preferredConfig.codexCommand).toBe('node ./scripts/claude-adapter.cjs');
+      expect(preferredConfig.codexCommand).toBe('node ./scripts/opencode-adapter.cjs');
       expect(preferredConfig.codexTurnTimeoutMs).toBe(1234);
 
       const legacyWorkflow = {

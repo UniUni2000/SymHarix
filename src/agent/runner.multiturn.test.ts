@@ -2,11 +2,27 @@ import { describe, expect, test } from 'bun:test';
 import { EventEmitter } from 'events';
 import type { ChildProcess } from 'child_process';
 import { PassThrough } from 'stream';
-import { AgentRunner } from './runner';
+import { AgentRunner, resolveAgentScriptPath } from './runner';
 
 type FakeWritable = PassThrough & {
   writes: string[];
 };
+
+test('resolves packaged adapter scripts from the immutable application root', () => {
+  const appScript = '/opt/symharix/scripts/opencode-adapter.cjs';
+  expect(resolveAgentScriptPath(
+    './scripts/opencode-adapter.cjs',
+    '/home/demo/.symharix',
+    { SYMHARIX_APP_ROOT: '/opt/symharix' },
+    (target) => target === appScript,
+  )).toBe(appScript);
+  expect(resolveAgentScriptPath(
+    './custom-adapter.cjs',
+    '/home/demo/.symharix',
+    { SYMHARIX_APP_ROOT: '/opt/symharix' },
+    () => false,
+  )).toBe('/home/demo/.symharix/custom-adapter.cjs');
+});
 
 function createFakeChildProcess() {
   const child = new EventEmitter() as unknown as ChildProcess & EventEmitter & {
@@ -34,7 +50,7 @@ function createFakeChildProcess() {
 describe('AgentRunner multi-turn cleanup', () => {
   test('does not duplicate timeline events across sequential turns on the same child process', async () => {
     const runner = new AgentRunner({
-      codexCommand: 'node ./scripts/claude-adapter.cjs',
+      codexCommand: 'node ./scripts/opencode-adapter.cjs',
       turnTimeoutMs: 5000,
       readTimeoutMs: 1000,
       stallTimeoutMs: 5000,

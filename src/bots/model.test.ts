@@ -1,7 +1,51 @@
 import { describe, expect, test } from 'bun:test';
-import { createBotAssistantModel, type BotAssistantHttpTransport } from './model';
+import { createBotAssistantModel, createBotAssistantModelFromEnv, type BotAssistantHttpTransport } from './model';
 
 describe('createBotAssistantModel', () => {
+  test('allows an Anthropic chat model to reuse the code runtime credentials', () => {
+    const original = {
+      provider: process.env.SYMHARIX_BOT_LLM_PROVIDER,
+      model: process.env.SYMHARIX_BOT_LLM_MODEL,
+      key: process.env.SYMHARIX_BOT_LLM_API_KEY,
+      baseUrl: process.env.SYMHARIX_BOT_LLM_BASE_URL,
+      runtimeModel: process.env.ANTHROPIC_MODEL,
+      runtimeKey: process.env.ANTHROPIC_API_KEY,
+      runtimeBaseUrl: process.env.ANTHROPIC_BASE_URL,
+    };
+
+    try {
+      process.env.SYMHARIX_BOT_LLM_PROVIDER = 'anthropic';
+      delete process.env.SYMHARIX_BOT_LLM_MODEL;
+      delete process.env.SYMHARIX_BOT_LLM_API_KEY;
+      delete process.env.SYMHARIX_BOT_LLM_BASE_URL;
+      process.env.ANTHROPIC_MODEL = 'claude-test';
+      process.env.ANTHROPIC_API_KEY = 'runtime-key';
+      process.env.ANTHROPIC_BASE_URL = 'https://example.invalid/v1';
+
+      const model = createBotAssistantModelFromEnv();
+      expect(model.getDiagnostics?.()).toMatchObject({
+        provider: 'anthropic',
+        model: 'claude-test',
+        configured: true,
+      });
+    } finally {
+      const restore = (key: keyof typeof original, envKey: string) => {
+        if (original[key] === undefined) {
+          delete process.env[envKey];
+        } else {
+          process.env[envKey] = original[key];
+        }
+      };
+      restore('provider', 'SYMHARIX_BOT_LLM_PROVIDER');
+      restore('model', 'SYMHARIX_BOT_LLM_MODEL');
+      restore('key', 'SYMHARIX_BOT_LLM_API_KEY');
+      restore('baseUrl', 'SYMHARIX_BOT_LLM_BASE_URL');
+      restore('runtimeModel', 'ANTHROPIC_MODEL');
+      restore('runtimeKey', 'ANTHROPIC_API_KEY');
+      restore('runtimeBaseUrl', 'ANTHROPIC_BASE_URL');
+    }
+  });
+
   test('returns an unconfigured assistant when bot LLM settings are missing', async () => {
     const model = createBotAssistantModel({
       provider: null,

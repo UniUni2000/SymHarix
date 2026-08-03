@@ -1,12 +1,25 @@
 import { Hono } from 'hono';
 import type { BotGateway } from '../../bots/types';
+import type { RuntimeAccessController } from '../runtimeAccess';
 
 type BotRouteStatus = 200 | 400 | 401 | 403 | 404 | 503;
 
-export function createBotRoutes(botGateway: BotGateway): Hono {
+export function createBotRoutes(
+  botGateway: BotGateway,
+  accessController: RuntimeAccessController | null,
+): Hono {
   const bots = new Hono();
 
   bots.get('/manifest', (c) => {
+    if (!accessController?.authorizeRead(c.req.raw).allowed) {
+      c.header('Cache-Control', 'private, no-store');
+      c.header('WWW-Authenticate', 'Bearer realm="SymHarix Runtime"');
+      return c.json({
+        success: false,
+        error: 'Runtime read access requires authentication.',
+      }, 401);
+    }
+    c.header('Cache-Control', 'private, no-store');
     return c.json({
       success: true,
       data: botGateway.getManifest(),

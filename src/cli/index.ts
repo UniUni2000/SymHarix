@@ -9,9 +9,16 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as dotenv from 'dotenv';
 import { syncSymHarixEnvAliases } from '../config/env';
+import {
+  resolveSymHarixApplicationRoot,
+  resolveSymHarixHome,
+} from '../config/installationPaths';
 
 // Load .env file explicitly
-const envPath = path.resolve(__dirname, '../../.env');
+const sourceRoot = path.resolve(__dirname, '../..');
+const applicationRoot = resolveSymHarixApplicationRoot(sourceRoot);
+const projectRoot = resolveSymHarixHome(applicationRoot);
+const envPath = path.join(projectRoot, '.env');
 if (fs.existsSync(envPath)) {
   dotenv.config({ path: envPath, quiet: true });
 }
@@ -36,6 +43,7 @@ import {
 	BotConversationFocusRepository,
 	WorkItemRepository,
 } from '../database';
+import { resolveDefaultDatabasePath } from '../database/path';
 import { LinearClient } from '../tracker/linear-client';
 import { createGitHubIssueClient } from '../github/issue-client';
 import {
@@ -56,7 +64,7 @@ import {
   verifyAttachedLiveSupervisor,
   verifyAttachedLiveSupervisorMatrix,
 } from '../verification/attachedLiveSupervisorVerifier';
-import { ensureEmbeddedClaudeRuntimeReady } from '../agent/embeddedClaudeRuntime';
+import { ensureOpenCodeRuntimeReady } from '../agent/openCodeRuntime';
 
 /**
  * Parse command line arguments
@@ -240,7 +248,7 @@ async function killKnownSymHarixProcesses(currentPid?: number): Promise<void> {
 
   try {
     const adapterPids = collectPids(
-      `ps aux | grep 'claude-adapter\\.cjs' | grep -v grep | awk '{print $2}'`
+      `ps aux | grep 'opencode-adapter\\.cjs' | grep -v grep | awk '{print $2}'`
     );
     for (const pid of adapterPids) {
       try {
@@ -508,7 +516,7 @@ async function main(): Promise<void> {
   console.log('[symharix] Max concurrent agents:', config.maxConcurrentAgents);
 
   try {
-    ensureEmbeddedClaudeRuntimeReady({
+    ensureOpenCodeRuntimeReady({
       projectRoot: config.projectRoot,
       codexCommand: config.codexCommand,
       log: (message) => console.log(message),
@@ -519,7 +527,7 @@ async function main(): Promise<void> {
   }
 
   const db = createDatabase({
-    path: path.join(config.projectRoot, 'symphony.db'),
+    path: resolveDefaultDatabasePath(config.projectRoot),
   });
 
   if (args.maintenance?.kind === 'repair_bot_followups') {
@@ -701,23 +709,33 @@ async function main(): Promise<void> {
 
   // Handle shutdown signals
   let shuttingDown = false;
+  let shutdownDeadline: NodeJS.Timeout | null = null;
 
   const shutdown = async (signal: string): Promise<void> => {
     if (shuttingDown) {
-      console.log('[symharix] Force shutdown...');
-      await killKnownSymHarixProcesses(process.pid);
-      process.exit(1);
+      // start:local and its child can receive the same terminal SIGINT almost
+      // simultaneously. Treat that duplicate as the same shutdown request;
+      // a bounded deadline below still handles genuinely stuck cleanup.
+      console.log('[symharix] Shutdown already in progress...');
+      return;
     }
 
     shuttingDown = true;
     console.log(`[symharix] Received ${signal}, shutting down gracefully...`);
+    shutdownDeadline = setTimeout(() => {
+      console.log('[symharix] Graceful shutdown deadline reached, force stopping...');
+      void killKnownSymHarixProcesses(process.pid).finally(() => process.exit(1));
+    }, 15_000);
+    shutdownDeadline.unref?.();
 
     try {
       await workflowWatcher.stop();
       await runtimeHost.stop();
+      if (shutdownDeadline) clearTimeout(shutdownDeadline);
       console.log('[symharix] Shutdown complete');
       process.exit(0);
     } catch (err) {
+      if (shutdownDeadline) clearTimeout(shutdownDeadline);
       console.error('[symharix] Shutdown error:', err);
       process.exit(1);
     }

@@ -79,7 +79,7 @@ function isFreshRuntimeIssue(issue: RuntimeIssueView, startedAt: number): boolea
 }
 
 function isRetryingRuntimeState(issue: RuntimeIssueView): boolean {
-  return issue.orchestrator_state === 'retry_scheduled' || issue.orchestrator_state === 'retrying';
+  return issue.orchestrator_state === 'retry_scheduled';
 }
 
 function isTerminalRuntimeFailure(issue: RuntimeIssueView): boolean {

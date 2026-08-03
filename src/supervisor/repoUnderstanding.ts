@@ -14,7 +14,7 @@ export interface SupervisorRepoUnderstandingSnapshot {
   summary: string;
   understanding: SupervisorRepoUnderstandingData;
   evidence_paths: string[];
-  source: 'cache' | 'claude_code' | 'fallback';
+  source: 'cache' | 'opencode' | 'claude_code' | 'fallback';
 }
 
 export interface SupervisorRepoUnderstandingInput {

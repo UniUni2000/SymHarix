@@ -1,5 +1,4 @@
 import type {
-  ConflictMemoryRecord,
   ConflictMemoryRepository,
   DebtSignalRepository,
   DecisionMemoryRepository,
@@ -8,7 +7,7 @@ import type {
   ReviewEventRepository,
   WorkItemRepository,
 } from '../database';
-import type { WorkItem } from '../database/types';
+import type { ConflictMemoryRecord, WorkItem } from '../database/types';
 import type {
   AgentTimelinePayload,
   FitnessSignal,

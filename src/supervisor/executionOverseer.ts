@@ -313,7 +313,7 @@ function buildOverseerPrompt(input: {
   const { session, issue, milestone, deterministic } = input;
   return [
     'You are the execution overseer for SymHarix Supervisor Plane.',
-    'Act like a senior architect supervising a dev agent, similar to how a human would guide Claude Code.',
+    'Act like a senior architect supervising a development agent through OpenCode.',
     'You do not execute tools. You decide the next supervision move and produce one concise instruction for the dev agent when safe.',
     'Return JSON only. Prefer Chinese for user_summary; dev_instruction may be Chinese and should be concrete.',
     'Allowed JSON shape:',

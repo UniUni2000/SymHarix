@@ -7,12 +7,17 @@
 ## 0. 最短路径
 
 ```bash
-bun run setup
-# 编辑 .env 和 WORKFLOW.md
-bun run start
+bun run configure
+# 按终端向导输入 Linear、GitHub、模型和聊天入口信息
+bun run configure:check
+bun run start:telegram # 或 bun run start:feishu
 ```
 
-`setup` 会安装依赖，并且只在 `.env` / `WORKFLOW.md` 不存在时创建它们。
+`bun run configure` 是推荐的初始化方式：它会安装依赖、创建本地 `.env` / `WORKFLOW.md`、不回显密钥，并把你输入的 Linear project slug 自动路由到 `owner/repo`。重复执行不会删除其他环境变量或已有仓库路由。
+
+向导会要求的必要信息只有：Linear API key、Linear project slug、目标 GitHub `owner/repo`、GitHub token，以及 OpenCode 的 provider/model 和对应 key。聊天模型可单独选择 Anthropic、OpenAI 或 OpenAI-compatible 服务；Telegram 和飞书可任选其一或同时配置。
+
+`bun run configure:check` 不打印任何密钥，只检查 `.env` 与 `WORKFLOW.md` 路由是否已准备好。
 
 `start` 会重新执行安全初始化检查，在可能时停止同端口旧实例，准备 Telegram 代理配置，在需要时创建临时 `cloudflared` 隧道，启动服务，并且只在当前进程中使用临时隧道地址，不写回 `.env`。
 
@@ -25,14 +30,14 @@ bun run start
 - Bun。
 - Git，以及目标 GitHub 仓库权限。
 - Linear API key。
-- 用于内置 Claude-compatible runtime 的 Anthropic API key。
+- 一个 OpenCode provider API key，或已有的 `opencode auth login` 凭据。
 
 可选：
 
 - `cloudflared`：没有自己的公网 HTTPS 地址，但需要 Telegram webhook 进入本机时使用。
 - `sqlite3`：需要直接检查本地诊断数据时使用。
 
-初始化：
+只安装依赖、但暂不进入配置向导时：
 
 ```bash
 bun run setup
@@ -45,6 +50,8 @@ bash scripts/check-runtime.sh
 ```
 
 ## 2. 配置仓库路由
+
+通常不需要手改本节的 YAML：`bun run configure` 会根据输入的 project slug 和 GitHub `owner/repo` 自动新增或更新一条路由。下面内容仅用于多仓库或高级配置。
 
 SymHarix 通过 `WORKFLOW.md` 把 Linear 项目路由到 GitHub 仓库。
 
@@ -85,6 +92,8 @@ repositories:
 
 ## 3. 填写 `.env`
 
+通常不需要手改 `.env`：终端向导会安全写入必填项，且输入 API key 时不会回显。下表是向导所写内容的参考。
+
 本地执行最小配置：
 
 ```dotenv
@@ -103,18 +112,25 @@ ANTHROPIC_API_KEY=...
 | `SYMHARIX_TRACKER_API_KEY` | 创建一个能访问目标 workspace/project 的 Linear API key。 | 让控制平面读取和更新 work item、状态与项目元数据。 |
 | `SYMHARIX_TRACKER_PROJECT_SLUG` | 使用 Telegram/Runtime 创建任务时默认进入的 Linear project slug。 | 给新 issue 提供默认项目，并且必须匹配 `WORKFLOW.md -> repositories.routing`。 |
 | `GITHUB_TOKEN` | 使用能访问 `WORKFLOW.md` 中所有目标仓库的 GitHub token。 | 让 SymHarix 读取仓库信息、准备 workspace，并对正确仓库执行交付。 |
-| `ANTHROPIC_API_KEY` | 使用内置 Claude-compatible runtime 所需的 API key。 | 驱动 agent 执行和只读仓库理解，除非你显式替换 runtime command。 |
+| `SYMHARIX_OPENCODE_MODEL` | 选择 `provider/model`，并配置对应 provider key 或 `opencode auth`。 | 通过 OpenCode 驱动 Plan、Dev、Review 和仓库理解。 |
 
-推荐 runtime 默认值：
+runtime 配置示例：
 
 ```dotenv
-CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
-CLAUDE_CODE_LOCAL_SKIP_REMOTE_PREFETCH=1
+SYMHARIX_OPENCODE_MODEL=deepseek/deepseek-chat
+DEEPSEEK_API_KEY=...
 ```
 
 新的环境变量使用 `SYMHARIX_*`。旧的 `SYMPHONY_*` 名称、`.symphony-*` 仓库契约和本地 `symphony.db` 文件仍作为兼容层保留。
 
 ## 4. 配置 Telegram
+
+终端部分只需在向导中选择 Telegram，并粘贴 BotFather token；`SYMHARIX_TELEGRAM_WEBHOOK_SECRET` 会自动生成。Telegram 平台需要完成的操作只有：
+
+1. 在 Telegram 打开 [@BotFather](https://t.me/BotFather)，执行 `/newbot`，复制生成的 token。
+2. 把 token 粘贴到 `bun run configure` 的 Telegram 提示中。
+3. 没有稳定 HTTPS 域名时，安装 `cloudflared`，将公网 URL 留空；`bun run start:telegram` 会创建临时 tunnel 并自动注册 webhook。生产环境请在向导中填稳定 HTTPS URL。
+4. 可选但建议填写自己的 Telegram numeric user id，作为写操作 allowlist；不确定时可先留空，后续再运行向导补上。
 
 Telegram 最小配置：
 
@@ -153,6 +169,13 @@ SYMHARIX_TELEGRAM_STARTUP_SUMMARY_ATTEMPTS=60
 
 ## 5. 配置 LLM
 
+向导把模型分为两个用途：
+
+- **代码执行模型**：开源 OpenCode runtime 真正执行仓库任务，可选择 Anthropic、OpenAI、Google、DeepSeek、OpenRouter、阿里云或自定义 OpenAI-compatible provider。
+- **聊天自然语言模型**：用于 Telegram / 飞书理解自然语言任务，可选 Anthropic、OpenAI 或任何 OpenAI-compatible endpoint。选择 Anthropic 时可复用代码运行时 key，不会在 `.env` 重复保存。
+
+高级用户可以继续直接修改以下变量：
+
 为了获得更好的 Telegram 自然语言体验：
 
 ```dotenv
@@ -161,6 +184,8 @@ SYMHARIX_BOT_LLM_MODEL=claude-3-5-sonnet-latest
 SYMHARIX_BOT_LLM_API_KEY=...
 SYMHARIX_BOT_LLM_HTTP_TRANSPORT=fetch
 ```
+
+如果 `SYMHARIX_BOT_LLM_PROVIDER=anthropic`，可以让 `SYMHARIX_BOT_LLM_API_KEY` 和 `SYMHARIX_BOT_LLM_BASE_URL` 留空，自动复用代码运行时的 `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL`。终端向导默认采用此方式。
 
 Supervisor 计划默认复用 Bot LLM。只有需要单独模型时才覆盖：
 
@@ -171,7 +196,7 @@ SYMHARIX_SUPERVISOR_LLM_API_KEY=
 SYMHARIX_SUPERVISOR_LLM_TIMEOUT_MS=45000
 ```
 
-只读仓库理解默认使用内置 adapter：
+只读仓库理解默认使用 OpenCode adapter：
 
 ```dotenv
 SYMHARIX_SUPERVISOR_TOOL_ROUTER_TIMEOUT_MS=12000
@@ -179,7 +204,7 @@ SYMHARIX_SUPERVISOR_REPO_UNDERSTANDING_COMMAND=
 SYMHARIX_SUPERVISOR_READONLY_ADVISOR_COMMAND=
 ```
 
-命令留空时使用 `node scripts/claude-adapter.cjs`。tool-router timeout 上限为 `60000` ms。
+命令留空时使用 `node scripts/opencode-adapter.cjs`。tool-router timeout 上限为 `60000` ms。
 
 ## 6. 启动
 
@@ -262,6 +287,19 @@ sudo systemctl stop ${SYMHARIX_SERVICE_NAME:-symharix}
 - `新开线程：...`
 - `重新把这个单子启动下`
 
+### 在 Runtime Planner 中检查和修改计划
+
+启动服务并登录 Runtime Deck 后，点击顶部的 `Planner`。这里不是聊天记录的简单复刻，而是可操作的计划收件箱：
+
+1. 左侧会同时保留本会话中的多条 active plan，不会因为新开计划自动取消旧计划。
+2. 右侧显示当前不可变版本、执行步骤、步骤依赖、预计影响路径、测试命令、复杂度以及 token/USD 估算。
+3. viewer token 只能查看；operator token 才能编辑、批准、选择备选、取消或回滚。
+4. 每次编辑都会生成新版本；旧聊天按钮和旧页面请求会被拒绝，避免误批准已经变化的计划。
+5. 回滚不会覆盖历史，而是从目标版本创建一个新的待审批版本。执行中的范围修改会先同步到现有任务，再让 Dev Agent 使用新指令继续。
+6. 如果代码上下文或规划模型不可用，页面会明确显示 degraded 原因，不会把模板兜底伪装成 AI 已分析结论。
+
+聊天 Plan Card 的 `打开计划视图` 会直接定位到对应计划。多目标请求只按真实可独立交付的目标拆分，不再固定制造三个子任务；部分子任务创建失败时会暂停并请求处理，不会误报为“已开始执行”。
+
 ## 8. 验证
 
 先启动服务，再运行 Telegram attach-mode 验证：
@@ -320,8 +358,8 @@ Bot 提示模型不可用：
 Issue 已创建但 agent 没跑：
 
 - 确认 `WORKFLOW.md -> repositories.routing` 包含 Linear project slug。
-- 确认 `agent_runner.command` 是 `node ./scripts/claude-adapter.cjs`。
-- 确认 service process 能读取 `ANTHROPIC_API_KEY`。
+- 确认 `agent_runner.command` 是 `node ./scripts/opencode-adapter.cjs`。
+- 运行 `bun run runtime:check`，并确认 service process 能读取所选 provider key 或 `opencode auth` 凭据。
 - 在 Runtime issue detail 中检查 `delivery_code`、`delivery_summary` 和 supervisor directive。
 
 Review 通过但交付阻塞：

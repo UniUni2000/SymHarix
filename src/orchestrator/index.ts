@@ -12,6 +12,11 @@ import type { Database } from 'bun:sqlite';
 import * as yaml from 'yaml';
 import { readSymHarixEnv } from '../config/env';
 import {
+  estimateTaskCostUsd,
+  resolveCostPolicy,
+} from '../cost/policy';
+import { CostGovernor } from '../cost/governor';
+import {
   AgentTimelinePayload,
   ChangePackSummary,
   ChangePackTaskStatus,
@@ -44,6 +49,7 @@ import type {
   CreateIssueRequest,
   CloseIssueRequest,
 } from '../runtime/types';
+import type { SupervisorExecutionIntent } from '../supervisor/types';
 import { LinearClient } from '../tracker/linear-client';
 import { TrackerProjectResolutionService } from '../tracker/projectResolution';
 import { GitHubIssueClient } from '../github/issue-client';
@@ -68,6 +74,7 @@ import {
   SyncEventRepository,
   WorkItemRepository
 } from '../database';
+import { resolveDefaultDatabasePath } from '../database/path';
 import type { ReviewDecision, ServiceLease, SupervisorSessionRecord } from '../database/types';
 import type { WorkItem } from '../database/types';
 import { buildReviewPrompt, parseCanonicalReviewReport } from '../hooks/review-prompt';
@@ -300,6 +307,7 @@ export interface OrchestratorDependencies {
   ) => Pick<GitHubIssueClient, 'closeIssue' | 'listOpenIssues' | 'listOpenPullRequests' | 'updatePullRequest'>;
   supervisor?: SupervisorService;
   projectResolutionService?: TrackerProjectResolutionService;
+  costGovernor?: CostGovernor;
 }
 
 export function parseCliCommandResult(output: string): CliCommandResult | null {
@@ -328,6 +336,10 @@ export function parseCliCommandResult(output: string): CliCommandResult | null {
   } catch {
     return null;
   }
+}
+
+function isTurnTokenCeilingFailure(message: string | null | undefined): boolean {
+  return /OpenCode turn token ceiling reached/i.test(message ?? '');
 }
 
 /**
@@ -367,6 +379,7 @@ export class Orchestrator extends EventEmitter {
   private governanceMemoryService: GovernanceMemoryService;
   private fitnessSignalService: FitnessSignalService;
   private governanceSuggestionEngine: GovernanceSuggestionEngine;
+  private costGovernor: CostGovernor;
 
   // Section 4.1.8: Orchestrator Runtime State
   private state: OrchestratorState;
@@ -422,10 +435,11 @@ export class Orchestrator extends EventEmitter {
     });
 
     this.db = dependencies.db ?? createDatabase({
-      path: path.join(config.projectRoot, 'symphony.db')
+      path: resolveDefaultDatabasePath(config.projectRoot),
     });
     this.workItemRepository = dependencies.workItemRepository ?? new WorkItemRepository(this.db);
     this.agentRunRepository = dependencies.agentRunRepository ?? new AgentRunRepository(this.db);
+    this.costGovernor = dependencies.costGovernor ?? new CostGovernor(this.db);
     this.reviewEventRepository = dependencies.reviewEventRepository ?? new ReviewEventRepository(this.db);
     this.syncEventRepository = dependencies.syncEventRepository ?? new SyncEventRepository(this.db);
     this.serviceLeaseRepository = dependencies.serviceLeaseRepository ?? new ServiceLeaseRepository(this.db);
@@ -613,6 +627,20 @@ export class Orchestrator extends EventEmitter {
     console.log('[orchestrator] Starting...');
 
     try {
+      const cancelledStaleRuns = this.agentRunRepository.cancelStaleRunning(
+        'Cancelled during recovery because the previous SymHarix process stopped before finalizing this run.',
+      );
+      if (cancelledStaleRuns > 0) {
+        console.warn(
+          `[orchestrator] Cancelled ${cancelledStaleRuns} stale running agent record(s) left by an earlier process.`,
+        );
+      }
+      const releasedCostReservations = this.costGovernor.releaseStaleReservations();
+      if (releasedCostReservations > 0) {
+        console.warn(
+          `[orchestrator] Released ${releasedCostReservations} stale cost reservation(s) left by an earlier process.`,
+        );
+      }
       this.startLeaseRenewalLoop();
 
       // Startup terminal workspace cleanup (Section 8.6)
@@ -708,6 +736,57 @@ export class Orchestrator extends EventEmitter {
       } | null;
     } = {},
   ): Promise<CreateIssueResult> {
+    const idempotencyKey = input.idempotency_key?.trim() || null;
+    if (idempotencyKey) {
+      const now = new Date().toISOString();
+      const inserted = this.db.query(`
+        INSERT OR IGNORE INTO supervisor_materialization_claims (
+          idempotency_key, status, issue_id, issue_identifier, error, created_at, updated_at
+        ) VALUES (?, 'creating', NULL, NULL, NULL, ?, ?)
+      `).run(idempotencyKey, now, now);
+      if (inserted.changes === 0) {
+        const existing = this.db.query(`
+          SELECT status, issue_id, issue_identifier, updated_at
+          FROM supervisor_materialization_claims
+          WHERE idempotency_key = ?
+        `).get(idempotencyKey) as {
+          status: string;
+          issue_id: string | null;
+          issue_identifier: string | null;
+          updated_at: string;
+        } | null;
+        if (existing?.issue_id) {
+          return {
+            accepted: true,
+            status: 'completed',
+            message: `Reused already-created ${existing.issue_identifier || 'issue'}`,
+            issue_id: existing.issue_id,
+            issue_identifier: existing.issue_identifier,
+            issue: null,
+          };
+        }
+        const stale = existing
+          ? Date.now() - new Date(existing.updated_at).getTime() > 10 * 60_000
+          : false;
+        const reclaimed = stale && existing
+          ? this.db.query(`
+              UPDATE supervisor_materialization_claims
+              SET status = 'creating', error = NULL, updated_at = ?
+              WHERE idempotency_key = ? AND updated_at = ? AND issue_id IS NULL
+            `).run(now, idempotencyKey, existing.updated_at).changes === 1
+          : false;
+        if (!reclaimed) {
+          return {
+            accepted: false,
+            status: 'rejected',
+            message: 'This Supervisor plan is already being materialized. Wait for the current attempt to finish.',
+            issue_id: null,
+            issue_identifier: null,
+            issue: null,
+          };
+        }
+      }
+    }
     const deferDispatch = options.defer_dispatch ?? false;
     const scheduleTickWhenRunning = options.schedule_tick ?? true;
     const inheritedLocale = options.governance_lineage?.root_issue_id
@@ -721,6 +800,9 @@ export class Orchestrator extends EventEmitter {
     if (input.project_slug?.trim()) {
       const resolved = await this.projectResolutionService.resolveProjectSlug(input.project_slug.trim());
       if (!resolved.project) {
+        if (idempotencyKey) {
+          this.db.query(`DELETE FROM supervisor_materialization_claims WHERE idempotency_key = ? AND issue_id IS NULL`).run(idempotencyKey);
+        }
         return {
           accepted: false,
           status: 'rejected',
@@ -743,6 +825,11 @@ export class Orchestrator extends EventEmitter {
     });
 
     if (!created.success || !created.issue) {
+      if (idempotencyKey) {
+        this.db.query(`
+          DELETE FROM supervisor_materialization_claims WHERE idempotency_key = ?
+        `).run(idempotencyKey);
+      }
       return {
         accepted: false,
         status: 'rejected',
@@ -754,6 +841,13 @@ export class Orchestrator extends EventEmitter {
     }
 
     const issue = created.issue;
+    if (idempotencyKey) {
+      this.db.query(`
+        UPDATE supervisor_materialization_claims
+        SET status = 'created', issue_id = ?, issue_identifier = ?, updated_at = ?
+        WHERE idempotency_key = ?
+      `).run(issue.id, issue.identifier, new Date().toISOString(), idempotencyKey);
+    }
     const route = resolvedRoute ?? this.tryResolveRepositoryRoute(issue);
     let governance: IntakeCriticAssessment | null = null;
     if (route) {
@@ -874,6 +968,51 @@ export class Orchestrator extends EventEmitter {
       issue_id: issue.id,
       issue_identifier: issue.identifier,
       issue: null,
+    };
+  }
+
+  async applySupervisorPlanRevision(
+    issueId: string,
+    intent: SupervisorExecutionIntent,
+  ): Promise<RuntimeActionResult> {
+    const workItem = this.workItemRepository.findByLinearIssueId(issueId);
+    if (!workItem) {
+      return {
+        accepted: false,
+        status: 'not_found',
+        message: `Issue ${issueId} was not found`,
+        issue_id: null,
+        issue_identifier: null,
+      };
+    }
+    this.workItemRepository.update({
+      id: workItem.id,
+      supervisor_root_session_id: intent.root_session_id,
+      supervisor_plan_summary: intent.plan_summary,
+      supervisor_acceptance_summary: intent.acceptance_summary,
+      supervisor_execution_mode: intent.approved_execution_mode,
+    });
+    if (this.supervisorSessionRepository.findById(intent.root_session_id)) {
+      this.supervisorSessionEventRepository.create({
+        id: crypto.randomUUID(),
+        session_id: intent.root_session_id,
+        event_kind: 'execution_plan_revision_applied',
+        payload_json: {
+          issue_id: workItem.linear_issue_id,
+          issue_identifier: workItem.linear_identifier,
+          plan_summary: intent.plan_summary,
+          acceptance_summary: intent.acceptance_summary,
+          execution_mode: intent.approved_execution_mode,
+        },
+      });
+    }
+    this.emit('state:changed', this.getStateSnapshot());
+    return {
+      accepted: true,
+      status: 'completed',
+      message: `Applied the revised Supervisor plan to ${workItem.linear_identifier}`,
+      issue_id: workItem.linear_issue_id,
+      issue_identifier: workItem.linear_identifier,
     };
   }
 
@@ -1196,6 +1335,42 @@ export class Orchestrator extends EventEmitter {
       message: `Queued ${issue.identifier} for retry`,
       issue_id: issue.id,
       issue_identifier: issue.identifier,
+    };
+  }
+
+  async overrideCostBudget(issueId: string): Promise<RuntimeActionResult> {
+    const workItem =
+      this.workItemRepository.findByLinearIssueId(issueId) ??
+      this.workItemRepository.findByIdentifier(issueId);
+    if (!workItem) {
+      return {
+        accepted: false,
+        status: 'not_found',
+        message: `Issue ${issueId} was not found`,
+        issue_id: null,
+        issue_identifier: null,
+      };
+    }
+    if (workItem.delivery_code !== 'cost_budget_exceeded') {
+      return {
+        accepted: false,
+        status: 'rejected',
+        message: `${workItem.linear_identifier} does not currently require a cost budget override`,
+        issue_id: workItem.linear_issue_id,
+        issue_identifier: workItem.linear_identifier,
+      };
+    }
+
+    const override = this.costGovernor.approveOverride(
+      workItem.id,
+      'Approved by Runtime operator',
+    );
+    const retry = await this.retryIssue(workItem.linear_issue_id);
+    return {
+      ...retry,
+      message: retry.accepted
+        ? `Budget override approved for ${workItem.linear_identifier} until ${override.expires_at}; ${retry.message}`
+        : `Budget override recorded for ${workItem.linear_identifier}, but retry was not started: ${retry.message}`,
     };
   }
 
@@ -3829,6 +4004,12 @@ export class Orchestrator extends EventEmitter {
     }
 
     const sourcePath = repoResult.sourcePath;
+    if (
+      params.suggestion.suggestion_type !== 'constitution_update'
+      && params.suggestion.suggestion_type !== 'harness_adoption'
+    ) {
+      throw new Error(`Unsupported governance PR suggestion: ${params.suggestion.suggestion_type}`);
+    }
     const branchName = this.buildGovernanceBranchName(params.suggestion.suggestion_type, params.route.github_repo_full);
     const worktreePath = this.getGovernanceWorktreePath(params.route, branchName);
     const startPoint = this.resolveGovernanceStartPoint(sourcePath);
@@ -5960,6 +6141,8 @@ export class Orchestrator extends EventEmitter {
       'tracker_state_conflict',
       'no_actionable_diff',
       'merge_blocked',
+      'cost_budget_exceeded',
+      'turn_token_ceiling_reached',
     ].includes((code ?? '').trim());
   }
 
@@ -6012,6 +6195,8 @@ export class Orchestrator extends EventEmitter {
         uncached_input_tokens: result.tokens.uncached_input ?? 0,
         cache_creation_input_tokens: result.tokens.cache_creation_input ?? 0,
         cache_read_input_tokens: result.tokens.cache_read_input ?? 0,
+        budget_reserved_tokens: 0,
+        budget_reserved_usd_micros: 0,
         finished_at: new Date(),
       });
     };
@@ -6195,7 +6380,11 @@ export class Orchestrator extends EventEmitter {
 
       // Initialize session (Section 10.2: Session Startup Handshake)
       // This sends initialize + thread/start and returns threadId
-      const { threadId } = await this.agentRunner.initializeSession(child, workspace.path);
+      const { threadId } = await this.agentRunner.initializeSession(
+        child,
+        workspace.path,
+        isReview ? 'review' : 'dev',
+      );
       if (runningEntry) {
         runningEntry.session_id = `${threadId}-turn-1`;
       }
@@ -6206,6 +6395,32 @@ export class Orchestrator extends EventEmitter {
       const turnBudget = this.getTurnBudget(isReview ? 'review' : 'dev', activeIssue);
       let reviewArtifactRepairBudget = 0;
       const touchedPathSet = new Set(workItem.touched_paths);
+
+      const haltForCostBudget = (message: string, state: string): void => {
+        result.outcome = 'halted';
+        result.next_action = 'stop';
+        result.failure_reason = 'agent_turn';
+        result.error = message;
+        result.final_state = state;
+        result.cleanup_workspace = false;
+        result.cli_result = {
+          ok: false,
+          final_state: state,
+          review_decision: null,
+          feedback: message,
+          delivery_code: 'cost_budget_exceeded',
+          delivery_summary: message,
+          retry_hint: 'stop',
+          linear_api_calls: 0,
+          github_api_calls: 0,
+        };
+        this.workItemRepository.update({
+          id: workItem.id,
+          orchestrator_state: 'halted',
+          delivery_code: 'cost_budget_exceeded',
+          delivery_summary: message,
+        });
+      };
 
       while (sessionActive && turnNumber <= turnBudget + reviewArtifactRepairBudget) {
         // Refresh issue state before each turn
@@ -6241,14 +6456,27 @@ export class Orchestrator extends EventEmitter {
           }
         }
 
+        const turnPreflight = this.costGovernor.reserveNextCall(workItem, agentRun.id);
+        if (!turnPreflight.allowed) {
+          haltForCostBudget(
+            turnPreflight.message ?? 'Cost budget approval is required before another model call.',
+            activeIssue.state,
+          );
+          sessionActive = false;
+          break;
+        }
+        this.emit('state:changed', this.getStateSnapshot());
+
         // Run turn
-        const turnResult = await this.agentRunner.runTurn(
-          child,
-          threadId,
-          currentPrompt,
-          `${activeIssue.identifier}: ${activeIssue.title}`,
-          workspace.path,
-          (event) => {
+        let turnResult;
+        try {
+          turnResult = await this.agentRunner.runTurn(
+            child,
+            threadId,
+            currentPrompt,
+            `${activeIssue.identifier}: ${activeIssue.title}`,
+            workspace.path,
+            (event) => {
             // Update running entry with event info
             if (runningEntry) {
               runningEntry.last_codex_event = event.event;
@@ -6271,7 +6499,7 @@ export class Orchestrator extends EventEmitter {
 
             this.emit('session:event', issue.id, event);
           },
-          async (runtimeRequest, runtimeState) => this.respondToRuntimeRequest({
+            async (runtimeRequest, runtimeState) => this.respondToRuntimeRequest({
             mode: isReview ? 'review' : 'dev',
             issue: activeIssue,
             attempt,
@@ -6292,12 +6520,27 @@ export class Orchestrator extends EventEmitter {
               }
             }
             return response;
-          })
-        );
+            })
+          );
+        } catch (error) {
+          this.costGovernor.releaseReservation(agentRun.id);
+          throw error;
+        }
 
         result.turns = turnNumber;
         result.tokens = this.addTokenTotals(result.tokens, turnResult.tokens);
         result.claude_api_calls += turnResult.claude_api_calls || 0;
+        this.costGovernor.recordUsage(agentRun.id, result.tokens);
+        this.emit('state:changed', this.getStateSnapshot());
+        const postTurnCost = this.costGovernor.getWorkItemSnapshot(workItem);
+        if (postTurnCost.blocked_scopes.length > 0) {
+          haltForCostBudget(
+            `Cost budget reached after the last model call (${postTurnCost.blocked_scopes.join(', ')}); operator approval is required to continue.`,
+            activeIssue.state,
+          );
+          sessionActive = false;
+          break;
+        }
 
         const turnTouchedPaths = deriveTouchedPathsFromTimeline(turnResult.timeline);
         for (const touchedPath of turnTouchedPaths) {
@@ -6325,8 +6568,39 @@ export class Orchestrator extends EventEmitter {
         );
 
         if (!turnResult.success) {
-          result.failure_reason = 'agent_turn';
-          result.error = turnResult.error;
+          if (isTurnTokenCeilingFailure(turnResult.error)) {
+            const message = [
+              turnResult.error || 'OpenCode turn token ceiling reached.',
+              'Automatic retry is disabled because repeating the same turn would spend the budget again.',
+              'Increase the single-turn ceiling with `bun run configure -- budget`, then retry this issue explicitly.',
+            ].join(' ');
+            result.outcome = 'halted';
+            result.next_action = 'stop';
+            result.failure_reason = 'agent_turn';
+            result.error = message;
+            result.final_state = activeIssue.state;
+            result.cleanup_workspace = false;
+            result.cli_result = {
+              ok: false,
+              final_state: activeIssue.state,
+              review_decision: null,
+              feedback: message,
+              delivery_code: 'turn_token_ceiling_reached',
+              delivery_summary: message,
+              retry_hint: 'stop',
+              linear_api_calls: 0,
+              github_api_calls: 0,
+            };
+            this.workItemRepository.update({
+              id: workItem.id,
+              orchestrator_state: 'halted',
+              delivery_code: 'turn_token_ceiling_reached',
+              delivery_summary: message,
+            });
+          } else {
+            result.failure_reason = 'agent_turn';
+            result.error = turnResult.error;
+          }
           sessionActive = false;
         } else if (turnResult.completed) {
           const workspaceArtifacts = await this.buildSupervisorArtifactSummary(
@@ -6379,22 +6653,38 @@ export class Orchestrator extends EventEmitter {
             continue;
           }
 
-          const nextAction = await this.decideNextSupervisorAction({
-            mode: isReview ? 'review' : 'dev',
-            issue: activeIssue,
-            attempt,
-            turnNumber,
-            maxTurns: turnBudget,
-            prompt: currentPrompt,
-            workspacePath: workspace.path,
-            workspaceArtifacts,
-            completionContext: {
-              missing_requirements: effectiveMissingRequirements,
-            },
-            effectiveHarness: governedState.effectiveHarness,
-            transcript: turnResult.transcript,
-            timeline: turnResult.timeline,
-          });
+          const supervisorPreflight = this.costGovernor.reserveNextCall(workItem, agentRun.id);
+          if (!supervisorPreflight.allowed) {
+            haltForCostBudget(
+              supervisorPreflight.message ?? 'Cost budget approval is required before the supervisor model call.',
+              activeIssue.state,
+            );
+            sessionActive = false;
+            break;
+          }
+          this.emit('state:changed', this.getStateSnapshot());
+          let nextAction;
+          try {
+            nextAction = await this.decideNextSupervisorAction({
+              mode: isReview ? 'review' : 'dev',
+              issue: activeIssue,
+              attempt,
+              turnNumber,
+              maxTurns: turnBudget,
+              prompt: currentPrompt,
+              workspacePath: workspace.path,
+              workspaceArtifacts,
+              completionContext: {
+                missing_requirements: effectiveMissingRequirements,
+              },
+              effectiveHarness: governedState.effectiveHarness,
+              transcript: turnResult.transcript,
+              timeline: turnResult.timeline,
+            });
+          } catch (error) {
+            this.costGovernor.releaseReservation(agentRun.id);
+            throw error;
+          }
           const supervisorTokens = this.combineTokenUsage(nextAction.token_usage);
           if (supervisorTokens) {
             result.tokens = this.addTokenTotals(result.tokens, supervisorTokens);
@@ -6402,6 +6692,17 @@ export class Orchestrator extends EventEmitter {
             if (activeRunningEntry) {
               this.addTokensToRunningEntry(activeRunningEntry, supervisorTokens);
             }
+          }
+          this.costGovernor.recordUsage(agentRun.id, result.tokens);
+          this.emit('state:changed', this.getStateSnapshot());
+          const postSupervisorCost = this.costGovernor.getWorkItemSnapshot(workItem);
+          if (postSupervisorCost.blocked_scopes.length > 0) {
+            haltForCostBudget(
+              `Cost budget reached after the supervisor model call (${postSupervisorCost.blocked_scopes.join(', ')}); operator approval is required to continue.`,
+              activeIssue.state,
+            );
+            sessionActive = false;
+            break;
           }
 
           if (nextAction.kind === 'continue') {
@@ -6461,7 +6762,7 @@ export class Orchestrator extends EventEmitter {
             }
           } else if (nextAction.kind === 'abort') {
             result.failure_reason = 'agent_turn';
-            result.error = nextAction.reason || 'Supervisor aborted the Claude session.';
+            result.error = nextAction.reason || 'Supervisor aborted the OpenCode session.';
             sessionActive = false;
           } else {
             sessionActive = false;
@@ -6507,7 +6808,12 @@ export class Orchestrator extends EventEmitter {
       if (result.outcome === 'halted') {
         result.success = true;
         result.completed = false;
-        finalizeAgentRun('cancelled', 'Execution halted because tracker state is no longer active.');
+        finalizeAgentRun(
+          'cancelled',
+          null,
+          null,
+          result.error || result.cli_result?.delivery_summary || 'Execution halted.',
+        );
         return result;
       }
 
@@ -7184,19 +7490,26 @@ export class Orchestrator extends EventEmitter {
       ].filter(Boolean);
       const tokenBreakdown =
         `input total ${formatTokenCount(result.tokens.input)} = ${inputEquationParts.join(' + ')}, output ${formatTokenCount(result.tokens.output)}`;
+      const estimatedCostUsd = estimateTaskCostUsd({
+        ...result.tokens,
+        cache_read_input: result.tokens.cache_read_input,
+      }, resolveCostPolicy());
+      const agentModel = readSymHarixEnv('SYMPHONY_OPENCODE_MODEL')
+        || '(role-scoped runtime default)';
       console.log(`
 ========================================
 [ISSUE COMPLETE] ${identifier}
 ----------------------------------------
   Turns:        ${result.turns}
   Tokens:       ${formatTokenCount(result.tokens.total)} (${tokenBreakdown})
-  Claude API:   ${result.claude_api_calls} calls
+  Agent model:  ${agentModel}
+  OpenCode:     ${result.claude_api_calls} calls
   Linear API:   ${result.linear_api_calls} calls
   GitHub API:   ${result.github_api_calls} calls
   Duration:     ${runtimeSeconds.toFixed(1)}s
-  Est. Cost:    $${(result.tokens.total * 0.000004).toFixed(5)}*
+  Est. Cost:    ${estimatedCostUsd === null ? 'not configured' : `$${estimatedCostUsd.toFixed(5)}`}
 ========================================
-* Estimated based on typical rates`);
+Configure provider rates with SYMHARIX_COST_*_USD_PER_MILLION.`);
 
       // Emit completion event
       this.emit('issue:completed', runningEntry.issue, true);
@@ -7419,7 +7732,10 @@ export class Orchestrator extends EventEmitter {
     envOverrides: Record<string, string> = {},
   ): Promise<CliCommandInvocationResult> {
     // Build command with optional workspace-path
-    const cmd = ['python3', './scripts/cli.py', command, issueId];
+    const python = process.env.SYMHARIX_PYTHON_BIN
+      || (process.platform === 'win32' ? 'python' : 'python3');
+    const applicationRoot = process.env.SYMHARIX_APP_ROOT?.trim() || this.config.projectRoot;
+    const cmd = [python, path.join(applicationRoot, 'scripts', 'cli.py'), command, issueId];
     if (workspacePath) {
       cmd.push('--workspace-path', workspacePath);
     }

@@ -22,9 +22,12 @@ type RuntimeController = {
   createIssue(input: CreateIssueRequest): Promise<CreateIssueResult>;
   stopIssue(issueId: string): Promise<RuntimeActionResult>;
   retryIssue(issueId: string): Promise<RuntimeActionResult>;
+  closeIssue(issueId: string, request?: import('../runtime/types').CloseIssueRequest): Promise<RuntimeActionResult>;
   overrideGovernance(issueId: string): Promise<RuntimeActionResult>;
-  on(event: string, listener: (...args: any[]) => void): unknown;
-  off?(event: string, listener: (...args: any[]) => void): unknown;
+  rewriteGovernance(issueId: string): Promise<RuntimeActionResult>;
+  splitGovernance(issueId: string): Promise<RuntimeActionResult>;
+  on(event: string, listener: (...args: any[]) => void): any;
+  off?(event: string, listener: (...args: any[]) => void): any;
 };
 
 type RuntimeHubWithController = RuntimeControlPlane & {

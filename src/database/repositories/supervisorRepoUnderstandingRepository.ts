@@ -131,7 +131,11 @@ export class SupervisorRepoUnderstandingRepository {
       summary: typeof row.summary === 'string' ? row.summary : null,
       understanding_json: parseUnderstanding(row.understanding_json),
       evidence_paths_json: parseStringArray(row.evidence_paths_json),
-      generated_by: row.generated_by === 'fallback' ? 'fallback' : 'claude_code',
+      generated_by: row.generated_by === 'fallback'
+        ? 'fallback'
+        : row.generated_by === 'opencode'
+          ? 'opencode'
+          : 'claude_code',
       error: typeof row.error === 'string' ? row.error : null,
       created_at: new Date(String(row.created_at)),
       updated_at: new Date(String(row.updated_at)),

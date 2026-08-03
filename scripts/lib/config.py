@@ -38,7 +38,7 @@ class Config:
     retry_delays: list[int] = field(default_factory=lambda: [1, 5, 30])
     max_concurrent_agents: int = 3
     max_turns: int = 20
-    codex_command: str = "node ./scripts/claude-adapter.cjs"
+    codex_command: str = "node ./scripts/opencode-adapter.cjs"
     # Auto-merge PR even if no reviews received
     auto_merge_no_reviews: bool = False
 

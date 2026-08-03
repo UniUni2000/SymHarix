@@ -33,9 +33,9 @@ SymHarix is a self-hostable control plane with a Telegram-first Supervisor.
 - Runtime issue detail and Mini App history are the best place to inspect persisted agent-run usage, replay summaries, active PR context, and file diffs.
 - Multi-repo context is explicit: Telegram can list configured routes, switch the chat default project, and read a named repo through the read-only advisor.
 - Orchestrator owns dispatch, retry, dev/review handoff, delivery cleanup, and repair.
-- Claude-compatible execution runs through `scripts/claude-adapter.cjs`.
+- OpenCode execution runs through `scripts/opencode-adapter.cjs`.
 
-The Supervisor is not just a model call and not just a Claude Code process. It is durable session state plus optional LLM and read-only repo-understanding paths.
+The Supervisor is not just a model call and not just an OpenCode process. It is durable session state plus optional LLM and read-only repo-understanding paths.
 
 ## Safe Startup
 
@@ -143,9 +143,9 @@ Classify:
 Inspect:
 
 ```bash
-sqlite3 symphony.db "select source, action, result, message_id, material_key, created_at from bot_transport_events order by id desc limit 30;"
-sqlite3 symphony.db "select * from bot_followup_delivery_states order by updated_at desc limit 20;"
-sqlite3 symphony.db "select * from bot_followup_message_states order by updated_at desc limit 20;"
+sqlite3 symharix.db "select source, action, result, message_id, material_key, created_at from bot_transport_events order by id desc limit 30;"
+sqlite3 symharix.db "select * from bot_followup_delivery_states order by updated_at desc limit 20;"
+sqlite3 symharix.db "select * from bot_followup_message_states order by updated_at desc limit 20;"
 ```
 
 Prefer fixing persisted material-key or delivery-state logic over adding another in-memory guard.
@@ -155,7 +155,7 @@ Prefer fixing persisted material-key or delivery-state logic over adding another
 Inspect:
 
 ```bash
-sqlite3 symphony.db "select id, state, transport, conversation_id, repo_ref, root_issue_id, updated_at from supervisor_sessions order by updated_at desc limit 20;"
+sqlite3 symharix.db "select id, state, transport, conversation_id, repo_ref, root_issue_id, updated_at from supervisor_sessions order by updated_at desc limit 20;"
 ```
 
 The user-facing UX should offer clear choices:
@@ -169,7 +169,7 @@ The user-facing UX should offer clear choices:
 Check repo understanding:
 
 ```bash
-sqlite3 symphony.db "select repo_ref, local_path, commit_sha, status, summary, error, updated_at from supervisor_repo_understandings order by id desc limit 20;"
+sqlite3 symharix.db "select repo_ref, local_path, commit_sha, status, summary, error, updated_at from supervisor_repo_understandings order by id desc limit 20;"
 ```
 
 If missing or failed, verify:
@@ -179,7 +179,7 @@ If missing or failed, verify:
 - route local path or source cache
 - `SYMHARIX_SUPERVISOR_REPO_UNDERSTANDING_COMMAND`
 - `SYMHARIX_SUPERVISOR_READONLY_ADVISOR_COMMAND`
-- `claude-code/bin/claude-symharix --help` from this checkout
+- `bun run runtime:check` from this checkout
 - readable repository path and valid Git `HEAD`
 
 Repo understanding is read-only. It should improve conversation and recommendations, but must not create issues or edit code before a Plan Card is approved.
@@ -206,7 +206,7 @@ The resolver accepts project slug, full `owner/repo`, or repo name. If a route i
 True runner path:
 
 ```text
-Orchestrator -> AgentRunner -> scripts/claude-adapter.cjs -> bundled Claude-compatible runtime
+Orchestrator -> AgentRunner -> scripts/opencode-adapter.cjs -> pinned anomalyco/opencode runtime
 ```
 
 Check:
@@ -216,7 +216,7 @@ Check:
 - local workspace path
 - branch/source-of-truth mismatch
 - compact dev context size
-- Claude process startup stderr
+- OpenCode process startup stderr
 
 ### PR Or Issue Does Not Close
 

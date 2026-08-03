@@ -102,8 +102,20 @@ export const AGENT_RUNS_TABLE_SCHEMA = `
     uncached_input_tokens INTEGER NOT NULL DEFAULT 0,
     cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
     cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+    budget_reserved_tokens INTEGER NOT NULL DEFAULT 0,
+    budget_reserved_usd_micros INTEGER NOT NULL DEFAULT 0,
     started_at TEXT NOT NULL,
     finished_at TEXT,
+    FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE
+  );
+`;
+
+export const COST_BUDGET_OVERRIDES_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS cost_budget_overrides (
+    work_item_id TEXT PRIMARY KEY,
+    approved_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    reason TEXT,
     FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE
   );
 `;
@@ -307,7 +319,7 @@ export const SUPERVISOR_PENDING_ACTIONS_TABLE_SCHEMA = `
 
 /**
  * SQL schema for repo_claude_conversations table
- * Tracks read-only Claude Code continuity per transport, conversation, and repository.
+ * Tracks read-only OpenCode continuity per transport, conversation, and repository.
  */
 export const REPO_CLAUDE_CONVERSATIONS_TABLE_SCHEMA = `
   CREATE TABLE IF NOT EXISTS repo_claude_conversations (
@@ -437,6 +449,34 @@ export const SUPERVISOR_SESSION_EVENTS_TABLE_SCHEMA = `
     payload_json TEXT,
     created_at TEXT NOT NULL,
     FOREIGN KEY (session_id) REFERENCES supervisor_sessions(id) ON DELETE CASCADE
+  );
+`;
+
+export const SUPERVISOR_PLAN_VERSIONS_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS supervisor_plan_versions (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    plan_version INTEGER NOT NULL,
+    plan_card_json TEXT NOT NULL,
+    change_kind TEXT NOT NULL,
+    change_summary TEXT,
+    actor_id TEXT,
+    actor_channel TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(session_id, plan_version),
+    FOREIGN KEY (session_id) REFERENCES supervisor_sessions(id) ON DELETE CASCADE
+  );
+`;
+
+export const SUPERVISOR_MATERIALIZATION_CLAIMS_TABLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS supervisor_materialization_claims (
+    idempotency_key TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    issue_id TEXT,
+    issue_identifier TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
   );
 `;
 
@@ -643,6 +683,7 @@ export const CONTROL_PLANE_INDEXES_SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_supervisor_sessions_root_issue ON supervisor_sessions(root_issue_id);
   CREATE INDEX IF NOT EXISTS idx_supervisor_sessions_state ON supervisor_sessions(state);
   CREATE INDEX IF NOT EXISTS idx_supervisor_session_events_session ON supervisor_session_events(session_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_supervisor_plan_versions_session ON supervisor_plan_versions(session_id, plan_version DESC);
   CREATE INDEX IF NOT EXISTS idx_supervisor_jobs_ready ON supervisor_jobs(status, run_after);
   CREATE INDEX IF NOT EXISTS idx_supervisor_jobs_session ON supervisor_jobs(session_id, updated_at DESC);
   CREATE INDEX IF NOT EXISTS idx_supervisor_jobs_root_issue ON supervisor_jobs(root_issue_id);
@@ -759,6 +800,7 @@ export function initializeSchema(db: Database): void {
   db.exec(WORK_ITEMS_TABLE_SCHEMA);
   db.exec(REPO_CACHES_TABLE_SCHEMA);
   db.exec(AGENT_RUNS_TABLE_SCHEMA);
+  db.exec(COST_BUDGET_OVERRIDES_TABLE_SCHEMA);
   db.exec(REVIEW_EVENTS_TABLE_SCHEMA);
   db.exec(SYNC_EVENTS_TABLE_SCHEMA);
   db.exec(BOT_WATCH_SUBSCRIPTIONS_TABLE_SCHEMA);
@@ -776,6 +818,8 @@ export function initializeSchema(db: Database): void {
   db.exec(BOT_FOLLOWUP_DELIVERY_STATES_TABLE_SCHEMA);
   db.exec(BOT_TRANSPORT_EVENTS_TABLE_SCHEMA);
   db.exec(SUPERVISOR_SESSIONS_TABLE_SCHEMA);
+  db.exec(SUPERVISOR_PLAN_VERSIONS_TABLE_SCHEMA);
+  db.exec(SUPERVISOR_MATERIALIZATION_CLAIMS_TABLE_SCHEMA);
   db.exec(SUPERVISOR_SESSION_EVENTS_TABLE_SCHEMA);
   db.exec(SUPERVISOR_JOBS_TABLE_SCHEMA);
   db.exec(SUPERVISOR_MEMORIES_TABLE_SCHEMA);
@@ -828,6 +872,8 @@ export function initializeSchema(db: Database): void {
   ensureColumn(db, 'agent_runs', 'uncached_input_tokens', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'agent_runs', 'cache_creation_input_tokens', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'agent_runs', 'cache_read_input_tokens', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'agent_runs', 'budget_reserved_tokens', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'agent_runs', 'budget_reserved_usd_micros', 'INTEGER NOT NULL DEFAULT 0');
   db.exec(CONTROL_PLANE_INDEXES_SCHEMA);
 }
 
@@ -835,6 +881,7 @@ export function initializeSchema(db: Database): void {
  * Drop all tables (useful for testing)
  */
 export function dropAllTables(db: Database): void {
+  db.exec('DROP TABLE IF EXISTS cost_budget_overrides;');
   db.exec('DROP TABLE IF EXISTS governance_suggestions;');
   db.exec('DROP TABLE IF EXISTS debt_signals;');
   db.exec('DROP TABLE IF EXISTS conflict_memories;');
@@ -852,6 +899,8 @@ export function dropAllTables(db: Database): void {
   db.exec('DROP TABLE IF EXISTS supervisor_memories;');
   db.exec('DROP TABLE IF EXISTS supervisor_jobs;');
   db.exec('DROP TABLE IF EXISTS supervisor_session_events;');
+  db.exec('DROP TABLE IF EXISTS supervisor_materialization_claims;');
+  db.exec('DROP TABLE IF EXISTS supervisor_plan_versions;');
   db.exec('DROP TABLE IF EXISTS supervisor_sessions;');
   db.exec('DROP TABLE IF EXISTS bot_followup_delivery_states;');
   db.exec('DROP TABLE IF EXISTS bot_followup_message_states;');

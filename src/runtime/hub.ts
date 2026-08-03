@@ -16,6 +16,7 @@ import type { AgentRun, SupervisorSessionRecord, WorkItem } from '../database/ty
 import type { OrchestratorStateSnapshot } from '../orchestrator';
 import { describeSupervisorThread } from '../supervisor/threadSummary';
 import { localizeKnownRuntimeText } from '../i18n/locale';
+import { CostGovernor } from '../cost/governor';
 import type { AgentEvent, AgentTimelinePayload, Issue } from '../types';
 import type {
   CreateIssueRequest,
@@ -25,6 +26,7 @@ import type {
   RuntimeAgentProgressItem,
   RuntimeComplexityLevel,
   RuntimeControlPlane,
+  RuntimeDeliveryCode,
   RuntimeDeliveryState,
   RuntimeFileActivity,
   RuntimeGovernanceChildIssueView,
@@ -50,8 +52,13 @@ type RuntimeTokenSnapshot = RuntimeIssueTokenUsage;
 interface RuntimeHubController {
   getStateSnapshot(): OrchestratorStateSnapshot;
   createIssue(input: CreateIssueRequest): Promise<CreateIssueResult>;
+  applySupervisorPlanRevision?(
+    issueId: string,
+    intent: import('../supervisor/types').SupervisorExecutionIntent,
+  ): Promise<RuntimeActionResult>;
   stopIssue(issueId: string): Promise<RuntimeActionResult>;
   retryIssue(issueId: string): Promise<RuntimeActionResult>;
+  overrideCostBudget?(issueId: string): Promise<RuntimeActionResult>;
   closeIssue(issueId: string, request?: CloseIssueRequest): Promise<RuntimeActionResult>;
   overrideGovernance(issueId: string): Promise<RuntimeActionResult>;
   rewriteGovernance(issueId: string): Promise<RuntimeActionResult>;
@@ -91,6 +98,26 @@ function toIso(value: Date | null | undefined): string | null {
 
 function derivePhase(state: string): 'DEV' | 'REVIEW' {
   return state.toLowerCase() === 'in review' ? 'REVIEW' : 'DEV';
+}
+
+const RUNTIME_DELIVERY_CODES = new Set<RuntimeDeliveryCode>([
+  'review_submit_failed',
+  'merge_blocked',
+  'dirty_workspace_no_commit',
+  'tracker_state_conflict',
+  'no_actionable_diff',
+  'manual_stop',
+  'manual_close',
+  'superseded',
+  'tracker_terminal_reconciled',
+  'cost_budget_exceeded',
+  'turn_token_ceiling_reached',
+]);
+
+function normalizeDeliveryCode(value: string | null | undefined): RuntimeDeliveryCode | null {
+  return value && RUNTIME_DELIVERY_CODES.has(value as RuntimeDeliveryCode)
+    ? value as RuntimeDeliveryCode
+    : null;
 }
 
 function mapToolStatus(code: string): 'started' | 'completed' | 'failed' {
@@ -375,6 +402,7 @@ export class RuntimeHub implements RuntimeControlPlane {
   private readonly shadowHarnessRepository: ShadowHarnessRepository;
   private readonly supervisorSessionRepository: SupervisorSessionRepository;
   private readonly supervisorJobRepository: SupervisorJobRepository;
+  private readonly costGovernor: CostGovernor;
   private readonly timelineHistoryLimit: number;
   private readonly workspaceRoot: string | null;
   private readonly issueCacheById = new Map<string, Issue>();
@@ -399,6 +427,7 @@ export class RuntimeHub implements RuntimeControlPlane {
     this.shadowHarnessRepository = new ShadowHarnessRepository(db);
     this.supervisorSessionRepository = new SupervisorSessionRepository(db);
     this.supervisorJobRepository = new SupervisorJobRepository(db);
+    this.costGovernor = new CostGovernor(db);
     this.timelineHistoryLimit = Math.max(10, options.timelineHistoryLimit ?? 200);
     this.workspaceRoot = options.workspaceRoot ?? null;
     this.controller = controller;
@@ -435,6 +464,7 @@ export class RuntimeHub implements RuntimeControlPlane {
 
     return {
       generated_at: new Date().toISOString(),
+      cost: this.costGovernor.getOverviewSnapshot(),
       counts: {
         running: snapshot.counts.running,
         retrying: snapshot.counts.retrying,
@@ -499,6 +529,26 @@ export class RuntimeHub implements RuntimeControlPlane {
     };
   }
 
+  async applySupervisorPlanRevision(
+    id: string,
+    intent: import('../supervisor/types').SupervisorExecutionIntent,
+  ): Promise<RuntimeActionResult> {
+    const workItem = this.resolveWorkItem(id);
+    const issueId = workItem?.linear_issue_id ?? id;
+    const result = await this.controller.applySupervisorPlanRevision?.(issueId, intent) ?? {
+      accepted: false,
+      status: 'rejected' as const,
+      message: 'Supervisor plan revision is not supported by this runtime',
+      issue_id: issueId,
+      issue_identifier: workItem?.linear_identifier ?? null,
+    };
+    this.publishOverview();
+    if (result.issue_id) {
+      this.publishIssue(result.issue_id);
+    }
+    return result;
+  }
+
   async stopIssue(id: string): Promise<RuntimeActionResult> {
     const workItem = this.resolveWorkItem(id);
     const issueId = workItem?.linear_issue_id ?? id;
@@ -514,6 +564,23 @@ export class RuntimeHub implements RuntimeControlPlane {
     const workItem = this.resolveWorkItem(id);
     const issueId = workItem?.linear_issue_id ?? id;
     const result = await this.controller.retryIssue(issueId);
+    this.publishOverview();
+    if (result.issue_id) {
+      this.publishIssue(result.issue_id);
+    }
+    return result;
+  }
+
+  async overrideCostBudget(id: string): Promise<RuntimeActionResult> {
+    const workItem = this.resolveWorkItem(id);
+    const issueId = workItem?.linear_issue_id ?? id;
+    const result = await this.controller.overrideCostBudget?.(issueId) ?? {
+      accepted: false,
+      status: 'rejected' as const,
+      message: 'Cost budget override is not available',
+      issue_id: issueId,
+      issue_identifier: workItem?.linear_identifier ?? null,
+    };
     this.publishOverview();
     if (result.issue_id) {
       this.publishIssue(result.issue_id);
@@ -995,6 +1062,7 @@ export class RuntimeHub implements RuntimeControlPlane {
       ['waiting_on_child', 'child_failed'].includes(governanceThreadState ?? '') && !running && !retrying
         ? 'halted'
         : workItem.orchestrator_state;
+    const costSnapshot = this.costGovernor.getWorkItemSnapshot(workItem);
 
     return {
       issue_id: workItem.linear_issue_id,
@@ -1069,6 +1137,7 @@ export class RuntimeHub implements RuntimeControlPlane {
       delivery_state: delivery.state,
       delivery_code: delivery.code,
       delivery_summary: delivery.summary,
+      last_review_decision: workItem.last_review_decision,
       supervisor_session_state: supervisorProjection.state,
       supervisor_plan_summary: supervisorProjection.summary,
       supervisor_job_state: supervisorProjection.jobState,
@@ -1092,6 +1161,7 @@ export class RuntimeHub implements RuntimeControlPlane {
         approved_at: toIso(workItem.governance_override_at),
         reason: workItem.governance_override_reason,
       },
+      cost: costSnapshot,
       actions: {
         can_stop: Boolean(running || retrying),
         can_retry:
@@ -1100,6 +1170,9 @@ export class RuntimeHub implements RuntimeControlPlane {
           !this.isTerminalState(workItem.linear_state) &&
           !['discovering', 'mapping', 'workspace_ready'].includes(workItem.orchestrator_state),
         can_override_governance: canOverrideGovernance,
+        can_override_cost_budget:
+          delivery.code === 'cost_budget_exceeded'
+          && !costSnapshot.override.active,
         can_rewrite_governance: canRewriteGovernance,
         can_split_governance: canSplitGovernance,
         can_open_pr: workItem.active_pr_number !== null,
@@ -1182,16 +1255,19 @@ export class RuntimeHub implements RuntimeControlPlane {
       delivery_state: null,
       delivery_code: null,
       delivery_summary: null,
+      last_review_decision: null,
       supervisor_session_state: null,
       supervisor_plan_summary: null,
       constitution_hits: [],
       fitness_signals: [],
       active_governance_suggestions: [],
       governance_override: null,
+      cost: null,
       actions: {
         can_stop: Boolean(running || retrying),
         can_retry: !running && !retrying && !this.isTerminalState(issue.state),
         can_override_governance: false,
+        can_override_cost_budget: false,
         can_rewrite_governance: false,
         can_split_governance: false,
         can_open_pr: false,
@@ -1793,6 +1869,7 @@ export class RuntimeHub implements RuntimeControlPlane {
     code: RuntimeIssueView['delivery_code'];
     summary: string | null;
   } {
+    const deliveryCode = normalizeDeliveryCode(workItem.delivery_code);
     const englishOutput = workItem.supervisor_locale === 'en';
     const evidenceSummary = workItem.evidence_summary;
     const missingCount = evidenceSummary?.missing ?? workItem.missing_requirements.length;
@@ -1822,7 +1899,7 @@ export class RuntimeHub implements RuntimeControlPlane {
           : `${workItem.linear_identifier} 已完成最终交付。`);
       return {
         state: 'completed',
-        code: workItem.delivery_code ?? null,
+        code: deliveryCode,
         summary: normalizeSummary(
           workItem.delivery_summary
             ?? (cancelled ? null : workItem.last_review_summary)
@@ -1838,7 +1915,7 @@ export class RuntimeHub implements RuntimeControlPlane {
     if (proofSatisfied && (workItem.orchestrator_state === 'failed' || latestFailure)) {
       return {
         state: 'delivery_failed',
-        code: workItem.delivery_code ?? null,
+        code: deliveryCode,
         summary: normalizeSummary(
           workItem.delivery_summary ?? (englishOutput
             ? `Proof is satisfied, but delivery is blocked at ${latestFailure ?? 'the final delivery action failed'}.`
@@ -1851,14 +1928,14 @@ export class RuntimeHub implements RuntimeControlPlane {
       };
     }
 
-    if (workItem.delivery_code && workItem.delivery_code !== 'manual_stop') {
+    if (deliveryCode && deliveryCode !== 'manual_stop') {
       return {
         state: 'delivery_failed',
-        code: workItem.delivery_code ?? null,
+        code: deliveryCode,
         summary: normalizeSummary(
           workItem.delivery_summary ?? (englishOutput
-            ? `Delivery is blocked: ${workItem.delivery_code}.`
-            : `交付已阻塞：${workItem.delivery_code}。`),
+            ? `Delivery is blocked: ${deliveryCode}.`
+            : `交付已阻塞：${deliveryCode}。`),
           englishOutput
             ? 'Delivery is blocked and needs user attention.'
             : '交付已阻塞，需要用户处理。',
@@ -1870,7 +1947,7 @@ export class RuntimeHub implements RuntimeControlPlane {
     if (proofSatisfied) {
       return {
         state: 'proof_satisfied',
-        code: workItem.delivery_code ?? null,
+        code: deliveryCode,
         summary: englishOutput
           ? 'Proof is satisfied and final delivery is pending.'
           : '证据已满足，正在等待最终交付动作完成。',
@@ -1879,7 +1956,7 @@ export class RuntimeHub implements RuntimeControlPlane {
 
     return {
       state: null,
-      code: workItem.delivery_code ?? null,
+      code: deliveryCode,
       summary: null,
     };
   }
@@ -1938,8 +2015,7 @@ export class RuntimeHub implements RuntimeControlPlane {
     const queuedChildIdentifiers = queuedChildren.map((child) => child.issue_identifier);
     if (!currentChild && childViews.length > 0 && childViews.every((child) => child.queue_state === 'completed')) {
       const rootFinalized = this.isTerminalState(workItem.linear_state)
-        || workItem.orchestrator_state === 'completed'
-        || workItem.delivery_state === 'completed';
+        || workItem.orchestrator_state === 'completed';
       if (!rootFinalized) {
         return {
           state: 'waiting_on_child',

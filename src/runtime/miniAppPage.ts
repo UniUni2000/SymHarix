@@ -2412,7 +2412,11 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           try {
             const response = await fetch(urls.themePreference, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              credentials: 'same-origin',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-symharix-runtime-csrf': '1'
+              },
               body: JSON.stringify({
                 conversation_id: conversationId,
                 theme
@@ -3053,7 +3057,13 @@ export function renderRuntimeMiniAppPage(issueId: string): string {
           return new Promise((resolve) => setTimeout(resolve, ms));
         }
         async function fetchJsonOnce(url, options) {
-          const response = await fetch(url, options);
+          const headers = new Headers(options && options.headers ? options.headers : {});
+          headers.set('x-symharix-runtime-csrf', '1');
+          const response = await fetch(url, {
+            ...(options || {}),
+            credentials: 'same-origin',
+            headers
+          });
           const raw = await response.text();
           let payload = null;
           try {

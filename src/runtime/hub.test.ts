@@ -85,6 +85,14 @@ class FakeController extends EventEmitter {
     issue_identifier: 'INT-1',
   });
 
+  overrideCostBudget = async (issueId: string) => ({
+    accepted: true,
+    status: 'queued' as const,
+    message: `budget override approved for ${issueId}`,
+    issue_id: issueId,
+    issue_identifier: 'INT-1',
+  });
+
   closeIssue = async (issueId: string, request: { successor_issue_id?: string | null; reason?: string | null } = {}) => ({
     accepted: true,
     status: 'accepted' as const,
@@ -1567,6 +1575,51 @@ describe('RuntimeHub', () => {
     expect(issue?.actions.can_override_governance).toBe(true);
     expect(issue?.actions.can_rewrite_governance).toBe(true);
     expect(issue?.actions.can_split_governance).toBe(false);
+
+    hub.dispose();
+  });
+
+  test('projects live cost budgets and exposes the operator approval action', async () => {
+    db = new Database(':memory:');
+    initializeSchema(db);
+
+    const workItemRepository = new WorkItemRepository(db);
+    const agentRunRepository = new AgentRunRepository(db);
+    const workItem = workItemRepository.create({
+      id: 'issue-cost',
+      linear_issue_id: 'issue-cost',
+      linear_identifier: 'INT-COST',
+      linear_title: 'Resume after budget approval',
+      linear_state: 'In Progress',
+      github_repo: 'acme/repo',
+      orchestrator_state: 'halted',
+      delivery_code: 'cost_budget_exceeded',
+      delivery_summary: 'Task budget reached',
+    });
+    agentRunRepository.create({
+      id: 'run-cost',
+      work_item_id: workItem.id,
+      agent_type: 'dev',
+      phase: 'dev',
+      input_tokens: 120,
+      output_tokens: 30,
+      total_tokens: 150,
+    });
+
+    const hub = new RuntimeHub(db, new FakeController());
+    const issue = hub.getIssue('INT-COST');
+
+    expect(issue?.delivery_code).toBe('cost_budget_exceeded');
+    expect(issue?.actions.can_override_cost_budget).toBe(true);
+    expect(issue?.cost?.scopes[0]).toMatchObject({
+      scope: 'task',
+      tokens_used: 150,
+    });
+    expect(hub.getOverview().cost?.repositories[0]?.github_repo).toBe('acme/repo');
+    await expect(hub.overrideCostBudget('INT-COST')).resolves.toMatchObject({
+      accepted: true,
+      message: 'budget override approved for issue-cost',
+    });
 
     hub.dispose();
   });

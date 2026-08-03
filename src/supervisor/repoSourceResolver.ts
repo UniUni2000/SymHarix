@@ -1,6 +1,6 @@
 import type { ResolvedRepositoryRoute } from '../types';
 import { RepoCacheManager, type RepoCacheResult } from '../workspace/repoCacheManager';
-import { resolveGitCommit } from './claudeRepoUnderstandingService';
+import { resolveGitCommit } from './openCodeRepoUnderstandingService';
 
 export type SupervisorRepoSourceStatus = 'unknown' | 'ready' | 'failed';
 

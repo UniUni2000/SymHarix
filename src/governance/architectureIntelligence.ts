@@ -154,15 +154,24 @@ async function readLocalImportTargets(workspacePath: string, touchedPath: string
         if (!specifier) {
           continue;
         }
-        targets.push(resolveTsImport(workspacePath, absolutePath, specifier));
+        const resolved = resolveTsImport(workspacePath, absolutePath, specifier);
+        if (resolved) {
+          targets.push(resolved);
+        }
       }
     }
   } else if (isPythonFile(normalizedTouchedPath)) {
     for (const match of content.matchAll(/from\s+([.\w]+)\s+import\s+[\w*, ]+/g)) {
-      targets.push(resolvePythonImport(workspacePath, absolutePath, match[1] ?? ''));
+      const resolved = resolvePythonImport(workspacePath, absolutePath, match[1] ?? '');
+      if (resolved) {
+        targets.push(resolved);
+      }
     }
     for (const match of content.matchAll(/import\s+([.\w]+)/g)) {
-      targets.push(resolvePythonImport(workspacePath, absolutePath, match[1] ?? ''));
+      const resolved = resolvePythonImport(workspacePath, absolutePath, match[1] ?? '');
+      if (resolved) {
+        targets.push(resolved);
+      }
     }
   }
 

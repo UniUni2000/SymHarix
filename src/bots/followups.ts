@@ -477,6 +477,10 @@ export class BotFollowupService {
       return;
     }
 
+    if (event.type !== 'timeline') {
+      return;
+    }
+
     if (!shouldNotifyTimeline(event.data)) {
       return;
     }
@@ -683,7 +687,7 @@ export class BotFollowupService {
       threadIssue.governance_current_child,
       ...(threadIssue.governance_child_queue ?? []),
       ...(threadIssue.governance_child_issues ?? []),
-    ].filter(Boolean);
+    ].filter((child): child is NonNullable<typeof child> => Boolean(child));
     const seen = new Set<string>();
     const issues: RuntimeIssueView[] = [];
 
@@ -822,8 +826,9 @@ export class BotFollowupService {
       return false;
     }
 
+    const messageStates = this.messageStates;
     return recipients.some((recipient) => {
-      const state = this.messageStates.findByConversationIssue({
+      const state = messageStates.findByConversationIssue({
         transport: recipient.transport,
         conversation_id: recipient.conversation_id,
         issue_id: issueId,

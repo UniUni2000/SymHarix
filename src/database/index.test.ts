@@ -503,6 +503,34 @@ describe('AgentRunRepository', () => {
       cache_read_input_tokens: 358592,
     });
   });
+
+  test('cancels stale running rows left by a stopped process', () => {
+    const workItems = new WorkItemRepository(db);
+    const repository = new AgentRunRepository(db);
+    workItems.create({
+      id: 'wi-stale-run',
+      linear_issue_id: 'linear-stale-run',
+      linear_identifier: 'INT-STALE-RUN',
+      linear_title: 'Interrupted run',
+      linear_state: 'In Progress',
+      github_repo: 'acme/repo',
+    });
+    repository.create({
+      id: 'run-stale',
+      work_item_id: 'wi-stale-run',
+      agent_type: 'dev',
+      phase: 'dev',
+      budget_reserved_tokens: 200000,
+    });
+
+    expect(repository.cancelStaleRunning('Recovered after restart', new Date('2026-08-02T00:00:00.000Z'))).toBe(1);
+    expect(repository.findById('run-stale')).toMatchObject({
+      run_status: 'cancelled',
+      error: 'Recovered after restart',
+      budget_reserved_tokens: 0,
+      finished_at: new Date('2026-08-02T00:00:00.000Z'),
+    });
+  });
 });
 
 describe('ReviewEventRepository', () => {

@@ -45,6 +45,13 @@ function primaryIssueCardAction(issue: RuntimeIssueView, locale: RuntimeLocale):
       callback_data: `rt|${issue.identifier}|stop`,
     };
   }
+  if (issue.actions.can_override_cost_budget) {
+    return {
+      label: textForLocale(locale, '批准预算并继续', 'Approve Budget'),
+      style: 'danger',
+      callback_data: `rt|${issue.identifier}|budget`,
+    };
+  }
   if (issue.actions.can_retry) {
     return {
       label: textForLocale(locale, '重试', 'Retry'),

@@ -77,7 +77,9 @@ export class SupervisorJobLoop {
     }
     this.running = true;
     try {
-      const supersededSessionsCancelled = this.cancelSupersededActiveSessions();
+      // Multiple active plans in one conversation are intentional in Planner v2.
+      // A plan is closed only by an explicit user/runtime action, never by recency.
+      const supersededSessionsCancelled = 0;
       let sessionsChecked = 0;
       let issuesSynced = 0;
       let memoriesWritten = 0;
@@ -133,40 +135,6 @@ export class SupervisorJobLoop {
 
   private now(): Date {
     return this.options.now?.() ?? new Date();
-  }
-
-  private cancelSupersededActiveSessions(): number {
-    const byConversation = new Map<string, SupervisorSessionRecord[]>();
-    for (const session of this.options.sessionRepository.findAll()) {
-      if (!LOOP_ACTIVE_STATES.has(session.state)) {
-        continue;
-      }
-      const key = `${session.transport}:${session.conversation_id}`;
-      byConversation.set(key, [...(byConversation.get(key) ?? []), session]);
-    }
-
-    let cancelled = 0;
-    for (const sessions of byConversation.values()) {
-      const sorted = [...sessions].sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
-      for (const session of sorted.slice(1)) {
-        this.options.sessionRepository.update({
-          id: session.id,
-          state: 'cancelled',
-          active_decision_kind: null,
-          delivery_summary: '同一 Telegram 会话已有更新的计划线程，旧线程已自动收口。',
-        });
-        this.options.eventRepository.create({
-          id: crypto.randomUUID(),
-          session_id: session.id,
-          event_kind: 'supervisor_session_superseded',
-          payload_json: {
-            reason: 'newer_active_session_in_same_conversation',
-          },
-        });
-        cancelled += 1;
-      }
-    }
-    return cancelled;
   }
 
   private enqueueIssueJobs(session: SupervisorSessionRecord, issue: RuntimeIssueView): boolean {
@@ -423,6 +391,9 @@ export class SupervisorJobLoop {
 
       if (job.job_kind === 'summarize_memory') {
         const repoRef = session.repo_ref ?? session.plan_card?.repo_ref ?? issue.github_repo;
+        if (!repoRef) {
+          throw new Error(`Cannot summarize ${issue.identifier} without a repository reference.`);
+        }
         const summary = [
           issue.delivery_code ? `delivery_code=${issue.delivery_code}` : null,
           issue.delivery_summary,

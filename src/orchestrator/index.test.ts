@@ -22,6 +22,8 @@ import {
   SyncEventRepository,
   WorkItemRepository
 } from '../database';
+import { CostGovernor } from '../cost/governor';
+import { resolveCostPolicy } from '../cost/policy';
 
 function makeConfig(): ServiceConfig {
   return {
@@ -1314,6 +1316,167 @@ describe('Orchestrator Stability', () => {
     } finally {
       fs.rmSync(workspacePath, { recursive: true, force: true });
     }
+  });
+
+  it('halts before the model call when the atomic cost preflight requires approval', async () => {
+    const issue = makeIssue({
+      state: 'In Progress',
+      title: 'Cost-guarded task',
+    });
+    const ctx = createOrchestrator(issue, { maxTurns: 1 });
+    orchestrator = ctx.orchestrator;
+    const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symharix-cost-preflight-'));
+    fs.mkdirSync(path.join(workspacePath, '.git'), { recursive: true });
+    fs.mkdirSync(path.join(workspacePath, '.symphony'), { recursive: true });
+    ctx.workspaceManager.createForIssue = mock(async () => ({
+      success: true,
+      workspace: {
+        path: workspacePath,
+        workspace_key: 'INT-1',
+        created_now: false,
+      },
+    }));
+    (orchestrator as any).workspaceManager = ctx.workspaceManager;
+    (orchestrator as any).runCliCommand = mock(async () => ({
+      success: true,
+      result: makeCliResult({ final_state: 'In Progress' }),
+    }));
+    (orchestrator as any).costGovernor = new CostGovernor(
+      ctx.db,
+      resolveCostPolicy({
+        SYMHARIX_TURN_RESERVE_TOKENS: '100',
+        SYMHARIX_MAX_TASK_TOKENS: '50',
+        SYMHARIX_MAX_REPO_DAILY_TOKENS: '1000',
+        SYMHARIX_MAX_DAILY_TOKENS: '1000',
+      }),
+      () => new Date('2026-07-31T08:00:00.000Z'),
+    );
+
+    try {
+      const workerResult = await (orchestrator as any).runAgentAttempt(
+        issue,
+        null,
+        (orchestrator as any).resolveRepositoryRoute(issue),
+      );
+
+      expect(workerResult).toMatchObject({
+        success: true,
+        completed: false,
+        outcome: 'halted',
+        next_action: 'stop',
+        cli_result: {
+          delivery_code: 'cost_budget_exceeded',
+        },
+      });
+      expect(ctx.agentRunner.runTurn).not.toHaveBeenCalled();
+      expect(ctx.workItemRepository.findByLinearIssueId(issue.id)).toMatchObject({
+        orchestrator_state: 'halted',
+        delivery_code: 'cost_budget_exceeded',
+      });
+      const run = new AgentRunRepository(ctx.db).findByWorkItemId(issue.id)[0];
+      expect(run).toMatchObject({
+        run_status: 'cancelled',
+        total_tokens: 0,
+        budget_reserved_tokens: 0,
+      });
+    } finally {
+      fs.rmSync(workspacePath, { recursive: true, force: true });
+    }
+  });
+
+  it('halts without automatic retry when OpenCode reaches the single-turn token ceiling', async () => {
+    const issue = makeIssue({
+      state: 'In Progress',
+      title: 'Cached coding turn reaches its ceiling',
+    });
+    const ctx = createOrchestrator(issue, { maxTurns: 1 });
+    orchestrator = ctx.orchestrator;
+    const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'symharix-turn-ceiling-'));
+    fs.mkdirSync(path.join(workspacePath, '.git'), { recursive: true });
+    fs.mkdirSync(path.join(workspacePath, '.symphony'), { recursive: true });
+    ctx.workspaceManager.createForIssue = mock(async () => ({
+      success: true,
+      workspace: {
+        path: workspacePath,
+        workspace_key: 'INT-1',
+        created_now: false,
+      },
+    }));
+    ctx.agentRunner.runTurn = mock(async () => ({
+      success: false,
+      completed: false,
+      cancelled: false,
+      error: 'OpenCode turn token ceiling reached (total=214000 >= limit=200000; uncached_input=12000, cache_read=198000, output=4000).',
+      tokens: {
+        input: 210000,
+        output: 4000,
+        total: 214000,
+        uncached_input: 12000,
+        cache_read_input: 198000,
+      },
+      claude_api_calls: 8,
+      timeline: [],
+      transcript: [],
+    }));
+    (orchestrator as any).workspaceManager = ctx.workspaceManager;
+    (orchestrator as any).agentRunner = ctx.agentRunner;
+    (orchestrator as any).runCliCommand = mock(async () => ({
+      success: true,
+      result: makeCliResult({ final_state: 'In Progress' }),
+    }));
+
+    try {
+      await (orchestrator as any).dispatchIssue(issue, null);
+      await awaitWorker(orchestrator, issue.id);
+
+      expect(ctx.workItemRepository.findByLinearIssueId(issue.id)).toMatchObject({
+        orchestrator_state: 'halted',
+        delivery_code: 'turn_token_ceiling_reached',
+      });
+      expect((orchestrator as any).state.retry_attempts.size).toBe(0);
+      const run = new AgentRunRepository(ctx.db).findByWorkItemId(issue.id)[0];
+      expect(run).toMatchObject({
+        run_status: 'cancelled',
+        total_tokens: 214000,
+      });
+      expect(run?.error).toContain('Automatic retry is disabled');
+    } finally {
+      fs.rmSync(workspacePath, { recursive: true, force: true });
+    }
+  });
+
+  it('records a time-limited cost override before retrying a halted task', async () => {
+    const issue = makeIssue({ state: 'In Progress' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+    const workItem = ctx.workItemRepository.create({
+      id: issue.id,
+      linear_issue_id: issue.id,
+      linear_identifier: issue.identifier,
+      linear_title: issue.title,
+      linear_state: issue.state,
+      github_repo: 'owner/repo',
+      orchestrator_state: 'halted',
+      delivery_code: 'cost_budget_exceeded',
+      delivery_summary: 'Budget reached',
+    });
+    const retryIssue = mock(async () => ({
+      accepted: true,
+      status: 'queued' as const,
+      message: `Queued ${issue.identifier}`,
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+    }));
+    (orchestrator as any).retryIssue = retryIssue;
+
+    const result = await orchestrator.overrideCostBudget(issue.id);
+    const snapshot = (orchestrator as any).costGovernor.getWorkItemSnapshot(workItem);
+
+    expect(result.accepted).toBe(true);
+    expect(result.message).toContain('Budget override approved');
+    expect(retryIssue).toHaveBeenCalledWith(issue.id);
+    expect(snapshot.override.active).toBe(true);
+    expect(snapshot.override.reason).toBe('Approved by Runtime operator');
   });
 
   it('captures a final review post-process evidence sweep after the CLI finishes', async () => {
@@ -2712,6 +2875,25 @@ describe('Orchestrator Stability', () => {
     expect(workItem?.orchestrator_state).toBe('discovering');
   });
 
+  it('reuses a completed Supervisor materialization claim instead of creating duplicate tracker issues', async () => {
+    const issue = makeIssue({ id: 'issue-idempotent', identifier: 'INT-IDEM', title: 'Idempotent plan' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+    const request = {
+      title: 'Idempotent plan', description: 'materialize once', team_id: 'team-1',
+      idempotency_key: 'supervisor:session-1:v1:root',
+    };
+
+    const first = await orchestrator.createIssue(request);
+    const second = await orchestrator.createIssue(request);
+
+    expect(first.accepted).toBe(true);
+    expect(second.accepted).toBe(true);
+    expect(second.status).toBe('completed');
+    expect(second.issue_id).toBe(issue.id);
+    expect(ctx.tracker.createIssue).toHaveBeenCalledTimes(1);
+  });
+
   it('infers supervisor locale from the original createIssue request language', async () => {
     const englishIssue = makeIssue({ id: 'issue-created-en', identifier: 'INT-55E', title: 'Create smoke test' });
     let ctx = createOrchestrator(englishIssue);
@@ -2782,6 +2964,25 @@ describe('Orchestrator Stability', () => {
     expect(workItem?.supervisor_plan_summary).toContain('清理 runtime 主链');
     expect(workItem?.supervisor_acceptance_summary).toContain('Telegram 卡片语义不回退');
     expect(workItem?.supervisor_execution_mode).toBe('root_with_split_queue');
+  });
+
+  it('applies an approved plan revision to the existing work item without creating another issue', async () => {
+    const issue = makeIssue({ id: 'issue-revision', identifier: 'INT-REV', title: 'Existing execution' });
+    const ctx = createOrchestrator(issue);
+    orchestrator = ctx.orchestrator;
+    await orchestrator.createIssue({ title: issue.title, team_id: 'team-1' });
+
+    const result = await orchestrator.applySupervisorPlanRevision(issue.id, {
+      root_session_id: 'session-revision', repo_ref: 'proj', plan_summary: 'Revised scope v2',
+      acceptance_summary: 'New regression test passes', approved_execution_mode: 'root_only', plan_card: {} as any,
+    });
+
+    const workItem = ctx.workItemRepository.findByLinearIssueId(issue.id);
+    expect(result.accepted).toBe(true);
+    expect(workItem?.supervisor_root_session_id).toBe('session-revision');
+    expect(workItem?.supervisor_plan_summary).toBe('Revised scope v2');
+    expect(workItem?.supervisor_acceptance_summary).toBe('New regression test passes');
+    expect(ctx.tracker.createIssue).toHaveBeenCalledTimes(1);
   });
 
   it('createIssue with defer_dispatch does not immediately dispatch or schedule a tick before children are created', async () => {

@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+set -eu
+
+SYMHARIX_PACKAGE_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+exec "$SYMHARIX_PACKAGE_ROOT/bin/bun" "$@"

@@ -31,10 +31,7 @@ export interface HealthResponse {
   status: 'healthy' | 'degraded' | 'unhealthy';
   version: string;
   timestamp: string;
-  checks: {
-    database: boolean;
-    memory: boolean;
-  };
+  checks: Record<string, boolean>;
 }
 
 /**
@@ -51,6 +48,6 @@ export interface ServerConfig {
  */
 export const DEFAULT_SERVER_CONFIG: ServerConfig = {
   port: 3000,
-  hostname: '0.0.0.0',
-  corsOrigins: ['*'],
+  hostname: '127.0.0.1',
+  corsOrigins: [],
 };

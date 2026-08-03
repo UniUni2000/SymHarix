@@ -195,7 +195,7 @@ function buildConversationPrompt(
 
 export function buildReadOnlyClaudeAdvisorPrompt(input: SupervisorAgentNormalizedInput): string {
   return [
-    'You are the read-only Claude Code brain for a Telegram Supervisor Agent.',
+    'You are the read-only OpenCode brain for a Telegram Supervisor Agent.',
     'You may inspect the repository to answer questions, suggest plans, or recommend artifacts.',
     'You must not edit files, create commits, create issues, change session state, run installs, run formatters, run codegen, or perform destructive actions.',
     'Use only read/list/search style repository inspection. Bash, Write, and Edit are disabled.',
@@ -344,6 +344,10 @@ export function createClaudeCodeReadOnlyAdvisorSessionFactory(
     if (!command) {
       throw new Error('Missing read-only supervisor advisor command.');
     }
+    const localPath = input.localPath;
+    if (!localPath) {
+      throw new Error('Read-only supervisor advisor requires a local repository path.');
+    }
 
     const runner = new AgentRunner({
       codexCommand: command,
@@ -358,8 +362,8 @@ export function createClaudeCodeReadOnlyAdvisorSessionFactory(
       stallTimeoutMs: config.timeoutMs,
       projectRoot: config.projectRoot ?? process.cwd(),
     });
-    const child = runner.launch(input.localPath);
-    const { threadId } = await runner.initializeSession(child, input.localPath);
+    const child = runner.launch(localPath);
+    const { threadId } = await runner.initializeSession(child, localPath);
     return {
       run: async (prompt, turnInput) => {
         (runner as unknown as { options: { turnSandboxPolicy: string } }).options.turnSandboxPolicy = JSON.stringify({
@@ -371,7 +375,7 @@ export function createClaudeCodeReadOnlyAdvisorSessionFactory(
           threadId,
           prompt,
           'Supervisor read-only repo advisor',
-          input.localPath,
+          localPath,
           () => undefined,
           async (request) => respondToReadOnlyClaudeRuntimeRequest(request, turnInput.allowExternalResearch),
         );
@@ -407,9 +411,11 @@ export function createClaudeCodeReadOnlyAdvisorRunner(
 }
 
 export function createReadOnlyClaudeSupervisorAdvisorFromEnv(): SupervisorReadOnlyClaudeAdvisor | null {
-  const command = normalizeConfigValue(readSymHarixEnv('SYMPHONY_SUPERVISOR_READONLY_ADVISOR_COMMAND'))
+  const command = normalizeConfigValue(readSymHarixEnv('SYMPHONY_SUPERVISOR_OPENCODE_READONLY_ADVISOR_COMMAND'))
+    ?? normalizeConfigValue(readSymHarixEnv('SYMPHONY_SUPERVISOR_READONLY_ADVISOR_COMMAND'))
+    ?? normalizeConfigValue(readSymHarixEnv('SYMPHONY_SUPERVISOR_OPENCODE_REPO_UNDERSTANDING_COMMAND'))
     ?? normalizeConfigValue(readSymHarixEnv('SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_COMMAND'))
-    ?? 'node scripts/claude-adapter.cjs';
+    ?? 'node scripts/opencode-adapter.cjs';
   const timeoutMs = parsePositiveInteger(readSymHarixEnv('SYMPHONY_SUPERVISOR_READONLY_ADVISOR_TIMEOUT_MS'))
     ?? parsePositiveInteger(readSymHarixEnv('SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_TIMEOUT_MS'))
     ?? 120_000;
@@ -422,3 +428,25 @@ export function createReadOnlyClaudeSupervisorAdvisorFromEnv(): SupervisorReadOn
   });
   return manager;
 }
+
+/**
+ * Canonical OpenCode names. Claude-prefixed exports remain available so
+ * existing integrations and persisted configuration can upgrade in place.
+ */
+export type SupervisorReadOnlyOpenCodeAdvisorBackend = SupervisorReadOnlyClaudeAdvisorBackend;
+export type SupervisorReadOnlyOpenCodeAdvisor = SupervisorReadOnlyClaudeAdvisor;
+export type SupervisorReadOnlyOpenCodeAdvisorRunnerConfig = SupervisorReadOnlyClaudeAdvisorRunnerConfig;
+export type SupervisorReadOnlyOpenCodeConversationKey = SupervisorReadOnlyClaudeConversationKey;
+export type SupervisorReadOnlyOpenCodeConversationDiagnostics = SupervisorReadOnlyClaudeConversationDiagnostics;
+export type SupervisorReadOnlyOpenCodeSession = SupervisorReadOnlyClaudeSession;
+export type SupervisorReadOnlyOpenCodeSessionFactory = SupervisorReadOnlyClaudeSessionFactory;
+export type SupervisorReadOnlyOpenCodeConversationManagerOptions =
+  SupervisorReadOnlyClaudeConversationManagerOptions;
+export {
+  SupervisorReadOnlyClaudeConversationManager as SupervisorReadOnlyOpenCodeConversationManager,
+  buildReadOnlyClaudeAdvisorPrompt as buildReadOnlyOpenCodeAdvisorPrompt,
+  createClaudeCodeReadOnlyAdvisorRunner as createOpenCodeReadOnlyAdvisorRunner,
+  createClaudeCodeReadOnlyAdvisorSessionFactory as createOpenCodeReadOnlyAdvisorSessionFactory,
+  createReadOnlyClaudeSupervisorAdvisorFromEnv as createReadOnlyOpenCodeSupervisorAdvisorFromEnv,
+  respondToReadOnlyClaudeRuntimeRequest as respondToReadOnlyOpenCodeRuntimeRequest,
+};

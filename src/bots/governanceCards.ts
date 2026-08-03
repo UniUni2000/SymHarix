@@ -1,5 +1,5 @@
 import type { BotTransportMessage } from './types';
-import type { RuntimeIssueView } from '../runtime/types';
+import type { RuntimeGovernanceChildQueueState, RuntimeIssueView } from '../runtime/types';
 import { localizeKnownRuntimeText, type RuntimeLocale } from '../i18n/locale';
 import { buildGovernanceQuickActions, toGovernanceQuickActionRows } from './governanceQuickActions';
 
@@ -104,9 +104,10 @@ function buildSystemSuggestion(issue: RuntimeIssueView): string | null {
   return compact(firstSuggestion.summary || firstSuggestion.title, 160);
 }
 
-function describeQueueState(queueState: RuntimeIssueView['governance_child_queue'] extends Array<infer T>
-  ? T extends { queue_state?: infer S } ? S : never
-  : never, locale: RuntimeLocale | null | undefined = null): string {
+function describeQueueState(
+  queueState: RuntimeGovernanceChildQueueState | undefined,
+  locale: RuntimeLocale | null | undefined = null,
+): string {
   switch (queueState) {
     case 'current':
       return textForLocale(locale, '当前处理', 'Current');

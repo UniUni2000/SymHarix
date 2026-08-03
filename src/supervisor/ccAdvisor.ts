@@ -1,11 +1,12 @@
 import type { RepoProfile } from './repoProfileService';
+import type { BotRepoProfileView } from '../bots/types';
 import { readSymHarixEnv } from '../config/env';
 
 export interface SupervisorCcAdvisorInput {
   repoRef: string;
   localPath: string | null;
   userText: string;
-  repoProfile: RepoProfile | null;
+  repoProfile: RepoProfile | BotRepoProfileView | null;
   projectContext: string | null;
 }
 

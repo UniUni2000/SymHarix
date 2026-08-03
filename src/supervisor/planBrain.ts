@@ -10,6 +10,7 @@ import type {
   SupervisorPlanBrainResult,
 } from './sessionService';
 import { readSymHarixEnv } from '../config/env';
+import { estimateTaskCostUsd, resolveCostPolicy } from '../cost/policy';
 
 const DEFAULT_TIMEOUT_MS = 45_000;
 const MAX_TIMEOUT_MS = 300_000;
@@ -113,6 +114,48 @@ function stringArray(value: unknown): string[] | undefined {
   return normalized.length > 0 ? normalized : undefined;
 }
 
+function planSteps(value: unknown): SupervisorPlanCard['steps'] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const steps = value.flatMap((item, index) => {
+    if (!item || typeof item !== 'object') {
+      return [];
+    }
+    const record = item as Record<string, unknown>;
+    const title = typeof record.title === 'string' ? record.title.trim() : '';
+    const description = typeof record.description === 'string' ? record.description.trim() : '';
+    if (!title || !description) {
+      return [];
+    }
+    return [{
+      id: typeof record.id === 'string' && record.id.trim() ? record.id.trim() : `step-${index + 1}`,
+      title,
+      description,
+      depends_on: stringArray(record.depends_on) ?? [],
+      affected_paths: stringArray(record.affected_paths) ?? [],
+      test_commands: stringArray(record.test_commands) ?? [],
+      acceptance: stringArray(record.acceptance) ?? [],
+    }];
+  });
+  return steps.length ? steps.slice(0, 8) : undefined;
+}
+
+function tokenUsage(payload: unknown, provider: 'anthropic' | 'openai'): {
+  input: number;
+  output: number;
+  total: number;
+} {
+  const usage = payload && typeof payload === 'object'
+    ? (payload as Record<string, unknown>).usage
+    : null;
+  const record = usage && typeof usage === 'object' ? usage as Record<string, unknown> : {};
+  const input = Number(provider === 'anthropic' ? record.input_tokens : record.prompt_tokens) || 0;
+  const output = Number(provider === 'anthropic' ? record.output_tokens : record.completion_tokens) || 0;
+  const total = Number(record.total_tokens) || input + output;
+  return { input, output, total };
+}
+
 function option(value: unknown): SupervisorPlanCard['recommended_option'] | undefined {
   if (!value || typeof value !== 'object') {
     return undefined;
@@ -141,6 +184,19 @@ function parsePlanBrainResult(record: Record<string, unknown>): SupervisorPlanBr
     planCard.out_of_scope = stringArray(planCardRecord.out_of_scope) ?? planCard.out_of_scope;
     planCard.acceptance = stringArray(planCardRecord.acceptance) ?? planCard.acceptance;
     planCard.known_risks = stringArray(planCardRecord.known_risks) ?? planCard.known_risks;
+    planCard.affected_paths = stringArray(planCardRecord.affected_paths) ?? planCard.affected_paths;
+    planCard.test_commands = stringArray(planCardRecord.test_commands) ?? planCard.test_commands;
+    planCard.dependencies = stringArray(planCardRecord.dependencies) ?? planCard.dependencies;
+    planCard.steps = planSteps(planCardRecord.steps) ?? planCard.steps;
+    if (['L1', 'L2', 'L3', 'L4'].includes(String(planCardRecord.estimated_complexity))) {
+      planCard.estimated_complexity = planCardRecord.estimated_complexity as 'L1' | 'L2' | 'L3' | 'L4';
+    }
+    if (Number.isFinite(Number(planCardRecord.estimated_token_budget))) {
+      planCard.estimated_token_budget = Math.max(1, Math.trunc(Number(planCardRecord.estimated_token_budget)));
+    }
+    if (Number.isFinite(Number(planCardRecord.estimated_cost_usd))) {
+      planCard.estimated_cost_usd = Math.max(0, Number(planCardRecord.estimated_cost_usd));
+    }
     if (typeof planCardRecord.execution_strategy === 'string') {
       planCard.execution_strategy = planCardRecord.execution_strategy;
     }
@@ -208,7 +264,7 @@ function buildPrompt(input: SupervisorPlanBrainInput): string {
       ? 'Return JSON only. The original user request is English, so write all user-facing planCard text in English.'
       : 'Return JSON only. The original user request contains Chinese, so write all user-facing planCard text in Chinese.',
     'Allowed JSON shape:',
-    '{"intakeMode":"direct_run|clarify_then_plan|plan_then_approve","approvalMode":"auto|explicit_user_approval","state":"clarifying|plan_ready|awaiting_user_approval","rationale":"...","planCard":{"title":"...","user_goal":"...","in_scope":["..."],"out_of_scope":["..."],"acceptance":["..."],"known_risks":["..."],"execution_strategy":"...","needs_user_approval":true,"clarification_question":null,"materialization_mode":"root_only|root_with_split_queue","recommended_option":{"label":"...","summary":"..."},"alternate_option":{"label":"...","summary":"..."}}}',
+    '{"intakeMode":"direct_run|clarify_then_plan|plan_then_approve","approvalMode":"auto|explicit_user_approval","state":"clarifying|plan_ready|awaiting_user_approval","rationale":"...","planCard":{"title":"...","user_goal":"...","in_scope":["..."],"out_of_scope":["..."],"acceptance":["..."],"known_risks":["..."],"execution_strategy":"...","affected_paths":["..."],"test_commands":["..."],"steps":[{"id":"step-1","title":"...","description":"...","depends_on":[],"affected_paths":["..."],"test_commands":["..."],"acceptance":["..."]}],"needs_user_approval":true,"clarification_question":null,"materialization_mode":"root_only|root_with_split_queue","recommended_option":{"label":"...","summary":"..."},"alternate_option":{"label":"...","summary":"..."}}}',
     'Rules:',
     '- Small single-surface tasks may be auto approved only when acceptance is clear.',
     '- Cleanup/delete requests need explicit approval unless the user gave a narrow safe target.',
@@ -220,6 +276,7 @@ function buildPrompt(input: SupervisorPlanBrainInput): string {
     `draft: ${JSON.stringify(input.draft)}`,
     `deterministic_plan: ${JSON.stringify(input.deterministicPlan)}`,
     `repo_intelligence: ${JSON.stringify(input.repoIntelligence)}`,
+    `repo_code_understanding: ${JSON.stringify(input.repoUnderstanding)}`,
     `governance_preview: ${JSON.stringify(input.governancePreview)}`,
     `recent_session_events: ${JSON.stringify(input.recentEvents.map((event) => ({
       kind: event.event_kind,
@@ -271,14 +328,47 @@ export class HttpSupervisorPlanBrain implements SupervisorPlanBrain {
         signal: controller.signal,
       });
       if (!response.ok) {
-        return null;
+        return {
+          rationale: `Planner model returned HTTP ${response.status}; deterministic PlanSpec was preserved.`,
+          diagnostics: {
+            source: 'llm_with_fallback',
+            provider: this.provider,
+            model: this.model,
+            degraded: true,
+            error_code: `http_${response.status}`,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            estimated_cost_usd: null,
+            generated_at: new Date().toISOString(),
+          },
+        };
       }
       const payload = await response.json().catch(() => null);
+      const usage = tokenUsage(payload, this.provider);
       const text = this.provider === 'anthropic'
         ? textFromAnthropic(payload)
         : textFromOpenAI(payload);
       const parsed = text ? extractJsonObject(text) : null;
-      return parsed ? parsePlanBrainResult(parsed) : null;
+      const result = parsed ? parsePlanBrainResult(parsed) : null;
+      return {
+        ...(result ?? {}),
+        rationale: result?.rationale ?? (parsed
+          ? null
+          : 'Planner response could not be parsed; deterministic PlanSpec was preserved.'),
+        diagnostics: {
+          source: parsed && result ? 'llm' : 'llm_with_fallback',
+          provider: this.provider,
+          model: this.model,
+          degraded: !(parsed && result),
+          error_code: parsed && result ? null : 'invalid_planner_response',
+          input_tokens: usage.input,
+          output_tokens: usage.output,
+          total_tokens: usage.total,
+          estimated_cost_usd: estimateTaskCostUsd(usage, resolveCostPolicy()),
+          generated_at: new Date().toISOString(),
+        },
+      };
     } finally {
       clearTimeout(timer);
     }
@@ -307,14 +397,14 @@ export class HttpSupervisorPlanBrain implements SupervisorPlanBrain {
     if (this.provider === 'anthropic') {
       return {
         model: this.model,
-        max_tokens: 1200,
+        max_tokens: 1800,
         messages: [{ role: 'user', content: prompt }],
       };
     }
     return {
       model: this.model,
       temperature: 0,
-      max_tokens: 1200,
+      max_tokens: 1800,
       messages: [{ role: 'user', content: prompt }],
     };
   }

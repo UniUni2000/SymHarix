@@ -87,7 +87,8 @@ async function serializeMultipartFormData(form: FormData): Promise<{
     chunks.push(typeof value === 'string' ? Buffer.from(value) : value);
   };
 
-  for (const [key, value] of form.entries()) {
+  const entries = form.entries() as IterableIterator<[string, string | Blob]>;
+  for (const [key, value] of entries) {
     write(`--${boundary}\r\n`);
     if (typeof value === 'string') {
       write(`Content-Disposition: form-data; name="${multipartEscape(key)}"\r\n\r\n`);

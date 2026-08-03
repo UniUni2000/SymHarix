@@ -21,6 +21,10 @@ export function renderRuntimeMarkup(): string {
             <span class="metric-label">Failed</span>
             <strong id="metric-failed" class="metric-value">0</strong>
           </div>
+          <div class="metric note">
+            <span class="metric-label">Daily budget</span>
+            <strong id="metric-daily-budget" class="metric-value">—</strong>
+          </div>
         </div>
 
         <div class="topbar-actions">
@@ -28,6 +32,7 @@ export function renderRuntimeMarkup(): string {
           <span id="access-badge" class="badge warn">Checking access</span>
           <button id="open-access-button" type="button" class="action-button secondary">Access token</button>
           <button id="refresh-button" type="button" class="action-button secondary">Refresh</button>
+          <button id="open-planner-button" type="button" class="action-button secondary">Planner</button>
           <button id="open-create-button" type="button" class="action-button primary">New Issue</button>
         </div>
       </header>
@@ -111,12 +116,12 @@ export function renderRuntimeMarkup(): string {
 
           <form id="access-form" class="drawer-form">
             <div>
-              <label class="form-label" for="runtime-token-input">Write token</label>
-              <input id="runtime-token-input" name="runtime_token" class="form-input" placeholder="Optional runtime write token" />
+              <label class="form-label" for="runtime-token-input">Viewer or operator token</label>
+              <input id="runtime-token-input" name="runtime_token" type="password" autocomplete="current-password" class="form-input" placeholder="Runtime access token" />
             </div>
             <div class="drawer-actions">
-              <button id="save-token-button" type="submit" class="action-button primary">Save token</button>
-              <button id="clear-token-button" type="button" class="action-button secondary">Clear token</button>
+              <button id="save-token-button" type="submit" class="action-button primary">Start secure session</button>
+              <button id="clear-token-button" type="button" class="action-button secondary">Log out</button>
             </div>
           </form>
         </section>
@@ -167,6 +172,24 @@ export function renderRuntimeMarkup(): string {
               <button id="create-button" type="submit" class="action-button primary">Create issue</button>
             </div>
           </form>
+        </section>
+      </div>
+
+      <div id="planner-drawer" class="drawer-root" aria-hidden="true">
+        <div class="drawer-backdrop" data-close-drawer="planner"></div>
+        <section class="drawer-panel planner-drawer-panel" role="dialog" aria-modal="true" aria-labelledby="planner-drawer-title">
+          <div class="drawer-header">
+            <div>
+              <div class="panel-kicker">Planner Inbox</div>
+              <h2 id="planner-drawer-title" class="drawer-title">Plans before and during execution</h2>
+              <p class="drawer-copy">Every change creates an immutable version. Mutations require the current version.</p>
+            </div>
+            <button type="button" class="action-button secondary" data-close-drawer="planner">Close</button>
+          </div>
+          <div class="planner-layout">
+            <div id="planner-list" class="planner-list"></div>
+            <div id="planner-detail" class="planner-detail"><div class="empty-state">Select a plan.</div></div>
+          </div>
         </section>
       </div>
 
