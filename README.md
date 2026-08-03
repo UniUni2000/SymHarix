@@ -31,7 +31,7 @@ The video shows the full loop from Telegram intake to Plan Card approval, runtim
 
 ## What SymHarix Is
 
-SymHarix is a self-hostable control plane for supervised coding work. The user talks to a Telegram or Feishu bot, the Supervisor clarifies or prepares a Plan Card, and approved work is routed to the configured GitHub repository through the bundled Claude-compatible runtime.
+SymHarix is a self-hostable control plane for supervised coding work. The user talks to a Telegram or Feishu bot, the Supervisor clarifies or prepares a Plan Card, and approved work is routed to the configured GitHub repository through a pinned open-source OpenCode runtime.
 
 Telegram is the default local entrypoint, while Feishu can run as an independent long-connection entrypoint for teams that cannot conveniently use Telegram. Runtime Deck is the diagnostics and control surface. Linear and GitHub remain the durable records for work items, branches, PRs, review evidence, and delivery state.
 
@@ -61,13 +61,72 @@ The SymHarix reviewer checks code from the dev agent before delivery can continu
   <img src="./assets/readme/guided-tour-review.gif" alt="SymHarix GitHub review proof and delivery state walkthrough" width="820">
 </p>
 
-## Quick Start
+## Install
+
+macOS / Linux one-line install (downloads a GitHub Release, verifies SHA-256, creates an isolated Python environment, then opens setup):
 
 ```bash
-bun run setup
-# edit .env and WORKFLOW.md
-bun run start
+curl -fsSL https://raw.githubusercontent.com/UniUni2000/SymHarix/main/install.sh | sh
 ```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/UniUni2000/SymHarix/main/install.ps1 | iex
+```
+
+Git and Python 3 are required system tools; the installer checks them before downloading and exits with a precise message when either is missing. Bun is bundled in each release package. Application versions are separate from mutable configuration, database, Python environment, and workspaces under the per-user SymHarix home, so upgrades do not overwrite operator data.
+
+For a script-free install, download the matching `tar.gz` / `.zip` and `checksums.txt` from [GitHub Releases](https://github.com/UniUni2000/SymHarix/releases), verify it, extract it, and run `SymHarix/bin/symharix` (`SymHarix\bin\symharix.cmd` on Windows).
+
+## Quick Start
+
+Downloaded package:
+
+```bash
+symharix guide
+symharix configure
+symharix check
+symharix doctor
+symharix smoke
+symharix start telegram # or symharix start feishu
+```
+
+After first-time setup, `symharix config` opens selective configuration management instead of replaying the entire wizard. Direct shortcuts are also available:
+
+```bash
+symharix config models
+symharix config telegram
+symharix config feishu
+symharix config connections
+symharix config budget
+symharix config security
+symharix config status
+symharix configure all       # explicitly replay the full wizard
+```
+
+Only the selected category is written. Existing secrets remain masked and can be kept unchanged or explicitly replaced.
+
+Equivalent source-checkout commands:
+
+```bash
+bun run configure:guide
+bun run configure:secure
+bun run configure
+bun run configure:check
+bun run configure:doctor
+bun run runtime:smoke
+bun run runtime:access -- copy viewer # Copy the read-only Runtime token without printing it
+bun run start:telegram # or bun run start:feishu
+```
+
+The terminal guide explains where every key/token comes from and the minimum permissions. `configure:check` performs offline format checks, while `configure:doctor` performs read-only connectivity checks. Only `runtime:smoke` sends a small real model request.
+
+Downloaded packages also provide `symharix open`, `symharix stop`, and `symharix runtime install`. See the [distribution design](./docs/DISTRIBUTION.zh-CN.md) for the release model and comparisons with other open-source installers.
+
+The first OpenCode download reports percent, size, speed, and elapsed time. A 30-second data stall or five-minute total timeout stops the current request and offers an explicit retry-or-skip choice without discarding completed configuration or partial download bytes; the next attempt resumes with HTTP Range.
+
+When a key/token already exists, the wizard shows only a masked prefix/suffix and explicitly asks whether to keep it unchanged or replace it. Replacement input is never echoed.
 
 `bun run start` is an alias for the Telegram surface. To run only Feishu, use:
 
@@ -93,10 +152,11 @@ Stop local services:
 bun run stop
 ```
 
-Check the bundled runtime:
+Install and check the checksum-verified OpenCode runtime:
 
 ```bash
-bash scripts/check-runtime.sh
+bun run runtime:install
+bun run runtime:check
 ```
 
 On a Linux server, install a systemd service so SymHarix keeps running after SSH disconnects:
@@ -113,8 +173,8 @@ Telegram or Feishu / Runtime Deck / Linear issue
   -> Supervisor session, repo routing, Plan Card, approval
   -> Issue-scoped run in Runtime history
   -> Workspace checkout + feature branch
-  -> AgentRunner -> scripts/claude-adapter.cjs
-  -> bundled Claude-compatible runtime
+  -> AgentRunner -> scripts/opencode-adapter.cjs
+  -> pinned anomalyco/opencode runtime
   -> Code changes + tests + evidence
   -> GitHub branch -> pull request -> review
   -> Merge or delivery blocker
@@ -128,7 +188,10 @@ The main behavior:
 - Mini App issue views expose active stage, active PR context, replay history, and file diffs when a workspace or PR head is available.
 - Approved work becomes an issue-scoped coding run: SymHarix prepares the workspace, creates or tracks a feature branch, captures verification evidence, opens or follows a GitHub PR, and keeps review and merge state visible.
 - Repository routing is explicit and fail-closed. A Linear `project_slug` must map to a GitHub repository in `WORKFLOW.md`.
-- Agent execution runs through `scripts/claude-adapter.cjs`, which launches the bundled Claude-compatible runtime. Read-only repo understanding uses the same adapter unless overridden.
+- Agent execution runs through `scripts/opencode-adapter.cjs`, which launches the pinned open-source OpenCode runtime. Read-only planning/review and writable development use separate permission policies.
+
+See [docs/OPENCODE_RUNTIME.zh-CN.md](docs/OPENCODE_RUNTIME.zh-CN.md) for the
+version lock, role permissions, model routing, and gated upgrade workflow.
 
 ## Configuration
 
@@ -138,7 +201,7 @@ SymHarix reads three layers:
 2. `WORKFLOW.md`: tracker states, repository routing, agent command, verification scenarios.
 3. Target repo contracts: `.symphony-repo.yaml` and `.symphony-constitution.md`.
 
-Use `SYMHARIX_*` for new environment variables. Legacy `SYMPHONY_*` variables, `.symphony-*` contracts, and the local `symphony.db` file remain supported for compatibility.
+Use `SYMHARIX_*` for new environment variables. New installations use `symharix.db`; if an existing `symphony.db` is present, SymHarix automatically keeps using it in place. Legacy `SYMPHONY_*` variables and `.symphony-*` repository contracts remain supported during migration.
 
 Minimum local `.env`:
 
@@ -178,7 +241,7 @@ How to get these values:
 2. In **Add App Capability**, enable **Bot**. This is the Feishu robot users will chat with.
 3. In **Credentials and Basic Info**, copy **App ID** into `SYMHARIX_FEISHU_APP_ID` and **App Secret** into `SYMHARIX_FEISHU_APP_SECRET`.
 4. In **Events and Callbacks**, set the subscription mode to **persistent connection**, then add `im.message.receive_v1` and `card.action.trigger`.
-5. For `SYMHARIX_FEISHU_OPERATOR_IDS`, first leave it blank, run `bun run start:feishu`, send any message to the bot, and copy the `user_id=ou_...` value printed in the SymHarix terminal logs. Put one or more ids in the env var, separated by commas.
+5. For `SYMHARIX_FEISHU_OPERATOR_IDS`, first leave it blank for a read-only run, start with `bun run start:feishu`, and send a write command to the bot. Copy the detected `ou_...` user id from its reply into `.env`, then restart. Put multiple ids in the variable separated by commas.
 
 Required Feishu app permissions for the full SymHarix bot flow:
 

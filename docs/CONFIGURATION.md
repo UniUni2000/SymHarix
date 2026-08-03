@@ -12,17 +12,25 @@ SymHarix reads configuration from three places:
 2. `WORKFLOW.md`: tracker state names, repository routing, agent command, and verification scenarios.
 3. Target repository contracts: `.symphony-repo.yaml` and `.symphony-constitution.md`.
 
-Use `SYMHARIX_*` for new operator-facing environment variables. Legacy `SYMPHONY_*` names, `.symphony-*` repository contracts, and the local `symphony.db` file remain supported for compatibility.
+Use `SYMHARIX_*` for new operator-facing environment variables. New installations use `symharix.db`; an existing `symphony.db` is detected and reused automatically. Legacy `SYMPHONY_*` names and `.symphony-*` repository contracts remain supported during migration.
 
 ## Local Commands
 
 ```bash
 bun run setup
+bun run configure:guide
+bun run configure:secure
+bun run configure
+bun run configure:check
+bun run configure:doctor
+bun run runtime:smoke
 bun run start
 bun run stop
 bun run health
 bash scripts/install-systemd-service.sh
 ```
+
+`configure:guide` explains where each credential comes from and its minimum permissions. `configure:check` performs offline format validation. `configure:doctor` calls authentication/read-only endpoints only; it does not create issues, pull requests, messages, or model requests. `runtime:smoke` is the explicit, low-cost end-to-end model call.
 
 `start` is the default Telegram local entrypoint. Use `bun run start:telegram` explicitly for Telegram, or `bun run start:feishu` for a Feishu-only local run. Each start command isolates the opposite chat surface in the child process environment, so Feishu does not require Telegram variables and Telegram does not require Feishu variables.
 
@@ -61,12 +69,12 @@ The fastest way to reason about startup is by responsibility:
 | --- | --- | --- |
 | Tracker | `SYMHARIX_TRACKER_KIND=linear`, `SYMHARIX_TRACKER_API_KEY`, `SYMHARIX_TRACKER_PROJECT_SLUG` | Linear supplies the work-item state machine and the default project for Telegram/Feishu/Runtime-created issues. |
 | GitHub access | `GITHUB_TOKEN` | The token must reach every repository declared in `WORKFLOW.md -> repositories.routing`. |
-| Agent runtime | `ANTHROPIC_API_KEY` | The bundled Claude-compatible runtime uses it for execution and repo understanding unless the runner is replaced. |
+| Agent runtime | `SYMHARIX_OPENCODE_MODEL` plus a provider key or `opencode auth` | OpenCode uses `provider/model` IDs for execution and repo understanding. |
 | Repository routing | `WORKFLOW.md -> repositories.routing` | The route key must match the Linear `project_slug`; missing routes fail closed before workspace creation. |
 | Telegram transport | `SYMHARIX_TELEGRAM_BOT_TOKEN`, `SYMHARIX_TELEGRAM_WEBHOOK_SECRET`, `SYMHARIX_TELEGRAM_OPERATOR_IDS` | Required only for `start:telegram`. The token enables Telegram, the secret protects webhook ingress, and operator ids restrict write-capable actions. |
 | Feishu transport | `SYMHARIX_FEISHU_APP_ID`, `SYMHARIX_FEISHU_APP_SECRET`, `SYMHARIX_FEISHU_OPERATOR_IDS` | Required only for `start:feishu`. App id/secret enable Feishu long connection mode, and operator ids restrict write-capable actions. |
 | Public ingress | `SYMHARIX_PUBLIC_BASE_URL` or temporary tunnel mode | Webhook and Mini App features need a stable publicly reachable HTTPS URL in production. |
-| Runtime writes | `SYMHARIX_RUNTIME_WRITE_TOKEN` | Optional locally, but recommended before exposing Runtime Deck/API write actions publicly. |
+| Runtime access | `SYMHARIX_RUNTIME_VIEWER_TOKEN`, `SYMHARIX_RUNTIME_WRITE_TOKEN`, `SYMHARIX_RUNTIME_SESSION_SECRET` | Viewer access is read-only and operator access can mutate; the wizard generates both credentials and the server-side session signing secret. |
 
 ## `.env` Reference
 
@@ -87,20 +95,20 @@ The fastest way to reason about startup is by responsibility:
 | `GITHUB_OWNER` | optional | Older fallback path only. Prefer `WORKFLOW.md -> repositories.routing`. |
 | `GITHUB_REPO` | optional | Older fallback path only. Prefer `WORKFLOW.md -> repositories.routing`. |
 
-### Claude-Compatible Runtime
+### OpenCode Runtime
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | yes | Used by the bundled runtime. |
-| `ANTHROPIC_MODEL` | optional | Older fallback path. |
-| `ANTHROPIC_BASE_URL` | optional | Older fallback path. |
-| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | recommended | Keeps the local runtime quieter. |
-| `CLAUDE_CODE_LOCAL_SKIP_REMOTE_PREFETCH` | recommended | Avoids broad startup prefetch. |
+| `SYMHARIX_OPENCODE_MODEL` | yes | Default `provider/model` used by all roles. |
+| `SYMHARIX_OPENCODE_PLAN_MODEL` | optional | Plan-only model override. |
+| `SYMHARIX_OPENCODE_DEV_MODEL` | optional | Dev-only model override. |
+| `SYMHARIX_OPENCODE_REVIEW_MODEL` | optional | Review-only model override. |
+| `SYMHARIX_OPENCODE_USE_AUTH` | optional | Set `1` to reuse credentials from `opencode auth login`. |
 | `SYMHARIX_ADAPTER_DEBUG` | debugging | Agent I/O diagnostics. |
 
-The adapter supplies runtime defaults such as simple mode, disabled background tasks, disabled auto memory, and read-only mode for read-only Supervisor sessions.
+The adapter supplies role-scoped permissions and disables runtime auto-update and external plugins for reproducibility.
 
-Before publishing or deploying a fresh checkout, verify that the adapter can spawn the bundled runtime:
+Before publishing or deploying a fresh checkout, verify the pinned runtime:
 
 ```bash
 bash scripts/check-runtime.sh
@@ -111,9 +119,35 @@ bash scripts/check-runtime.sh
 | Variable | Required | Meaning |
 | --- | --- | --- |
 | `PORT` | optional | One-off local HTTP port override. |
-| `SYMHARIX_RUNTIME_WRITE_TOKEN` | optional | Protects Runtime Deck/API write actions. |
+| `SYMHARIX_RUNTIME_VIEWER_TOKEN` | recommended | Read-only access to Runtime API, SSE, detailed health, Deck, and Mini App. Generated by the wizard. |
+| `SYMHARIX_RUNTIME_WRITE_TOKEN` | required for writes | Operator credential with read access plus create, stop, retry, and approval actions. Generated by the wizard. |
+| `SYMHARIX_RUNTIME_SESSION_SECRET` | required | Signs short browser sessions. Generated by the wizard and must not be reused as an access token. |
+| `SYMHARIX_RUNTIME_SESSION_TTL_MINUTES` | optional | Browser session lifetime; defaults to `15` minutes. |
+| `SYMHARIX_MAX_TURN_OUTPUT_TOKENS` | optional | Per-call output ceiling passed to OpenCode/provider; defaults to `16000`. |
+| `SYMHARIX_MAX_TURN_STEPS` | optional | Maximum OpenCode agentic iterations per turn; defaults to `12`. |
+| `SYMHARIX_TURN_RESERVE_TOKENS` | optional | Aggregate per-turn token ceiling and the amount atomically reserved before each model call; defaults to `200000`. Cache reads are included. Reaching it pauses the issue without automatic retry. |
+| `SYMHARIX_MAX_TASK_TOKENS` | optional | Hard per-task token budget; defaults to `500000`. |
+| `SYMHARIX_MAX_REPO_DAILY_TOKENS` | optional | Per-repository UTC daily token limit; defaults to `2000000`. |
+| `SYMHARIX_MAX_DAILY_TOKENS` | optional | Global UTC daily token limit; defaults to `5000000`. |
+| `SYMHARIX_MAX_TASK_USD` | optional | Per-task USD limit; defaults to `$25` and is enforced when rates are configured. |
+| `SYMHARIX_MAX_REPO_DAILY_USD` | optional | Per-repository UTC daily USD limit; defaults to `$100` when rates are configured. |
+| `SYMHARIX_MAX_DAILY_USD` | optional | Global UTC daily USD limit; defaults to `$250` when rates are configured. |
+| `SYMHARIX_COST_OVERRIDE_MINUTES` | optional | Operator approval lifetime; defaults to `60` minutes. |
+| `SYMHARIX_COST_INPUT_USD_PER_MILLION` | optional | Conservative input ceiling rate. Use the highest active rate when roles use different models. |
+| `SYMHARIX_COST_OUTPUT_USD_PER_MILLION` | optional | Conservative output ceiling rate. Use the highest active rate when roles use different models. |
+| `SYMHARIX_COST_CACHE_READ_USD_PER_MILLION` | optional | Cache-read input rate; falls back to the input rate when omitted. |
 
-Leaving `SYMHARIX_RUNTIME_WRITE_TOKEN` blank is convenient for local development. Set it before exposing `/runtime` publicly.
+Runtime API, SSE, detailed health/readiness, Deck, Mini App, work-items, and the Bot manifest all require read authentication by default. A browser submits a viewer/operator token once and receives a short `HttpOnly + SameSite=Lax` session cookie; the token is never stored in `localStorage`. Cookie-backed mutations additionally require the same origin and a CSRF marker. `/api/v1/health/live` stays public for process and container liveness probes. With no viewer or operator credential, access fails closed and SymHarix refuses non-loopback exposure.
+
+You do not need to open `.env` or print a credential into terminal history. From a source checkout, run `bun run runtime:access -- copy viewer`; from an installed package, run `symharix access copy viewer`. Replace `viewer` with `operator` for stop/retry/approval access. The command writes only to the system clipboard and never prints the token.
+
+Scripts and external monitors can use a header directly without creating a cookie:
+
+```bash
+curl -H "Authorization: Bearer $SYMHARIX_RUNTIME_VIEWER_TOKEN" \
+  http://127.0.0.1:3000/api/v1/runtime/overview
+```
+Token limits remain active without pricing. Until both input and output rates are supplied, USD budgets are shown as “not configured” and are not used to block calls. Every task-associated coding or supervisor call atomically reserves capacity in SQLite, so concurrent tasks cannot independently spend the same remaining daily budget. An over-budget task is halted with `cost_budget_exceeded`; a Runtime operator can grant a time-limited override in Runtime Deck or from the Telegram/Feishu issue card (or `/budget ISSUE-ID`). Standalone chat-classification traffic is not assigned to a repository budget, so keep the provider account spending cap enabled as an independent final safeguard.
 
 Runtime issue detail restores token usage from persisted agent runs, so completed issues can still show usage after the live orchestrator snapshot is gone. Mini App history also tries workspace diffs, merge commits, and active PR heads before falling back to compact history text.
 
@@ -135,7 +169,7 @@ Telegram and Feishu are optional product surfaces over the same Supervisor runti
 | --- | --- | --- |
 | `SYMHARIX_TELEGRAM_BOT_TOKEN` | for Telegram | BotFather token. Leave blank to disable Telegram. |
 | `SYMHARIX_TELEGRAM_WEBHOOK_SECRET` | recommended | Webhook path/header secret. |
-| `SYMHARIX_TELEGRAM_OPERATOR_IDS` | recommended | Comma-separated user ids allowed to run write actions. |
+| `SYMHARIX_TELEGRAM_OPERATOR_IDS` | required for writes | Comma-separated user ids allowed to run write actions. Blank is read-only. |
 | `SYMHARIX_TELEGRAM_OPERATIONS_CHAT_ID` | optional | Fixed operations chat. |
 | `SYMHARIX_PUBLIC_BASE_URL` | optional | Public HTTPS base for webhook and Mini App links. |
 | `SYMHARIX_TELEGRAM_BOOTSTRAP` | optional | Set `off` to disable automatic webhook bootstrap. |
@@ -192,7 +226,7 @@ Check `health`, `webhook_url`, `public_base_url`, `mini_app_base_url`, pending u
 | --- | --- | --- |
 | `SYMHARIX_FEISHU_APP_ID` | for Feishu | Feishu custom app ID. Leave blank to disable Feishu. |
 | `SYMHARIX_FEISHU_APP_SECRET` | for Feishu | Feishu custom app secret used to obtain `tenant_access_token`. |
-| `SYMHARIX_FEISHU_OPERATOR_IDS` | recommended | Comma-separated `open_id`, `user_id`, or `union_id` values allowed to run write actions. |
+| `SYMHARIX_FEISHU_OPERATOR_IDS` | required for writes | Comma-separated `open_id`, `user_id`, or `union_id` values allowed to run write actions. Blank is read-only. |
 | `SYMHARIX_FEISHU_OPERATIONS_CHAT_ID` | optional | Fixed operations chat. You can read the `chat_id` from a Feishu message event. |
 | `SYMHARIX_FEISHU_API_BASE_URL` | optional | OpenAPI base, defaulting to `https://open.feishu.cn/open-apis`. |
 | `SYMHARIX_PUBLIC_BASE_URL` | optional | Only needed if you want Feishu cards to open local Mini App/runtime web URLs through a public HTTPS base. Not required for long connection events. |
@@ -214,7 +248,7 @@ If mobile Feishu clients need to open the runtime view remotely, use one of thes
 | Stable public ingress | `SYMHARIX_PUBLIC_BASE_URL=https://your-domain.example` |
 | Local development tunnel | `SYMHARIX_FEISHU_RUNTIME_OPEN_MODE=applink_web_url` and `SYMHARIX_FEISHU_RUNTIME_TUNNEL=auto` or `on` |
 
-To discover your operator id, leave `SYMHARIX_FEISHU_OPERATOR_IDS` blank for the first run, send a message to the Feishu bot, then copy the `user_id=...` value from the SymHarix startup logs into the env var. The received value is normally the sender `open_id` (`ou_...`).
+To discover your operator id, leave `SYMHARIX_FEISHU_OPERATOR_IDS` blank for the first read-only run and send `/whoami` (aliases: `/id`, `/me`) to the bot. The response prints the detected user id; copy it into the env var and restart. The received value is normally the sender `open_id` (`ou_...`).
 
 Minimum Feishu app permissions:
 
@@ -269,21 +303,21 @@ SYMHARIX_SUPERVISOR_AGENT_*
 | `SYMHARIX_SUPERVISOR_AGENT_TIMEOUT_MS` | Default `45000`. |
 | `SYMHARIX_SUPERVISOR_CC_*` | Compatibility layer for the older CC advisor. |
 
-### Supervisor Claude Runtime And Repo Understanding
+### Supervisor OpenCode Runtime And Repo Understanding
 
-The Telegram Supervisor can use a top-level Claude-compatible runtime as the assistant brain. Repository access in repo-understanding paths is read-only. Business actions still go through supervisor/orchestrator tools and confirmation policy.
+The Telegram Supervisor can use the open-source OpenCode runtime as the assistant brain. Repository access in repo-understanding paths is read-only. Business actions still go through supervisor/orchestrator tools and confirmation policy.
 
 | Variable | Meaning |
 | --- | --- |
-| `SYMHARIX_SUPERVISOR_CLAUDE_RUNTIME` | Set `off` only when intentionally disabling the Claude runtime front door. |
-| `SYMHARIX_SUPERVISOR_CLAUDE_COMMAND` | Runtime command, default `node scripts/claude-adapter.cjs`. |
+| `SYMHARIX_SUPERVISOR_OPENCODE_RUNTIME` | Set `off` only when intentionally disabling the OpenCode runtime front door. |
+| `SYMHARIX_SUPERVISOR_OPENCODE_COMMAND` | Runtime command, default `node scripts/opencode-adapter.cjs`. |
 | `SYMHARIX_SUPERVISOR_TOOL_ROUTER_TIMEOUT_MS` | Supervisor tool-router model timeout, default `12000`, max `60000`. |
 | `SYMHARIX_SUPERVISOR_REPO_UNDERSTANDING_COMMAND` | Read-only repo understanding command. |
 | `SYMHARIX_SUPERVISOR_REPO_UNDERSTANDING_TIMEOUT_MS` | Default `120000`. |
 | `SYMHARIX_SUPERVISOR_READONLY_ADVISOR_COMMAND` | Per-turn read-only repo advisor command. |
 | `SYMHARIX_SUPERVISOR_READONLY_ADVISOR_TIMEOUT_MS` | Default `120000`. |
 
-Blank command values use `node scripts/claude-adapter.cjs`, which invokes the bundled Claude-compatible runtime. The preferred internal entrypoint is `claude-code/bin/claude-symharix`; a legacy entrypoint remains available only as a compatibility fallback.
+Blank command values use `node scripts/opencode-adapter.cjs`, which invokes the checksum-verified version in `runtime/opencode.lock.json`. The older `SYMHARIX_SUPERVISOR_CLAUDE_*` names remain temporary configuration aliases.
 
 Internal Supervisor MCP bridge variables such as `SYMHARIX_SUPERVISOR_CONTEXT_*` and `SYMHARIX_SUPERVISOR_ORCHESTRATOR_*` are generated by the runtime. Do not set them in `.env` unless debugging the bridge directly; legacy `SYMPHONY_*` bridge names are still accepted internally.
 
@@ -366,10 +400,10 @@ Rules:
 
 ```yaml
 agent_runner:
-  command: node ./scripts/claude-adapter.cjs
+  command: node ./scripts/opencode-adapter.cjs
 ```
 
-Change this only when intentionally replacing the Claude-compatible runner. Older workflows may still use `codex.command`; it remains accepted as a legacy alias.
+Change this only when intentionally replacing the OpenCode adapter. Older workflows may still use `codex.command`; it remains accepted as a legacy alias.
 
 ### Verification Scenarios
 

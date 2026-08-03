@@ -25,7 +25,7 @@ Required:
 - Bun.
 - Git and access to the target GitHub repository.
 - A Linear API key.
-- An Anthropic API key for the bundled Claude-compatible runtime.
+- An OpenCode provider API key, or an existing `opencode auth login` credential.
 
 Optional:
 
@@ -103,13 +103,13 @@ Why these values are needed:
 | `SYMHARIX_TRACKER_API_KEY` | Create a Linear API key with access to the workspace/project you want SymHarix to manage. | Lets the control plane read and update work items, states, and project metadata. |
 | `SYMHARIX_TRACKER_PROJECT_SLUG` | Use the Linear project slug that should receive Telegram/Runtime-created work. | Provides the default project for new issues and must match `WORKFLOW.md -> repositories.routing`. |
 | `GITHUB_TOKEN` | Use a GitHub token with access to every target repository listed in `WORKFLOW.md`. | Lets SymHarix fetch repository metadata, prepare workspaces, and drive delivery against the right repo. |
-| `ANTHROPIC_API_KEY` | Use the API key for the bundled Claude-compatible runtime. | Powers agent execution and read-only repo understanding unless you intentionally override the runtime command. |
+| `SYMHARIX_OPENCODE_MODEL` | Select a `provider/model` and configure that provider key or `opencode auth`. | Powers Plan, Dev, Review, and repo understanding through OpenCode. |
 
-Recommended runtime defaults:
+Example runtime selection:
 
 ```dotenv
-CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
-CLAUDE_CODE_LOCAL_SKIP_REMOTE_PREFETCH=1
+SYMHARIX_OPENCODE_MODEL=deepseek/deepseek-chat
+DEEPSEEK_API_KEY=...
 ```
 
 Use `SYMHARIX_*` for new environment variables. Legacy `SYMPHONY_*` names, `.symphony-*` repository contracts, and the local `symphony.db` file remain supported for compatibility.
@@ -171,7 +171,7 @@ SYMHARIX_SUPERVISOR_LLM_API_KEY=
 SYMHARIX_SUPERVISOR_LLM_TIMEOUT_MS=45000
 ```
 
-Read-only repo understanding defaults to the bundled adapter:
+Read-only repo understanding defaults to the OpenCode adapter:
 
 ```dotenv
 SYMHARIX_SUPERVISOR_TOOL_ROUTER_TIMEOUT_MS=12000
@@ -179,7 +179,7 @@ SYMHARIX_SUPERVISOR_REPO_UNDERSTANDING_COMMAND=
 SYMHARIX_SUPERVISOR_READONLY_ADVISOR_COMMAND=
 ```
 
-Blank command values use `node scripts/claude-adapter.cjs`. The tool-router timeout is capped at `60000` ms.
+Blank command values use `node scripts/opencode-adapter.cjs`. The tool-router timeout is capped at `60000` ms.
 
 ## 6. Start
 
@@ -320,8 +320,8 @@ Bot says the model is unavailable:
 Issue created but agent does not run:
 
 - Confirm `WORKFLOW.md -> repositories.routing` contains the Linear project slug.
-- Confirm `agent_runner.command` is `node ./scripts/claude-adapter.cjs`.
-- Confirm `ANTHROPIC_API_KEY` is available to the service process.
+- Confirm `agent_runner.command` is `node ./scripts/opencode-adapter.cjs`.
+- Run `bun run runtime:check`, then confirm the selected provider key or `opencode auth` credential is available.
 - Check Runtime issue detail for `delivery_code`, `delivery_summary`, and supervisor directives.
 
 Review passed but delivery is blocked:

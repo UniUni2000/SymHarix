@@ -33,9 +33,9 @@ SymHarix 是一个带 Telegram-first Supervisor 的可自托管控制平面。
 - Runtime issue detail 与 Mini App history 是查看持久化 agent-run usage、回放摘要、active PR 上下文和文件 diff 的主要位置。
 - 多仓库上下文必须显式：Telegram 可以列出已配置 route、切换 chat 默认项目，并通过只读 advisor 读取指定仓库。
 - Orchestrator 负责派发、重试、开发/评审交接、交付清理和修复。
-- Claude-compatible 执行链路通过 `scripts/claude-adapter.cjs` 运行。
+- OpenCode 执行链路通过 `scripts/opencode-adapter.cjs` 运行。
 
-Supervisor 不是简单的模型调用，也不只是一个 Claude Code 进程。它是持久化 session 状态，加上可选的 LLM 与只读仓库理解路径。
+Supervisor 不是简单的模型调用，也不只是一个 OpenCode 进程。它是持久化 session 状态，加上可选的 LLM 与只读仓库理解路径。
 
 ## 安全启动
 
@@ -143,9 +143,9 @@ bun --env-file=.env run src/cli/index.ts verify-live-supervisor \
 检查：
 
 ```bash
-sqlite3 symphony.db "select source, action, result, message_id, material_key, created_at from bot_transport_events order by id desc limit 30;"
-sqlite3 symphony.db "select * from bot_followup_delivery_states order by updated_at desc limit 20;"
-sqlite3 symphony.db "select * from bot_followup_message_states order by updated_at desc limit 20;"
+sqlite3 symharix.db "select source, action, result, message_id, material_key, created_at from bot_transport_events order by id desc limit 30;"
+sqlite3 symharix.db "select * from bot_followup_delivery_states order by updated_at desc limit 20;"
+sqlite3 symharix.db "select * from bot_followup_message_states order by updated_at desc limit 20;"
 ```
 
 优先修复持久化的 material-key 或 delivery-state 逻辑，不要只叠加新的内存 guard。
@@ -155,7 +155,7 @@ sqlite3 symphony.db "select * from bot_followup_message_states order by updated_
 检查：
 
 ```bash
-sqlite3 symphony.db "select id, state, transport, conversation_id, repo_ref, root_issue_id, updated_at from supervisor_sessions order by updated_at desc limit 20;"
+sqlite3 symharix.db "select id, state, transport, conversation_id, repo_ref, root_issue_id, updated_at from supervisor_sessions order by updated_at desc limit 20;"
 ```
 
 面向用户的 UX 应给出明确选择：
@@ -169,7 +169,7 @@ sqlite3 symphony.db "select id, state, transport, conversation_id, repo_ref, roo
 检查仓库理解：
 
 ```bash
-sqlite3 symphony.db "select repo_ref, local_path, commit_sha, status, summary, error, updated_at from supervisor_repo_understandings order by id desc limit 20;"
+sqlite3 symharix.db "select repo_ref, local_path, commit_sha, status, summary, error, updated_at from supervisor_repo_understandings order by id desc limit 20;"
 ```
 
 如果缺失或失败，检查：
@@ -179,7 +179,7 @@ sqlite3 symphony.db "select repo_ref, local_path, commit_sha, status, summary, e
 - 路由 local path 或 source cache
 - `SYMHARIX_SUPERVISOR_REPO_UNDERSTANDING_COMMAND`
 - `SYMHARIX_SUPERVISOR_READONLY_ADVISOR_COMMAND`
-- 在本 checkout 中运行 `claude-code/bin/claude-symharix --help`
+- 在本 checkout 中运行 `bun run runtime:check`
 - 仓库路径可读且 Git `HEAD` 有效
 
 仓库理解是只读的。它应改善对话和建议，但不能在 Plan Card 获批前创建 issue 或编辑代码。
@@ -206,7 +206,7 @@ resolver 接受 project slug、完整 `owner/repo` 或 repo name。缺失 route 
 真实 runner 路径：
 
 ```text
-Orchestrator -> AgentRunner -> scripts/claude-adapter.cjs -> bundled Claude-compatible runtime
+Orchestrator -> AgentRunner -> scripts/opencode-adapter.cjs -> 锁定版本的 anomalyco/opencode runtime
 ```
 
 检查：
@@ -216,7 +216,7 @@ Orchestrator -> AgentRunner -> scripts/claude-adapter.cjs -> bundled Claude-comp
 - local workspace path
 - branch/source-of-truth mismatch
 - compact dev context size
-- Claude process startup stderr
+- OpenCode process startup stderr
 
 ### PR 或 Issue 没关闭
 

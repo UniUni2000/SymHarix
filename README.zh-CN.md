@@ -33,7 +33,7 @@
 
 ## SymHarix 是什么
 
-SymHarix 是一个可部署在本机或服务器上的代码执行控制平面。用户可以通过 Telegram Bot 或飞书机器人提需求，Supervisor 负责澄清、推荐计划或展示 Plan Card；用户批准后，任务会按配置路由到 GitHub 仓库，并通过内置 Claude-compatible runtime 执行。
+SymHarix 是一个可部署在本机或服务器上的代码执行控制平面。用户可以通过 Telegram Bot 或飞书机器人提需求，Supervisor 负责澄清、推荐计划或展示 Plan Card；用户批准后，任务会按配置路由到 GitHub 仓库，并通过锁定版本的开源 OpenCode runtime 执行。
 
 Telegram 是默认本地入口；飞书可以作为独立的长连接入口，方便不便访问 Telegram 的团队单独使用。Runtime Deck 是诊断和控制界面。Linear 与 GitHub 负责保存任务、分支、PR、review 证据和交付状态。
 
@@ -63,13 +63,70 @@ SymHarix 的 reviewer 会先审核 dev agent 写好的代码，审核通过后�
   <img src="./assets/readme/guided-tour-review.gif" alt="SymHarix 在 GitHub branch 详情页展示 reviewer 审核情况" width="820">
 </p>
 
-## 快速开始
+## 安装
+
+macOS / Linux 一行安装（下载 GitHub Release、校验 SHA-256、创建独立 Python 环境，然后进入配置）：
 
 ```bash
-bun run setup
-# 编辑 .env 和 WORKFLOW.md
-bun run start
+curl -fsSL https://raw.githubusercontent.com/UniUni2000/SymHarix/main/install.sh | sh
 ```
+
+Windows PowerShell：
+
+```powershell
+irm https://raw.githubusercontent.com/UniUni2000/SymHarix/main/install.ps1 | iex
+```
+
+安装器要求系统已有 Git 和 Python 3；缺失时会在下载前明确停止并给出提示。Bun 已包含在发行包中，不要求用户单独安装。程序版本保存在用户级安装目录，`.env`、`WORKFLOW.md`、数据库、Python 虚拟环境和工作区保存在独立的 `~/.symharix`，升级不会覆盖。
+
+不执行远程脚本也可以：从 [GitHub Releases](https://github.com/UniUni2000/SymHarix/releases) 下载与系统匹配的 `tar.gz` / `.zip` 和 `checksums.txt`，校验后解压，运行 `SymHarix/bin/symharix`（Windows 为 `SymHarix\bin\symharix.cmd`）。
+
+## 快速开始
+
+安装版：
+
+```bash
+symharix guide
+symharix configure
+symharix check
+symharix doctor
+symharix smoke
+symharix start telegram # 或 symharix start feishu
+```
+
+首次配置完成后，运行 `symharix config` 会进入配置管理菜单，不必重新走完整向导。也可以直接打开某一类设置：
+
+```bash
+symharix config models       # 代码模型与聊天理解模型
+symharix config telegram     # 修改或禁用 Telegram
+symharix config feishu       # 修改或禁用飞书
+symharix config connections  # Linear、GitHub token 与仓库路由
+symharix config budget       # token/USD 预算、单轮上限和模型价格
+symharix config security     # 补齐或轮换 Runtime 安全密钥
+symharix config status       # 只查看掩码状态
+symharix configure all       # 确实需要时重新运行完整向导
+```
+
+选择分类后只写入该分类涉及的字段；现有 key/token 仍只显示首尾掩码，并让使用者选择保持不变或覆盖。安全密钥轮换不会输出新值，修改后会提醒重启服务。
+
+源码开发版的等价命令：
+
+```bash
+bun run configure:guide
+bun run configure:secure
+bun run configure
+bun run configure:check
+bun run configure:doctor
+bun run runtime:smoke
+bun run runtime:access -- copy viewer # 安全复制 Runtime 只读 token，不在终端回显
+bun run start:telegram # 或 bun run start:feishu
+```
+
+`configure:guide` 会逐项说明每个 key/token 的官方获取位置、页面点击步骤和最小权限；`configure` 自动读取 Linear 项目供编号选择，密钥输入不回显；`configure:check` 离线预判 token、ID、URL、模型和权限分离格式；`configure:doctor` 只读联网验证外部凭据；只有 `runtime:smoke` 会发起一次极小的真实模型调用。完整说明见[终端配置与验证手册](./docs/TERMINAL_SETUP.zh-CN.md)。
+
+安装版还可以使用 `symharix open` 打开 Runtime Deck、`symharix stop` 停止服务、`symharix runtime install` 安装并校验锁定的 OpenCode。分发设计和其他开源项目的对照见[发行与安装设计](./docs/DISTRIBUTION.zh-CN.md)。
+
+OpenCode 首次下载会显示百分比、大小、速度和耗时；连续 30 秒无数据或总计超过 5 分钟时，会让使用者选择重试或暂时跳过。已完成的配置和部分下载都会保留，下次使用 HTTP Range 断点续传。
 
 `bun run start` 是 Telegram 入口的别名。只运行飞书入口时使用：
 
@@ -115,8 +172,8 @@ Telegram 或飞书 / Runtime Deck / Linear issue
   -> Supervisor session, repo routing, Plan Card, approval
   -> Issue-scoped run in Runtime history
   -> Workspace checkout + feature branch
-  -> AgentRunner -> scripts/claude-adapter.cjs
-  -> bundled Claude-compatible runtime
+  -> AgentRunner -> scripts/opencode-adapter.cjs
+  -> 锁定版本的 anomalyco/opencode runtime
   -> Code changes + tests + evidence
   -> GitHub branch -> pull request -> review
   -> Merge or delivery blocker
@@ -130,7 +187,10 @@ Telegram 或飞书 / Runtime Deck / Linear issue
 - Mini App issue 页面会展示当前阶段、active PR、回放历史，并在 workspace 或 PR head 可用时展示文件 diff。
 - 用户批准后，任务会变成一个 issue-scoped coding run：SymHarix 准备 workspace、创建或跟踪 feature branch、保存验证证据、创建或跟踪 GitHub PR，并持续展示 review 与 merge 状态。
 - 仓库路由必须显式配置，并且缺失时 fail closed。Linear `project_slug` 必须映射到 `WORKFLOW.md` 中的 GitHub 仓库。
-- Agent 执行链路通过 `scripts/claude-adapter.cjs` 运行，并由它启动内置 Claude-compatible runtime；只读仓库理解默认也使用这个 adapter，除非显式覆盖。
+- Agent 执行链路通过 `scripts/opencode-adapter.cjs` 运行，并由它启动锁定版本的开源 OpenCode runtime；Plan/Review 与 Dev 使用相互独立的只读/可写权限策略。
+
+OpenCode 版本锁、模型配置、三角色权限和升级流程见
+[docs/OPENCODE_RUNTIME.zh-CN.md](docs/OPENCODE_RUNTIME.zh-CN.md)。
 
 ## 配置
 
@@ -141,6 +201,8 @@ SymHarix 读取三层配置：
 3. 目标仓库契约：`.symphony-repo.yaml` 与 `.symphony-constitution.md`。
 
 新的环境变量使用 `SYMHARIX_*`。旧的 `SYMPHONY_*` 变量、`.symphony-*` 契约和本地 `symphony.db` 文件仍作为兼容层保留。
+
+优先从 `bun run configure:guide` 开始，再运行 `bun run configure`，无需手动编辑本节中的 `.env` 或 YAML。向导会验证 Linear key 并自动列出项目，收集目标 GitHub `owner/repo` 与 token、OpenCode 的 provider/model 与 key，以及可选聊天入口和自然语言模型。它会保留已有配置，并只更新选中的项目路由。
 
 本地运行最小 `.env`：
 
@@ -180,7 +242,9 @@ SYMHARIX_FEISHU_OPERATOR_IDS=ou_xxx
 2. 在「添加应用能力」里启用「机器人」，这个机器人就是用户在飞书里对话的入口。
 3. 在「凭证与基础信息」页复制 **App ID** 到 `SYMHARIX_FEISHU_APP_ID`，复制 **App Secret** 到 `SYMHARIX_FEISHU_APP_SECRET`。
 4. 在「事件与回调」里把订阅方式设置为「长连接」，并添加 `im.message.receive_v1` 和 `card.action.trigger`。
-5. `SYMHARIX_FEISHU_OPERATOR_IDS` 可以先留空，运行 `bun run start:feishu` 后给机器人发任意消息，再从 SymHarix 终端日志里复制 `user_id=ou_...` 的值填回 `.env`。多个 operator id 用英文逗号分隔。
+5. `SYMHARIX_FEISHU_OPERATOR_IDS` 可以先留空，运行 `bun run start:feishu` 后给机器人发送 `/whoami`，再从回复中复制 `Detected user id: ou_...` 填回配置。多个 operator id 用英文逗号分隔。
+
+飞书平台只需要在后台完成以上应用设置；SymHarix 使用长连接接收事件，因此不需要为消息入口准备公网 webhook、Verification Token 或 Encrypt Key。创建应用后在向导选择「飞书」，粘贴 App ID、App Secret 即可。
 
 为了保证完整的 SymHarix 机器人流程，飞书应用需要开启这些权限：
 
