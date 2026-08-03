@@ -2,8 +2,16 @@ function safeReturnPath(value: string): string {
   return value.startsWith('/runtime') && !value.startsWith('//') ? value : '/runtime';
 }
 
+function serializeInlineScriptValue(value: string): string {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003c')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+}
+
 export function renderRuntimeLoginPage(returnPath: string): string {
   const target = safeReturnPath(returnPath);
+  const serializedTarget = serializeInlineScriptValue(target);
   return `<!doctype html>
 <html lang="zh-CN">
   <head>
@@ -41,12 +49,49 @@ export function renderRuntimeLoginPage(returnPath: string): string {
       <p id="error" role="alert"></p>
       <p class="hint">没有 token 时，在运行 SymHarix 的终端执行 <code>bun run runtime:access -- copy viewer</code>；安装包用户执行 <code>symharix access copy viewer</code>。复制后回到这里粘贴。需要写操作时将 <code>viewer</code> 改为 <code>operator</code>。</p>
     </main>
+    <script src="https://telegram.org/js/telegram-web-app.js?59"></script>
     <script>
       (function () {
         const form = document.getElementById('login-form');
         const input = document.getElementById('runtime-token');
         const button = document.getElementById('submit-button');
         const error = document.getElementById('error');
+        async function exchangeTelegramIdentity() {
+          const telegram = window.Telegram && window.Telegram.WebApp
+            ? window.Telegram.WebApp
+            : null;
+          const initData = telegram && typeof telegram.initData === 'string'
+            ? telegram.initData
+            : '';
+          if (!initData) return false;
+          button.disabled = true;
+          input.disabled = true;
+          error.style.color = '#a9c5c1';
+          error.textContent = '正在验证 Telegram 身份…';
+          try {
+            telegram.ready();
+            const response = await fetch('/api/v1/runtime/auth/telegram', {
+              method: 'POST',
+              credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ init_data: initData })
+            });
+            const payload = await response.json().catch(function () { return null; });
+            if (!response.ok) {
+              throw new Error(payload && payload.error
+                ? String(payload.error)
+                : 'Telegram 身份验证失败。');
+            }
+            window.location.replace(${serializedTarget});
+            return true;
+          } catch (reason) {
+            error.style.color = '#ff9f9f';
+            error.textContent = reason instanceof Error ? reason.message : 'Telegram 身份验证失败。';
+            button.disabled = false;
+            input.disabled = false;
+            return false;
+          }
+        }
         form.addEventListener('submit', async function (event) {
           event.preventDefault();
           button.disabled = true;
@@ -59,13 +104,14 @@ export function renderRuntimeLoginPage(returnPath: string): string {
               body: JSON.stringify({ token: String(input.value || '') })
             });
             if (!response.ok) throw new Error('Token 无效或 Runtime 尚未配置读取凭据。');
-            window.location.replace(${JSON.stringify(target)});
+            window.location.replace(${serializedTarget});
           } catch (reason) {
             error.textContent = reason instanceof Error ? reason.message : '登录失败。';
             button.disabled = false;
             input.select();
           }
         });
+        void exchangeTelegramIdentity();
       })();
     </script>
   </body>

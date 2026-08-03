@@ -3,6 +3,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { createHmac } from 'node:crypto';
 import { Database } from 'bun:sqlite';
 import { SymHarixServer, isLoopbackHostname, shouldLogAccessRequest } from './index';
 import { initializeSchema, dropAllTables } from '../database/schema';
@@ -18,6 +19,21 @@ import { clearTelegramThemePreferences, getTelegramThemePreference } from '../bo
 
 async function readJson<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
+}
+
+function buildTelegramInitData(botToken: string, userId: string): string {
+  const params = new URLSearchParams({
+    auth_date: String(Math.floor(Date.now() / 1000)),
+    query_id: 'AAE-server-test',
+    user: JSON.stringify({ id: Number(userId), first_name: 'Runtime Operator' }),
+  });
+  const dataCheckString = [...params.entries()]
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    .map(([key, value]) => `${key}=${value}`)
+    .join('\n');
+  const secretKey = createHmac('sha256', 'WebAppData').update(botToken).digest();
+  params.set('hash', createHmac('sha256', secretKey).update(dataCheckString).digest('hex'));
+  return params.toString();
 }
 
 describe('SymHarixServer', () => {
@@ -901,6 +917,53 @@ describe('SymHarixServer', () => {
     expect(allowed.status).toBe(202);
   });
 
+  test('exchanges signed Telegram Mini App initData for an operator session', async () => {
+    const botToken = '123456789:test-bot-token';
+    const telegramServer = new SymHarixServer(
+      db,
+      { port: 0 },
+      runtimeControlPlane,
+      botGateway,
+      createRuntimeAccessController({
+        viewerToken: 'viewer-token',
+        writeToken: 'operator-token',
+        sessionSecret: 'telegram-session-secret',
+      }),
+      {
+        botToken,
+        operatorIds: new Set(['8552378102']),
+      },
+    );
+    const login = await telegramServer.getApp().request('/api/v1/runtime/auth/telegram', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-forwarded-proto': 'https',
+      },
+      body: JSON.stringify({
+        init_data: buildTelegramInitData(botToken, '8552378102'),
+      }),
+    });
+
+    expect(login.status).toBe(200);
+    const setCookie = login.headers.get('set-cookie');
+    expect(setCookie).toContain('symharix_runtime_session=');
+    expect(setCookie).toContain('HttpOnly');
+    expect(setCookie).toContain('Secure');
+    const cookie = setCookie!.split(';')[0]!;
+    const runtimePage = await telegramServer.getApp().request('/runtime/issues/INT-RT-1/app', {
+      headers: { Cookie: cookie },
+    });
+    expect(runtimePage.status).toBe(200);
+
+    const denied = await telegramServer.getApp().request('/api/v1/runtime/auth/telegram', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ init_data: buildTelegramInitData(botToken, '7') }),
+    });
+    expect(denied.status).toBe(403);
+  });
+
   test('keeps signed bot ingress public while protecting the bot manifest', async () => {
     const manifest = await server.getApp().request('/api/v1/bots/manifest');
     expect(manifest.status).toBe(401);
@@ -1146,6 +1209,8 @@ describe('SymHarixServer', () => {
     const runtimeLogin = await runtimePage.text();
     expect(runtimeLogin).toContain('Runtime 读取需要身份验证');
     expect(runtimeLogin).toContain('bun run runtime:access -- copy viewer');
+    expect(runtimeLogin).toContain('https://telegram.org/js/telegram-web-app.js');
+    expect(runtimeLogin).toContain('/api/v1/runtime/auth/telegram');
 
     const mutation = await readOnlyServer.getApp().request(
       '/api/v1/runtime/issues/INT-RT-1/retry',

@@ -1,9 +1,14 @@
 import { Hono, type Context } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import type { ApiResponse } from '../types';
 import type { RuntimeControlPlane } from '../../runtime/types';
 import { buildRuntimeManifest, type RuntimeAccessController } from '../runtimeAccess';
 import { rememberTelegramThemePreference } from '../../bots/telegramThemePreference';
 import type { BotGateway } from '../../bots/types';
+import {
+  validateTelegramMiniAppInitData,
+  type TelegramMiniAppAuthConfig,
+} from '../telegramMiniAppAuth';
 
 type RuntimeRouteStatus = 200 | 201 | 202 | 400 | 403 | 404 | 409;
 
@@ -40,9 +45,18 @@ export function createRuntimeRoutes(
   options: {
     getPublicBaseUrl?: () => string | null;
     botGateway?: BotGateway | null;
+    telegramMiniAppAuth?: TelegramMiniAppAuthConfig | null;
   } = {},
 ): Hono {
   const runtime = new Hono();
+
+  runtime.use('/auth/telegram', bodyLimit({
+    maxSize: 32 * 1024,
+    onError: (c) => c.json({
+      success: false,
+      error: 'Telegram authentication payload is too large.',
+    }, 413),
+  }));
 
   runtime.post('/auth/token', async (c) => {
     const body = await c.req.json().catch(() => null);
@@ -64,6 +78,51 @@ export function createRuntimeRoutes(
       success: true,
       data: {
         access: session.access,
+      },
+    });
+  });
+
+  runtime.post('/auth/telegram', async (c) => {
+    c.header('Cache-Control', 'private, no-store');
+    if (!options.telegramMiniAppAuth) {
+      return c.json({
+        success: false,
+        error: 'Telegram Mini App authentication is not configured.',
+      }, 503);
+    }
+    const body = await c.req.json().catch(() => null);
+    const initData = body && typeof body === 'object'
+      && typeof (body as Record<string, unknown>).init_data === 'string'
+      ? String((body as Record<string, unknown>).init_data)
+      : '';
+    const authentication = validateTelegramMiniAppInitData(
+      initData,
+      options.telegramMiniAppAuth,
+    );
+    if (!authentication.ok) {
+      return c.json({
+        success: false,
+        error: authentication.error,
+      }, authentication.status);
+    }
+    const session = accessController.createPrincipalSession({
+      subject: `telegram:${authentication.userId}`,
+      role: 'operator',
+    }, {
+      secure: requestUsesHttps(c.req.raw),
+    });
+    if (!session.allowed || !session.set_cookie) {
+      return c.json({
+        success: false,
+        error: 'Could not create a Runtime session for this Telegram user.',
+      }, 503);
+    }
+    c.header('Set-Cookie', session.set_cookie);
+    return c.json({
+      success: true,
+      data: {
+        access: session.access,
+        telegram_user_id: authentication.userId,
       },
     });
   });
