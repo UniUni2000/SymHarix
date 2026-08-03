@@ -34,6 +34,8 @@ import {
   resolveStartLocalWatchdogPollThreshold,
   shouldEmitTelegramStartupSummary,
   shouldProvisionStartLocalTunnel,
+  summarizeStartLocalActiveExecutions,
+  type StartLocalActiveExecutionSummary,
   type StartLocalBotSurface,
 } from './startLocalTunnel';
 
@@ -290,6 +292,22 @@ async function readTelegramManifestSnapshot(
     };
   };
   return payload.data?.transports?.telegram ?? null;
+}
+
+async function readStartLocalActiveExecutionSummary(
+  port: number,
+  env: Record<string, string | undefined>,
+): Promise<StartLocalActiveExecutionSummary> {
+  const response = await fetch(`http://127.0.0.1:${port}/api/v1/runtime/overview`, {
+    headers: buildStartLocalRuntimeReadHeaders(env),
+  });
+  if (!response.ok) {
+    throw new Error(`runtime overview returned ${response.status}`);
+  }
+  const payload = await response.json() as {
+    data?: Parameters<typeof summarizeStartLocalActiveExecutions>[0];
+  };
+  return summarizeStartLocalActiveExecutions(payload.data);
 }
 
 async function probePublicTunnelReachability(publicBaseUrl: string): Promise<{
@@ -724,9 +742,39 @@ async function main(): Promise<void> {
       if (botSurface === 'feishu') {
         await waitForLocalServiceStartup(requestedPort, childEnv);
       }
+
+      const shouldDeferForActiveExecutions = async (): Promise<boolean> => {
+        try {
+          const active = await readStartLocalActiveExecutionSummary(requestedPort, childEnv);
+          if (active.total === 0) {
+            return false;
+          }
+          console.warn(
+            '[symharix] start:local deferring tunnel replacement while active work is in flight; '
+              + `running=${active.orchestratorRunning} retrying=${active.orchestratorRetrying} `
+              + `supervisor=${active.supervisorRunning}. Local execution will continue and the watchdog will retry when idle.`,
+          );
+          return true;
+        } catch {
+          // A stopped or booting service cannot report activity. Continue recovery;
+          // preserving an unreachable child would prevent start:local from healing.
+          return false;
+        }
+      };
+
+      if (await shouldDeferForActiveExecutions()) {
+        return;
+      }
       const nextTunnelHandle = await provisionTemporaryTunnel();
       if (!nextTunnelHandle) {
         console.warn('[symharix] start:local tunnel recovery skipped; keeping the current service running.');
+        return;
+      }
+
+      // Tunnel provisioning can take long enough for a new Agent or Supervisor
+      // turn to start. Re-check immediately before replacing the service child.
+      if (await shouldDeferForActiveExecutions()) {
+        await nextTunnelHandle.dispose();
         return;
       }
 

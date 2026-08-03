@@ -2507,6 +2507,7 @@ describe('RuntimeHub', () => {
 
     expect(jobRepository.findById(job.id)?.status).toBe('running');
     expect(issue?.supervisor_job_state).toBe('running:issue_dev_instruction');
+    expect(hub.getOverview().counts.supervisor_running).toBe(1);
 
     hub.dispose();
   });

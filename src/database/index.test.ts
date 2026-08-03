@@ -220,6 +220,7 @@ describe('SupervisorJobRepository', () => {
 
     expect(leased?.status).toBe('running');
     expect(leased?.lease_owner).toBe('worker-a');
+    expect(repository.countRunning()).toBe(1);
     expect(repository.leaseNextReady({
       now: new Date('2026-01-01T00:00:02.000Z'),
       leaseOwner: 'worker-b',
@@ -232,6 +233,7 @@ describe('SupervisorJobRepository', () => {
     });
 
     expect(repository.findById(leased!.id)?.status).toBe('succeeded');
+    expect(repository.countRunning()).toBe(0);
   });
 });
 

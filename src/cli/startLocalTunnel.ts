@@ -181,6 +181,54 @@ export function buildStartLocalRuntimeReadHeaders(
   return token ? { Authorization: `Bearer ${token}` } : undefined;
 }
 
+export interface StartLocalRuntimeActivitySnapshot {
+  counts?: {
+    running?: number | null;
+    retrying?: number | null;
+    supervisor_running?: number | null;
+  } | null;
+  issues?: Array<{
+    supervisor_job_state?: string | null;
+  }> | null;
+}
+
+export interface StartLocalActiveExecutionSummary {
+  orchestratorRunning: number;
+  orchestratorRetrying: number;
+  supervisorRunning: number;
+  total: number;
+}
+
+function normalizeActivityCount(value: number | null | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : 0;
+}
+
+/**
+ * Summarize work that would be interrupted or lose an in-memory retry lease if
+ * start:local replaced the service process while recovering a temporary tunnel.
+ */
+export function summarizeStartLocalActiveExecutions(
+  snapshot: StartLocalRuntimeActivitySnapshot | null | undefined,
+): StartLocalActiveExecutionSummary {
+  const orchestratorRunning = normalizeActivityCount(snapshot?.counts?.running);
+  const orchestratorRetrying = normalizeActivityCount(snapshot?.counts?.retrying);
+  const reportedSupervisorRunning = snapshot?.counts?.supervisor_running;
+  const supervisorRunning = typeof reportedSupervisorRunning === 'number'
+    ? normalizeActivityCount(reportedSupervisorRunning)
+    : (snapshot?.issues ?? []).filter((issue) => (
+      /^running(?:$|:)/i.test(issue.supervisor_job_state?.trim() ?? '')
+    )).length;
+
+  return {
+    orchestratorRunning,
+    orchestratorRetrying,
+    supervisorRunning,
+    total: orchestratorRunning + orchestratorRetrying + supervisorRunning,
+  };
+}
+
 export function getStartLocalTunnelProbeRecoveryReason(params: {
   expectedPublicBaseUrl?: string | null;
   status?: number | null;

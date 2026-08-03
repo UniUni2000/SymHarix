@@ -70,6 +70,15 @@ export class SupervisorJobRepository {
     return rows.map((row) => this.mapRow(row)).filter((row): row is SupervisorJobRecord => row !== null);
   }
 
+  countRunning(): number {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM supervisor_jobs
+      WHERE status = 'running'
+    `).get() as { count?: number } | undefined;
+    return Number(row?.count ?? 0);
+  }
+
   leaseNextReady(params: {
     now: Date;
     leaseOwner: string;

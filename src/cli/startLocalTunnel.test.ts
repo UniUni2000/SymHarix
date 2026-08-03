@@ -13,6 +13,7 @@ import {
   resolveStartLocalWatchdogPollThreshold,
   shouldEmitTelegramStartupSummary,
   shouldProvisionStartLocalTunnel,
+  summarizeStartLocalActiveExecutions,
   upsertEnvAssignment,
 } from './startLocalTunnel';
 import { probePublicTunnelReachabilityFromEnv } from './startLocal';
@@ -142,6 +143,40 @@ describe('startLocalTunnel', () => {
       SYMHARIX_RUNTIME_WRITE_TOKEN: 'operator-secret',
     })).toEqual({ Authorization: 'Bearer operator-secret' });
     expect(buildStartLocalRuntimeReadHeaders({})).toBeUndefined();
+  });
+
+  test('defers service replacement for active Agent retries and Supervisor turns', () => {
+    expect(summarizeStartLocalActiveExecutions({
+      counts: { running: 2, retrying: 1, supervisor_running: 1 },
+      issues: [
+        { supervisor_job_state: 'running:issue_dev_instruction' },
+        { supervisor_job_state: 'succeeded:assess_milestone' },
+      ],
+    })).toEqual({
+      orchestratorRunning: 2,
+      orchestratorRetrying: 1,
+      supervisorRunning: 1,
+      total: 4,
+    });
+  });
+
+  test('falls back to issue projections when an older Runtime omits Supervisor counts', () => {
+    expect(summarizeStartLocalActiveExecutions({
+      counts: { running: 0, retrying: 0 },
+      issues: [{ supervisor_job_state: 'running:verify_handoff' }],
+    }).supervisorRunning).toBe(1);
+  });
+
+  test('treats malformed Runtime activity counts as idle without throwing', () => {
+    expect(summarizeStartLocalActiveExecutions({
+      counts: { running: Number.NaN, retrying: -1 },
+      issues: [{ supervisor_job_state: 'awaiting_user_decision' }],
+    })).toEqual({
+      orchestratorRunning: 0,
+      orchestratorRetrying: 0,
+      supervisorRunning: 0,
+      total: 0,
+    });
   });
 
   test('provisions a runtime tunnel for Feishu AppLink web URL mode by default', () => {
