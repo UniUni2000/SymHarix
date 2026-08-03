@@ -137,7 +137,7 @@ bash scripts/check-runtime.sh
 | `SYMHARIX_COST_OUTPUT_USD_PER_MILLION` | 可选 | 每百万 output token 的保守计价上限。多模型时填写最高单价。 |
 | `SYMHARIX_COST_CACHE_READ_USD_PER_MILLION` | 可选 | cache-read input 价格；未设置时按 input 价格估算。 |
 
-Runtime 的 API、SSE、详细 health/readiness、Deck、Mini App、work-items 与 Bot manifest 默认全部要求读取身份。浏览器只在登录时提交一次 viewer/operator token，服务端将其换成短期 `HttpOnly + SameSite=Lax` Cookie；token 不写入 `localStorage`。使用 Cookie 的写操作还必须携带同源请求与 CSRF 标记。`/api/v1/health/live` 保持公开，供进程或容器存活探针使用。没有任何 viewer/operator token 时服务 fail closed，并拒绝监听到非 loopback 地址。
+Runtime 的 API、SSE、详细 health/readiness、Deck、Mini App、work-items 与 Bot manifest 默认全部要求读取身份。从 Telegram 卡片打开 Mini App 时，页面会把 `Telegram.WebApp.initData` 交给服务端验签；只有列入 `SYMHARIX_TELEGRAM_OPERATOR_IDS` 的用户才会换取短期 operator 会话，空 allowlist 依然 fail closed。普通浏览器只在登录时提交一次 viewer/operator token。两种方式都只签发短期 `HttpOnly + SameSite=Lax` Cookie，token 不写入 `localStorage`，也不信任 `initDataUnsafe`。使用 Cookie 的写操作还必须携带同源请求与 CSRF 标记。`/api/v1/health/live` 保持公开，供进程或容器存活探针使用。没有任何 viewer/operator token 时服务 fail closed，并拒绝监听到非 loopback 地址。
 
 不需要打开 `.env` 或让 token 出现在终端历史中。源码仓库运行 `bun run runtime:access -- copy viewer`，安装包运行 `symharix access copy viewer`，即可将只读 token 直接写入系统剪贴板；需要执行停止、重试和审批时，将 `viewer` 改为 `operator`。命令只输出复制结果，不回显 token。
 
@@ -185,7 +185,7 @@ SymHarix 不要求公网 IP，但 Telegram webhook 和 Mini App 功能需要一�
 | 服务器只能主动访问 Telegram | 不足以支撑当前 webhook 模式；需要另做 polling/getUpdates transport。 |
 | 本地开发且没有稳定公网 URL | 留空 `SYMHARIX_PUBLIC_BASE_URL`，让 `start` 尝试临时 `cloudflared` 隧道。 |
 
-如果 `SYMHARIX_PUBLIC_BASE_URL` 留空且启用了 Telegram，`start` 会在 app 启动前尝试创建临时 `cloudflared` 隧道。对于临时 `trycloudflare.com` URL，`start` 还会运行 watchdog 检查公网 URL 和 Telegram manifest。如果隧道过期或不可达，它会创建新隧道并重启本地 service process。
+如果 `SYMHARIX_PUBLIC_BASE_URL` 留空且启用了 Telegram，`start` 会在 app 启动前尝试创建临时 `cloudflared` 隧道。对于临时 `trycloudflare.com` URL，`start` 的 watchdog 会检查 `cloudflared` 子进程与 Telegram manifest 里的实际 webhook 和投递错误。它不会因为本地代理对公网 URL 的单次 curl 超时就重启整个 orchestrator。只有隧道进程退出，或 Telegram 连续报告注册/投递故障时，才会创建新隧道并重启本地 service process。
 
 隧道与 webhook 参数：
 
