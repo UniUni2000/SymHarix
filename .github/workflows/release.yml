@@ -35,21 +35,25 @@ jobs:
             platform: darwin
             asset_platform: darwin
             arch: x64
+            uname_arch: x86_64
             archive: tar
           - runner: macos-15
             platform: darwin
             asset_platform: darwin
             arch: arm64
+            uname_arch: arm64
             archive: tar
           - runner: ubuntu-24.04
             platform: linux
             asset_platform: linux
             arch: x64
+            uname_arch: x86_64
             archive: tar
           - runner: ubuntu-24.04-arm
             platform: linux
             asset_platform: linux
             arch: arm64
+            uname_arch: aarch64
             archive: tar
           - runner: windows-2025
             platform: win32
@@ -83,7 +87,7 @@ jobs:
         if: matrix.archive == 'tar'
         shell: bash
         run: |
-          test "$(uname -m)" = "${{ matrix.arch == 'x64' && 'x86_64' || 'arm64' }}"
+          test "$(uname -m)" = "${{ matrix.uname_arch }}"
           SYMHARIX_HOME="$RUNNER_TEMP/symharix-home" build/release-stage/SymHarix/bin/symharix version
           SYMHARIX_HOME="$RUNNER_TEMP/symharix-home" build/release-stage/SymHarix/bin/symharix help
           tar -czf 'build/symharix-${{ matrix.asset_platform }}-${{ matrix.arch }}.tar.gz' \
