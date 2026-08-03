@@ -22,8 +22,9 @@ export class AgentRunRepository {
         input_summary, output_summary, decision, error,
         input_tokens, output_tokens, total_tokens,
         uncached_input_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+        budget_reserved_tokens, budget_reserved_usd_micros,
         started_at, finished_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const inputTokens = this.tokenNumber(run.input_tokens);
@@ -45,6 +46,8 @@ export class AgentRunRepository {
       this.tokenNumber(run.uncached_input_tokens),
       this.tokenNumber(run.cache_creation_input_tokens),
       this.tokenNumber(run.cache_read_input_tokens),
+      this.tokenNumber(run.budget_reserved_tokens),
+      this.tokenNumber(run.budget_reserved_usd_micros),
       startedAt,
       run.finished_at?.toISOString() ?? null
     );
@@ -87,6 +90,8 @@ export class AgentRunRepository {
     if (run.uncached_input_tokens !== undefined) assign('uncached_input_tokens', this.tokenNumber(run.uncached_input_tokens));
     if (run.cache_creation_input_tokens !== undefined) assign('cache_creation_input_tokens', this.tokenNumber(run.cache_creation_input_tokens));
     if (run.cache_read_input_tokens !== undefined) assign('cache_read_input_tokens', this.tokenNumber(run.cache_read_input_tokens));
+    if (run.budget_reserved_tokens !== undefined) assign('budget_reserved_tokens', this.tokenNumber(run.budget_reserved_tokens));
+    if (run.budget_reserved_usd_micros !== undefined) assign('budget_reserved_usd_micros', this.tokenNumber(run.budget_reserved_usd_micros));
     if (run.started_at !== undefined) assign('started_at', run.started_at.toISOString());
     if (run.finished_at !== undefined) assign('finished_at', run.finished_at?.toISOString() ?? null);
 
@@ -104,6 +109,24 @@ export class AgentRunRepository {
     const stmt = this.db.prepare(`DELETE FROM agent_runs WHERE id = ?`);
     const result = stmt.run(id);
     return (result as { changes: number }).changes > 0;
+  }
+
+  /**
+   * A process-local `running` row cannot still own a model call after a new
+   * orchestrator has acquired the primary lease. Close those crash/shutdown
+   * residues so Runtime and cost history do not report phantom live agents.
+   */
+  cancelStaleRunning(reason: string, finishedAt = new Date()): number {
+    const result = this.db.prepare(`
+      UPDATE agent_runs
+      SET run_status = 'cancelled',
+          error = COALESCE(error, ?),
+          budget_reserved_tokens = 0,
+          budget_reserved_usd_micros = 0,
+          finished_at = COALESCE(finished_at, ?)
+      WHERE run_status = 'running'
+    `).run(reason, finishedAt.toISOString());
+    return (result as { changes: number }).changes;
   }
 
   private mapToAgentRun(row: Record<string, unknown> | undefined): AgentRun | null {
@@ -127,6 +150,8 @@ export class AgentRunRepository {
       uncached_input_tokens: this.tokenNumber(row.uncached_input_tokens as number | null | undefined),
       cache_creation_input_tokens: this.tokenNumber(row.cache_creation_input_tokens as number | null | undefined),
       cache_read_input_tokens: this.tokenNumber(row.cache_read_input_tokens as number | null | undefined),
+      budget_reserved_tokens: this.tokenNumber(row.budget_reserved_tokens as number | null | undefined),
+      budget_reserved_usd_micros: this.tokenNumber(row.budget_reserved_usd_micros as number | null | undefined),
       started_at: new Date(row.started_at as string),
       finished_at: row.finished_at ? new Date(row.finished_at as string) : null,
     };

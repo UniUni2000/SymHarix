@@ -7,12 +7,29 @@ import {
 } from '../../database';
 import type { ApiResponse, PaginatedResponse } from '../types';
 import type { AgentRun, ReviewEvent, WorkItem } from '../../database/types';
+import type { RuntimeAccessController } from '../runtimeAccess';
 
-export function createWorkItemRoutes(db: Database): Hono {
+export function createWorkItemRoutes(
+  db: Database,
+  accessController: RuntimeAccessController | null,
+): Hono {
   const workItems = new Hono();
   const workItemRepository = new WorkItemRepository(db);
   const agentRunRepository = new AgentRunRepository(db);
   const reviewEventRepository = new ReviewEventRepository(db);
+
+  workItems.use('*', async (c, next) => {
+    if (!accessController?.authorizeRead(c.req.raw).allowed) {
+      c.header('Cache-Control', 'private, no-store');
+      c.header('WWW-Authenticate', 'Bearer realm="SymHarix Runtime"');
+      return c.json({
+        success: false,
+        error: 'Runtime read access requires authentication.',
+      }, 401);
+    }
+    await next();
+    c.header('Cache-Control', 'private, no-store');
+  });
 
   workItems.get('/', (c) => {
     const page = parseInt(c.req.query('page') || '1', 10);
