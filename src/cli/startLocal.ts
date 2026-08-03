@@ -29,7 +29,10 @@ import {
   getStartLocalTunnelRecoveryReason,
   hasHttpProxyEnv,
   isEphemeralTryCloudflareUrl,
+  isStartLocalWebhookRegistrationMismatch,
+  isTelegramWebhookRegisteredForBase,
   resolveStartLocalPort,
+  resolveStartLocalWatchdogPollThreshold,
   shouldEmitTelegramStartupSummary,
   shouldProvisionStartLocalTunnel,
   type StartLocalBotSurface,
@@ -457,10 +460,16 @@ async function printTelegramStartupSummary(
   attempts: number,
   env: Record<string, string | undefined>,
 ): Promise<void> {
+  let lastTelegram: TelegramManifestSnapshot | null = null;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       const telegram = await readTelegramManifestSnapshot(port, env);
-      if (telegram && shouldEmitTelegramStartupSummary(telegram, expectedPublicBaseUrl)) {
+      lastTelegram = telegram;
+      if (
+        telegram
+        && isTelegramWebhookRegisteredForBase(telegram, expectedPublicBaseUrl)
+        && shouldEmitTelegramStartupSummary(telegram, expectedPublicBaseUrl)
+      ) {
         console.log(`[symharix] ${buildTelegramStartupSummary(telegram, expectedPublicBaseUrl)}`);
         return;
       }
@@ -471,7 +480,9 @@ async function printTelegramStartupSummary(
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
-  console.log('[symharix] telegram: unhealthy webhook_url=(none)');
+  console.log(lastTelegram
+    ? `[symharix] ${buildTelegramStartupSummary(lastTelegram, expectedPublicBaseUrl)}`
+    : '[symharix] telegram: unhealthy webhook_url=(none)');
 }
 
 function printFeishuStartupSummary(expectedPublicBaseUrl?: string | null): void {
@@ -546,6 +557,7 @@ async function main(): Promise<void> {
   let finished = false;
   let tunnelWatchdog: NodeJS.Timeout | null = null;
   let recoveryInFlight: Promise<void> | null = null;
+  let telegramWebhookReadyForCurrentTunnel = false;
   const intentionalChildStops = new WeakSet<ChildProcess>();
 
   const cleanup = async (): Promise<void> => {
@@ -728,6 +740,7 @@ async function main(): Promise<void> {
 
       tunnelHandle = nextTunnelHandle;
       setSymHarixEnv('SYMPHONY_PUBLIC_BASE_URL', nextTunnelHandle.publicBaseUrl, childEnv);
+      telegramWebhookReadyForCurrentTunnel = false;
       if (previousTunnelHandle) {
         await previousTunnelHandle.dispose();
       }
@@ -795,6 +808,7 @@ async function main(): Promise<void> {
         if (!expectedPublicBaseUrl) {
           const telegram = await readTelegramManifestSnapshot(requestedPort, childEnv);
           if (telegram?.webhook_url) {
+            telegramWebhookReadyForCurrentTunnel = true;
             degradedPolls = 0;
             return;
           }
@@ -809,11 +823,14 @@ async function main(): Promise<void> {
         let recoveryReason: string | null = null;
         if (botSurface === 'telegram') {
           const telegram = await readTelegramManifestSnapshot(requestedPort, childEnv);
+          if (telegram && isTelegramWebhookRegisteredForBase(telegram, expectedPublicBaseUrl)) {
+            telegramWebhookReadyForCurrentTunnel = true;
+          }
           recoveryReason = telegram
             ? getStartLocalTunnelRecoveryReason(telegram, expectedPublicBaseUrl)
             : null;
         }
-        if (!recoveryReason) {
+        if (!recoveryReason || isStartLocalWebhookRegistrationMismatch(recoveryReason)) {
           // Use the same proxy-aware curl fallback as startup registration.
           // Bun fetch can reject an otherwise healthy Cloudflare certificate on
           // some local proxy stacks, which must not trigger tunnel replacement.
@@ -821,11 +838,15 @@ async function main(): Promise<void> {
             expectedPublicBaseUrl,
             childEnv,
           );
-          recoveryReason = getStartLocalTunnelProbeRecoveryReason({
+          const tunnelRecoveryReason = getStartLocalTunnelProbeRecoveryReason({
             expectedPublicBaseUrl,
             status: tunnelProbe.status,
             errorMessage: tunnelProbe.errorMessage,
           });
+          // A dead public tunnel takes precedence over a registration mismatch.
+          // If the public URL is reachable, keep the mismatch reason and let the
+          // in-process webhook reconciler repair Telegram without a full restart.
+          recoveryReason = tunnelRecoveryReason ?? recoveryReason;
         }
         if (!recoveryReason) {
           degradedPolls = 0;
@@ -833,9 +854,12 @@ async function main(): Promise<void> {
         }
 
         degradedPolls += 1;
-        const requiredPolls = recoveryReason === 'telegram webhook is not registered'
-          ? initialMissingPollThreshold
-          : degradedPollThreshold;
+        const requiredPolls = resolveStartLocalWatchdogPollThreshold({
+          webhookReadyForCurrentTunnel: telegramWebhookReadyForCurrentTunnel,
+          degradedPollThreshold,
+          initialPollThreshold: initialMissingPollThreshold,
+          recoveryReason,
+        });
         if (degradedPolls < requiredPolls) {
           return;
         }

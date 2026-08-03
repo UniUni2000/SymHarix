@@ -6,7 +6,10 @@ import {
   getStartLocalTunnelProbeRecoveryReason,
   getStartLocalTunnelRegistrationWaitReason,
   getStartLocalTunnelRecoveryReason,
+  isStartLocalWebhookRegistrationMismatch,
+  isTelegramWebhookRegisteredForBase,
   resolveStartLocalPort,
+  resolveStartLocalWatchdogPollThreshold,
   shouldEmitTelegramStartupSummary,
   shouldProvisionStartLocalTunnel,
   upsertEnvAssignment,
@@ -35,6 +38,40 @@ describe('startLocalTunnel', () => {
     expect(result).toEqual({ status: 200, errorMessage: null });
     expect(curlCalls).toBe(1);
     expect(fetchCalls).toBe(0);
+  });
+
+  test('waits through initial webhook convergence before enabling fast watchdog recovery', () => {
+    expect(isTelegramWebhookRegisteredForBase({
+      webhook_url: 'https://old.trycloudflare.com/api/v1/bots/telegram/webhook',
+    }, 'https://fresh.trycloudflare.com')).toBe(false);
+    expect(resolveStartLocalWatchdogPollThreshold({
+      webhookReadyForCurrentTunnel: false,
+      degradedPollThreshold: 2,
+      initialPollThreshold: 18,
+    })).toBe(18);
+
+    expect(isTelegramWebhookRegisteredForBase({
+      webhook_url: 'https://fresh.trycloudflare.com/api/v1/bots/telegram/webhook',
+    }, 'https://fresh.trycloudflare.com')).toBe(true);
+    expect(resolveStartLocalWatchdogPollThreshold({
+      webhookReadyForCurrentTunnel: true,
+      degradedPollThreshold: 2,
+      initialPollThreshold: 18,
+    })).toBe(2);
+
+    expect(isStartLocalWebhookRegistrationMismatch('telegram webhook is not registered')).toBe(true);
+    expect(resolveStartLocalWatchdogPollThreshold({
+      webhookReadyForCurrentTunnel: true,
+      degradedPollThreshold: 2,
+      initialPollThreshold: 18,
+      recoveryReason: 'telegram webhook is not registered',
+    })).toBe(18);
+    expect(resolveStartLocalWatchdogPollThreshold({
+      webhookReadyForCurrentTunnel: true,
+      degradedPollThreshold: 2,
+      initialPollThreshold: 18,
+      recoveryReason: 'public tunnel unreachable: status 530',
+    })).toBe(2);
   });
 
   test('isolates Feishu local startup from Telegram credentials and operations chats', () => {

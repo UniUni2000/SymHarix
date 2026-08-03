@@ -91,6 +91,39 @@ export function shouldEmitTelegramStartupSummary(telegram: {
   return false;
 }
 
+export function isTelegramWebhookRegisteredForBase(
+  telegram: { webhook_url?: string | null },
+  expectedPublicBaseUrl?: string | null,
+): boolean {
+  const webhookUrl = normalizeEnvValue(telegram.webhook_url ?? undefined);
+  const expectedBaseUrl = normalizeEnvValue(expectedPublicBaseUrl ?? undefined);
+  if (!webhookUrl) {
+    return false;
+  }
+  return expectedBaseUrl ? webhookUrl.startsWith(`${expectedBaseUrl}/`) : true;
+}
+
+export function resolveStartLocalWatchdogPollThreshold(params: {
+  webhookReadyForCurrentTunnel: boolean;
+  degradedPollThreshold: number;
+  initialPollThreshold: number;
+  recoveryReason?: string | null;
+}): number {
+  if (isStartLocalWebhookRegistrationMismatch(params.recoveryReason)) {
+    return params.initialPollThreshold;
+  }
+  return params.webhookReadyForCurrentTunnel
+    ? params.degradedPollThreshold
+    : params.initialPollThreshold;
+}
+
+export function isStartLocalWebhookRegistrationMismatch(
+  recoveryReason?: string | null,
+): boolean {
+  return recoveryReason === 'telegram webhook is not registered'
+    || Boolean(recoveryReason?.startsWith('stale webhook_url='));
+}
+
 export function getStartLocalTunnelRecoveryReason(telegram: {
   health?: string | null;
   webhook_url?: string | null;
