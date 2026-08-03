@@ -4,6 +4,7 @@ import {
   buildStartLocalRuntimeReadHeaders,
   buildTelegramStartupSummary,
   getStartLocalTunnelProbeRecoveryReason,
+  getStartLocalTunnelProcessRecoveryReason,
   getStartLocalTunnelRegistrationWaitReason,
   getStartLocalTunnelRecoveryReason,
   isStartLocalWebhookRegistrationMismatch,
@@ -17,7 +18,7 @@ import {
 import { probePublicTunnelReachabilityFromEnv } from './startLocal';
 
 describe('startLocalTunnel', () => {
-  test('uses the proxy-compatible curl probe for watchdog reachability checks', async () => {
+  test('uses the proxy-compatible curl probe for startup reachability checks', async () => {
     let fetchCalls = 0;
     let curlCalls = 0;
     const result = await probePublicTunnelReachabilityFromEnv(
@@ -72,6 +73,8 @@ describe('startLocalTunnel', () => {
       initialPollThreshold: 18,
       recoveryReason: 'public tunnel unreachable: status 530',
     })).toBe(2);
+    expect(getStartLocalTunnelProcessRecoveryReason(true)).toBeNull();
+    expect(getStartLocalTunnelProcessRecoveryReason(false)).toBe('public tunnel process exited');
   });
 
   test('isolates Feishu local startup from Telegram credentials and operations chats', () => {

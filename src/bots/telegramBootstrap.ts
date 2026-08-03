@@ -4,6 +4,7 @@ import { readSymHarixEnv } from '../config/env';
 
 export interface TelegramTunnelHandle {
   publicBaseUrl: string;
+  isAlive?: () => boolean;
   dispose: () => Promise<void> | void;
 }
 
@@ -136,6 +137,7 @@ export function createCloudflaredTunnelProvider(
         finish(() => {
           resolve({
             publicBaseUrl,
+            isAlive: () => child.exitCode === null && !child.killed,
             dispose: async () => {
               disposeRequested = true;
               await terminateChild(child);

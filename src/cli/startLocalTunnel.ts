@@ -124,6 +124,12 @@ export function isStartLocalWebhookRegistrationMismatch(
     || Boolean(recoveryReason?.startsWith('stale webhook_url='));
 }
 
+export function getStartLocalTunnelProcessRecoveryReason(
+  tunnelProcessAlive: boolean | null | undefined,
+): string | null {
+  return tunnelProcessAlive === false ? 'public tunnel process exited' : null;
+}
+
 export function getStartLocalTunnelRecoveryReason(telegram: {
   health?: string | null;
   webhook_url?: string | null;

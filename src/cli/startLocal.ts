@@ -24,12 +24,11 @@ import {
   applyProxyEnv,
   disableProxyEnv,
   ensureNoProxyForLocalhost,
-  getStartLocalTunnelProbeRecoveryReason,
   getStartLocalTunnelRegistrationWaitReason,
   getStartLocalTunnelRecoveryReason,
+  getStartLocalTunnelProcessRecoveryReason,
   hasHttpProxyEnv,
   isEphemeralTryCloudflareUrl,
-  isStartLocalWebhookRegistrationMismatch,
   isTelegramWebhookRegisteredForBase,
   resolveStartLocalPort,
   resolveStartLocalWatchdogPollThreshold,
@@ -820,8 +819,10 @@ async function main(): Promise<void> {
           return;
         }
 
-        let recoveryReason: string | null = null;
-        if (botSurface === 'telegram') {
+        let recoveryReason = getStartLocalTunnelProcessRecoveryReason(
+          tunnelHandle?.isAlive?.(),
+        );
+        if (!recoveryReason && botSurface === 'telegram') {
           const telegram = await readTelegramManifestSnapshot(requestedPort, childEnv);
           if (telegram && isTelegramWebhookRegisteredForBase(telegram, expectedPublicBaseUrl)) {
             telegramWebhookReadyForCurrentTunnel = true;
@@ -829,24 +830,6 @@ async function main(): Promise<void> {
           recoveryReason = telegram
             ? getStartLocalTunnelRecoveryReason(telegram, expectedPublicBaseUrl)
             : null;
-        }
-        if (!recoveryReason || isStartLocalWebhookRegistrationMismatch(recoveryReason)) {
-          // Use the same proxy-aware curl fallback as startup registration.
-          // Bun fetch can reject an otherwise healthy Cloudflare certificate on
-          // some local proxy stacks, which must not trigger tunnel replacement.
-          const tunnelProbe = await probePublicTunnelReachabilityFromEnv(
-            expectedPublicBaseUrl,
-            childEnv,
-          );
-          const tunnelRecoveryReason = getStartLocalTunnelProbeRecoveryReason({
-            expectedPublicBaseUrl,
-            status: tunnelProbe.status,
-            errorMessage: tunnelProbe.errorMessage,
-          });
-          // A dead public tunnel takes precedence over a registration mismatch.
-          // If the public URL is reachable, keep the mismatch reason and let the
-          // in-process webhook reconciler repair Telegram without a full restart.
-          recoveryReason = tunnelRecoveryReason ?? recoveryReason;
         }
         if (!recoveryReason) {
           degradedPolls = 0;
