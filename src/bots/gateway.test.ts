@@ -821,6 +821,78 @@ describe('DefaultBotGateway', () => {
     gateway.dispose();
   });
 
+  test('repairs a missing Telegram webhook after consecutive diagnostics mismatches', async () => {
+    const expectedWebhookUrl = 'https://example.test/api/v1/bots/telegram/webhook';
+    let observedWebhookUrl: string | null = null;
+    let reconcileCalls = 0;
+    const telegramDiagnostics = {
+      getSnapshot: () => ({
+        health: observedWebhookUrl ? 'healthy' : 'unconfigured',
+        webhook_url: observedWebhookUrl,
+        webhook_pending_update_count: 0,
+        webhook_last_error_message: null,
+        webhook_last_error_at: null,
+        webhook_error_recent: false,
+        diagnostics_error_message: null,
+        diagnostics_checked_at: new Date().toISOString(),
+        webhook_ingress_recently_ok: false,
+        callback_ingress_recently_ok: false,
+      }),
+      maybeRefresh: () => undefined,
+      refreshNow: async () => undefined,
+      recordIngressSuccess: () => undefined,
+      recordCallbackSuccess: () => undefined,
+      recordCallbackFailure: () => undefined,
+      recordAudit: () => undefined,
+    };
+    const telegramBootstrapService = {
+      bootstrap: async () => ({
+        enabled: true,
+        publicBaseUrl: 'https://example.test',
+        webhookUrl: expectedWebhookUrl,
+        usedTunnel: false,
+      }),
+      reconcileWebhook: async () => {
+        reconcileCalls += 1;
+        observedWebhookUrl = expectedWebhookUrl;
+        return {
+          enabled: true,
+          publicBaseUrl: 'https://example.test',
+          webhookUrl: expectedWebhookUrl,
+          usedTunnel: false,
+        };
+      },
+      dispose: async () => undefined,
+    };
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'secret',
+        operationsChatId: null,
+        operatorIds: new Set(['9']),
+      },
+      { botToken: null, publicKey: null, operatorIds: new Set() },
+      undefined,
+      null,
+      {
+        telegramDiagnostics: telegramDiagnostics as any,
+        telegramBootstrapService: telegramBootstrapService as any,
+        telegramWebhookReconcileIntervalMs: 60_000,
+        telegramWebhookReconcileThreshold: 2,
+      },
+    );
+
+    await gateway.initializeInboundIntegration({ localBaseUrl: 'http://127.0.0.1:3000' });
+    await (gateway as any).reconcileTelegramWebhook();
+    expect(reconcileCalls).toBe(0);
+    await (gateway as any).reconcileTelegramWebhook();
+    expect(reconcileCalls).toBe(1);
+    expect(gateway.getManifest().transports.telegram.webhook_url).toBe(expectedWebhookUrl);
+
+    gateway.dispose();
+  });
+
   test('handles Telegram webhook commands with a fast ACK and sends the reply asynchronously', async () => {
     const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -5075,6 +5147,82 @@ describe('DefaultBotGateway', () => {
 
     expect(result.status).toBe(401);
     expect(result.body.error).toBe('Invalid Telegram webhook secret');
+  });
+
+  test('fails closed when Telegram webhook ingress has no configured secret', async () => {
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: null,
+        operatorIds: new Set(['9']),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+    );
+
+    const result = await gateway.handleTelegramWebhook(
+      { update_id: 1 },
+      { 'x-telegram-bot-api-secret-token': 'any-value' },
+    );
+
+    expect(result.status).toBe(503);
+    expect(result.body.error).toBe('Telegram webhook secret is not configured');
+    gateway.dispose();
+  });
+
+  test('records healthy ingress for every authenticated Telegram update', async () => {
+    let ingressSuccesses = 0;
+    const telegramDiagnostics = {
+      getSnapshot: () => ({
+        health: 'healthy',
+        webhook_url: 'https://runtime.example.com/api/v1/bots/telegram/webhook',
+        webhook_pending_update_count: 0,
+        webhook_last_error_message: null,
+        webhook_last_error_at: null,
+        webhook_error_recent: false,
+        diagnostics_error_message: null,
+        diagnostics_checked_at: new Date().toISOString(),
+        webhook_ingress_recently_ok: ingressSuccesses > 0,
+        callback_ingress_recently_ok: false,
+      }),
+      maybeRefresh: () => undefined,
+      refreshNow: async () => undefined,
+      recordIngressSuccess: () => {
+        ingressSuccesses += 1;
+      },
+      recordCallbackSuccess: () => undefined,
+      recordCallbackFailure: () => undefined,
+      recordAudit: () => undefined,
+    };
+    const gateway = new DefaultBotGateway(
+      createRuntimeControlPlane(),
+      {
+        botToken: 'telegram-token',
+        webhookSecret: 'strong-webhook-secret',
+        operatorIds: new Set(['9']),
+      },
+      {
+        botToken: null,
+        publicKey: null,
+        operatorIds: new Set(),
+      },
+      undefined,
+      null,
+      { telegramDiagnostics: telegramDiagnostics as any },
+    );
+
+    const result = await gateway.handleTelegramWebhook(
+      { update_id: 2 },
+      { 'x-telegram-bot-api-secret-token': 'strong-webhook-secret' },
+    );
+
+    expect(result.status).toBe(200);
+    expect(ingressSuccesses).toBe(1);
+    gateway.dispose();
   });
 
   test('handles Feishu long connection message events with the same command path as Telegram', async () => {

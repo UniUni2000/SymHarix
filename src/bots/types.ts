@@ -164,6 +164,10 @@ export interface BotTransportManifest {
   webhook_pending_update_count?: number | null;
   webhook_last_error_message?: string | null;
   webhook_last_error_at?: string | null;
+  webhook_error_recent?: boolean;
+  webhook_diagnostics_error_message?: string | null;
+  webhook_diagnostics_checked_at?: string | null;
+  webhook_ingress_recently_ok?: boolean;
   callback_ingress_recently_ok?: boolean;
 }
 
@@ -233,6 +237,11 @@ export interface BotGateway {
     localBaseUrl: string;
     inboundPath?: string;
   }): Promise<void>;
+  validateTelegramWebhookRequest?(headers?: Headers | Record<string, string | undefined>): {
+    ok: boolean;
+    status: 200 | 401 | 503;
+    error?: string;
+  };
   handleTelegramWebhook(body: unknown, headers?: Headers | Record<string, string | undefined>): Promise<{
     ok: boolean;
     status: number;
@@ -292,6 +301,10 @@ export interface TelegramWebhookDiagnostics {
   webhook_pending_update_count: number | null;
   webhook_last_error_message: string | null;
   webhook_last_error_at: string | null;
+  webhook_error_recent: boolean;
+  diagnostics_error_message: string | null;
+  diagnostics_checked_at: string | null;
+  webhook_ingress_recently_ok: boolean;
   callback_ingress_recently_ok: boolean;
 }
 

@@ -8,6 +8,20 @@ describe('TelegramWebhookBootstrapService', () => {
     globalThis.fetch = originalFetch;
   });
 
+  test('fails closed when Telegram is enabled without a webhook secret', async () => {
+    const service = new TelegramWebhookBootstrapService({
+      botToken: 'telegram-token',
+      webhookSecret: null,
+      publicBaseUrl: 'https://bot.example.test',
+      fetcher: mock(async () => Response.json({ ok: true, result: true })) as unknown as typeof fetch,
+    });
+
+    await expect(service.bootstrap({
+      localBaseUrl: 'http://127.0.0.1:8080',
+      inboundPath: '/api/v1/bots/telegram/webhook',
+    })).rejects.toThrow('webhook secret is required');
+  });
+
   test('registers a Telegram webhook against a configured public base URL', async () => {
     const fetcher = mock(async () => new Response(JSON.stringify({ ok: true, result: true }), { status: 200 }));
     globalThis.fetch = fetcher as typeof globalThis.fetch;
@@ -259,6 +273,52 @@ describe('TelegramWebhookBootstrapService', () => {
     })).rejects.toThrow('Unauthorized');
 
     expect(attempts).toBe(1);
+  });
+
+  test('retries transient Telegram API failures for a stable public webhook', async () => {
+    let attempts = 0;
+    const service = new TelegramWebhookBootstrapService({
+      botToken: 'telegram-token',
+      webhookSecret: 'secret',
+      publicBaseUrl: 'https://bot.example.test',
+      webhookRetryDelayMs: 0,
+      webhookRetryAttempts: 3,
+      fetcher: mock(async () => {
+        attempts += 1;
+        return attempts === 1
+          ? Response.json({ ok: false, description: 'temporary unavailable' }, { status: 503 })
+          : Response.json({ ok: true, result: true });
+      }) as unknown as typeof fetch,
+    });
+
+    await service.bootstrap({
+      localBaseUrl: 'http://127.0.0.1:8080',
+      inboundPath: '/api/v1/bots/telegram/webhook',
+    });
+
+    expect(attempts).toBe(2);
+  });
+
+  test('can re-register the active webhook without replacing its tunnel', async () => {
+    let setWebhookCalls = 0;
+    const service = new TelegramWebhookBootstrapService({
+      botToken: 'telegram-token',
+      webhookSecret: 'secret',
+      publicBaseUrl: 'https://bot.example.test',
+      fetcher: mock(async (input: string | URL | RequestInfo) => {
+        if (String(input).endsWith('/setWebhook')) setWebhookCalls += 1;
+        return Response.json({ ok: true, result: true });
+      }) as unknown as typeof fetch,
+    });
+
+    const bootstrapped = await service.bootstrap({
+      localBaseUrl: 'http://127.0.0.1:8080',
+      inboundPath: '/api/v1/bots/telegram/webhook',
+    });
+    const reconciled = await service.reconcileWebhook();
+
+    expect(reconciled).toEqual(bootstrapped);
+    expect(setWebhookCalls).toBe(2);
   });
 
   test('waits for the public tunnel URL to become reachable before calling setWebhook', async () => {

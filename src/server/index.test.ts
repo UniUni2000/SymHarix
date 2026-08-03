@@ -959,6 +959,55 @@ describe('SymHarixServer', () => {
     expect(telegramWebhookCalls).toBe(1);
   });
 
+  test('rejects unauthenticated Telegram webhook requests before parsing their body', async () => {
+    const previousValidator = botGateway.validateTelegramWebhookRequest;
+    botGateway.validateTelegramWebhookRequest = (headers) => (
+      headers.get('x-telegram-bot-api-secret-token') === 'expected-secret'
+        ? { ok: true, status: 200 }
+        : { ok: false, status: 401, error: 'Invalid Telegram webhook secret' }
+    );
+    try {
+      const callsBefore = telegramWebhookCalls;
+      const response = await request('/api/v1/bots/telegram/webhook', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{malformed-json',
+      });
+
+      expect(response.status).toBe(401);
+      expect(telegramWebhookCalls).toBe(callsBefore);
+    } finally {
+      botGateway.validateTelegramWebhookRequest = previousValidator;
+    }
+  });
+
+  test('rejects oversized Telegram webhook payloads before gateway processing', async () => {
+    const previousValidator = botGateway.validateTelegramWebhookRequest;
+    botGateway.validateTelegramWebhookRequest = (headers) => (
+      headers.get('x-telegram-bot-api-secret-token') === 'expected-secret'
+        ? { ok: true, status: 200 }
+        : { ok: false, status: 401, error: 'Invalid Telegram webhook secret' }
+    );
+    try {
+      const callsBefore = telegramWebhookCalls;
+      const body = JSON.stringify({ payload: 'x'.repeat(300 * 1024) });
+      const response = await request('/api/v1/bots/telegram/webhook', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': String(new TextEncoder().encode(body).byteLength),
+          'x-telegram-bot-api-secret-token': 'expected-secret',
+        },
+        body,
+      });
+
+      expect(response.status).toBe(413);
+      expect(telegramWebhookCalls).toBe(callsBefore);
+    } finally {
+      botGateway.validateTelegramWebhookRequest = previousValidator;
+    }
+  });
+
   test('POST /api/v1/bots/discord/interactions proxies Discord interactions to the bot gateway', async () => {
     const response = await request('/api/v1/bots/discord/interactions', {
       method: 'POST',

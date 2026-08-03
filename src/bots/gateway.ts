@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { BotAssistantService } from './assistant';
 import { BotCommandService } from './commandService';
 import { BotFollowupService } from './followups';
@@ -331,6 +332,15 @@ function getHeaderValue(headers: Headers | Record<string, string | undefined>, k
   }
 
   return null;
+}
+
+function secretsEqual(presented: string | null, expected: string | null): boolean {
+  if (!presented || !expected) {
+    return false;
+  }
+  const presentedDigest = createHash('sha256').update(presented).digest();
+  const expectedDigest = createHash('sha256').update(expected).digest();
+  return timingSafeEqual(presentedDigest, expectedDigest);
 }
 
 type TelegramInlineKeyboardButton = {
@@ -1347,6 +1357,12 @@ export class DefaultBotGateway implements BotGateway {
   private telegramPublicBaseUrl: string | null = normalizePublicBaseUrl(readSymHarixEnv('SYMPHONY_PUBLIC_BASE_URL') || null);
   private telegramWebhookUsedTunnel: boolean | null = null;
   private startupRepairTimer: ReturnType<typeof setTimeout> | null = null;
+  private telegramWebhookReconcileTimer: ReturnType<typeof setInterval> | null = null;
+  private telegramWebhookReconcileInFlight: Promise<void> | null = null;
+  private telegramExpectedWebhookUrl: string | null = null;
+  private telegramWebhookMismatchPolls = 0;
+  private readonly telegramWebhookReconcileIntervalMs: number;
+  private readonly telegramWebhookReconcileThreshold: number;
 
   constructor(
     private readonly runtime: RuntimeControlPlane,
@@ -1399,6 +1415,8 @@ export class DefaultBotGateway implements BotGateway {
       telegramTextProcessingAckDelayMs?: number | null;
       telegramTextCoalesceDelayMs?: number | null;
       telegramRuntimeOpenCooldownMs?: number | null;
+      telegramWebhookReconcileIntervalMs?: number | null;
+      telegramWebhookReconcileThreshold?: number | null;
       startupRepairDelayMs?: number | null;
     } = {},
   ) {
@@ -1427,6 +1445,18 @@ export class DefaultBotGateway implements BotGateway {
         ?? 3_000,
     );
     this.telegramTextCoalesceDelayMs = Math.max(0, options.telegramTextCoalesceDelayMs ?? 0);
+    this.telegramWebhookReconcileIntervalMs = Math.max(
+      1_000,
+      options.telegramWebhookReconcileIntervalMs
+        ?? parsePositiveInteger(readSymHarixEnv('SYMPHONY_TELEGRAM_WEBHOOK_RECONCILE_INTERVAL_MS'))
+        ?? 30_000,
+    );
+    this.telegramWebhookReconcileThreshold = Math.max(
+      1,
+      options.telegramWebhookReconcileThreshold
+        ?? parsePositiveInteger(readSymHarixEnv('SYMPHONY_TELEGRAM_WEBHOOK_RECONCILE_POLLS'))
+        ?? 2,
+    );
     this.telegramRuntimeOpenCooldownMs = Math.max(
       0,
       options.telegramRuntimeOpenCooldownMs
@@ -1726,6 +1756,10 @@ export class DefaultBotGateway implements BotGateway {
           webhook_pending_update_count: telegramDiagnostics.webhook_pending_update_count,
           webhook_last_error_message: telegramDiagnostics.webhook_last_error_message,
           webhook_last_error_at: telegramDiagnostics.webhook_last_error_at,
+          webhook_error_recent: telegramDiagnostics.webhook_error_recent,
+          webhook_diagnostics_error_message: telegramDiagnostics.diagnostics_error_message,
+          webhook_diagnostics_checked_at: telegramDiagnostics.diagnostics_checked_at,
+          webhook_ingress_recently_ok: telegramDiagnostics.webhook_ingress_recently_ok,
           callback_ingress_recently_ok: telegramDiagnostics.callback_ingress_recently_ok,
         },
         feishu: {
@@ -1818,12 +1852,76 @@ export class DefaultBotGateway implements BotGateway {
         this.telegramPublicBaseUrl = normalizePublicBaseUrl(result.publicBaseUrl);
         this.telegramWebhookUsedTunnel = result.usedTunnel;
       }
+      this.telegramExpectedWebhookUrl = result.webhookUrl;
       await this.telegramDiagnostics.refreshNow();
+      this.startTelegramWebhookReconciler();
     } catch (error) {
       logger.warn('Telegram inbound bootstrap failed', {
         local_base_url: params.localBaseUrl,
       }, error instanceof Error ? error : undefined);
     }
+  }
+
+  private startTelegramWebhookReconciler(): void {
+    if (
+      this.telegramWebhookReconcileTimer
+      || !this.telegramBootstrap
+      || !this.telegramExpectedWebhookUrl
+    ) {
+      return;
+    }
+
+    this.telegramWebhookReconcileTimer = setInterval(() => {
+      if (this.telegramWebhookReconcileInFlight) {
+        return;
+      }
+      this.telegramWebhookReconcileInFlight = this.reconcileTelegramWebhook()
+        .catch((error) => {
+          logger.warn('Telegram webhook reconciliation failed', {
+            expected_webhook_url: this.telegramExpectedWebhookUrl,
+          }, error instanceof Error ? error : undefined);
+        })
+        .finally(() => {
+          this.telegramWebhookReconcileInFlight = null;
+        });
+    }, this.telegramWebhookReconcileIntervalMs);
+    this.telegramWebhookReconcileTimer.unref?.();
+  }
+
+  private async reconcileTelegramWebhook(): Promise<void> {
+    if (!this.telegramBootstrap || !this.telegramExpectedWebhookUrl) {
+      return;
+    }
+
+    await this.telegramDiagnostics.refreshNow();
+    const snapshot = this.telegramDiagnostics.getSnapshot();
+    if (snapshot.diagnostics_error_message) {
+      return;
+    }
+    if (snapshot.webhook_url === this.telegramExpectedWebhookUrl) {
+      this.telegramWebhookMismatchPolls = 0;
+      return;
+    }
+
+    this.telegramWebhookMismatchPolls += 1;
+    if (this.telegramWebhookMismatchPolls < this.telegramWebhookReconcileThreshold) {
+      return;
+    }
+
+    this.telegramWebhookMismatchPolls = 0;
+    const previousWebhookUrl = snapshot.webhook_url;
+    await this.telegramBootstrap.reconcileWebhook();
+    await this.telegramDiagnostics.refreshNow();
+    const repaired = this.telegramDiagnostics.getSnapshot();
+    if (repaired.webhook_url !== this.telegramExpectedWebhookUrl) {
+      throw new Error(
+        `Telegram webhook remained ${repaired.webhook_url || '(none)'} after reconciliation`,
+      );
+    }
+    logger.warn('Telegram webhook registration repaired automatically', {
+      previous_webhook_url: previousWebhookUrl,
+      webhook_url: repaired.webhook_url,
+    });
   }
 
   private async startFeishuLongConnection(): Promise<void> {
@@ -1857,6 +1955,10 @@ export class DefaultBotGateway implements BotGateway {
     if (this.startupRepairTimer) {
       clearTimeout(this.startupRepairTimer);
       this.startupRepairTimer = null;
+    }
+    if (this.telegramWebhookReconcileTimer) {
+      clearInterval(this.telegramWebhookReconcileTimer);
+      this.telegramWebhookReconcileTimer = null;
     }
     for (const pending of this.pendingTelegramTextResponses.values()) {
       clearTimeout(pending.timer);
@@ -2365,24 +2467,17 @@ export class DefaultBotGateway implements BotGateway {
     body: unknown,
     headers: Headers | Record<string, string | undefined> = {},
   ): Promise<{ ok: boolean; status: number; body: Record<string, unknown> }> {
-    if (!this.telegramNotifier) {
+    const authorization = this.validateTelegramWebhookRequest(headers);
+    if (!authorization.ok) {
       return {
         ok: false,
-        status: 503,
-        body: { ok: false, error: 'Telegram adapter is not configured' },
+        status: authorization.status,
+        body: { ok: false, error: authorization.error },
       };
     }
+    const telegramNotifier = this.telegramNotifier!;
 
-    if (this.telegramConfig.webhookSecret) {
-      const receivedSecret = getHeaderValue(headers, 'x-telegram-bot-api-secret-token');
-      if (receivedSecret !== this.telegramConfig.webhookSecret) {
-        return {
-          ok: false,
-          status: 401,
-          body: { ok: false, error: 'Invalid Telegram webhook secret' },
-        };
-      }
-    }
+    this.telegramDiagnostics.recordIngressSuccess();
 
     const update = body as TelegramUpdate;
     const updateId = update.update_id !== undefined && update.update_id !== null ? String(update.update_id) : null;
@@ -2485,7 +2580,7 @@ export class DefaultBotGateway implements BotGateway {
           if (runtimeOpenReplayKey) {
             const guard = this.acquireTelegramRuntimeOpenGuard(runtimeOpenReplayKey);
             if (!guard.accepted) {
-              await this.telegramNotifier.answerCallbackQuery(
+              await telegramNotifier.answerCallbackQuery(
                 callbackQuery.id || 'unknown-callback',
                 guard.reason === 'cooldown'
                   ? textForIssueLocale(
@@ -2518,7 +2613,7 @@ export class DefaultBotGateway implements BotGateway {
           try {
             if (appUrl && ephemeralTunnelUrl && parsedCallback.issueIdentifier && callbackIssue) {
               try {
-                await this.telegramNotifier.answerCallbackQuery(
+                await telegramNotifier.answerCallbackQuery(
                   callbackQuery.id || 'unknown-callback',
                   textForIssueLocale(
                     callbackIssue,
@@ -2615,7 +2710,7 @@ export class DefaultBotGateway implements BotGateway {
               }
             }
             if (!callbackAnswered) {
-              await this.telegramNotifier.answerCallbackQuery(
+              await telegramNotifier.answerCallbackQuery(
                 callbackQuery.id || 'unknown-callback',
                 appUrl
                   ? ephemeralTunnelUrl
@@ -2659,7 +2754,7 @@ export class DefaultBotGateway implements BotGateway {
             context,
             parsed: parsedCallback,
           });
-          await this.telegramNotifier.answerCallbackQuery(
+          await telegramNotifier.answerCallbackQuery(
             callbackQuery.id || 'unknown-callback',
             supervisorResult.toastText,
           );
@@ -2718,7 +2813,7 @@ export class DefaultBotGateway implements BotGateway {
         };
 
         try {
-          await this.telegramNotifier.answerCallbackQuery(
+          await telegramNotifier.answerCallbackQuery(
             callbackQuery.id || 'unknown-callback',
             callbackResult.toastText,
           );
@@ -2798,7 +2893,7 @@ export class DefaultBotGateway implements BotGateway {
 
         if (!isTelegramAnswerCallbackBadRequest(error)) {
           try {
-            await this.telegramNotifier.answerCallbackQuery(
+            await telegramNotifier.answerCallbackQuery(
               callbackQuery.id || 'unknown-callback',
               textForIssueLocale(callbackIssue, '执行失败，请稍后重试', 'Action failed. Please try again.'),
             );
@@ -2811,7 +2906,7 @@ export class DefaultBotGateway implements BotGateway {
         }
 
         try {
-          await this.telegramNotifier.sendMessage(
+          await telegramNotifier.sendMessage(
             {
               transport: 'telegram',
               conversation_id: conversationId,
@@ -2868,6 +2963,22 @@ export class DefaultBotGateway implements BotGateway {
       status: 200,
       body: { ok: true },
     };
+  }
+
+  validateTelegramWebhookRequest(
+    headers: Headers | Record<string, string | undefined> = {},
+  ): { ok: boolean; status: 200 | 401 | 503; error?: string } {
+    if (!this.telegramNotifier) {
+      return { ok: false, status: 503, error: 'Telegram adapter is not configured' };
+    }
+    if (!this.telegramConfig.webhookSecret) {
+      return { ok: false, status: 503, error: 'Telegram webhook secret is not configured' };
+    }
+    const receivedSecret = getHeaderValue(headers, 'x-telegram-bot-api-secret-token');
+    if (!secretsEqual(receivedSecret, this.telegramConfig.webhookSecret)) {
+      return { ok: false, status: 401, error: 'Invalid Telegram webhook secret' };
+    }
+    return { ok: true, status: 200 };
   }
 
   private rememberTelegramUpdateId(updateId: string): void {

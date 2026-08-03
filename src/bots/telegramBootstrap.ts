@@ -65,9 +65,16 @@ function parsePositiveIntegerEnv(name: string): number | null {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
-function isRetryableTunnelWebhookError(error: unknown): boolean {
+function isRetryableWebhookError(error: unknown, usedTunnel: boolean): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /setWebhook failed/i.test(message) && /failed to resolve host|host.*not known|dns|timed out|connection reset|fetch failed|network error/i.test(message);
+  if (!/setWebhook failed/i.test(message)) {
+    return false;
+  }
+  if (/status (?:408|425|429|5\d\d)\b|timed out|connection reset|fetch failed|network error/i.test(message)) {
+    return true;
+  }
+  return usedTunnel
+    && /failed to resolve host|host.*not known|dns|wrong response from the webhook/i.test(message);
 }
 
 export function createCloudflaredTunnelProvider(
@@ -243,6 +250,10 @@ export class TelegramWebhookBootstrapService {
       };
     }
 
+    if (!this.options.webhookSecret) {
+      throw new Error('Telegram webhook secret is required when Telegram webhook ingress is enabled');
+    }
+
     if (this.activePublicBaseUrl && this.activeWebhookUrl) {
       return {
         enabled: true,
@@ -286,6 +297,31 @@ export class TelegramWebhookBootstrapService {
       publicBaseUrl,
       webhookUrl,
       usedTunnel,
+    };
+  }
+
+  async reconcileWebhook(): Promise<TelegramWebhookBootstrapResult> {
+    if (!this.options.botToken || this.bootstrapMode === 'off') {
+      return {
+        enabled: false,
+        publicBaseUrl: null,
+        webhookUrl: null,
+        usedTunnel: false,
+      };
+    }
+    if (!this.options.webhookSecret) {
+      throw new Error('Telegram webhook secret is required when Telegram webhook ingress is enabled');
+    }
+    if (!this.activePublicBaseUrl || !this.activeWebhookUrl) {
+      throw new Error('Telegram webhook cannot be reconciled before bootstrap completes');
+    }
+
+    await this.setWebhookWithRetry(this.activeWebhookUrl, this.usedTunnel);
+    return {
+      enabled: true,
+      publicBaseUrl: this.activePublicBaseUrl,
+      webhookUrl: this.activeWebhookUrl,
+      usedTunnel: this.usedTunnel,
     };
   }
 
@@ -360,9 +396,8 @@ export class TelegramWebhookBootstrapService {
         return;
       } catch (error) {
         lastError = error;
-        const shouldRetry = usedTunnel
-          && attempt < this.webhookRetryAttempts
-          && isRetryableTunnelWebhookError(error);
+        const shouldRetry = attempt < this.webhookRetryAttempts
+          && isRetryableWebhookError(error, usedTunnel);
         if (!shouldRetry) {
           throw error;
         }
@@ -416,11 +451,20 @@ export class TelegramWebhookBootstrapService {
       },
     );
 
-    if (response.ok) {
+    const body = await response.text().catch(() => '');
+    let responsePayload: { ok?: boolean; description?: string } | null = null;
+    if (body) {
+      try {
+        responsePayload = JSON.parse(body) as { ok?: boolean; description?: string };
+      } catch {
+        responsePayload = null;
+      }
+    }
+    if (response.ok && responsePayload?.ok !== false) {
       return;
     }
 
-    const body = await response.text().catch(() => '');
-    throw new Error(`Telegram ${method} failed with status ${response.status}: ${body}`);
+    const detail = responsePayload?.description || body;
+    throw new Error(`Telegram ${method} failed with status ${response.status}: ${detail}`);
   }
 }
