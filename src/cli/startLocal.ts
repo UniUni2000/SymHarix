@@ -357,20 +357,24 @@ function probePublicTunnelReachabilityWithCurl(
   return { status: null, errorMessage };
 }
 
-async function probePublicTunnelReachabilityFromEnv(
+export async function probePublicTunnelReachabilityFromEnv(
   publicBaseUrl: string,
   env: Record<string, string | undefined>,
+  probes: {
+    fetchProbe?: typeof probePublicTunnelReachability;
+    curlProbe?: typeof probePublicTunnelReachabilityWithCurl;
+  } = {},
 ): Promise<{
   status: number | null;
   errorMessage: string | null;
 }> {
   if (hasHttpProxyEnv(env)) {
-    const curlProbe = probePublicTunnelReachabilityWithCurl(publicBaseUrl, env);
+    const curlProbe = (probes.curlProbe ?? probePublicTunnelReachabilityWithCurl)(publicBaseUrl, env);
     if (curlProbe.status !== null || curlProbe.errorMessage) {
       return curlProbe;
     }
   }
-  return probePublicTunnelReachability(publicBaseUrl);
+  return (probes.fetchProbe ?? probePublicTunnelReachability)(publicBaseUrl);
 }
 
 async function waitForTemporaryTunnelRegistration(
@@ -810,7 +814,13 @@ async function main(): Promise<void> {
             : null;
         }
         if (!recoveryReason) {
-          const tunnelProbe = await probePublicTunnelReachability(expectedPublicBaseUrl);
+          // Use the same proxy-aware curl fallback as startup registration.
+          // Bun fetch can reject an otherwise healthy Cloudflare certificate on
+          // some local proxy stacks, which must not trigger tunnel replacement.
+          const tunnelProbe = await probePublicTunnelReachabilityFromEnv(
+            expectedPublicBaseUrl,
+            childEnv,
+          );
           recoveryReason = getStartLocalTunnelProbeRecoveryReason({
             expectedPublicBaseUrl,
             status: tunnelProbe.status,
@@ -876,8 +886,10 @@ async function main(): Promise<void> {
   startTunnelWatchdog();
 }
 
-void main().catch((error) => {
-  console.error('[symharix] start:local wrapper failed.');
-  console.error(error);
-  process.exit(1);
-});
+if (import.meta.main) {
+  void main().catch((error) => {
+    console.error('[symharix] start:local wrapper failed.');
+    console.error(error);
+    process.exit(1);
+  });
+}

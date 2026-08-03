@@ -11,8 +11,32 @@ import {
   shouldProvisionStartLocalTunnel,
   upsertEnvAssignment,
 } from './startLocalTunnel';
+import { probePublicTunnelReachabilityFromEnv } from './startLocal';
 
 describe('startLocalTunnel', () => {
+  test('uses the proxy-compatible curl probe for watchdog reachability checks', async () => {
+    let fetchCalls = 0;
+    let curlCalls = 0;
+    const result = await probePublicTunnelReachabilityFromEnv(
+      'https://healthy.trycloudflare.com',
+      { HTTPS_PROXY: 'http://127.0.0.1:7890' },
+      {
+        fetchProbe: async () => {
+          fetchCalls += 1;
+          return { status: null, errorMessage: 'unknown certificate verification error' };
+        },
+        curlProbe: () => {
+          curlCalls += 1;
+          return { status: 200, errorMessage: null };
+        },
+      },
+    );
+
+    expect(result).toEqual({ status: 200, errorMessage: null });
+    expect(curlCalls).toBe(1);
+    expect(fetchCalls).toBe(0);
+  });
+
   test('isolates Feishu local startup from Telegram credentials and operations chats', () => {
     const env: Record<string, string | undefined> = {
       SYMHARIX_TELEGRAM_BOT_TOKEN: 'telegram-token',
