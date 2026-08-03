@@ -50,6 +50,14 @@ export function createRuntimeRoutes(
 ): Hono {
   const runtime = new Hono();
 
+  runtime.use('/auth/token', bodyLimit({
+    maxSize: 8 * 1024,
+    onError: (c) => c.json({
+      success: false,
+      error: 'Runtime token authentication payload is too large.',
+    }, 413),
+  }));
+
   runtime.use('/auth/telegram', bodyLimit({
     maxSize: 32 * 1024,
     onError: (c) => c.json({

@@ -917,6 +917,20 @@ describe('SymHarixServer', () => {
     expect(allowed.status).toBe(202);
   });
 
+  test('rejects oversized anonymous Runtime token authentication payloads', async () => {
+    const response = await server.getApp().request('/api/v1/runtime/auth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: 'x'.repeat(9 * 1024) }),
+    });
+
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({
+      success: false,
+      error: 'Runtime token authentication payload is too large.',
+    });
+  });
+
   test('exchanges signed Telegram Mini App initData for an operator session', async () => {
     const botToken = '123456789:test-bot-token';
     const telegramServer = new SymHarixServer(
