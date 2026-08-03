@@ -569,7 +569,9 @@ export type AgentTimelineCode =
   | 'governance_suggestion_dismissed'
   | 'governance_suggestion_reused_child'
   | 'governance_child_noop_closed'
-  | 'constitution_update_suggested';
+  | 'constitution_update_suggested'
+  | 'supervisor_root_finalize_failed'
+  | 'supervisor_root_completed';
 
 export interface AgentTimelinePayload {
   level: AgentTimelineLevel;

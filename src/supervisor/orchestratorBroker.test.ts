@@ -32,6 +32,7 @@ function issue(overrides: Partial<RuntimeIssueView> = {}): RuntimeIssueView {
     actions: {
       can_stop: false,
       can_retry: true,
+      can_override_cost_budget: true,
       can_open_pr: false,
     },
     created_at: '2026-05-10T00:00:00.000Z',
@@ -85,6 +86,13 @@ function createRuntimeControlPlane(): RuntimeControlPlane & {
       retryIssueCalls.push(id);
       return { accepted: true, status: 'accepted', message: `Retrying ${id}`, issue_id: id, issue_identifier: 'INT-163' };
     },
+    overrideCostBudget: async (id: string) => ({
+      accepted: true,
+      status: 'accepted',
+      message: `Approved cost budget for ${id}`,
+      issue_id: id,
+      issue_identifier: 'INT-163',
+    }),
     closeIssue: async () => ({ accepted: false, status: 'rejected', message: 'not used' }),
     overrideGovernance: async () => ({ accepted: false, status: 'rejected', message: 'not used' }),
     rewriteGovernance: async () => ({ accepted: false, status: 'rejected', message: 'not used' }),
@@ -147,6 +155,7 @@ describe('SupervisorOrchestratorBroker', () => {
     expect(capabilities.map((capability) => capability.name)).toContain('unwatch_issue');
     expect(capabilities.map((capability) => capability.name)).toContain('switch_repository');
     expect(capabilities.map((capability) => capability.name)).toContain('create_issue');
+    expect(capabilities.map((capability) => capability.name)).toContain('approve_cost_budget');
     const watchCapability = capabilities.find((capability) => capability.name === 'watch_issue');
     expect(watchCapability?.risk).toBe('low_write');
     expect(watchCapability?.input_schema).toBeTruthy();
@@ -217,6 +226,26 @@ describe('SupervisorOrchestratorBroker', () => {
 
     expect(result.ok).toBe(true);
     expect(runtime.retryIssueCalls).toEqual(['INT-163']);
+  });
+
+  test('keeps natural-language cost-budget approval behind confirmation', async () => {
+    const { broker, context, pendingActions } = createHarness();
+    broker.beginTurn({
+      context,
+      text: '批准 INT-163 的成本预算并继续',
+      repoRef: 'UniUni2000/test2',
+      canWrite: true,
+      activeIssueId: 'INT-163',
+    });
+
+    const result = await broker.callTool('approve_cost_budget', { issue_id: 'INT-163' }, { context });
+
+    expect(result.ok).toBe(true);
+    expect(result.response?.actions?.[0]?.callback_data).toBe('pending|confirm');
+    expect(pendingActions.findOpenByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    })?.tool_name).toBe('approve_cost_budget');
   });
 
   test('lets Claude call watch and unwatch through orchestrator tools', async () => {

@@ -1,6 +1,7 @@
 import type { WorkItemOrchestratorState } from '../database/types';
 import type { RuntimeLocale } from '../i18n/locale';
 import type { SupervisorExecutionIntent } from '../supervisor/types';
+import type { CostOverviewSnapshot, WorkItemCostSnapshot } from '../cost/governor';
 import type {
   AgentTimelinePayload,
   ChangePackSummary,
@@ -25,7 +26,7 @@ export type RuntimeCommandStatus =
   | 'completed'
   | 'rejected'
   | 'not_found';
-export type RuntimeAccessMode = 'open' | 'token';
+export type RuntimeAccessMode = 'read_only' | 'token';
 export type RuntimeViewerRole = 'operator' | 'viewer';
 export type RuntimeHistoryEntrySource = 'agent_run' | 'review' | 'work_item' | 'sync_event' | 'governance';
 
@@ -33,6 +34,7 @@ export interface RuntimeActionState {
   can_stop: boolean;
   can_retry: boolean;
   can_override_governance?: boolean;
+  can_override_cost_budget?: boolean;
   can_rewrite_governance?: boolean;
   can_split_governance?: boolean;
   can_open_pr: boolean;
@@ -90,13 +92,16 @@ export type RuntimeDeliveryState =
 
 export type RuntimeDeliveryCode =
   | 'review_submit_failed'
+  | 'merge_blocked'
   | 'dirty_workspace_no_commit'
   | 'tracker_state_conflict'
   | 'no_actionable_diff'
   | 'manual_stop'
   | 'manual_close'
   | 'superseded'
-  | 'tracker_terminal_reconciled';
+  | 'tracker_terminal_reconciled'
+  | 'cost_budget_exceeded'
+  | 'turn_token_ceiling_reached';
 
 export interface RuntimeGovernanceActionView {
   outcome_kind: 'unblocked' | 'waiting_on_child' | 'child_still_blocked' | 'failed';
@@ -220,6 +225,7 @@ export interface RuntimeIssueView {
   delivery_state?: RuntimeDeliveryState | null;
   delivery_code?: RuntimeDeliveryCode | null;
   delivery_summary?: string | null;
+  last_review_decision?: string | null;
   supervisor_session_state?: string | null;
   supervisor_plan_summary?: string | null;
   supervisor_job_state?: string | null;
@@ -229,6 +235,7 @@ export interface RuntimeIssueView {
   fitness_signals?: Array<{ code: string; summary: string; severity: 'low' | 'medium' | 'high' }>;
   active_governance_suggestions?: GovernanceSuggestion[];
   governance_override?: RuntimeGovernanceOverrideView | null;
+  cost?: WorkItemCostSnapshot | null;
   actions: RuntimeActionState;
   created_at: string | null;
   updated_at: string | null;
@@ -280,6 +287,9 @@ export interface RuntimeAccessView {
   can_create_issue: boolean;
   can_control_issues: boolean;
   token_required: boolean;
+  authenticated?: boolean;
+  auth_source?: 'token' | 'session' | null;
+  session_expires_at?: string | null;
 }
 
 export interface RuntimeManifest {
@@ -295,6 +305,7 @@ export interface RuntimeManifest {
 
 export interface RuntimeOverview {
   generated_at: string;
+  cost?: CostOverviewSnapshot;
   counts: {
     running: number;
     retrying: number;
@@ -312,6 +323,8 @@ export interface CreateIssueRequest {
   state_id?: string | null;
   supervisor_locale?: RuntimeLocale | null;
   supervisor_execution_intent?: SupervisorExecutionIntent | null;
+  /** Stable key used to make Supervisor materialization safe to retry. */
+  idempotency_key?: string | null;
   defer_dispatch?: boolean | null;
   governance_lineage?: {
     root_issue_id: string;
@@ -359,8 +372,13 @@ export interface RuntimeControlPlane {
   getTimeline(id: string, limit?: number): RuntimeTimelineEvent[];
   getHistoryView(id: string, limit?: number): RuntimeIssueHistoryView | null;
   createIssue(input: CreateIssueRequest): Promise<CreateIssueResult>;
+  applySupervisorPlanRevision?(
+    id: string,
+    intent: SupervisorExecutionIntent,
+  ): Promise<RuntimeActionResult>;
   stopIssue(id: string): Promise<RuntimeActionResult>;
   retryIssue(id: string): Promise<RuntimeActionResult>;
+  overrideCostBudget?(id: string): Promise<RuntimeActionResult>;
   closeIssue(id: string, request?: CloseIssueRequest): Promise<RuntimeActionResult>;
   overrideGovernance(id: string): Promise<RuntimeActionResult>;
   rewriteGovernance(id: string): Promise<RuntimeActionResult>;

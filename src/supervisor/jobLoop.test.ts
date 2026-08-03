@@ -225,7 +225,7 @@ describe('SupervisorJobLoop', () => {
     expect(directiveJob?.status).toBe('succeeded');
   });
 
-  test('collapses superseded active sessions before polling runtime so stale Telegram decisions do not block new work', async () => {
+  test('keeps independent active sessions in the same conversation instead of cancelling by recency', async () => {
     const db = new Database(':memory:');
     initializeSchema(db);
     const sessions = new SupervisorSessionRepository(db);
@@ -295,9 +295,9 @@ describe('SupervisorJobLoop', () => {
 
     const result = await loop.tick();
 
-    expect(result.superseded_sessions_cancelled).toBe(1);
-    expect(result.sessions_checked).toBe(1);
-    expect(sessions.findById('old-delivery-decision')?.state).toBe('cancelled');
+    expect(result.superseded_sessions_cancelled).toBe(0);
+    expect(result.sessions_checked).toBe(2);
+    expect(sessions.findById('old-delivery-decision')?.state).toBe('awaiting_user_decision');
     expect(sessions.findById('new-plan')?.state).toBe('awaiting_user_decision');
   });
 

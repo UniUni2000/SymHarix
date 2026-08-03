@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
+import { spawn, type ChildProcess } from 'child_process';
 import { createDefaultTelegramApiFetch } from './telegramHttp';
 import { readSymHarixEnv } from '../config/env';
 
@@ -48,9 +48,10 @@ function buildWebhookUrl(baseUrl: string, inboundPath: string): string {
   return `${baseUrl}${normalizedPath}`;
 }
 
-async function defaultFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  return createDefaultTelegramApiFetch()(input, init);
-}
+const defaultFetch = (async (
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> => createDefaultTelegramApiFetch()(input, init)) as typeof fetch;
 
 function sleep(ms: number): Promise<void> {
   if (ms <= 0) {
@@ -171,7 +172,7 @@ export function createCloudflaredTunnelProvider(
   };
 }
 
-async function terminateChild(child: ChildProcessWithoutNullStreams): Promise<void> {
+async function terminateChild(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.killed) {
     return;
   }

@@ -30,14 +30,14 @@ import { createBotAssistantModelFromEnv, type BotAssistantModel } from './model'
 import type { SupervisorCcAdvisor, SupervisorCcAdvisorResult } from '../supervisor/ccAdvisor';
 import type { ResolvedRepositoryRoute } from '../types';
 import {
-  shouldUseReadOnlyClaudeForText,
+  shouldUseReadOnlyOpenCodeForText,
   type SupervisorAgentResult,
   type SupervisorAgentService,
   type SupervisorControlPlaneSnapshot,
 } from '../supervisor/supervisorAgent';
 import type { SupervisorRepoSourceResolver } from '../supervisor/repoSourceResolver';
 import type { SupervisorRepoUnderstandingService } from '../supervisor/repoUnderstanding';
-import type { SupervisorClaudeRuntimeService } from '../supervisor/claudeRuntime';
+import type { SupervisorOpenCodeRuntimeService } from '../supervisor/openCodeRuntime';
 import { SupervisorSessionService } from '../supervisor/sessionService';
 import type { SupervisorAgentRuntimeService } from '../supervisor/agentRuntime';
 import {
@@ -108,6 +108,27 @@ function isConfirmation(text: string): boolean {
 
 function isCancellation(text: string): boolean {
   return CANCEL_WORDS.has(text.trim().toLowerCase());
+}
+
+function isIdentityQueryText(text: string): boolean {
+  const normalized = text.trim().replace(/\s+/g, ' ').toLowerCase();
+  if (/^\/(?:whoami|id|me)(?:@[a-z0-9_]+)?$/.test(normalized)) {
+    return true;
+  }
+
+  const asksAboutSelf = /(?:我的|我自己的|本人|my\b|for me\b)/i.test(normalized);
+  const namesIdentity = /(?:dete(?:ct|xt)ed\s*user\s*id|operator[\s_-]*id|open[\s_-]*id|user[\s_-]*id|用户[\s_-]*id|飞书[\s_-]*id)/i.test(normalized);
+  const shortPersonalIdQuestion = /(?:我的|my)\s*(?:飞书\s*)?id(?:\s*是什么|\?|？|$)/i.test(normalized);
+  return (asksAboutSelf && namesIdentity) || shortPersonalIdQuestion;
+}
+
+function isExplicitIssueCreationRequest(text: string): boolean {
+  const normalized = text.trim().replace(/\s+/g, ' ');
+  if (/^(?:如何|怎么|怎样|为什么|what\b|how\b)/i.test(normalized)) {
+    return false;
+  }
+  return /(?:创建|新建|建|开|提).{0,24}(?:issue|任务|工单|单子)|create\s+(?:an?\s+)?(?:issue|task)|open\s+(?:an?\s+)?issue/i.test(normalized)
+    || /(?:让你|你来|由你|给你).{0,16}(?:提|建|开).{0,8}(?:issue|任务|工单|单子)/i.test(normalized);
 }
 
 function isOpenPendingAction(
@@ -381,7 +402,7 @@ function nonBlankString(value: unknown): string | null {
   return trimmed ? trimmed : null;
 }
 
-function parseSupervisorClaudeStructuredIntent(message: string): BotAssistantIntent | null {
+function parseSupervisorOpenCodeStructuredIntent(message: string): BotAssistantIntent | null {
   const record = extractJsonObject(message);
   if (!record) {
     return null;
@@ -438,7 +459,7 @@ function parseSupervisorClaudeStructuredIntent(message: string): BotAssistantInt
   return null;
 }
 
-function parseSupervisorClaudeStructuredReply(message: string): BotCommandResponse | null {
+function parseSupervisorOpenCodeStructuredReply(message: string): BotCommandResponse | null {
   const record = extractJsonObject(message);
   if (!record) {
     return null;
@@ -482,12 +503,11 @@ function shouldRequireOrchestratorBackedResponse(text: string): boolean {
     Boolean(detectPendingReplacementControlIntent(normalized)) ||
     isNaturalRetryRequest(normalized) ||
     /停止|停掉|stop|cancel run|halt/i.test(normalized) ||
-    /(?:创建|新建).{0,24}issue|(?:建|开|提).{0,12}(?:一个|个|一条|条)?\s*(?:issue|任务|工单|单子)|create\s+(?:an?\s+)?issue|open\s+(?:an?\s+)?issue/i.test(normalized) ||
-    /(?:让你|你来|由你|给你).{0,16}(?:提|建|开).{0,8}(?:issue|任务|工单|单子)/i.test(normalized);
+    isExplicitIssueCreationRequest(normalized);
 }
 
-function isSupervisorClaudeBusinessToolDenial(message: string): boolean {
-  return /(?:只读\s*(?:Claude\s*Code\s*)?(?:brain|大脑)|read-only\s+(?:Claude\s+Code\s+)?brain)/i.test(message) ||
+function isSupervisorOpenCodeBusinessToolDenial(message: string): boolean {
+  return /(?:只读\s*(?:(?:Claude\s*Code|OpenCode)\s*)?(?:brain|大脑)|read-only\s+(?:(?:Claude\s+Code|OpenCode)\s+)?brain)/i.test(message) ||
     /(?:不能做|无法|不能|没法)[\s\S]{0,160}(?:创建|新建|关闭|重试|retry|close|create)[\s\S]{0,80}(?:issue|Linear|orchestrator|动作|工具|tool)/i.test(message) ||
     /(?:无法|不能|没法)[\s\S]{0,80}(?:直接)?(?:操作|调用|触发)[\s\S]{0,80}(?:orchestrator|控制台|工具|tool)/i.test(message) ||
     /(?:需要|请)[\s\S]{0,80}(?:通过|到)[\s\S]{0,80}(?:orchestrator|控制台|Linear|GitHub)[\s\S]{0,80}(?:手动|触发|操作)/i.test(message) ||
@@ -504,7 +524,7 @@ function shouldFallbackToOrchestratorBackedRuntime(params: {
     return false;
   }
   return shouldRequireOrchestratorBackedResponse(params.requestText) ||
-    isSupervisorClaudeBusinessToolDenial(params.response.message);
+    isSupervisorOpenCodeBusinessToolDenial(params.response.message);
 }
 
 function shouldProbeActiveSupervisorSession(params: {
@@ -608,6 +628,7 @@ function coerceIntent(value: Record<string, unknown> | null): BotAssistantIntent
     case 'unwatch':
     case 'stop':
     case 'retry':
+    case 'approve_budget':
     case 'close_issue':
     case 'override':
     case 'rewrite':
@@ -710,7 +731,7 @@ function coerceIntent(value: Record<string, unknown> | null): BotAssistantIntent
 }
 
 function isDecisionOutput(value: BotAssistantModelOutput): value is BotAssistantDecision {
-  return Boolean(value) && typeof value === 'object' && 'intent' in value;
+  return value !== null && typeof value === 'object' && 'intent' in value;
 }
 
 function defaultDiagnostics(): BotAssistantDiagnostics {
@@ -756,6 +777,7 @@ function toPendingRequest(intent: BotAssistantIntent): BotCommandRequest | null 
     case 'unwatch':
     case 'stop':
     case 'retry':
+    case 'approve_budget':
     case 'close_issue':
     case 'override':
     case 'rewrite':
@@ -1083,17 +1105,18 @@ function explainGovernanceNextStep(focusIssue: BotFocusedIssueContext): string {
     ].filter(Boolean).join('\n');
   }
 
+  const childIssues = governance.child_issues ?? [];
   return [
     `${focusIssue.issue.identifier} 当前的治理状态是 ${governance.decision || governance.status || 'unknown'}。`,
-    governance.thread_state === 'waiting_on_child' && governance.child_issues[0]
-      ? `当前源单还在等治理子任务 ${governance.child_issues[0].issue_identifier}，所以不会继续自动开发。`
+    governance.thread_state === 'waiting_on_child' && childIssues[0]
+      ? `当前源单还在等治理子任务 ${childIssues[0].issue_identifier}，所以不会继续自动开发。`
       : null,
     governance.pause_reason ? `暂停原因：${governance.pause_reason}` : null,
     governance.summary ? `原因：${governance.summary}` : null,
     governance.suggestions[0] ? `建议：${governance.suggestions[0].summary}` : null,
     governance.suggestions[1] ? `备选：${governance.suggestions[1].summary}` : null,
-    governance.child_issues.length > 0
-      ? `治理子任务：${governance.child_issues.map((child) => `${child.issue_identifier} · ${child.title}`).join('；')}`
+    childIssues.length > 0
+      ? `治理子任务：${childIssues.map((child) => `${child.issue_identifier} · ${child.title}`).join('；')}`
       : null,
     governance.next_recommended_action ? `下一步：${governance.next_recommended_action}` : null,
     governance.expected_handoff ? `接力方式：${governance.expected_handoff}` : null,
@@ -1269,6 +1292,18 @@ function buildHeuristicDecision(
         ? context.overview.active_issues[0]!.identifier
         : null
     );
+
+  if (
+    controlTargetIssue
+    && /(?:批准|同意|放行|解除|提高|override|approve).*(?:预算|费用|成本|token)|(?:预算|费用|成本|token).*(?:批准|同意|放行|解除|提高|override|approve)/i.test(trimmed)
+  ) {
+    return {
+      intent: {
+        kind: 'approve_budget',
+        issue_id: controlTargetIssue,
+      },
+    };
+  }
 
   if (bareOrdinal && focusIssue) {
     const runtimeLikeIssue = {
@@ -1538,7 +1573,7 @@ function buildHeuristicDecision(
     };
   }
 
-  if (/写一个|创建.*issue|建单|新建任务|new\s+/i.test(trimmed)) {
+  if (/写一个|new\s+/i.test(trimmed) || isExplicitIssueCreationRequest(trimmed)) {
     const title = lines[0] || trimmed;
     return {
       intent: {
@@ -1731,7 +1766,7 @@ export class BotAssistantService {
     private readonly supervisorRepoSourceResolver: SupervisorRepoSourceResolver | null = null,
     private readonly conversationFocuses: BotConversationFocusRepository | null = null,
     private readonly supervisorAgentRuntime: Pick<SupervisorAgentRuntimeService, 'respond'> | null = null,
-    private readonly supervisorClaudeRuntime: Pick<SupervisorClaudeRuntimeService, 'respond'> | null = null,
+    private readonly supervisorOpenCodeRuntime: Pick<SupervisorOpenCodeRuntimeService, 'respond'> | null = null,
   ) {
     this.model = normalizeModel(model);
     this.runtimeContext = new BotRuntimeContextService(
@@ -1836,9 +1871,9 @@ export class BotAssistantService {
         repoRef: focusedRepoRef,
       }),
     );
-    const forceReadOnlyClaude = hasActiveRepoConversation || shouldUseReadOnlyClaudeForText(text);
+    const forceReadOnlyOpenCode = hasActiveRepoConversation || shouldUseReadOnlyOpenCodeForText(text);
 
-    if (!focusedRepoRef && forceReadOnlyClaude) {
+    if (!focusedRepoRef && forceReadOnlyOpenCode) {
       const available = runtimeContext.available_projects.map((item) => item.project_slug);
       return {
         mode: 'clarify',
@@ -1855,7 +1890,7 @@ export class BotAssistantService {
         repoRef: focusedRepoRef,
         defaultRepoRef,
         userText: text,
-        forceReadOnlyClaude,
+        forceReadOnlyOpenCode,
         projectContext: toAdvisorProjectContext(runtimeContext),
         controlPlaneSnapshot: buildControlPlaneSnapshot(runtimeContext),
         route,
@@ -1883,7 +1918,7 @@ export class BotAssistantService {
   ): Promise<BotCommandResponse> {
     if (!isSupervisorChatTransport(context) || !this.supervisorAgentService?.clearRepoConversation) {
       return {
-        message: '当前没有可清空的仓库 Claude 会话。',
+        message: '当前没有可清空的仓库 OpenCode 会话。',
       };
     }
 
@@ -1904,15 +1939,15 @@ export class BotAssistantService {
     if (cleared === 0) {
       return {
         message: repoRef
-          ? `当前没有 ${repoRef} 的连续仓库 Claude 会话可清空。`
-          : '当前聊天没有连续仓库 Claude 会话可清空。',
+          ? `当前没有 ${repoRef} 的连续仓库 OpenCode 会话可清空。`
+          : '当前聊天没有连续仓库 OpenCode 会话可清空。',
       };
     }
 
     return {
       message: repoRef
-        ? `已清空 ${repoRef} 的连续仓库 Claude 会话。下一次仓库问题会重新读取最新 source cache。`
-        : `已清空当前聊天的 ${cleared} 个连续仓库 Claude 会话。下一次仓库问题会重新读取最新 source cache。`,
+        ? `已清空 ${repoRef} 的连续仓库 OpenCode 会话。下一次仓库问题会重新读取最新 source cache。`
+        : `已清空当前聊天的 ${cleared} 个连续仓库 OpenCode 会话。下一次仓库问题会重新读取最新 source cache。`,
     };
   }
 
@@ -1995,25 +2030,25 @@ export class BotAssistantService {
     return null;
   }
 
-  private async respondWithSupervisorClaudeRuntime(
+  private async respondWithSupervisorOpenCodeRuntime(
     context: BotCommandContext,
     text: string,
     options: { allowStructuredIntent?: boolean } = {},
   ): Promise<BotCommandResponse | null> {
-    if (!isSupervisorChatTransport(context) || !this.supervisorClaudeRuntime) {
+    if (!isSupervisorChatTransport(context) || !this.supervisorOpenCodeRuntime) {
       return null;
     }
-    const supervisorClaudeResponse = await this.supervisorClaudeRuntime.respond({
+    const supervisorOpenCodeResponse = await this.supervisorOpenCodeRuntime.respond({
       context,
       text,
       canWrite: this.canWrite(context),
     });
-    if (!supervisorClaudeResponse) {
+    if (!supervisorOpenCodeResponse) {
       return null;
     }
     const allowStructuredIntent = options.allowStructuredIntent ?? true;
     if (allowStructuredIntent) {
-      const structuredIntent = parseSupervisorClaudeStructuredIntent(supervisorClaudeResponse.message);
+      const structuredIntent = parseSupervisorOpenCodeStructuredIntent(supervisorOpenCodeResponse.message);
       if (structuredIntent) {
         const runtimeContext = await this.runtimeContext.buildContext(
           context,
@@ -2023,14 +2058,14 @@ export class BotAssistantService {
         return this.handleIntent(context, structuredIntent, text, runtimeContext);
       }
     }
-    const structuredReply = parseSupervisorClaudeStructuredReply(supervisorClaudeResponse.message);
+    const structuredReply = parseSupervisorOpenCodeStructuredReply(supervisorOpenCodeResponse.message);
     if (structuredReply) {
       return structuredReply;
     }
     if (
       shouldFallbackToOrchestratorBackedRuntime({
         requestText: text,
-        response: supervisorClaudeResponse,
+        response: supervisorOpenCodeResponse,
       }) &&
       this.supervisorAgentRuntime
     ) {
@@ -2042,8 +2077,8 @@ export class BotAssistantService {
       this.rememberResponseIssueFocus(context, fallbackResponse);
       return fallbackResponse;
     }
-    this.rememberResponseIssueFocus(context, supervisorClaudeResponse);
-    return supervisorClaudeResponse;
+    this.rememberResponseIssueFocus(context, supervisorOpenCodeResponse);
+    return supervisorOpenCodeResponse;
   }
 
   private async respondFromSupervisorAgentResult(params: {
@@ -2102,6 +2137,23 @@ export class BotAssistantService {
 
   async respondToText(context: BotCommandContext, text: string): Promise<BotCommandResponse> {
     const normalized = text.trim();
+
+    // Identity discovery is part of initial fail-closed setup. Keep it ahead of
+    // pending actions and model routing so it is deterministic and free.
+    if (isIdentityQueryText(normalized)) {
+      return this.commandService.execute(context, { command: 'whoami', raw_text: text });
+    }
+
+    // A clear write request from an untrusted sender must reach the permission
+    // boundary directly. Letting a chat model reinterpret it can hide the
+    // operator-id discovery message needed during first-run setup.
+    if (!this.canWrite(context) && isExplicitIssueCreationRequest(normalized)) {
+      return this.commandService.execute(context, {
+        command: 'new',
+        create_issue: { title: normalized },
+        raw_text: text,
+      });
+    }
 
     const pendingCandidate = this.pendingActions
       ?.findLatestByConversation({
@@ -2187,11 +2239,11 @@ export class BotAssistantService {
             canWrite: this.canWrite(context),
           });
         }
-        const supervisorClaudeResponse = await this.respondWithSupervisorClaudeRuntime(context, text, {
+        const supervisorOpenCodeResponse = await this.respondWithSupervisorOpenCodeRuntime(context, text, {
           allowStructuredIntent: false,
         });
-        if (supervisorClaudeResponse) {
-          return supervisorClaudeResponse;
+        if (supervisorOpenCodeResponse) {
+          return supervisorOpenCodeResponse;
         }
         const cardFocusResponse = await this.respondToCardFocusRequest(context, normalized);
         if (cardFocusResponse) {
@@ -2262,9 +2314,9 @@ export class BotAssistantService {
       };
     }
 
-    const supervisorClaudeResponse = await this.respondWithSupervisorClaudeRuntime(context, text);
-    if (supervisorClaudeResponse) {
-      return supervisorClaudeResponse;
+    const supervisorOpenCodeResponse = await this.respondWithSupervisorOpenCodeRuntime(context, text);
+    if (supervisorOpenCodeResponse) {
+      return supervisorOpenCodeResponse;
     }
 
     const cardFocusResponse = await this.respondToCardFocusRequest(context, normalized);
@@ -2321,7 +2373,7 @@ export class BotAssistantService {
       const supervisorResponse = await this.supervisorSessionService.respond({
         context,
         text,
-        intent: fastHeuristic.intent.kind === 'help' ? null : fastHeuristic.intent,
+        intent: fastHeuristic.intent,
         runtimeContext,
         canWrite: this.canWrite(context),
         source: supervisorIntakeSourceForContext(context),
@@ -2358,17 +2410,18 @@ export class BotAssistantService {
       }
     }
 
+    const supervisorSessionService = this.supervisorSessionService;
     if (shouldProbeActiveSupervisorSession({
       context,
       hasActiveSupervisorSession,
-      supervisorSessionService: this.supervisorSessionService,
+      supervisorSessionService,
     })) {
       supervisorAttempted = true;
       const source: SupervisorIntakeSource = supervisorIntakeSourceForContext(context);
-      const supervisorResponse = await this.supervisorSessionService.respond({
+      const supervisorResponse = await supervisorSessionService!.respond({
         context,
         text,
-        intent: fastHeuristic.intent.kind === 'help' ? null : fastHeuristic.intent,
+        intent: fastHeuristic.intent,
         runtimeContext,
         canWrite: this.canWrite(context),
         source,
@@ -2421,7 +2474,7 @@ export class BotAssistantService {
       const supervisorResponse = await this.supervisorSessionService.respond({
         context,
         text,
-        intent: fastHeuristic.intent.kind === 'help' ? null : fastHeuristic.intent,
+        intent: fastHeuristic.intent,
         runtimeContext,
         canWrite: this.canWrite(context),
         source,
@@ -2751,6 +2804,7 @@ export class BotAssistantService {
       case 'unwatch':
       case 'stop':
       case 'retry':
+      case 'approve_budget':
       case 'close_issue':
       case 'supersede_issue':
       case 'override':
@@ -2850,6 +2904,7 @@ function isDeterministicControlIntent(intent: BotAssistantIntent): boolean {
     'unwatch',
     'stop',
     'retry',
+    'approve_budget',
     'close_issue',
     'supersede_issue',
     'override',

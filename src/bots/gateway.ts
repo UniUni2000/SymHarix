@@ -31,11 +31,12 @@ import {
   ReviewEventRepository,
   ShadowHarnessRepository,
   SupervisorSessionEventRepository,
+  SupervisorPlanVersionRepository,
   SupervisorSessionRepository,
   SupervisorJobRepository,
   SupervisorMemoryRepository,
   SupervisorRepoUnderstandingRepository,
-  RepoClaudeConversationRepository,
+  RepoAgentConversationRepository,
   SupervisorPendingActionRepository,
   SupervisorRunEventRepository,
   SupervisorRunRepository,
@@ -63,6 +64,7 @@ import type {
   TelegramCallbackAuditRecord,
 } from './types';
 import { BotMessageEditError, getBotMessageEditFailureKind } from './types';
+import { createBotWriteAuthorizer } from './access';
 import { TrackerProjectResolutionService } from '../tracker/projectResolution';
 import { createBotAssistantModelFromEnv, type BotAssistantModel } from './model';
 import {
@@ -101,7 +103,7 @@ import {
 import { inferRuntimeLocaleFromText, type RuntimeLocale } from '../i18n/locale';
 import {
   createSupervisorAgentFromEnv,
-  shouldUseReadOnlyClaudeForText,
+  shouldUseReadOnlyOpenCodeForText,
   type SupervisorAgentService,
 } from '../supervisor/supervisorAgent';
 import {
@@ -154,14 +156,14 @@ function buildTelegramCallbackFailureFallbackText(
   );
 }
 import {
-  createClaudeCodeRepoUnderstandingRunner,
-  DefaultClaudeRepoUnderstandingService,
+  createOpenCodeRepoUnderstandingRunner,
+  DefaultOpenCodeRepoUnderstandingService,
   resolveGitCommit,
-} from '../supervisor/claudeRepoUnderstandingService';
+} from '../supervisor/openCodeRepoUnderstandingService';
 import { DefaultRepoProfileService } from '../supervisor/repoProfileService';
 import { GovernanceMemoryService } from '../governance/repoIntelligence';
 import { SupervisorAgentRuntimeService, createSupervisorToolRouterModel } from '../supervisor/agentRuntime';
-import { SupervisorClaudeRuntimeService, type SupervisorClaudeRuntimeHandle } from '../supervisor/claudeRuntime';
+import { SupervisorOpenCodeRuntimeService, type SupervisorOpenCodeRuntimeHandle } from '../supervisor/openCodeRuntime';
 import {
   SUPERVISOR_CONTEXT_TOOL_NAMES,
   SupervisorContextBroker,
@@ -294,7 +296,7 @@ type TelegramCallbackKind =
   | 'supervisor_action'
   | 'runtime_action'
   | 'unknown';
-type TelegramRuntimeAction = 'refresh' | 'retry' | 'stop' | 'close' | 'open';
+type TelegramRuntimeAction = 'refresh' | 'retry' | 'stop' | 'close' | 'open' | 'budget';
 type TelegramCallbackDeliveryMode = 'edited' | 'sent_fallback' | 'kept_original';
 
 function telegramCallbackDeliveryResult(mode: TelegramCallbackDeliveryMode): TelegramCallbackAuditRecord['result'] {
@@ -539,7 +541,7 @@ class TelegramNotifier implements BotTransportNotifier {
     if (photo.bytes) {
       form.set(
         'photo',
-        new Blob([photo.bytes], { type: photo.content_type || 'image/png' }),
+        new Blob([new Uint8Array(photo.bytes).buffer as ArrayBuffer], { type: photo.content_type || 'image/png' }),
         photo.filename || 'issue-card.png',
       );
       return;
@@ -1002,24 +1004,6 @@ function isSupervisorChatTransport(transport: BotTransport): boolean {
   return transport === 'telegram' || transport === 'feishu';
 }
 
-function createBotWriteAuthorizer(params: {
-  telegramOperatorIds: Set<string>;
-  discordOperatorIds: Set<string>;
-  feishuOperatorIds: Set<string>;
-}): (context: BotCommandContext) => boolean {
-  return (context) => {
-    const operatorIds = context.transport === 'telegram'
-      ? params.telegramOperatorIds
-      : context.transport === 'feishu'
-        ? params.feishuOperatorIds
-        : params.discordOperatorIds;
-    if (operatorIds.size === 0) {
-      return true;
-    }
-    return Boolean(context.identity.user_id && operatorIds.has(context.identity.user_id));
-  };
-}
-
 function parsePositiveInteger(value: string | null | undefined): number | null {
   const normalized = value?.trim();
   if (!normalized) {
@@ -1188,10 +1172,11 @@ function createRepoUnderstandingServiceFromEnv(
   const repository = new SupervisorRepoUnderstandingRepository(db);
   const timeoutMs = parsePositiveInteger(readSymHarixEnv('SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_TIMEOUT_MS'))
     ?? 120_000;
-  const command = readSymHarixEnv('SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_COMMAND')
-    || 'node scripts/claude-adapter.cjs';
+  const command = readSymHarixEnv('SYMPHONY_SUPERVISOR_OPENCODE_REPO_UNDERSTANDING_COMMAND')
+    || readSymHarixEnv('SYMPHONY_SUPERVISOR_REPO_UNDERSTANDING_COMMAND')
+    || 'node scripts/opencode-adapter.cjs';
 
-  return new DefaultClaudeRepoUnderstandingService({
+  return new DefaultOpenCodeRepoUnderstandingService({
     findCached: async ({ repoRef, commitSha }) => mapReadyRepoUnderstanding(
       repository.findByRepoAndCommit(repoRef, commitSha),
     ),
@@ -1205,12 +1190,12 @@ function createRepoUnderstandingServiceFromEnv(
         summary: snapshot.summary,
         understanding_json: snapshot.understanding,
         evidence_paths_json: snapshot.evidence_paths,
-        generated_by: snapshot.source === 'fallback' ? 'fallback' : 'claude_code',
+        generated_by: snapshot.source === 'fallback' ? 'fallback' : 'opencode',
         error: null,
       });
     },
     resolveCommit: resolveGitCommit,
-    runClaude: createClaudeCodeRepoUnderstandingRunner({
+    runOpenCode: createOpenCodeRepoUnderstandingRunner({
       command,
       timeoutMs,
       projectRoot: process.cwd(),
@@ -1236,6 +1221,7 @@ export class DefaultBotGateway implements BotGateway {
   private readonly telegramBootstrap: TelegramWebhookBootstrapService | null;
   private readonly supervisorSessions: SupervisorSessionRepository | null;
   private readonly supervisorSessionEvents: SupervisorSessionEventRepository | null;
+  private readonly supervisorPlanVersions: SupervisorPlanVersionRepository | null;
   private readonly supervisorSessionService: SupervisorSessionService | null;
   private readonly supervisorWorker: SupervisorWorker | null;
   private readonly supervisorJobLoop: SupervisorJobLoop | null;
@@ -1243,15 +1229,104 @@ export class DefaultBotGateway implements BotGateway {
   private readonly supervisorRepoSourceResolver: SupervisorRepoSourceResolver | null;
   private readonly supervisorAgentService: SupervisorAgentService | null;
   private readonly supervisorAgentRuntime: SupervisorAgentRuntimeService | null;
-  private readonly supervisorClaudeRuntime: SupervisorClaudeRuntimeHandle | null;
+  private readonly supervisorOpenCodeRuntime: SupervisorOpenCodeRuntimeHandle | null;
   private readonly supervisorContextBroker: SupervisorContextBroker | null;
   private readonly supervisorOrchestratorBroker: SupervisorOrchestratorBroker | null;
   private readonly supervisorRuns: SupervisorRunRepository | null;
   private readonly supervisorRunEvents: SupervisorRunEventRepository | null;
   private readonly supervisorToolCalls: SupervisorToolCallRepository | null;
   private readonly supervisorPendingActions: SupervisorPendingActionRepository | null;
-  private readonly repoClaudeConversations: RepoClaudeConversationRepository | null;
+  private readonly repoAgentConversations: RepoAgentConversationRepository | null;
   private readonly botWriteAuthorizer: (context: BotCommandContext) => boolean;
+
+  listSupervisorPlans() {
+    return (this.supervisorSessionService?.listSessions() ?? []).map((session) => ({
+      session,
+      ...this.planVersionHistory(session.id),
+    }));
+  }
+
+  getSupervisorPlan(sessionId: string) {
+    const session = this.supervisorSessionService?.findById(sessionId) ?? null;
+    return session ? {
+      session,
+      ...this.planVersionHistory(session.id),
+    } : null;
+  }
+
+  private planVersionHistory(sessionId: string) {
+    const versions = this.supervisorSessionService?.listPlanVersions(sessionId) ?? [];
+    const ascending = [...versions].sort((left, right) => left.plan_version - right.plan_version);
+    const versionDiffs = ascending.map((version, index) => {
+      const previous = ascending[index - 1]?.plan_card ?? null;
+      const current = version.plan_card;
+      const fields = [
+        'title', 'user_goal', 'in_scope', 'out_of_scope', 'acceptance', 'known_risks',
+        'execution_strategy', 'materialization_mode', 'steps', 'affected_paths', 'test_commands',
+      ];
+      const changedFields = previous
+        ? fields.filter((field) => JSON.stringify((previous as any)[field]) !== JSON.stringify((current as any)[field]))
+        : fields.filter((field) => (current as any)[field] != null);
+      const difference = (left: string[] | undefined, right: string[] | undefined) => (
+        (left ?? []).filter((value) => !(right ?? []).includes(value))
+      );
+      return {
+        from_version: previous ? ascending[index - 1]!.plan_version : null,
+        to_version: version.plan_version,
+        changed_fields: changedFields,
+        scope_added: difference(current.in_scope, previous?.in_scope),
+        scope_removed: difference(previous?.in_scope, current.in_scope),
+        acceptance_added: difference(current.acceptance, previous?.acceptance),
+        acceptance_removed: difference(previous?.acceptance, current.acceptance),
+      };
+    });
+    return { versions, version_diffs: versionDiffs };
+  }
+
+  async actOnSupervisorPlan(input: {
+    sessionId: string;
+    action: 'approve' | 'alternate' | 'cancel' | 'rollback';
+    expectedPlanVersion: number;
+    targetPlanVersion?: number | null;
+  }): Promise<BotCommandResponse> {
+    if (!this.supervisorSessionService) {
+      return { message: 'Planner is not configured.' };
+    }
+    if (input.action === 'rollback') {
+      return this.supervisorSessionService.rollbackPlanFromRuntime({
+        sessionId: input.sessionId,
+        targetPlanVersion: input.targetPlanVersion ?? 0,
+        expectedPlanVersion: input.expectedPlanVersion,
+        canWrite: true,
+      });
+    }
+    const session = this.supervisorSessionService.findById(input.sessionId);
+    if (!session) {
+      return { message: 'Plan session not found.' };
+    }
+    return this.supervisorSessionService.respondToAction({
+      context: {
+        transport: session.transport,
+        recipient: { transport: session.transport, conversation_id: session.conversation_id },
+        identity: { user_id: session.user_id, display_name: 'Runtime operator' },
+      },
+      sessionId: input.sessionId,
+      action: input.action,
+      canWrite: true,
+      expectedPlanVersion: input.expectedPlanVersion,
+    });
+  }
+
+  async reviseSupervisorPlan(input: {
+    sessionId: string;
+    instruction: string;
+    expectedPlanVersion: number;
+  }): Promise<BotCommandResponse> {
+    return this.supervisorSessionService?.revisePlanFromRuntime({
+      ...input,
+      canWrite: true,
+    }) ?? { message: 'Planner is not configured.' };
+  }
   private readonly feishuConfig: FeishuAdapterConfig;
   private readonly telegramTextProcessingAckDelayMs: number;
   private readonly telegramTextCoalesceDelayMs: number;
@@ -1289,19 +1364,24 @@ export class DefaultBotGateway implements BotGateway {
       transportEventRepository?: BotTransportEventRepository | null;
       supervisorSessionRepository?: SupervisorSessionRepository | null;
       supervisorSessionEventRepository?: SupervisorSessionEventRepository | null;
+      supervisorPlanVersionRepository?: SupervisorPlanVersionRepository | null;
       supervisorJobRepository?: SupervisorJobRepository | null;
       supervisorMemoryRepository?: SupervisorMemoryRepository | null;
       supervisorRunRepository?: SupervisorRunRepository | null;
       supervisorRunEventRepository?: SupervisorRunEventRepository | null;
       supervisorToolCallRepository?: SupervisorToolCallRepository | null;
       supervisorPendingActionRepository?: SupervisorPendingActionRepository | null;
-      repoClaudeConversationRepository?: RepoClaudeConversationRepository | null;
+      repoAgentConversationRepository?: RepoAgentConversationRepository | null;
+      /** @deprecated Use repoAgentConversationRepository. */
+      repoClaudeConversationRepository?: RepoAgentConversationRepository | null;
       supervisorAgentRuntimeService?: SupervisorAgentRuntimeService | null;
       supervisorSessionService?: SupervisorSessionService | null;
       supervisorPlanBrain?: SupervisorPlanBrain | null;
       supervisorExecutionOverseer?: SupervisorExecutionOverseer | null;
       supervisorRepoIntelligenceResolver?: SupervisorRepoIntelligenceResolver | null;
-      supervisorClaudeRuntimeService?: SupervisorClaudeRuntimeHandle | null;
+      supervisorOpenCodeRuntimeService?: SupervisorOpenCodeRuntimeHandle | null;
+      /** @deprecated Use supervisorOpenCodeRuntimeService. */
+      supervisorClaudeRuntimeService?: SupervisorOpenCodeRuntimeHandle | null;
       supervisorContextBroker?: SupervisorContextBroker | null;
       supervisorOrchestratorBroker?: SupervisorOrchestratorBroker | null;
       workItemRepository?: WorkItemRepository | null;
@@ -1332,11 +1412,14 @@ export class DefaultBotGateway implements BotGateway {
     this.transportEvents = options.transportEventRepository ?? null;
     this.supervisorSessions = options.supervisorSessionRepository ?? null;
     this.supervisorSessionEvents = options.supervisorSessionEventRepository ?? null;
+    this.supervisorPlanVersions = options.supervisorPlanVersionRepository ?? null;
     this.supervisorRuns = options.supervisorRunRepository ?? null;
     this.supervisorRunEvents = options.supervisorRunEventRepository ?? null;
     this.supervisorToolCalls = options.supervisorToolCallRepository ?? null;
     this.supervisorPendingActions = options.supervisorPendingActionRepository ?? null;
-    this.repoClaudeConversations = options.repoClaudeConversationRepository ?? null;
+    this.repoAgentConversations = options.repoAgentConversationRepository
+      ?? options.repoClaudeConversationRepository
+      ?? null;
     this.telegramTextProcessingAckDelayMs = Math.max(
       1,
       options.telegramTextProcessingAckDelayMs
@@ -1421,7 +1504,7 @@ export class DefaultBotGateway implements BotGateway {
                 events: this.supervisorRunEvents,
                 toolCalls: this.supervisorToolCalls,
                 pendingActions: this.supervisorPendingActions,
-                repoConversations: this.repoClaudeConversations,
+                repoConversations: this.repoAgentConversations,
                 model: createSupervisorToolRouterModel(assistantModel),
                 supervisorAgentService: this.supervisorAgentService,
                 onProgress: async ({ context, message }) => {
@@ -1441,6 +1524,8 @@ export class DefaultBotGateway implements BotGateway {
             options.supervisorRepoIntelligenceResolver ?? null,
             options.supervisorPlanBrain ?? null,
             options.supervisorExecutionOverseer ?? createSupervisorExecutionOverseerFromEnv(),
+            this.supervisorPlanVersions,
+            options.repoUnderstandingService ?? null,
           )
         : null);
     this.supervisorContextBroker = options.supervisorContextBroker === undefined
@@ -1472,14 +1557,16 @@ export class DefaultBotGateway implements BotGateway {
                 events: this.supervisorRunEvents,
                 toolCalls: this.supervisorToolCalls,
                 pendingActions: this.supervisorPendingActions,
-                repoConversations: this.repoClaudeConversations,
+                repoConversations: this.repoAgentConversations,
                 supervisorAgentService: this.supervisorAgentService,
               })
             : null
         )
       : options.supervisorOrchestratorBroker;
-    this.supervisorClaudeRuntime = options.supervisorClaudeRuntimeService ?? null;
-    this.supervisorClaudeRuntime?.setOrchestratorBridge?.(this.supervisorOrchestratorBroker);
+    this.supervisorOpenCodeRuntime = options.supervisorOpenCodeRuntimeService
+      ?? options.supervisorClaudeRuntimeService
+      ?? null;
+    this.supervisorOpenCodeRuntime?.setOrchestratorBridge?.(this.supervisorOrchestratorBroker);
     this.assistantService = new BotAssistantService(
       runtime,
       this.commandService,
@@ -1497,7 +1584,7 @@ export class DefaultBotGateway implements BotGateway {
       this.supervisorRepoSourceResolver,
       this.conversationFocuses,
       this.supervisorAgentRuntime,
-      this.supervisorClaudeRuntime,
+      this.supervisorOpenCodeRuntime,
     );
     const runStartupRepair = () => {
       try {
@@ -1611,7 +1698,7 @@ export class DefaultBotGateway implements BotGateway {
         title: session.plan_card?.title ?? null,
         repo_ref: session.repo_ref,
         root_issue_id: session.root_issue_id,
-        updated_at: session.updated_at,
+        updated_at: session.updated_at.toISOString(),
       }));
 
     return {
@@ -1621,7 +1708,8 @@ export class DefaultBotGateway implements BotGateway {
           inbound_enabled: telegramInboundEnabled,
           outbound_enabled: telegramOutboundEnabled,
           watch_supported: telegramOutboundEnabled,
-          write_requires_operator: this.telegramConfig.operatorIds.size > 0,
+          write_requires_operator: true,
+          operator_configured: this.telegramConfig.operatorIds.size > 0,
           inbound_path: '/api/v1/bots/telegram/webhook',
           proactive_followups_supported: Boolean(this.telegramNotifier),
           inline_actions_supported: Boolean(this.telegramNotifier),
@@ -1645,7 +1733,8 @@ export class DefaultBotGateway implements BotGateway {
           inbound_enabled: feishuInboundEnabled,
           outbound_enabled: feishuOutboundEnabled,
           watch_supported: feishuOutboundEnabled,
-          write_requires_operator: this.feishuConfig.operatorIds.size > 0,
+          write_requires_operator: true,
+          operator_configured: this.feishuConfig.operatorIds.size > 0,
           inbound_path: 'long_connection',
           proactive_followups_supported: Boolean(this.feishuNotifier),
           inline_actions_supported: Boolean(this.feishuNotifier),
@@ -1660,11 +1749,12 @@ export class DefaultBotGateway implements BotGateway {
           inbound_enabled: discordInboundEnabled,
           outbound_enabled: discordOutboundEnabled,
           watch_supported: discordOutboundEnabled,
-          write_requires_operator: this.discordConfig.operatorIds.size > 0,
+          write_requires_operator: true,
+          operator_configured: this.discordConfig.operatorIds.size > 0,
           inbound_path: '/api/v1/bots/discord/interactions',
         },
       },
-      commands: ['help', 'clear', 'status', 'new', 'project', 'watch', 'unwatch', 'stop', 'retry', 'close', 'supersede', 'override', 'rewrite', 'split'],
+      commands: ['help', 'clear', 'status', 'new', 'project', 'watch', 'unwatch', 'stop', 'retry', 'approve_budget', 'close_issue', 'supersede_issue', 'override', 'rewrite', 'split'],
       watch_presets: ['default', 'verbose', 'failures', 'status'],
       assistant: this.assistantService.getDiagnostics(),
       natural_language_enabled: true,
@@ -1705,8 +1795,8 @@ export class DefaultBotGateway implements BotGateway {
     inboundPath?: string;
   }): Promise<void> {
     const localBaseUrl = params.localBaseUrl.replace(/\/+$/, '');
-    this.supervisorClaudeRuntime?.setContextEndpoint?.(`${localBaseUrl}/api/v1/bots/supervisor-context/call`);
-    this.supervisorClaudeRuntime?.setOrchestratorEndpoint?.(`${localBaseUrl}/api/v1/bots/supervisor-orchestrator/call`);
+    this.supervisorOpenCodeRuntime?.setContextEndpoint?.(`${localBaseUrl}/api/v1/bots/supervisor-context/call`);
+    this.supervisorOpenCodeRuntime?.setOrchestratorEndpoint?.(`${localBaseUrl}/api/v1/bots/supervisor-orchestrator/call`);
     if (this.feishuNotifier && !this.feishuConfig.publicBaseUrl) {
       this.feishuConfig.publicBaseUrl = localBaseUrl;
       logger.info('Feishu runtime Mini App base URL defaulted to local server', {
@@ -1784,7 +1874,7 @@ export class DefaultBotGateway implements BotGateway {
     this.supervisorJobLoop?.dispose();
     this.supervisorSessionService?.dispose();
     void this.supervisorAgentService?.disposeRepoConversations?.();
-    void this.supervisorClaudeRuntime?.dispose?.();
+    void this.supervisorOpenCodeRuntime?.dispose?.();
     void this.feishuLongConnection?.dispose();
     void this.telegramBootstrap?.dispose();
   }
@@ -1801,7 +1891,7 @@ export class DefaultBotGateway implements BotGateway {
       };
     }
 
-    const expectedToken = this.supervisorClaudeRuntime?.getContextToken?.() ?? null;
+    const expectedToken = this.supervisorOpenCodeRuntime?.getContextToken?.() ?? null;
     if (expectedToken) {
       const receivedToken = getHeaderValue(headers, 'x-supervisor-context-token');
       if (receivedToken !== expectedToken) {
@@ -1896,7 +1986,7 @@ export class DefaultBotGateway implements BotGateway {
       };
     }
 
-    const expectedToken = this.supervisorClaudeRuntime?.getContextToken?.() ?? null;
+    const expectedToken = this.supervisorOpenCodeRuntime?.getContextToken?.() ?? null;
     if (expectedToken) {
       const receivedToken = getHeaderValue(headers, 'x-supervisor-orchestrator-token');
       if (receivedToken !== expectedToken) {
@@ -2426,7 +2516,7 @@ export class DefaultBotGateway implements BotGateway {
           }
           let callbackAnswered = false;
           try {
-            if (appUrl && ephemeralTunnelUrl && parsedCallback.issueIdentifier) {
+            if (appUrl && ephemeralTunnelUrl && parsedCallback.issueIdentifier && callbackIssue) {
               try {
                 await this.telegramNotifier.answerCallbackQuery(
                   callbackQuery.id || 'unknown-callback',
@@ -2540,7 +2630,7 @@ export class DefaultBotGateway implements BotGateway {
                 timestamp: new Date().toISOString(),
               });
             }
-            if (appUrl && ephemeralTunnelUrl && parsedCallback.issueIdentifier) {
+            if (appUrl && ephemeralTunnelUrl && parsedCallback.issueIdentifier && callbackIssue) {
               await this.deliverTelegramRuntimeEntryFallback({
                 recipient,
                 issue: callbackIssue,
@@ -2843,6 +2933,12 @@ export class DefaultBotGateway implements BotGateway {
       runtimeAction?: TelegramRuntimeAction | null;
     },
   ): Promise<BotCommandResponse> {
+    if (parsed.runtimeAction === 'budget') {
+      return this.commandService.execute(context, {
+        command: 'approve_budget',
+        issue_id: parsed.issueIdentifier,
+      });
+    }
     if (!this.supervisorAgentRuntime) {
       return {
         message: '这张运行卡暂时不能直接执行按钮动作。你可以直接回复“查看当前 issue”或“重试 INT-xxx”。',
@@ -2895,7 +2991,10 @@ export class DefaultBotGateway implements BotGateway {
     } | null;
   }> {
     if (parsed.kind === 'runtime_action' && parsed.issueIdentifier) {
-      const response = await this.handleRuntimeIssueCardAction(context, issue, parsed);
+      const response = await this.handleRuntimeIssueCardAction(context, issue, {
+        ...parsed,
+        issueIdentifier: parsed.issueIdentifier,
+      });
       const responseIssue = response.issue_id
         ? this.runtime.getIssue(response.issue_id)
         : issue;
@@ -3229,6 +3328,7 @@ export class DefaultBotGateway implements BotGateway {
     issueIdentifier: string | null;
     ordinal: number | null;
     sessionId?: string | null;
+    supervisorPlanVersion?: number | null;
     supervisorAction?: 'approve' | 'edit' | 'alternate' | 'focus' | 'cancel' | null;
     runtimeAction?: TelegramRuntimeAction | null;
   } {
@@ -3259,19 +3359,37 @@ export class DefaultBotGateway implements BotGateway {
       };
     }
 
-    const supervisorSelection = data.match(/^sup\|([^|]+)\|(approve|edit|alternate|focus|cancel)$/i);
-    if (supervisorSelection?.[1] && supervisorSelection?.[2]) {
+    const versionedSupervisorSelection = data.match(/^sup\|([^|]+)\|v(\d+)\|(approve|edit|alternate|focus|cancel)$/i);
+    const legacySupervisorSelection = data.match(/^sup\|([^|]+)\|(approve|edit|alternate|focus|cancel)$/i);
+    const supervisorSelection = versionedSupervisorSelection ?? legacySupervisorSelection;
+    if (supervisorSelection?.[1]) {
+      const actionIndex = versionedSupervisorSelection ? 3 : 2;
+      const action = supervisorSelection[actionIndex];
+      if (!action) {
+        return {
+          kind: 'unknown',
+          issueIdentifier: null,
+          ordinal: null,
+          sessionId: null,
+          supervisorPlanVersion: null,
+          supervisorAction: null,
+          runtimeAction: null,
+        };
+      }
       return {
         kind: 'supervisor_action',
         issueIdentifier: null,
         ordinal: null,
         sessionId: supervisorSelection[1],
-        supervisorAction: supervisorSelection[2].toLowerCase() as 'approve' | 'edit' | 'alternate' | 'focus' | 'cancel',
+        supervisorPlanVersion: versionedSupervisorSelection
+          ? Number.parseInt(versionedSupervisorSelection[2]!, 10)
+          : null,
+        supervisorAction: action.toLowerCase() as 'approve' | 'edit' | 'alternate' | 'focus' | 'cancel',
         runtimeAction: null,
       };
     }
 
-    const runtimeSelection = data.match(/^rt\|([A-Z][A-Z0-9]+-\d+)\|(refresh|retry|stop|close|open)$/i);
+    const runtimeSelection = data.match(/^rt\|([A-Z][A-Z0-9]+-\d+)\|(refresh|retry|stop|close|open|budget)$/i);
     if (runtimeSelection?.[1] && runtimeSelection?.[2]) {
       return {
         kind: 'runtime_action',
@@ -3297,6 +3415,7 @@ export class DefaultBotGateway implements BotGateway {
     context: BotCommandContext;
     parsed: {
       sessionId?: string | null;
+      supervisorPlanVersion?: number | null;
       supervisorAction?: 'approve' | 'edit' | 'alternate' | 'focus' | 'cancel' | null;
     };
   }): Promise<{
@@ -3323,7 +3442,9 @@ export class DefaultBotGateway implements BotGateway {
       canWrite: createBotWriteAuthorizer({
         telegramOperatorIds: this.telegramConfig.operatorIds,
         discordOperatorIds: this.discordConfig.operatorIds,
+        feishuOperatorIds: this.feishuConfig.operatorIds,
       })(params.context),
+      expectedPlanVersion: params.parsed.supervisorPlanVersion ?? null,
     });
     return {
       outbound: {
@@ -4386,7 +4507,7 @@ export class DefaultBotGateway implements BotGateway {
         {
           text: text.startsWith('/')
             ? isEnglish ? 'Got it. I am processing the command.' : '已收到，正在处理命令。'
-            : shouldUseReadOnlyClaudeForText(text)
+            : shouldUseReadOnlyOpenCodeForText(text)
               ? isEnglish ? 'Got it. I am reading the latest repository context and will reply shortly.' : '收到，我正在读取最新仓库信息，整理好后马上回复。'
               : isEnglish ? 'Got your message. I am thinking it through and will reply shortly.' : '收到您的消息了，我这边正在思考和处理，给我点时间',
           reply_to_message_id: context.message_id ?? undefined,
@@ -4740,13 +4861,14 @@ export function createBotGatewayFromEnv(
   const transportEventRepository = db ? new BotTransportEventRepository(db) : null;
   const supervisorSessionRepository = db ? new SupervisorSessionRepository(db) : null;
   const supervisorSessionEventRepository = db ? new SupervisorSessionEventRepository(db) : null;
+  const supervisorPlanVersionRepository = db ? new SupervisorPlanVersionRepository(db) : null;
   const supervisorJobRepository = db ? new SupervisorJobRepository(db) : null;
   const supervisorMemoryRepository = db ? new SupervisorMemoryRepository(db) : null;
   const supervisorRunRepository = db ? new SupervisorRunRepository(db) : null;
   const supervisorRunEventRepository = db ? new SupervisorRunEventRepository(db) : null;
   const supervisorToolCallRepository = db ? new SupervisorToolCallRepository(db) : null;
   const supervisorPendingActionRepository = db ? new SupervisorPendingActionRepository(db) : null;
-  const repoClaudeConversationRepository = db ? new RepoClaudeConversationRepository(db) : null;
+  const repoAgentConversationRepository = db ? new RepoAgentConversationRepository(db) : null;
   const workItemRepository = db ? new WorkItemRepository(db) : null;
   const reviewEventRepository = db ? new ReviewEventRepository(db) : null;
   const governanceAssessmentRepository = db ? new GovernanceAssessmentRepository(db) : null;
@@ -4817,11 +4939,17 @@ export function createBotGatewayFromEnv(
     supervisorSessions: supervisorSessionRepository,
     repoIntelligenceResolver: supervisorRepoIntelligenceResolver,
   });
-  const supervisorClaudeRuntimeService = readSymHarixEnv('SYMPHONY_SUPERVISOR_CLAUDE_RUNTIME') === 'off'
+  const supervisorRuntimeSetting =
+    readSymHarixEnv('SYMPHONY_SUPERVISOR_OPENCODE_RUNTIME')
+    || readSymHarixEnv('SYMPHONY_SUPERVISOR_CLAUDE_RUNTIME');
+  const supervisorOpenCodeRuntimeService = supervisorRuntimeSetting === 'off'
     ? null
-    : new SupervisorClaudeRuntimeService({
+    : new SupervisorOpenCodeRuntimeService({
         resolveWorkspace: (input) => supervisorContextBroker.resolveWorkspace(input),
-        command: readSymHarixEnv('SYMPHONY_SUPERVISOR_CLAUDE_COMMAND') || 'node scripts/claude-adapter.cjs',
+        command:
+          readSymHarixEnv('SYMPHONY_SUPERVISOR_OPENCODE_COMMAND')
+          || readSymHarixEnv('SYMPHONY_SUPERVISOR_CLAUDE_COMMAND')
+          || 'node scripts/opencode-adapter.cjs',
         contextEndpoint: readSymHarixEnv('SYMPHONY_SUPERVISOR_CONTEXT_ENDPOINT') || null,
         projectRoot: process.cwd(),
       });
@@ -4845,16 +4973,17 @@ export function createBotGatewayFromEnv(
     transportEventRepository,
     supervisorSessionRepository,
     supervisorSessionEventRepository,
+    supervisorPlanVersionRepository,
     supervisorJobRepository,
     supervisorMemoryRepository,
     supervisorRunRepository,
     supervisorRunEventRepository,
     supervisorToolCallRepository,
     supervisorPendingActionRepository,
-    repoClaudeConversationRepository,
+    repoAgentConversationRepository,
     supervisorRepoIntelligenceResolver,
     supervisorContextBroker,
-    supervisorClaudeRuntimeService,
+    supervisorOpenCodeRuntimeService,
     supervisorPlanBrain: createSupervisorPlanBrainFromEnv(),
     supervisorExecutionOverseer: createSupervisorExecutionOverseerFromEnv(),
     workItemRepository,

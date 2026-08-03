@@ -51,7 +51,7 @@ export type BotWatchPresetValue = 'default' | 'verbose' | 'failures' | 'status';
 export type BotIssueFollowupRole = 'origin';
 export type BotFollowupCardKind = 'governance_blocked' | 'runtime_issue';
 export type BotFollowupDeliveryKind = 'governance_card' | 'lifecycle_digest' | 'runtime_entry';
-export type BotLifecycleNotificationClass = 'retrying' | 'failed' | 'done' | 'cancelled';
+export type BotLifecycleNotificationClass = 'retrying' | 'failed' | 'delivery_failed' | 'done' | 'cancelled';
 export type BotConversationFocusSource =
   | 'explicit_issue'
   | 'runtime_issue'
@@ -84,6 +84,7 @@ export type BotPendingIntentKind =
   | 'unwatch'
   | 'stop'
   | 'retry'
+  | 'approve_budget'
   | 'close_issue'
   | 'supersede_issue'
   | 'override'
@@ -155,6 +156,11 @@ export type SupervisorRunEventKind =
   | 'confirmation_requested'
   | 'confirmation_accepted'
   | 'confirmation_cancelled'
+  | 'confirmation_completed'
+  | 'confirmation_failed'
+  | 'model_fallback'
+  | 'model_repair_requested'
+  | 'tool_call_rejected'
   | 'final_answer'
   | 'run_recovered';
 export type SupervisorToolRisk = 'read' | 'low_write' | 'high_write';
@@ -167,6 +173,8 @@ export type SupervisorPendingActionStatus =
   | 'cancelled'
   | 'expired';
 export type RepoClaudeConversationStatus = 'active' | 'cleared' | 'failed';
+/** Canonical name; the legacy SQLite table remains unchanged for compatibility. */
+export type RepoAgentConversationStatus = RepoClaudeConversationStatus;
 
 export interface ServiceLease {
   lease_key: string;
@@ -341,6 +349,8 @@ export interface AgentRun {
   uncached_input_tokens: number;
   cache_creation_input_tokens: number;
   cache_read_input_tokens: number;
+  budget_reserved_tokens: number;
+  budget_reserved_usd_micros: number;
   started_at: Date;
   finished_at: Date | null;
 }
@@ -361,6 +371,8 @@ export interface CreateAgentRun {
   uncached_input_tokens?: number;
   cache_creation_input_tokens?: number;
   cache_read_input_tokens?: number;
+  budget_reserved_tokens?: number;
+  budget_reserved_usd_micros?: number;
   started_at?: Date;
   finished_at?: Date | null;
 }
@@ -500,7 +512,7 @@ export interface BotPendingActionRecord {
   issue_id: string | null;
   user_id: string | null;
   intent_kind: BotPendingIntentKind;
-  normalized_payload: Record<string, unknown>;
+  normalized_payload: unknown;
   summary_message: string;
   expires_at: Date;
   status: BotPendingActionStatus;
@@ -516,7 +528,7 @@ export interface CreateBotPendingActionRecord {
   issue_id?: string | null;
   user_id?: string | null;
   intent_kind: BotPendingIntentKind;
-  normalized_payload: Record<string, unknown>;
+  normalized_payload: unknown;
   summary_message: string;
   expires_at: Date;
   status?: BotPendingActionStatus;
@@ -662,6 +674,29 @@ export interface SupervisorPlanCardOption {
   summary: string;
 }
 
+export interface SupervisorPlanStep {
+  id: string;
+  title: string;
+  description: string;
+  depends_on: string[];
+  affected_paths: string[];
+  test_commands: string[];
+  acceptance: string[];
+}
+
+export interface SupervisorPlanningDiagnostics {
+  source: 'deterministic' | 'llm' | 'llm_with_fallback';
+  provider: string | null;
+  model: string | null;
+  degraded: boolean;
+  error_code: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  estimated_cost_usd: number | null;
+  generated_at: string;
+}
+
 export interface SupervisorPlanCard {
   title: string;
   user_goal: string;
@@ -677,6 +712,15 @@ export interface SupervisorPlanCard {
   materialization_mode: SupervisorMaterializationMode;
   recommended_option: SupervisorPlanCardOption;
   alternate_option: SupervisorPlanCardOption | null;
+  steps?: SupervisorPlanStep[];
+  dependencies?: string[];
+  affected_paths?: string[];
+  test_commands?: string[];
+  estimated_complexity?: 'L1' | 'L2' | 'L3' | 'L4' | null;
+  estimated_token_budget?: number | null;
+  estimated_cost_usd?: number | null;
+  estimated_cost_note?: string | null;
+  planning_diagnostics?: SupervisorPlanningDiagnostics | null;
   governance_preview: {
     decision: string | null;
     summary: string | null;
@@ -684,6 +728,30 @@ export interface SupervisorPlanCard {
     rewrite_title: string | null;
     rewrite_description: string | null;
   } | null;
+}
+
+export interface SupervisorPlanVersionRecord {
+  id: string;
+  session_id: string;
+  plan_version: number;
+  plan_card: SupervisorPlanCard;
+  change_kind: 'initial' | 'clarification' | 'edit' | 'alternate' | 'scope_change' | 'runtime_edit' | 'rollback';
+  change_summary: string | null;
+  actor_id: string | null;
+  actor_channel: string;
+  created_at: Date;
+}
+
+export interface CreateSupervisorPlanVersionRecord {
+  id?: string;
+  session_id: string;
+  plan_version: number;
+  plan_card: SupervisorPlanCard;
+  change_kind: SupervisorPlanVersionRecord['change_kind'];
+  change_summary?: string | null;
+  actor_id?: string | null;
+  actor_channel: string;
+  created_at?: Date;
 }
 
 export interface SupervisorSessionRecord {
@@ -780,7 +848,7 @@ export interface SupervisorRepoUnderstanding {
   summary: string | null;
   understanding_json: SupervisorRepoUnderstandingJson;
   evidence_paths_json: string[];
-  generated_by: 'claude_code' | 'fallback';
+  generated_by: 'opencode' | 'claude_code' | 'fallback';
   error: string | null;
   created_at: Date;
   updated_at: Date;
@@ -947,6 +1015,8 @@ export interface RepoClaudeConversationRecord {
   last_used_at: Date;
 }
 
+export type RepoAgentConversationRecord = RepoClaudeConversationRecord;
+
 export interface UpsertRepoClaudeConversationRecord {
   transport: BotWatchTransport;
   conversation_id: string;
@@ -956,11 +1026,15 @@ export interface UpsertRepoClaudeConversationRecord {
   clear_generation?: number;
 }
 
+export type UpsertRepoAgentConversationRecord = UpsertRepoClaudeConversationRecord;
+
 export interface RepoClaudeConversationKey {
   transport: BotWatchTransport;
   conversation_id: string;
   repo_ref: string;
 }
+
+export type RepoAgentConversationKey = RepoClaudeConversationKey;
 
 export interface SupervisorSessionEventRecord {
   id: string;

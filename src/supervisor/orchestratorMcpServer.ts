@@ -21,6 +21,7 @@ const TOOL_DESCRIPTIONS: Record<SupervisorOrchestratorToolName, string> = {
   watch_issue: 'Subscribe this Telegram conversation to issue progress updates. This is a low-risk user-control action.',
   unwatch_issue: 'Remove this Telegram conversation from issue progress updates. This is a low-risk user-control action.',
   retry_issue: 'Retry a retryable issue through the orchestrator policy layer.',
+  approve_cost_budget: 'Approve a temporary cost-budget override for a budget-blocked issue. This is confirmation-gated by default.',
   stop_issue: 'Stop a running issue through the orchestrator policy layer.',
   switch_repository: 'Switch the default repository for this Telegram conversation. Accepts project slug, owner/repo, or repo basename.',
   set_default_project: 'Set the default project for this Telegram conversation.',

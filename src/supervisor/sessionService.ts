@@ -12,12 +12,14 @@ import type {
   SupervisorDecisionKind,
   SupervisorIntakeMode,
   SupervisorPlanCard,
+  SupervisorPlanVersionRecord,
   SupervisorSessionEventRecord,
   SupervisorSessionRecord,
   SupervisorSessionState,
 } from '../database/types';
 import { SupervisorSessionEventRepository } from '../database/repositories/supervisorSessionEventRepository';
 import { SupervisorSessionRepository } from '../database/repositories/supervisorSessionRepository';
+import { SupervisorPlanVersionRepository } from '../database/repositories/supervisorPlanVersionRepository';
 import { TrackerProjectResolutionService } from '../tracker/projectResolution';
 import type {
   SupervisorExecutionIntent,
@@ -28,6 +30,10 @@ import type {
   SupervisorRepoIntelligenceResolver,
   SupervisorRepoIntelligenceSnapshot,
 } from './repoIntelligence';
+import type {
+  SupervisorRepoUnderstandingService,
+  SupervisorRepoUnderstandingSnapshot,
+} from './repoUnderstanding';
 import { describeSupervisorThread } from './threadSummary';
 import { applySupervisorApprovalPolicy } from './approvalPolicy';
 import {
@@ -38,6 +44,7 @@ import {
 import { buildSupervisorSessionVisualCard } from './sessionVisualCard';
 import { isInternalSupervisorTurnBudgetFailure } from './milestoneVisibility';
 import { inferRuntimeLocaleFromText, localizeKnownRuntimeText, type RuntimeLocale } from '../i18n/locale';
+import { estimateTaskCostUsd, resolveCostPolicy } from '../cost/policy';
 
 export interface SupervisorServiceResponseParams {
   context: BotCommandContext;
@@ -50,13 +57,15 @@ export interface SupervisorServiceResponseParams {
 
 export type SupervisorSessionAction = 'approve' | 'edit' | 'alternate' | 'focus' | 'cancel';
 
-const APPROVE_WORDS = ['确认', '按推荐继续', '批准', '开始执行', '继续', '批准并开始'];
+const APPROVE_WORDS = ['确认', '同意', '按推荐继续', '批准', '开始执行', '继续执行', '批准并开始'];
 const EDIT_WORDS = ['改一下计划', '修改计划', '先别执行', '不要开始'];
 const ALTERNATE_WORDS = ['换用备选方案', '换方案', '备选方案'];
 const CANCEL_WORDS = ['取消当前计划', '取消这条计划', '结束当前计划', '放弃当前计划'];
 const FOCUS_TEXT_PATTERN = /^(?:卡片给我|卡片发我|把卡片发我|把当前卡片发我|发我卡片|发一下卡片|当前卡片|查看当前计划|看当前计划|当前计划|查看计划卡|看计划卡|计划卡给我)$/i;
 const NEW_THREAD_PREFIX = /^(新开线程|开启新线程|新建线程|另开线程)[:：\s]+/;
 const SCOPE_CHANGE_PATTERNS = [/顺便/, /另外/, /再加/, /改成/, /顺手/];
+const NEGATED_APPROVAL_PATTERN = /(?:不|不要|别|先别|暂不|暂缓|尚未|还没|没有|没|未)(?:.{0,6})?(?:确认|同意|批准|继续|开始|执行)|(?:确认|同意|批准|继续|开始|执行)(?:.{0,6})?(?:不了|不行|不可以|不要|取消|等等|等一下)/i;
+const APPROVAL_TTL_MINUTES = 24 * 60;
 
 function isChatIntakeSource(source: SupervisorIntakeSource | undefined): boolean {
   return source === 'telegram_chat' || source === 'feishu_chat';
@@ -78,6 +87,7 @@ function emptyRuntimeContext(): BotRuntimeCopilotContext {
     default_project_slug: null,
     available_projects: [],
     repo_profile: null,
+    repo_understanding: null,
     watch_subscriptions: [],
     overview: {
       running: 0,
@@ -199,6 +209,10 @@ function runtimeIssueAppPath(session: SupervisorSessionRecord, issue: RuntimeIss
   return `/runtime?session=${encodeURIComponent(session.id)}`;
 }
 
+function runtimePlanAppPath(session: SupervisorSessionRecord): string {
+  return `/runtime?session=${encodeURIComponent(session.id)}`;
+}
+
 function isRetryableDeliveryDecision(session: SupervisorSessionRecord, issue: RuntimeIssueView | null): boolean {
   return session.state === 'awaiting_user_decision' &&
     session.active_decision_kind === 'delivery_failure' &&
@@ -245,11 +259,18 @@ function supervisorActionRows(
     ];
   }
 
+  const callback = (action: SupervisorSessionAction): string => `sup|${session.id}|v${session.plan_version}|${action}`;
   return [
-    [{ label: primaryLabel, style: 'success', callback_data: `sup|${session.id}|${primaryAction}` }],
+    [{ label: primaryLabel, style: 'success', callback_data: callback(primaryAction) }],
     [
-      { label: textForLocale(locale, '改一下计划', 'Edit Plan'), callback_data: `sup|${session.id}|edit` },
-      { label: textForLocale(locale, '打开运行视图', 'Open Runtime View'), style: 'primary', web_app: { url: runtimeIssueAppPath(session, issue) } },
+      { label: textForLocale(locale, '改一下计划', 'Edit Plan'), callback_data: callback('edit') },
+      ...(session.plan_card?.alternate_option
+        ? [{ label: textForLocale(locale, '使用备选方案', 'Use Alternate'), callback_data: callback('alternate') }]
+        : []),
+    ],
+    [
+      { label: textForLocale(locale, '取消计划', 'Cancel Plan'), style: 'danger', callback_data: callback('cancel') },
+      { label: textForLocale(locale, '打开计划视图', 'Open Plan View'), style: 'primary', web_app: { url: runtimePlanAppPath(session) } },
     ],
   ];
 }
@@ -583,7 +604,37 @@ function buildDestructiveApprovalPolicyText(
 
 function isApprovalText(text: string): boolean {
   const normalized = text.trim().toLowerCase();
-  return APPROVE_WORDS.some((word) => normalized.includes(word.toLowerCase()));
+  if (!normalized || NEGATED_APPROVAL_PATTERN.test(normalized)) {
+    return false;
+  }
+  const punctuationStripped = normalized.replace(/[，。！？!?、,.;；：:]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (/^(?:yes|y|ok|okay|approve|approved|confirm|confirmed|continue|start)(?:\s+(?:the\s+)?(?:plan|execution|now))*$/i.test(punctuationStripped)) {
+    return true;
+  }
+  return APPROVE_WORDS.some((word) => {
+    const index = punctuationStripped.indexOf(word.toLowerCase());
+    if (index < 0) {
+      return false;
+    }
+    const prefix = punctuationStripped.slice(0, index);
+    return prefix.length <= 8 && !/[不别没未缓等]/.test(prefix);
+  });
+}
+
+function isNegatedApprovalText(text: string): boolean {
+  return NEGATED_APPROVAL_PATTERN.test(text.trim());
+}
+
+function approvalTtlMinutes(): number {
+  const raw = Number(process.env.SYMHARIX_SUPERVISOR_PLAN_APPROVAL_TTL_MINUTES);
+  return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : APPROVAL_TTL_MINUTES;
+}
+
+function isApprovalExpired(session: SupervisorSessionRecord, now = new Date()): boolean {
+  if (session.state !== 'awaiting_user_approval' && session.state !== 'plan_ready') {
+    return false;
+  }
+  return now.getTime() - session.updated_at.getTime() > approvalTtlMinutes() * 60_000;
 }
 
 function isEditText(text: string): boolean {
@@ -636,6 +687,7 @@ function shouldRouteReadOnlyIntentToActiveSession(
 ): boolean {
   if (
     isApprovalText(text) ||
+    isNegatedApprovalText(text) ||
     isEditText(text) ||
     isAlternateText(text) ||
     isCancelText(text) ||
@@ -1111,6 +1163,7 @@ export interface SupervisorPlanBrainInput {
   draft: DraftInput;
   runtimeContext: BotRuntimeCopilotContext;
   repoIntelligence: SupervisorRepoIntelligenceSnapshot | null;
+  repoUnderstanding: SupervisorRepoUnderstandingSnapshot | null;
   governancePreview: SupervisorPlanCard['governance_preview'];
   deterministicPlan: PlanComputation;
   recentEvents: SupervisorSessionEventRecord[];
@@ -1122,6 +1175,7 @@ export interface SupervisorPlanBrainResult {
   state?: SupervisorSessionState | null;
   planCard?: Partial<SupervisorPlanCard> | null;
   rationale?: string | null;
+  diagnostics?: SupervisorPlanCard['planning_diagnostics'];
 }
 
 export interface SupervisorPlanBrain {
@@ -1156,6 +1210,22 @@ function buildSupervisorSplitChildPlans(planCard: SupervisorPlanCard): Array<{
   title: string;
   description: string;
 }> {
+  if (planCard.steps && planCard.steps.length > 1) {
+    return planCard.steps.slice(0, 6).map((step, index, steps) => ({
+      title: step.title,
+      description: [
+        `来源 root 计划：${planCard.title}`,
+        `PlanSpec step：${step.id} (${index + 1}/${steps.length})`,
+        `用途：${step.description}`,
+        `依赖：${step.depends_on.join('、') || '无'}`,
+        `影响路径：${step.affected_paths.join('、') || '执行时按仓库证据确认'}`,
+        `验收标准：${step.acceptance.join('；')}`,
+        `验证命令：${step.test_commands.join('；') || '使用仓库默认验证命令'}`,
+        '执行规则：只处理本 PlanSpec step；依赖未满足时不得抢跑。',
+      ].join('\n'),
+    }));
+  }
+
   const visibleScopeText = [
     planCard.user_goal,
     ...planCard.in_scope,
@@ -1252,6 +1322,15 @@ function mergePlanCard(
           })
         : fallback.alternate_option,
     governance_preview: override.governance_preview ?? fallback.governance_preview,
+    steps: override.steps ?? fallback.steps,
+    dependencies: mergeStringList(override.dependencies, fallback.dependencies ?? []),
+    affected_paths: mergeStringList(override.affected_paths, fallback.affected_paths ?? []),
+    test_commands: mergeStringList(override.test_commands, fallback.test_commands ?? []),
+    estimated_complexity: override.estimated_complexity ?? fallback.estimated_complexity,
+    estimated_token_budget: override.estimated_token_budget ?? fallback.estimated_token_budget,
+    estimated_cost_usd: override.estimated_cost_usd ?? fallback.estimated_cost_usd,
+    estimated_cost_note: override.estimated_cost_note ?? fallback.estimated_cost_note,
+    planning_diagnostics: override.planning_diagnostics ?? fallback.planning_diagnostics,
   };
   return {
     ...candidate,
@@ -1260,6 +1339,89 @@ function mergePlanCard(
       && !supportsSplitQueue(candidate)
       ? 'root_only'
       : candidate.materialization_mode,
+  };
+}
+
+function buildPlanSpec(
+  planCard: SupervisorPlanCard,
+  repoUnderstanding: SupervisorRepoUnderstandingSnapshot | null,
+): SupervisorPlanCard {
+  const repo = repoUnderstanding?.understanding;
+  const affectedPaths = Array.from(new Set([
+    ...(planCard.affected_paths ?? []),
+    ...(repo?.key_paths ?? []),
+    ...(repoUnderstanding?.evidence_paths ?? []),
+  ])).slice(0, 8);
+  const testCommands = Array.from(new Set([
+    ...(planCard.test_commands ?? []),
+    ...(repo?.test_commands ?? []),
+  ])).slice(0, 6);
+  const inferredParallelScopes = planCard.user_goal
+    .replace(/^(?:请|帮我|please)\s*/i, '')
+    .replace(/^(?:同时|一起)\s*/i, '')
+    .split(/\s+(?:and|plus)\s+|[、；;]|(?:，|,)?(?:并且|以及|另外|还有|同时|和)(?=[^，,。.!！?？]{2,})/i)
+    .map((scope) => scope.replace(/\s+(?:together|in one issue)$/i, '').replace(/一起(?:改掉|完成|处理)?$/i, '').trim())
+    .filter((scope) => scope.length >= 3)
+    .slice(0, 6);
+  const splitScopes = planCard.materialization_mode === 'root_with_split_queue'
+    ? (planCard.in_scope.length > 1 ? planCard.in_scope : inferredParallelScopes).slice(0, 6)
+    : [];
+  const stepSeeds = splitScopes.length > 1
+    ? splitScopes.map((scope, index) => ({
+        title: `交付 ${index + 1}: ${compact(scope, 72)}`,
+        description: scope,
+        acceptance: [planCard.acceptance[index] ?? planCard.acceptance[0] ?? scope],
+      }))
+    : [
+        {
+          title: '读取现状并锁定改动边界',
+          description: `先读取与“${compact(planCard.user_goal, 80)}”直接相关的实现、配置和测试。`,
+          acceptance: ['改动边界与依赖已经用仓库证据确认。'],
+        },
+        {
+          title: `实现 ${compact(planCard.title, 72)}`,
+          description: planCard.in_scope.join('；'),
+          acceptance: planCard.acceptance,
+        },
+        {
+          title: '验证并整理交付证据',
+          description: '运行定向测试与仓库门禁，检查 diff 并记录结果。',
+          acceptance: ['相关测试通过，改动范围与计划一致，交付证据可复核。'],
+        },
+      ];
+  const steps = stepSeeds.map((seed, index) => ({
+    id: `step-${index + 1}`,
+    title: seed.title,
+    description: seed.description,
+    depends_on: index === 0 ? [] : [`step-${index}`],
+    affected_paths: affectedPaths,
+    test_commands: index === stepSeeds.length - 1 ? testCommands : [],
+    acceptance: seed.acceptance,
+  }));
+  const score = planCard.in_scope.length
+    + (affectedPaths.length > 5 ? 1 : 0)
+    + (planCard.materialization_mode === 'root_with_split_queue' ? 2 : 0)
+    + (planCard.known_risks.length > 2 ? 1 : 0);
+  const complexity = score >= 7 ? 'L4' : score >= 5 ? 'L3' : score >= 3 ? 'L2' : 'L1';
+  const tokenBudget = complexity === 'L4' ? 220_000 : complexity === 'L3' ? 140_000 : complexity === 'L2' ? 80_000 : 40_000;
+  const policy = resolveCostPolicy();
+  const estimatedCostUsd = estimateTaskCostUsd({
+    input: Math.round(tokenBudget * 0.8),
+    output: Math.round(tokenBudget * 0.2),
+    total: tokenBudget,
+  }, policy);
+  return {
+    ...planCard,
+    steps,
+    dependencies: steps.flatMap((step) => step.depends_on.map((dependency) => `${dependency} -> ${step.id}`)),
+    affected_paths: affectedPaths,
+    test_commands: testCommands,
+    estimated_complexity: complexity,
+    estimated_token_budget: tokenBudget,
+    estimated_cost_usd: estimatedCostUsd,
+    estimated_cost_note: estimatedCostUsd === null
+      ? 'USD estimate unavailable until model input/output prices are configured.'
+      : 'Rough execution estimate based on the PlanSpec token budget; runtime governor remains authoritative.',
   };
 }
 
@@ -1449,6 +1611,8 @@ export class SupervisorSessionService {
     private readonly repoIntelligenceResolver: SupervisorRepoIntelligenceResolver | null = null,
     private readonly planBrain: SupervisorPlanBrain | null = null,
     private readonly executionOverseer: SupervisorExecutionOverseer = new DefaultSupervisorExecutionOverseer(),
+    private readonly planVersions: SupervisorPlanVersionRepository | null = null,
+    private readonly repoUnderstandingService: SupervisorRepoUnderstandingService | null = null,
   ) {
     this.unsubscribe = this.runtime.subscribe((event) => {
       if (event.type === 'issue') {
@@ -1488,26 +1652,107 @@ export class SupervisorSessionService {
     return this.sessions.findById(id);
   }
 
-  preemptActiveSessionsForNewThread(context: BotCommandContext, text: string): number {
-    if (!isNewThreadText(text)) {
-      return 0;
-    }
+  listSessions(): SupervisorSessionRecord[] {
+    return this.sessions.findAll();
+  }
 
-    let cancelled = 0;
-    for (const session of this.findActiveSessionsForConversation(context)) {
-      this.sessions.update({
-        id: session.id,
-        state: 'cancelled',
-        active_decision_kind: null,
-        delivery_summary: '用户选择新开计划线程，旧线程已取消。',
-      });
-      this.stopSessionExecution(session);
-      this.recordEvent(session.id, 'session_cancelled_for_new_thread_preemptive', {
-        text,
-      });
-      cancelled += 1;
+  listPlanVersions(sessionId: string): SupervisorPlanVersionRecord[] {
+    return this.planVersions?.listBySession(sessionId) ?? [];
+  }
+
+  async revisePlanFromRuntime(input: {
+    sessionId: string;
+    instruction: string;
+    expectedPlanVersion: number;
+    canWrite: boolean;
+  }): Promise<BotCommandResponse> {
+    const session = this.sessions.findById(input.sessionId);
+    if (!session) {
+      return { message: 'Plan session not found.' };
     }
-    return cancelled;
+    if (!input.canWrite) {
+      return this.writePermissionResponse(session, '修改计划');
+    }
+    if (input.expectedPlanVersion !== session.plan_version) {
+      return this.stalePlanVersionResponse(session, input.expectedPlanVersion);
+    }
+    const instruction = compact(input.instruction, 1_200);
+    if (!instruction) {
+      return this.withSessionMetadata(session, { message: 'Revision instruction is required.' }, 'revision-empty');
+    }
+    const plan = session.plan_card;
+    const revising = this.sessions.update({
+      id: session.id,
+      state: 'clarifying',
+      active_decision_kind: 'plan_revision',
+    }) ?? session;
+    this.recordEvent(session.id, 'plan_revision_requested', {
+      text: instruction,
+      mode: 'runtime',
+      expected_plan_version: input.expectedPlanVersion,
+    });
+    return this.recomputeAndRespond(revising, {
+      title: plan?.title ?? instruction,
+      description: [
+        plan ? `Current goal: ${plan.user_goal}` : null,
+        plan ? `Current scope: ${plan.in_scope.join('; ')}` : null,
+        plan ? `Current acceptance: ${plan.acceptance.join('; ')}` : null,
+        `Requested revision: ${instruction}`,
+      ].filter(Boolean).join('\n'),
+      project_slug: plan?.project_slug ?? session.repo_ref,
+    }, emptyRuntimeContext(), true, 'inline_action', 'runtime_edit');
+  }
+
+  rollbackPlanFromRuntime(input: {
+    sessionId: string;
+    targetPlanVersion: number;
+    expectedPlanVersion: number;
+    canWrite: boolean;
+  }): BotCommandResponse {
+    const session = this.sessions.findById(input.sessionId);
+    if (!session) {
+      return { message: 'Plan session not found.' };
+    }
+    if (!input.canWrite) {
+      return this.writePermissionResponse(session, '回滚计划');
+    }
+    if (input.expectedPlanVersion !== session.plan_version) {
+      return this.stalePlanVersionResponse(session, input.expectedPlanVersion);
+    }
+    const target = this.planVersions?.findBySessionVersion(session.id, input.targetPlanVersion) ?? null;
+    if (!target) {
+      return this.withSessionMetadata(session, { message: `Plan version ${input.targetPlanVersion} was not found.` }, 'rollback-missing');
+    }
+    const nextVersion = session.plan_version + 1;
+    const updated = this.sessions.update({
+      id: session.id,
+      plan_card: target.plan_card,
+      plan_version: nextVersion,
+      approval_mode: session.root_issue_id ? 'explicit_reapproval' : 'explicit_user_approval',
+      state: 'awaiting_user_approval',
+      active_decision_kind: 'plan_revision',
+    }) ?? session;
+    this.planVersions?.create({
+      session_id: session.id,
+      plan_version: nextVersion,
+      plan_card: target.plan_card,
+      change_kind: 'rollback',
+      change_summary: `Restored immutable plan v${input.targetPlanVersion}`,
+      actor_id: session.user_id,
+      actor_channel: 'runtime',
+    });
+    this.recordEvent(session.id, 'plan_version_rolled_back', {
+      from_version: session.plan_version,
+      target_version: input.targetPlanVersion,
+      new_version: nextVersion,
+    });
+    return this.renderSessionMessage(updated, session.root_issue_id ? this.runtime.getIssue(session.root_issue_id) : null);
+  }
+
+  preemptActiveSessionsForNewThread(_context: BotCommandContext, _text: string, _canWrite = false): number {
+    // Planner v2 supports multiple active plans per conversation. A new thread
+    // no longer destroys an existing execution thread.
+    return 0;
   }
 
   recordOutboundMessage(sessionId: string, messageId: string, cardKey: string | null = null): void {
@@ -1543,7 +1788,37 @@ export class SupervisorSessionService {
       return this.startSession(params);
     }
 
+    const activeSessions = this.findActiveSessionsForConversation(params.context);
+    const ambiguousAction = isApprovalText(params.text)
+      ? 'approve'
+      : isAlternateText(params.text)
+        ? 'alternate'
+        : isEditText(params.text)
+          ? 'edit'
+          : isCancelText(params.text)
+            ? 'cancel'
+            : isFocusText(params.text)
+              ? 'focus'
+              : null;
+    if (activeSessions.length > 1 && ambiguousAction) {
+      return {
+        message: textForLocale(
+          inferRuntimeLocaleFromText(params.text),
+          '当前会话有多条活跃计划。为避免操作错线程，请点选具体计划；每个按钮都绑定当前计划版本。',
+          'This conversation has multiple active plans. Select the exact plan to avoid acting on the wrong thread; every button is bound to its current version.',
+        ),
+        action_rows: activeSessions.slice(0, 8).map((candidate) => [{
+          label: compact(`${candidate.plan_card?.title || '未命名计划'} · v${candidate.plan_version}`, 54),
+          callback_data: `sup|${candidate.id}|v${candidate.plan_version}|${ambiguousAction}`,
+          style: ambiguousAction === 'cancel' ? 'danger' as const : 'default' as const,
+        }]),
+      };
+    }
+
     if (isCancelText(params.text)) {
+      if (!params.canWrite) {
+        return this.writePermissionResponse(activeSession, '取消计划');
+      }
       return this.cancelSession(activeSession, params.text);
     }
 
@@ -1559,17 +1834,8 @@ export class SupervisorSessionService {
     }
 
     if (params.intent?.kind === 'create_issue' && isNewThreadText(params.text)) {
-      for (const session of this.findActiveSessionsForConversation(params.context)) {
-        this.sessions.update({
-          id: session.id,
-          state: 'cancelled',
-          active_decision_kind: null,
-          delivery_summary: '用户选择新开计划线程，旧线程已取消。',
-        });
-        this.stopSessionExecution(session);
-        this.recordEvent(session.id, 'session_cancelled_for_new_thread', {
-          text: params.text,
-        });
+      if (!params.canWrite) {
+        return this.writePermissionResponse(activeSession, '新开计划线程');
       }
       const stripped = stripNewThreadPrefix(params.text);
       return this.startSession({
@@ -1631,6 +1897,7 @@ export class SupervisorSessionService {
     sessionId: string;
     action: SupervisorSessionAction;
     canWrite: boolean;
+    expectedPlanVersion?: number | null;
     runtimeContext?: BotRuntimeCopilotContext | null;
   }): Promise<BotCommandResponse> {
     const session = this.sessions.findById(params.sessionId);
@@ -1638,6 +1905,33 @@ export class SupervisorSessionService {
       return {
         message: 'This Plan Card state is no longer available. Reply with what you want to continue, and I will reconnect the current thread.',
       };
+    }
+
+    const expectedVersion = params.expectedPlanVersion ?? null;
+    const staleLegacyMutation = expectedVersion === null && session.plan_version > 1 && params.action !== 'focus';
+    if (
+      params.action !== 'focus'
+      && (staleLegacyMutation || (expectedVersion !== null && expectedVersion !== session.plan_version))
+    ) {
+      return this.stalePlanVersionResponse(session, expectedVersion);
+    }
+
+    if (params.action !== 'focus' && !params.canWrite) {
+      return this.writePermissionResponse(session, params.action === 'cancel' ? '取消计划' : '修改或批准计划');
+    }
+
+    if (params.action === 'approve' && isApprovalExpired(session)) {
+      const expired = this.sessions.update({
+        id: session.id,
+        state: 'cancelled',
+        active_decision_kind: null,
+        delivery_summary: '计划批准窗口已过期，请基于最新仓库状态重新生成计划。',
+      }) ?? session;
+      this.recordEvent(session.id, 'plan_approval_expired', {
+        plan_version: session.plan_version,
+        expected_plan_version: expectedVersion,
+      });
+      return this.renderSessionMessage(expired);
     }
 
     const text = params.action === 'approve'
@@ -1686,6 +1980,37 @@ export class SupervisorSessionService {
     });
     this.stopSessionExecution(session);
     return this.renderSessionMessage(updated);
+  }
+
+  private writePermissionResponse(session: SupervisorSessionRecord, action: string): BotCommandResponse {
+    return this.withSessionMetadata(session, {
+      message: textForLocale(
+        session.supervisor_locale,
+        `当前用户没有 operator 写权限，不能${action}。计划和执行状态均未改变。`,
+        `The current user does not have operator write access and cannot ${action}. The plan and execution state were not changed.`,
+      ),
+    }, 'write-permission-denied');
+  }
+
+  private stalePlanVersionResponse(
+    session: SupervisorSessionRecord,
+    expectedPlanVersion: number | null,
+  ): BotCommandResponse {
+    const current = this.renderSessionMessage(
+      session,
+      session.root_issue_id ? this.runtime.getIssue(session.root_issue_id) : null,
+    );
+    return {
+      ...current,
+      message: [
+        textForLocale(
+          session.supervisor_locale,
+          `这张卡对应的计划版本${expectedPlanVersion === null ? '未知' : `是 v${expectedPlanVersion}`}，当前已经是 v${session.plan_version}，因此没有执行旧卡片上的操作。`,
+          `This card targets ${expectedPlanVersion === null ? 'an unknown plan version' : `plan v${expectedPlanVersion}`}; the current plan is v${session.plan_version}, so the stale action was not executed.`,
+        ),
+        current.message,
+      ].join('\n\n'),
+    };
   }
 
   private stopSessionExecution(session: SupervisorSessionRecord): void {
@@ -1746,6 +2071,16 @@ export class SupervisorSessionService {
     });
 
     if (session.state === 'awaiting_user_approval' || session.state === 'plan_ready') {
+      if (isNegatedApprovalText(params.text)) {
+        return this.withSessionMetadata(session, {
+          message: textForLocale(
+            session.supervisor_locale,
+            '收到，你还没有批准这份计划。我不会建单或开始执行；你可以继续说明要修改的内容。',
+            'Understood. You have not approved this plan. I will not create an issue or start execution; tell me what you want changed.',
+          ),
+          action_rows: supervisorActionRows(session, null),
+        }, 'approval-negated');
+      }
       if (isApprovalText(params.text)) {
         if (session.approval_mode === 'explicit_reapproval' && session.root_issue_id) {
           return this.approvePlanRevision(session, params.canWrite);
@@ -1753,6 +2088,9 @@ export class SupervisorSessionService {
         return this.materialize(session, params.canWrite);
       }
       if (isAlternateText(params.text) || isEditText(params.text)) {
+        if (!params.canWrite) {
+          return this.writePermissionResponse(session, '修改计划');
+        }
         const updated = this.sessions.update({
           id: session.id,
           state: 'clarifying',
@@ -1760,7 +2098,29 @@ export class SupervisorSessionService {
         })!;
         this.recordEvent(session.id, 'plan_revision_requested', {
           text: params.text,
+          mode: isAlternateText(params.text) ? 'alternate' : 'edit',
         });
+        if (isAlternateText(params.text) && updated.plan_card) {
+          const alternateDraft: DraftInput = {
+            title: updated.plan_card.title,
+            description: [
+              `原始目标：${updated.plan_card.user_goal}`,
+              `原范围：${updated.plan_card.in_scope.join('；')}`,
+              `原验收：${updated.plan_card.acceptance.join('；')}`,
+              `原执行方式：${updated.plan_card.execution_strategy}`,
+              '用户选择备选方案：请保留目标和安全边界，但改用与推荐方案不同、仍然可验证的执行路径。',
+            ].join('\n'),
+            project_slug: updated.plan_card.project_slug,
+          };
+          return this.recomputeAndRespond(
+            updated,
+            alternateDraft,
+            params.runtimeContext,
+            params.canWrite,
+            params.source,
+            'alternate',
+          );
+        }
         return {
           ...this.withSessionMetadata(
             updated,
@@ -1800,6 +2160,16 @@ export class SupervisorSessionService {
             ].filter((value): value is string => Boolean(value)).join('\n')
           )
         : null;
+      const revisionContext = session.active_decision_kind === 'plan_revision' && planCard
+        ? [
+            `当前目标：${planCard.user_goal}`,
+            `当前范围：${planCard.in_scope.join('；')}`,
+            `当前不处理：${planCard.out_of_scope.join('；')}`,
+            `当前验收：${planCard.acceptance.join('；')}`,
+            `当前执行方式：${planCard.execution_strategy}`,
+            `用户修改要求：${params.text}`,
+          ].join('\n')
+        : null;
       const draft: DraftInput = {
         title: answerUpdatesGoal
           ? normalizeTitle(params.text)
@@ -1822,7 +2192,7 @@ export class SupervisorSessionService {
                 planCard?.user_goal || planCard?.title || null,
                 `用户澄清：${params.text}`,
               ].filter((value): value is string => Boolean(value)).join('\n')
-            : params.text,
+            : revisionContext ?? params.text,
         project_slug: session.repo_ref,
         acceptance_override: explicitClarifiedAcceptance ?? delegatedAcceptance ?? null,
       };
@@ -1857,6 +2227,9 @@ export class SupervisorSessionService {
 
     if (session.state === 'executing') {
       if (isScopeChangeText(params.text)) {
+        if (!params.canWrite) {
+          return this.writePermissionResponse(session, '修改执行中的计划');
+        }
         const nextPlanVersion = (session.plan_version ?? 1) + 1;
         const revisedPlanCard = session.plan_card
           ? buildScopeChangedPlanCard(session.plan_card, params.text)
@@ -1872,6 +2245,17 @@ export class SupervisorSessionService {
             scope_change_text: params.text,
           },
         })!;
+        if (revisedPlanCard) {
+          this.planVersions?.create({
+            session_id: session.id,
+            plan_version: nextPlanVersion,
+            plan_card: revisedPlanCard,
+            change_kind: 'scope_change',
+            change_summary: params.text,
+            actor_id: params.context.identity.user_id,
+            actor_channel: params.context.transport,
+          });
+        }
         this.recordEvent(session.id, 'scope_change_detected', {
           text: params.text,
           next_plan_version: nextPlanVersion,
@@ -1912,6 +2296,7 @@ export class SupervisorSessionService {
     runtimeContext: BotRuntimeCopilotContext,
     canWrite: boolean,
     source?: SupervisorIntakeSource,
+    requestedChangeKind?: SupervisorPlanVersionRecord['change_kind'],
   ): Promise<BotCommandResponse> {
     const computedPlan = await this.computePlan(session, draft, runtimeContext, source);
     const shouldHoldRecommendationForTelegram = Boolean(
@@ -1947,6 +2332,17 @@ export class SupervisorSessionService {
           }
       : computedPlan;
     const localeAlignedPlanCard = localizePlanCardForLocale(computed.planCard, session.supervisor_locale);
+    const planChanged = JSON.stringify(session.plan_card) !== JSON.stringify(localeAlignedPlanCard);
+    const nextPlanVersion = session.plan_card && planChanged
+      ? Math.max(1, session.plan_version) + 1
+      : Math.max(1, session.plan_version);
+    const changeKind: SupervisorPlanVersionRecord['change_kind'] = !session.plan_card
+      ? 'initial'
+      : requestedChangeKind
+        ? requestedChangeKind
+        : session.active_decision_kind === 'plan_revision'
+          ? 'edit'
+          : 'clarification';
     const updated = this.sessions.update({
       id: session.id,
       state: computed.state,
@@ -1954,14 +2350,29 @@ export class SupervisorSessionService {
       intake_mode: computed.intakeMode,
       approval_mode: computed.approvalMode,
       plan_card: localeAlignedPlanCard,
+      plan_version: nextPlanVersion,
       active_decision_kind: computed.state === 'awaiting_user_approval' ? 'plan_approval' : null,
     })!;
+
+    if (planChanged || !session.plan_card) {
+      this.planVersions?.create({
+        session_id: session.id,
+        plan_version: nextPlanVersion,
+        plan_card: localeAlignedPlanCard,
+        change_kind: changeKind,
+        change_summary: changeKind === 'initial' ? 'Initial plan draft' : draft.description,
+        actor_id: session.user_id,
+        actor_channel: source ?? session.transport,
+      });
+    }
 
     this.recordEvent(session.id, 'plan_card_generated', {
       state: updated.state,
       repo_ref: updated.repo_ref,
       intake_mode: updated.intake_mode,
       approval_mode: updated.approval_mode,
+      plan_version: updated.plan_version,
+      change_kind: changeKind,
     });
 
     if (updated.approval_mode === 'auto' && updated.state !== 'clarifying') {
@@ -2022,7 +2433,7 @@ export class SupervisorSessionService {
           governance_preview: null,
         },
       };
-      return this.refinePlanWithBrain(session, draft, runtimeContext, null, null, base);
+      return this.refinePlanWithBrain(session, draft, runtimeContext, null, null, null, base);
     }
 
     const resolved = await this.projectResolver?.resolveProjectSlug(repoRef);
@@ -2031,6 +2442,28 @@ export class SupervisorSessionService {
       projectSlug: repoRef,
       route,
     }) ?? null;
+    let repoUnderstanding: SupervisorRepoUnderstandingSnapshot | null = null;
+    if (this.repoUnderstandingService && route) {
+      try {
+        repoUnderstanding = await this.repoUnderstandingService.understand({
+          repoRef: route.github_repo_full,
+          localPath: route.local_path,
+          forceRefresh: false,
+          cacheOnly: false,
+        });
+        this.recordEvent(session.id, 'plan_repo_context_loaded', {
+          repo_ref: repoUnderstanding.repo_ref,
+          commit_sha: repoUnderstanding.commit_sha,
+          source: repoUnderstanding.source,
+          evidence_paths: repoUnderstanding.evidence_paths,
+        });
+      } catch (error) {
+        this.recordEvent(session.id, 'plan_repo_context_failed', {
+          repo_ref: route.github_repo_full,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     const governance = route
       ? await assessIntakeCritic({
           issue: {
@@ -2113,7 +2546,7 @@ export class SupervisorSessionService {
       intakeMode,
       approvalMode,
       state,
-      planCard: {
+      planCard: buildPlanSpec({
         title: governance?.rewrite_title?.trim() || inferredIssueTitle,
         user_goal: requestTitle,
         in_scope: structuredScope?.inScope ?? [requestTitle],
@@ -2127,6 +2560,12 @@ export class SupervisorSessionService {
           riskyCleanup ? '这类清理可能删除文件，需要先确认范围和验收方式。' : null,
           needsClarify ? '当前验收条件还不够稳，需要先补清楚。' : null,
           ...buildRepoIntelligenceRisks(repoIntelligence),
+          ...(repoUnderstanding?.understanding.risks ?? []),
+          ...(!repoUnderstanding && route ? [textForLocale(
+            session.supervisor_locale,
+            '代码上下文读取不可用；影响路径需要在执行第一步再次确认。',
+            'Code context was unavailable; affected paths must be confirmed during the first execution step.',
+          )] : []),
         ].filter((value): value is string => Boolean(value)),
         execution_strategy: [
           inferConversationalExecutionStrategy(requestTitle, requestDescription)
@@ -2161,13 +2600,14 @@ export class SupervisorSessionService {
               rewrite_description: governance.rewrite_description,
             }
           : null,
-      },
+      }, repoUnderstanding),
     };
     return this.refinePlanWithBrain(
       session,
       draft,
       runtimeContext,
       repoIntelligence,
+      repoUnderstanding,
       base.planCard.governance_preview,
       base,
     );
@@ -2178,11 +2618,29 @@ export class SupervisorSessionService {
     draft: DraftInput,
     runtimeContext: BotRuntimeCopilotContext,
     repoIntelligence: SupervisorRepoIntelligenceSnapshot | null,
+    repoUnderstanding: SupervisorRepoUnderstandingSnapshot | null,
     governancePreview: SupervisorPlanCard['governance_preview'],
     deterministicPlan: PlanComputation,
   ): Promise<PlanComputation> {
     if (!this.planBrain) {
-      return deterministicPlan;
+      return {
+        ...deterministicPlan,
+        planCard: buildPlanSpec({
+          ...deterministicPlan.planCard,
+          planning_diagnostics: {
+            source: 'deterministic',
+            provider: null,
+            model: null,
+            degraded: false,
+            error_code: null,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            estimated_cost_usd: null,
+            generated_at: new Date().toISOString(),
+          },
+        }, repoUnderstanding),
+      };
     }
 
     const recentEvents = this.sessionEvents.listBySession(session.id).slice(-16);
@@ -2192,6 +2650,7 @@ export class SupervisorSessionService {
         draft,
         runtimeContext,
         repoIntelligence,
+        repoUnderstanding,
         governancePreview,
         deterministicPlan,
         recentEvents,
@@ -2200,6 +2659,21 @@ export class SupervisorSessionService {
       const computed = shouldPreferDeterministicAfterClarification(recentEvents, deterministicPlan, refined)
         ? deterministicPlan
         : refined;
+      computed.planCard = buildPlanSpec({
+        ...computed.planCard,
+        planning_diagnostics: refinement?.diagnostics ?? {
+          source: 'llm_with_fallback',
+          provider: null,
+          model: null,
+          degraded: true,
+          error_code: 'empty_planner_response',
+          input_tokens: 0,
+          output_tokens: 0,
+          total_tokens: 0,
+          estimated_cost_usd: null,
+          generated_at: new Date().toISOString(),
+        },
+      }, repoUnderstanding);
       if (refinement) {
         this.recordEvent(session.id, 'plan_brain_applied', {
           rationale: refinement.rationale ?? null,
@@ -2214,7 +2688,24 @@ export class SupervisorSessionService {
       this.recordEvent(session.id, 'plan_brain_failed', {
         message: error instanceof Error ? error.message : String(error),
       });
-      return deterministicPlan;
+      return {
+        ...deterministicPlan,
+        planCard: {
+          ...deterministicPlan.planCard,
+          planning_diagnostics: {
+            source: 'llm_with_fallback',
+            provider: null,
+            model: null,
+            degraded: true,
+            error_code: error instanceof Error ? error.name : 'planner_error',
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            estimated_cost_usd: null,
+            generated_at: new Date().toISOString(),
+          },
+        },
+      };
     }
   }
 
@@ -2243,6 +2734,19 @@ export class SupervisorSessionService {
           'missing-plan',
         ),
       };
+    }
+
+    if (session.root_issue_id) {
+      const existingIssue = this.runtime.getIssue(session.root_issue_id);
+      return this.renderMaterializedMessage(
+        session,
+        existingIssue,
+        textForLocale(
+          locale,
+          `这份计划已经创建过 ${existingIssue?.identifier || '对应任务'}，不会重复建单。`,
+          `This plan already created ${existingIssue?.identifier || 'its issue'}; no duplicate issue was created.`,
+        ),
+      );
     }
 
     this.sessions.update({
@@ -2280,6 +2784,7 @@ export class SupervisorSessionService {
       project_slug: planCard.project_slug,
       supervisor_locale: session.supervisor_locale,
       supervisor_execution_intent: executionIntent,
+      idempotency_key: `supervisor:${session.id}:v${session.plan_version}:root`,
       defer_dispatch: planCard.materialization_mode === 'root_with_split_queue',
     });
 
@@ -2334,6 +2839,7 @@ export class SupervisorSessionService {
           project_slug: planCard.project_slug,
           supervisor_locale: session.supervisor_locale,
           supervisor_execution_intent: executionIntent,
+          idempotency_key: `supervisor:${session.id}:v${session.plan_version}:child:${index + 1}`,
           governance_lineage: {
             root_issue_id: createResult.issue_id,
             parent_issue_id: createResult.issue_id,
@@ -2365,6 +2871,10 @@ export class SupervisorSessionService {
           ),
         ].join('\n');
       } else {
+        const firstCreatedChild = childResults.find((result) => result.accepted && result.issue_id);
+        if (firstCreatedChild?.issue_id) {
+          await this.runtime.stopIssue(firstCreatedChild.issue_id).catch(() => null);
+        }
         resultMessage = textForLocale(
           session.supervisor_locale,
           `已创建 ${createResult.issue_identifier || '新任务'}，但自动创建 child queue 时有部分子任务失败。`,
@@ -2375,7 +2885,8 @@ export class SupervisorSessionService {
 
     const updated = this.sessions.update({
       id: session.id,
-      state: 'executing',
+      state: materialOutcome.split_status === 'partial' ? 'awaiting_user_decision' : 'executing',
+      active_decision_kind: materialOutcome.split_status === 'partial' ? 'execution_decision' : null,
       repo_ref: planCard.project_slug,
       root_issue_id: createResult.issue_id,
       current_child_issue_id: latestIssue?.governance_current_child?.issue_id ?? null,
@@ -2395,10 +2906,10 @@ export class SupervisorSessionService {
     return this.renderMaterializedMessage(updated, latestIssue, resultMessage);
   }
 
-  private approvePlanRevision(
+  private async approvePlanRevision(
     session: SupervisorSessionRecord,
     canWrite: boolean,
-  ): BotCommandResponse {
+  ): Promise<BotCommandResponse> {
     if (!canWrite) {
       return this.withSessionMetadata(
         session,
@@ -2414,6 +2925,48 @@ export class SupervisorSessionService {
     }
 
     const issue = session.root_issue_id ? this.runtime.getIssue(session.root_issue_id) : null;
+    const planCard = session.plan_card;
+    if (!session.root_issue_id || !planCard) {
+      return this.withSessionMetadata(
+        session,
+        {
+          message: textForLocale(
+            session.supervisor_locale,
+            '当前修订没有绑定到可同步的 root issue，请先恢复原任务上下文。',
+            'This revision is not linked to a root issue that can be updated. Restore the original task context first.',
+          ),
+        },
+        'revision-missing-root',
+      );
+    }
+    const intent = buildExecutionIntent(session, planCard);
+    const applied = await this.runtime.applySupervisorPlanRevision?.(session.root_issue_id, intent) ?? {
+      accepted: false,
+      message: 'Runtime does not support plan revision handoff.',
+    };
+    if (!applied.accepted) {
+      const failed = this.sessions.update({
+        id: session.id,
+        state: 'awaiting_user_approval',
+        active_decision_kind: 'plan_revision',
+        delivery_summary: applied.message,
+      }) ?? session;
+      this.recordEvent(session.id, 'plan_revision_handoff_failed', {
+        plan_version: session.plan_version,
+        message: applied.message,
+      });
+      return this.withSessionMetadata(
+        failed,
+        {
+          message: textForLocale(
+            session.supervisor_locale,
+            `修订计划尚未同步到执行面：${applied.message}。当前执行不会按未同步版本继续。`,
+            `The revised plan was not applied to the execution plane: ${applied.message}. Execution will not continue under an unsynchronized revision.`,
+          ),
+        },
+        'revision-handoff-failed',
+      );
+    }
     const updated = this.sessions.update({
       id: session.id,
       state: 'executing',
@@ -2425,6 +2978,13 @@ export class SupervisorSessionService {
         outcome_kind: 'plan_revision_approved',
         plan_revision_approved_at: new Date().toISOString(),
         plan_version: session.plan_version,
+        latest_dev_instruction: [
+          `Supervisor plan v${session.plan_version} is approved and replaces the earlier execution intent.`,
+          `Goal: ${planCard.user_goal}`,
+          `In scope: ${planCard.in_scope.join('; ')}`,
+          `Acceptance: ${planCard.acceptance.join('; ')}`,
+          `Strategy: ${planCard.execution_strategy}`,
+        ].join('\n'),
       },
     }) ?? session;
     this.recordEvent(session.id, 'plan_revision_approved', {
@@ -2605,6 +3165,32 @@ export class SupervisorSessionService {
             null,
             `<b>${textForLocale(locale, '验收标准', 'Acceptance Criteria')}</b>`,
             escapeHtml(textList(planCard.acceptance, textForLocale(locale, '结果可验证。', 'The result is verifiable.'))),
+            null,
+            `<b>${textForLocale(locale, '执行计划规格', 'Execution PlanSpec')}</b>`,
+            escapeHtml([
+              planCard.estimated_complexity ?? 'L1',
+              textForLocale(locale, `${planCard.steps?.length ?? 0} 个步骤`, `${planCard.steps?.length ?? 0} steps`),
+              planCard.estimated_token_budget
+                ? textForLocale(locale, `约 ${Math.round(planCard.estimated_token_budget / 1000)}k tokens`, `about ${Math.round(planCard.estimated_token_budget / 1000)}k tokens`)
+                : null,
+              planCard.estimated_cost_usd !== null && planCard.estimated_cost_usd !== undefined
+                ? `~$${planCard.estimated_cost_usd.toFixed(2)}`
+                : textForLocale(locale, 'USD 估算待配置模型价格', 'USD estimate awaits model pricing'),
+            ].filter(Boolean).join(' · ')),
+            planCard.affected_paths?.length ? `<b>${textForLocale(locale, '预计影响路径', 'Expected Paths')}</b>` : null,
+            planCard.affected_paths?.length ? escapeHtml(planCard.affected_paths.slice(0, 6).join(' · ')) : null,
+            planCard.test_commands?.length ? `<b>${textForLocale(locale, '验证命令', 'Verification Commands')}</b>` : null,
+            planCard.test_commands?.length ? escapeHtml(planCard.test_commands.slice(0, 4).join(' · ')) : null,
+            planCard.planning_diagnostics?.degraded
+              ? `<b>${textForLocale(locale, 'Planner 降级提示', 'Planner Degraded')}</b>`
+              : null,
+            planCard.planning_diagnostics?.degraded
+              ? escapeHtml(textForLocale(
+                  locale,
+                  '自然语言规划模型本轮不可用或响应无效，当前卡片使用确定性 PlanSpec；批准前请重点检查路径和验收。',
+                  'The planning model was unavailable or invalid, so this card uses the deterministic PlanSpec. Review paths and acceptance carefully before approval.',
+                ))
+              : null,
             visibleRisks.length > 0 ? null : null,
             visibleRisks.length > 0 ? `<b>${textForLocale(locale, '已知风险', 'Known Risks')}</b>` : null,
             visibleRisks.length > 0 ? escapeHtml(textList(visibleRisks, textForLocale(locale, '暂无明显风险。', 'No obvious risks.'))) : null,

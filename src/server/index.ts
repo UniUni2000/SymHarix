@@ -4,17 +4,18 @@
  */
 
 import { createServer as createNetServer } from 'node:net';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
 import type { Database } from 'bun:sqlite';
 import { createHealthRoutes } from './routes/health';
 import { createWorkItemRoutes } from './routes/work-items';
 import { createRuntimeRoutes } from './routes/runtime';
 import { createBotRoutes } from './routes/bots';
-import type { ServerConfig, ApiResponse } from './types';
+import { DEFAULT_SERVER_CONFIG, type ServerConfig, type ApiResponse } from './types';
 import type { RuntimeControlPlane } from '../runtime/types';
 import { renderRuntimePage } from '../runtime/page';
 import { renderRuntimeMiniAppPage } from '../runtime/miniAppPage';
+import { renderRuntimeLoginPage } from '../runtime/loginPage';
 import { createBotGatewayFromEnv } from '../bots/gateway';
 import type { BotGateway } from '../bots/types';
 import {
@@ -22,15 +23,6 @@ import {
   type RuntimeAccessController,
 } from './runtimeAccess';
 import { readSymHarixEnv } from '../config/env';
-
-/**
- * Default server configuration
- */
-const DEFAULT_CONFIG: ServerConfig = {
-  port: 3000,
-  hostname: '0.0.0.0',
-  corsOrigins: ['*'],
-};
 
 const QUIET_ACCESS_LOG_PATHS = new Set([
   '/',
@@ -75,6 +67,13 @@ async function resolveServePort(port: number, hostname: string): Promise<number>
   return reserveEphemeralPort(hostname);
 }
 
+export function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  return normalized === 'localhost'
+    || normalized === '127.0.0.1'
+    || normalized === '::1';
+}
+
 /**
  * SymHarixServer class
  * Main HTTP server with Hono framework
@@ -99,7 +98,11 @@ export class SymHarixServer {
     runtimeAccessController: RuntimeAccessController | null = runtimeControlPlane ? createRuntimeAccessControllerFromEnv() : null,
   ) {
     this.db = db;
-    this.config = { ...DEFAULT_CONFIG, ...config };
+    this.config = {
+      ...DEFAULT_SERVER_CONFIG,
+      ...config,
+      corsOrigins: [...(config.corsOrigins ?? DEFAULT_SERVER_CONFIG.corsOrigins)],
+    };
     this.runtimeControlPlane = runtimeControlPlane;
     this.botGateway = botGateway;
     this.runtimeAccessController = runtimeAccessController;
@@ -123,14 +126,26 @@ export class SymHarixServer {
       console.log(`[http] ${c.req.method} ${url.pathname} ${c.res.status} ${Date.now() - startedAt}ms`);
     });
 
-    // CORS middleware
-    this.app.use('*', cors({
-      origin: '*',
-      allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-      allowHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'X-SymHarix-Runtime-Token'],
-      exposeHeaders: ['X-Request-ID', 'X-Total-Count'],
-      maxAge: 86400,
-    }));
+    if (this.config.corsOrigins.length > 0) {
+      const allowedOrigins = new Set(this.config.corsOrigins);
+      this.app.use('*', cors({
+        origin: (origin) => (
+          allowedOrigins.has('*') || allowedOrigins.has(origin)
+            ? origin
+            : null
+        ),
+        allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+        allowHeaders: [
+          'Content-Type',
+          'Authorization',
+          'X-Request-ID',
+          'X-SymHarix-Runtime-Token',
+          'X-SymHarix-Runtime-CSRF',
+        ],
+        exposeHeaders: ['X-Request-ID', 'X-Total-Count'],
+        maxAge: 86400,
+      }));
+    }
 
     // Error handler
     this.app.onError((err, c) => {
@@ -160,23 +175,39 @@ export class SymHarixServer {
     const apiV1 = new Hono();
 
     // Mount sub-routes
-    apiV1.route('/health', createHealthRoutes(this.db));
-    apiV1.route('/work-items', createWorkItemRoutes(this.db));
+    apiV1.route('/health', createHealthRoutes(this.db, {
+      runtimeControlPlane: this.runtimeControlPlane,
+      botGateway: this.botGateway,
+      runtimeAccessController: this.runtimeAccessController,
+    }));
+    apiV1.route('/work-items', createWorkItemRoutes(this.db, this.runtimeAccessController));
     if (this.runtimeControlPlane && this.runtimeAccessController) {
       apiV1.route('/runtime', createRuntimeRoutes(this.runtimeControlPlane, this.runtimeAccessController, {
         getPublicBaseUrl: () => this.getPublicBaseUrl(),
+        botGateway: this.botGateway,
       }));
     }
     if (this.botGateway) {
-      apiV1.route('/bots', createBotRoutes(this.botGateway));
+      apiV1.route('/bots', createBotRoutes(this.botGateway, this.runtimeAccessController));
     }
 
     // Mount API v1 under /api/v1
     this.app.route('/api/v1', apiV1);
 
     if (this.runtimeControlPlane) {
-      this.app.get('/runtime', (c) => c.html(renderRuntimePage()));
-      this.app.get('/runtime/issues/:id/app', (c) => c.html(renderRuntimeMiniAppPage(c.req.param('id'))));
+      const renderProtectedRuntimePage = (c: Context, render: () => string) => {
+        const access = this.runtimeAccessController?.authorizeRead(c.req.raw);
+        c.header('Cache-Control', 'private, no-store');
+        if (!access?.allowed) {
+          c.header('WWW-Authenticate', 'Bearer realm="SymHarix Runtime"');
+          return c.html(renderRuntimeLoginPage(new URL(c.req.url).pathname), 401);
+        }
+        return c.html(render());
+      };
+      this.app.get('/runtime', (c) => renderProtectedRuntimePage(c, renderRuntimePage));
+      this.app.get('/runtime/issues/:id/app', (c) => (
+        renderProtectedRuntimePage(c, () => renderRuntimeMiniAppPage(c.req.param('id')))
+      ));
     }
 
     // Root endpoint
@@ -235,6 +266,18 @@ export class SymHarixServer {
   async start(): Promise<{ port: number; hostname: string }> {
     return new Promise((resolve, reject) => {
       void (async () => {
+        if (!isLoopbackHostname(this.config.hostname)) {
+          if (this.runtimeAccessController && !this.runtimeAccessController.hasReadCredential()) {
+            throw new Error(
+              'Refusing to expose the Runtime control plane without SYMHARIX_RUNTIME_VIEWER_TOKEN or SYMHARIX_RUNTIME_WRITE_TOKEN',
+            );
+          }
+          if (this.config.corsOrigins.includes('*')) {
+            throw new Error(
+              'Refusing to expose the server with wildcard CORS; configure exact origins',
+            );
+          }
+        }
         const requestedPort = await resolveServePort(this.config.port, this.config.hostname);
         this.server = Bun.serve({
           port: requestedPort,
@@ -272,7 +315,7 @@ export class SymHarixServer {
       if (this.server) {
         this.server.stop();
         this.server = null;
-      console.log('symharix server stopped');
+        console.log('symharix server stopped');
       }
       this.botGateway?.dispose?.();
       resolve();

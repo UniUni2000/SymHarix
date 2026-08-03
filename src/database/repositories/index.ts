@@ -16,7 +16,10 @@ export { SupervisorRunRepository } from './supervisorRunRepository';
 export { SupervisorRunEventRepository } from './supervisorRunEventRepository';
 export { SupervisorToolCallRepository } from './supervisorToolCallRepository';
 export { SupervisorPendingActionRepository } from './supervisorPendingActionRepository';
-export { RepoClaudeConversationRepository } from './repoClaudeConversationRepository';
+export {
+  RepoClaudeConversationRepository,
+  RepoClaudeConversationRepository as RepoAgentConversationRepository,
+} from './repoClaudeConversationRepository';
 export { BotIssueFollowupRepository } from './botIssueFollowupRepository';
 export { BotFollowupMessageStateRepository } from './botFollowupMessageStateRepository';
 export { BotFollowupDeliveryStateRepository } from './botFollowupDeliveryStateRepository';
@@ -28,6 +31,7 @@ export { DecisionMemoryRepository } from './decisionMemoryRepository';
 export { ConflictMemoryRepository } from './conflictMemoryRepository';
 export { DebtSignalRepository } from './debtSignalRepository';
 export { SupervisorSessionRepository } from './supervisorSessionRepository';
+export { SupervisorPlanVersionRepository } from './supervisorPlanVersionRepository';
 export { SupervisorSessionEventRepository } from './supervisorSessionEventRepository';
 export { SupervisorJobRepository } from './supervisorJobRepository';
 export { SupervisorMemoryRepository } from './supervisorMemoryRepository';

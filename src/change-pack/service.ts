@@ -1126,7 +1126,7 @@ export async function evaluateChangePackState(params: {
     if (isReviewOnlyCommandRequirement(item.key, params.mode)) {
       continue;
     }
-    let satisfied = item.status === 'satisfied' || isSatisfiedEvidenceRecord(item as Record<string, unknown>);
+    let satisfied = item.status === 'satisfied' || isSatisfiedEvidenceRecord(item as unknown as Record<string, unknown>);
 
     if (item.kind === 'verification' && hasStructuredRequirementEvidence(item.evidence)) {
       satisfied = true;
@@ -1170,7 +1170,7 @@ export async function evaluateChangePackState(params: {
       satisfied = true;
     }
     if (item.key === 'review_decision' && parsedReviewReport) {
-      const expectedDecisionValue = (item as Record<string, unknown>).decision;
+      const expectedDecisionValue = (item as unknown as Record<string, unknown>).decision;
       const expectedDecision = typeof expectedDecisionValue === 'string'
         ? expectedDecisionValue.trim().toUpperCase()
         : null;

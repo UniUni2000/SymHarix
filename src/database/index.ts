@@ -5,6 +5,7 @@
 
 import { Database } from 'bun:sqlite';
 import { initializeSchema, dropAllTables } from './schema';
+import { resolveDefaultDatabasePath } from './path';
 
 /**
  * Database configuration options
@@ -22,7 +23,7 @@ export interface DatabaseConfig {
  * Default database configuration
  */
 const DEFAULT_CONFIG: DatabaseConfig = {
-  path: './symphony.db',
+  path: resolveDefaultDatabasePath(process.cwd()),
   walMode: true,
   createIfMissing: true,
 };
@@ -126,7 +127,11 @@ export { SupervisorRunRepository } from './repositories/supervisorRunRepository'
 export { SupervisorRunEventRepository } from './repositories/supervisorRunEventRepository';
 export { SupervisorToolCallRepository } from './repositories/supervisorToolCallRepository';
 export { SupervisorPendingActionRepository } from './repositories/supervisorPendingActionRepository';
-export { RepoClaudeConversationRepository } from './repositories/repoClaudeConversationRepository';
+export {
+  RepoClaudeConversationRepository,
+  RepoClaudeConversationRepository as RepoAgentConversationRepository,
+} from './repositories/repoClaudeConversationRepository';
+export { resolveDefaultDatabasePath } from './path';
 export { BotIssueFollowupRepository } from './repositories/botIssueFollowupRepository';
 export { BotFollowupMessageStateRepository } from './repositories/botFollowupMessageStateRepository';
 export { BotFollowupDeliveryStateRepository } from './repositories/botFollowupDeliveryStateRepository';
@@ -138,6 +143,7 @@ export { DecisionMemoryRepository } from './repositories/decisionMemoryRepositor
 export { ConflictMemoryRepository } from './repositories/conflictMemoryRepository';
 export { DebtSignalRepository } from './repositories/debtSignalRepository';
 export { SupervisorSessionRepository } from './repositories/supervisorSessionRepository';
+export { SupervisorPlanVersionRepository } from './repositories/supervisorPlanVersionRepository';
 export { SupervisorSessionEventRepository } from './repositories/supervisorSessionEventRepository';
 export { SupervisorJobRepository } from './repositories/supervisorJobRepository';
 export { SupervisorMemoryRepository } from './repositories/supervisorMemoryRepository';

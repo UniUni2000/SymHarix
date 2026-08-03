@@ -1,5 +1,5 @@
 import type {
-  RepoClaudeConversationRepository,
+  RepoAgentConversationRepository,
   SupervisorPendingActionRepository,
   SupervisorRunEventRepository,
   SupervisorRunRepository,
@@ -17,10 +17,11 @@ import type {
   BotAssistantDecision,
   BotAssistantDiagnostics,
   BotAssistantIntent,
+  BotAssistantModelOutput,
   BotIssueContextView,
   BotRuntimeCopilotContext,
 } from '../bots/types';
-import type { BotAssistantModel, BotAssistantModelOutput } from '../bots/model';
+import type { BotAssistantModel } from '../bots/model';
 import { BotCommandService } from '../bots/commandService';
 import { readSymHarixEnv } from '../config/env';
 import { isTerminalIssue, isUserVisibleActiveIssue } from '../bots/issueVisibility';
@@ -32,7 +33,7 @@ import {
   isSupervisorControlPlaneQuestion,
 } from '../bots/controlPlaneIntent';
 import {
-  shouldUseReadOnlyClaudeForText,
+  shouldUseReadOnlyOpenCodeForText,
   type SupervisorAgentResult,
   type SupervisorAgentService,
 } from './supervisorAgent';
@@ -114,7 +115,7 @@ export interface SupervisorToolContext {
   preferences: BotConversationPreferenceRepository | null;
   projectResolver: TrackerProjectResolutionService | null;
   supervisorAgentService: SupervisorAgentService | null;
-  repoConversations: RepoClaudeConversationRepository | null;
+  repoConversations: RepoAgentConversationRepository | null;
 }
 
 export interface SupervisorToolResult {
@@ -151,7 +152,7 @@ export interface SupervisorAgentRuntimeServiceOptions {
   events: SupervisorRunEventRepository;
   toolCalls: SupervisorToolCallRepository;
   pendingActions: SupervisorPendingActionRepository;
-  repoConversations?: RepoClaudeConversationRepository | null;
+  repoConversations?: RepoAgentConversationRepository | null;
   actionPolicy?: SupervisorActionPolicy;
   model?: SupervisorModelLoop;
   supervisorAgentService?: SupervisorAgentService | null;
@@ -264,6 +265,10 @@ function isStatusQuestion(text: string): boolean {
 
 function isRetryRequest(text: string): boolean {
   return /重试|重新执行|重新跑|继续执行|retry|rerun|re-run|restart/i.test(text);
+}
+
+function isCostBudgetApprovalRequest(text: string): boolean {
+  return /(?:批准|同意|放行|解除|提高|override|approve).*(?:预算|费用|成本|token)|(?:预算|费用|成本|token).*(?:批准|同意|放行|解除|提高|override|approve)/i.test(text);
 }
 
 function isStopRequest(text: string): boolean {
@@ -424,7 +429,12 @@ function isSetProjectRequest(text: string): boolean {
 
 function isRuntimeControlActionText(text: string): boolean {
   const issueId = extractIssueIdentifiers(text)[0] ?? null;
-  if (issueId && (isRetryRequest(text) || isStopRequest(text) || isCloseRequest(text))) {
+  if (issueId && (
+    isRetryRequest(text)
+    || isCostBudgetApprovalRequest(text)
+    || isStopRequest(text)
+    || isCloseRequest(text)
+  )) {
     return true;
   }
   if (isCreateIssueRequest(text)) {
@@ -470,7 +480,7 @@ function isRepositoryUnderstandingRequest(text: string): boolean {
   if (isRuntimeControlActionText(text)) {
     return false;
   }
-  return shouldUseReadOnlyClaudeForText(text) ||
+  return shouldUseReadOnlyOpenCodeForText(text) ||
     /readme|仓库|代码|文件|repo|repository/i.test(text);
 }
 
@@ -758,7 +768,7 @@ function extractJsonObject(text: string): Record<string, unknown> | null {
 }
 
 function isBotAssistantDecision(value: BotAssistantModelOutput): value is BotAssistantDecision {
-  return Boolean(value) && typeof value === 'object' && 'intent' in value;
+  return value !== null && typeof value === 'object' && 'intent' in value;
 }
 
 function coerceToolRouterIntent(value: Record<string, unknown> | null): BotAssistantIntent | null {
@@ -791,9 +801,10 @@ function coerceToolRouterIntent(value: Record<string, unknown> | null): BotAssis
       };
     case 'list_repositories':
       return { kind };
+    case 'read_repo':
     case 'read_repo_with_claude':
       return {
-        kind,
+        kind: 'read_repo',
         question: typeof intent.question === 'string' && intent.question.trim()
           ? intent.question.trim()
           : null,
@@ -824,6 +835,7 @@ function coerceToolRouterIntent(value: Record<string, unknown> | null): BotAssis
     case 'unwatch':
     case 'stop':
     case 'retry':
+    case 'approve_budget':
     case 'close_issue':
     case 'override':
     case 'rewrite':
@@ -948,10 +960,10 @@ function botIntentToSupervisorTurn(
         args: {},
         reason: 'LLM router selected repository route listing.',
       };
-    case 'read_repo_with_claude':
+    case 'read_repo':
       return {
         type: 'tool_call',
-        tool: 'read_repo_with_claude',
+        tool: 'read_repo',
         args: {
           question: intent.question ?? input.text,
           repo_ref: intent.repo_ref,
@@ -1010,6 +1022,13 @@ function botIntentToSupervisorTurn(
         tool: 'retry_issue',
         args: { issue_id: issueIdFromIntent({ intentIssueId: intent.issue_id, context: input.context }) },
         reason: 'LLM router selected retry.',
+      };
+    case 'approve_budget':
+      return {
+        type: 'tool_call',
+        tool: 'approve_cost_budget',
+        args: { issue_id: issueIdFromIntent({ intentIssueId: intent.issue_id, context: input.context }) },
+        reason: 'LLM router selected a temporary cost-budget override.',
       };
     case 'stop':
       return {
@@ -1375,7 +1394,14 @@ export class SupervisorActionPolicy {
     if (!issueId) {
       return 'Issue id is missing.';
     }
-    return context.runtime.getIssue(issueId) ? null : `Issue ${issueId} was not found.`;
+    const issue = context.runtime.getIssue(issueId);
+    if (!issue) {
+      return `Issue ${issueId} was not found.`;
+    }
+    if (toolName === 'approve_cost_budget' && !issue.actions.can_override_cost_budget) {
+      return `${issue.identifier} is not currently blocked by a cost budget.`;
+    }
+    return null;
   }
 }
 
@@ -1473,7 +1499,7 @@ export class SupervisorAgentRuntimeService {
       const readCall = this.options.toolCalls.findByRun(candidate.id)
         .slice()
         .reverse()
-        .find((call) => call.tool_name === 'read_repo_with_claude');
+        .find((call) => call.tool_name === 'read_repo' || call.tool_name === 'read_repo_with_claude');
       if (readCall || isRepositoryUnderstandingRequest(candidate.user_message)) {
         return {
           run: candidate,
@@ -1500,7 +1526,7 @@ export class SupervisorAgentRuntimeService {
     const previousQuestion = firstString(previous.readCall?.args.question) ?? previous.run.user_message;
     return {
       type: 'tool_call',
-      tool: 'read_repo_with_claude',
+      tool: 'read_repo',
       args: {
         question: this.replaceRouteReferences(previousQuestion, route),
         repo_ref: route.github_repo_full,
@@ -1516,7 +1542,7 @@ export class SupervisorAgentRuntimeService {
     request?: SupervisorRuntimeRespondRequest,
   ): Record<string, unknown> {
     if (
-      (toolName === 'list_issues' || toolName === 'summarize_issue_list' || toolName === 'read_repo_with_claude') &&
+      (toolName === 'list_issues' || toolName === 'summarize_issue_list' || toolName === 'read_repo') &&
       !firstString(args.repo_ref) &&
       !firstString(args.project_slug)
     ) {
@@ -1836,7 +1862,15 @@ export class SupervisorAgentRuntimeService {
             toolResults,
             context: this.buildRuntimeCopilotContext(request, run),
           });
-      const turn = parseStructuredTurn(rawTurn);
+      const parsedTurn = parseStructuredTurn(rawTurn);
+      const turn = parsedTurn?.type === 'tool_call' && parsedTurn.tool === 'read_repo_with_claude'
+        ? { ...parsedTurn, tool: 'read_repo' }
+        : parsedTurn?.type === 'confirm_action' && parsedTurn.action.tool === 'read_repo_with_claude'
+          ? {
+              ...parsedTurn,
+              action: { ...parsedTurn.action, tool: 'read_repo' },
+            }
+          : parsedTurn;
 
       if (!turn) {
         if (this.options.model && !useDeterministicFallback && toolResults.length === 0) {
@@ -2061,7 +2095,12 @@ export class SupervisorAgentRuntimeService {
     canWrite: boolean;
     skipConfirmation?: boolean;
   }): Promise<SupervisorToolResult> {
-    const definition = this.tools.get(params.turn.tool);
+    // Accept tool calls persisted or emitted before the OpenCode migration, but
+    // expose and persist only the provider-neutral canonical name.
+    const canonicalToolName = params.turn.tool === 'read_repo_with_claude'
+      ? 'read_repo'
+      : params.turn.tool;
+    const definition = this.tools.get(canonicalToolName);
     const locale = inferRuntimeLocaleFromText(params.request.text);
     if (!definition) {
       return {
@@ -2388,8 +2427,8 @@ export class SupervisorAgentRuntimeService {
           status: suggestion.status,
           title: suggestion.title,
           summary: suggestion.summary,
-          can_execute: suggestion.can_execute,
-          can_dismiss: suggestion.can_dismiss,
+          can_execute: Boolean(suggestion.can_execute),
+          can_dismiss: Boolean(suggestion.can_dismiss),
         })),
       },
       recent_timeline: timeline.map((event) => ({
@@ -2459,6 +2498,14 @@ export class SupervisorAgentRuntimeService {
   private detectControlTurn(text: string, contextualIssueId: string | null = null): SupervisorTurn | null {
     const issueIds = extractIssueIdentifiers(text);
     const targetIssueId = issueIds[0] ?? contextualIssueId;
+    if (isCostBudgetApprovalRequest(text) && targetIssueId) {
+      return {
+        type: 'tool_call',
+        tool: 'approve_cost_budget',
+        args: { issue_id: targetIssueId },
+        reason: 'User explicitly asked to approve the cost budget for an issue.',
+      };
+    }
     if (isRetryRequest(text) && targetIssueId) {
       return {
         type: 'tool_call',
@@ -2531,8 +2578,8 @@ export class SupervisorAgentRuntimeService {
     const issueId = extractIssueIdentifiers(text)[0] ?? run.active_issue_id ?? null;
     const issue = issueId ? this.options.runtime.getIssue(issueId) : null;
     const route = routeRepoRef({
-      preferences: this.options.preferences,
-      projectResolver: this.options.projectResolver,
+      preferences: this.options.preferences ?? null,
+      projectResolver: this.options.projectResolver ?? null,
       context: request.context,
       issue,
     });
@@ -2560,7 +2607,7 @@ export class SupervisorAgentRuntimeService {
 
     return [{
       type: 'tool_call',
-      tool: 'read_repo_with_claude',
+      tool: 'read_repo',
       args: { question: text },
       reason: 'User asked for a repo-aware issue recommendation.',
     }];
@@ -2732,7 +2779,14 @@ export class SupervisorAgentRuntimeService {
     if (
       !issueId &&
       isContextualIssueReference(text) &&
-      (isShowCardRequest(text) || isRetryRequest(text) || isStopRequest(text) || isCloseRequest(text) || isStatusQuestion(text))
+      (
+        isShowCardRequest(text)
+        || isRetryRequest(text)
+        || isCostBudgetApprovalRequest(text)
+        || isStopRequest(text)
+        || isCloseRequest(text)
+        || isStatusQuestion(text)
+      )
     ) {
       return [{
         type: 'clarify',
@@ -2762,10 +2816,10 @@ export class SupervisorAgentRuntimeService {
         reason: 'User asked to set the default project for this conversation.',
       }];
     }
-    if (shouldUseReadOnlyClaudeForText(text) || /readme|仓库|代码|文件|repo|repository/i.test(text)) {
+    if (shouldUseReadOnlyOpenCodeForText(text) || /readme|仓库|代码|文件|repo|repository/i.test(text)) {
       return [{
         type: 'tool_call',
-        tool: 'read_repo_with_claude',
+        tool: 'read_repo',
         args: { question: text },
         reason: 'User asked for repository understanding.',
       }];
@@ -3132,8 +3186,8 @@ export function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
       },
     },
     {
-      name: 'read_repo_with_claude',
-      description: 'Ask read-only Claude Code for repository understanding through the shared source cache.',
+      name: 'read_repo',
+      description: 'Ask the read-only OpenCode agent for repository understanding through the shared source cache.',
       input_schema: {
         type: 'object',
         required: ['question'],
@@ -3158,7 +3212,7 @@ export function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
         });
         if (!route.repoRef) {
           return {
-            tool: 'read_repo_with_claude',
+            tool: 'read_repo',
             ok: false,
             summary: 'No repository route is configured for this conversation.',
             message: '这个聊天还没有默认项目或仓库路由。请先设置 /project <slug>。',
@@ -3171,7 +3225,7 @@ export function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
           repoRef: route.repoRef,
           defaultRepoRef: route.repoRef,
           userText: question,
-          forceReadOnlyClaude: true,
+          forceReadOnlyOpenCode: true,
           projectContext: route.route ? `default_project=${route.route.project_slug}` : null,
           route: route.route,
           runtimeContext: {
@@ -3202,7 +3256,7 @@ export function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
           if (fallbackProfile) {
             const message = formatRepoProfileFallback(route.repoRef, fallbackProfile);
             return {
-              tool: 'read_repo_with_claude',
+              tool: 'read_repo',
               ok: true,
               summary: compact(message),
               message,
@@ -3210,19 +3264,19 @@ export function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
             };
           }
           return {
-            tool: 'read_repo_with_claude',
+            tool: 'read_repo',
             ok: false,
             summary: supervisorError
-              ? `Read-only Claude Code failed: ${supervisorError instanceof Error ? supervisorError.message : String(supervisorError)}`
-              : 'Read-only Claude Code did not return an answer.',
+              ? `Read-only OpenCode failed: ${supervisorError instanceof Error ? supervisorError.message : String(supervisorError)}`
+              : 'Read-only OpenCode did not return an answer.',
             message: supervisorError
-              ? formatToolFailureRecovery('read_repo_with_claude', inferRuntimeLocaleFromText(context.text))
+              ? formatToolFailureRecovery('read_repo', inferRuntimeLocaleFromText(context.text))
               : '仓库只读分析暂时没有返回结果。',
           };
         }
         const message = formatSupervisorAgentResult(result);
         return {
-          tool: 'read_repo_with_claude',
+          tool: 'read_repo',
           ok: true,
           summary: compact(message),
           message,
@@ -3232,7 +3286,7 @@ export function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
     },
     {
       name: 'clear_repo_conversation',
-      description: 'Clear read-only Claude Code memory for this conversation and repository.',
+      description: 'Clear read-only OpenCode memory for this conversation and repository.',
       input_schema: {
         type: 'object',
         properties: { repo_ref: { type: 'string' } },
@@ -3254,8 +3308,8 @@ export function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
         return {
           tool: 'clear_repo_conversation',
           ok: true,
-          summary: `Cleared ${cleared} repo Claude conversations.`,
-          message: cleared > 0 ? `已清空 ${cleared} 个仓库 Claude 会话。` : '当前没有可清空的仓库 Claude 会话。',
+          summary: `Cleared ${cleared} repository advisor conversations.`,
+          message: cleared > 0 ? `已清空 ${cleared} 个仓库顾问会话。` : '当前没有可清空的仓库顾问会话。',
         };
       },
     },
@@ -3288,6 +3342,7 @@ export function createSupervisorToolDefinitions(): SupervisorToolDefinition[] {
       },
     },
     commandTool('retry_issue', 'retry', 'low_write'),
+    commandTool('approve_cost_budget', 'approve_budget', 'high_write'),
     commandTool('stop_issue', 'stop', 'low_write'),
     commandTool('set_default_project', 'project', 'low_write'),
     commandTool('watch_issue', 'watch', 'low_write'),

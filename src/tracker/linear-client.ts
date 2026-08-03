@@ -596,7 +596,7 @@ export class LinearClient {
         case 'last_review_decision':
           {
             const normalized = String(node.value).toLowerCase();
-            const normalizedDecision = {
+            const normalizedDecision: LinearCustomFields['last_review_decision'] = ({
               approve: 'approve',
               minor: 'approve_minor',
               approve_minor: 'approve_minor',
@@ -606,7 +606,7 @@ export class LinearClient {
               request_tests: 'request_tests',
               reject: 'reject',
               merge_blocked: 'merge_blocked',
-            }[normalized];
+            } as Record<string, NonNullable<LinearCustomFields['last_review_decision']>>)[normalized];
             if (normalizedDecision) {
               fields.last_review_decision = normalizedDecision;
             }

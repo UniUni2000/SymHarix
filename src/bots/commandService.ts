@@ -36,6 +36,7 @@ function listCommands(): string {
   return [
     'Commands:',
     'help',
+    'whoami (aliases: id, me)',
     'clear [all]',
     'status [ISSUE-ID]',
     'new <title> (add description on the next line for Telegram)',
@@ -44,6 +45,7 @@ function listCommands(): string {
     'unwatch <ISSUE-ID>',
     'stop <ISSUE-ID>',
     'retry <ISSUE-ID>',
+    'budget <ISSUE-ID>',
     'close <ISSUE-ID>',
     'supersede <OLD-ISSUE-ID> <NEW-ISSUE-ID>',
     'override <ISSUE-ID>',
@@ -245,12 +247,19 @@ export function parseTextCommand(text: string): BotCommandRequest {
   switch (normalizedCommand) {
     case 'clear':
       return { command: 'clear', raw_text: text };
+    case 'whoami':
+    case 'id':
+    case 'me':
+      return { command: 'whoami', raw_text: text };
     case 'status':
       return { command: 'status', issue_id: readIssueArg(), raw_text: text };
     case 'stop':
       return { command: 'stop', issue_id: readIssueArg(), raw_text: text };
     case 'retry':
       return { command: 'retry', issue_id: readIssueArg(), raw_text: text };
+    case 'budget':
+    case 'approve_budget':
+      return { command: 'approve_budget', issue_id: readIssueArg(), raw_text: text };
     case 'close':
       return { command: 'close_issue', issue_id: readIssueArg(), raw_text: text };
     case 'supersede':
@@ -314,11 +323,37 @@ export class BotCommandService {
     private readonly followups: BotIssueFollowupRepository | null = null,
   ) {}
 
+  private readOnlyMessage(context: BotCommandContext): string {
+    const envName = context.transport === 'telegram'
+      ? 'SYMHARIX_TELEGRAM_OPERATOR_IDS'
+      : context.transport === 'feishu'
+        ? 'SYMHARIX_FEISHU_OPERATOR_IDS'
+        : 'SYMHARIX_DISCORD_OPERATOR_IDS';
+    const detectedId = context.identity.user_id || '(unavailable)';
+    return [
+      `${context.transport} is read-only for this user.`,
+      `Detected user id: ${detectedId}`,
+      `To enable write actions, add this id to ${envName} and restart SymHarix.`,
+      'Allowed commands: help, whoami, status, watch, unwatch.',
+    ].join('\n');
+  }
+
+  private identityMessage(context: BotCommandContext): string {
+    const detectedId = context.identity.user_id || '(unavailable)';
+    return [
+      `Detected user id: ${detectedId}`,
+      `Transport: ${context.transport}`,
+      `Operator access: ${this.canWrite(context) ? 'enabled' : 'read-only'}`,
+    ].join('\n');
+  }
+
   async execute(
     context: BotCommandContext,
     request: BotCommandRequest,
   ): Promise<BotCommandResponse> {
     switch (request.command) {
+      case 'whoami':
+        return { message: this.identityMessage(context) };
       case 'status':
         return this.handleStatus(request.issue_id);
       case 'new':
@@ -333,6 +368,8 @@ export class BotCommandService {
         return this.handleStop(context, request.issue_id);
       case 'retry':
         return this.handleRetry(context, request.issue_id);
+      case 'approve_budget':
+        return this.handleApproveBudget(context, request.issue_id);
       case 'close_issue':
         return this.handleCloseIssue(context, request.issue_id, request.reason);
       case 'supersede_issue':
@@ -423,7 +460,7 @@ export class BotCommandService {
   ): Promise<BotCommandResponse> {
     if (!this.canWrite(context)) {
       return {
-        message: `${context.transport} is configured as read-only for this user. Allowed commands: help, status, watch, unwatch.`,
+        message: this.readOnlyMessage(context),
       };
     }
 
@@ -640,7 +677,7 @@ export class BotCommandService {
   ): Promise<BotCommandResponse> {
     if (!this.canWrite(context)) {
       return {
-        message: `${context.transport} is configured as read-only for this user. Allowed commands: help, status, watch, unwatch.`,
+        message: this.readOnlyMessage(context),
       };
     }
 
@@ -678,7 +715,7 @@ export class BotCommandService {
   ): Promise<BotCommandResponse> {
     if (!this.canWrite(context)) {
       return {
-        message: `${context.transport} is configured as read-only for this user. Allowed commands: help, status, watch, unwatch.`,
+        message: this.readOnlyMessage(context),
       };
     }
 
@@ -696,6 +733,49 @@ export class BotCommandService {
     };
   }
 
+  private async handleApproveBudget(
+    context: BotCommandContext,
+    issueId?: string | null,
+  ): Promise<BotCommandResponse> {
+    if (!this.canWrite(context)) {
+      return {
+        message: this.readOnlyMessage(context),
+      };
+    }
+    if (!issueId) {
+      return {
+        message: `Issue id is required.\n${listCommands()}`,
+      };
+    }
+    if (!this.runtime.overrideCostBudget) {
+      return {
+        message: 'Cost budget approval is not available on this runtime.',
+        issue_id: issueId,
+      };
+    }
+
+    const result = await this.runtime.overrideCostBudget(issueId);
+    this.registerOriginFollowup(context, result);
+    const issue = result.issue_id ? this.runtime.getIssue(result.issue_id) : null;
+    if (issue) {
+      const visual = buildSupervisorIssueVisualCard(issue, { theme: cardThemeForContext(context) });
+      return {
+        message: result.message,
+        caption: visual.caption,
+        format: 'telegram_html',
+        media_key: visual.media_key,
+        photo: visual.photo,
+        show_caption_above_media: false,
+        action_rows: buildIssueCardActionRows(issue),
+        issue_id: result.issue_id,
+      };
+    }
+    return {
+      message: result.message,
+      issue_id: result.issue_id,
+    };
+  }
+
   private async handleCloseIssue(
     context: BotCommandContext,
     issueId?: string | null,
@@ -703,7 +783,7 @@ export class BotCommandService {
   ): Promise<BotCommandResponse> {
     if (!this.canWrite(context)) {
       return {
-        message: `${context.transport} is configured as read-only for this user. Allowed commands: help, status, watch, unwatch.`,
+        message: this.readOnlyMessage(context),
       };
     }
 
@@ -732,7 +812,7 @@ export class BotCommandService {
   ): Promise<BotCommandResponse> {
     if (!this.canWrite(context)) {
       return {
-        message: `${context.transport} is configured as read-only for this user. Allowed commands: help, status, watch, unwatch.`,
+        message: this.readOnlyMessage(context),
       };
     }
 
@@ -767,7 +847,7 @@ export class BotCommandService {
   ): Promise<BotCommandResponse> {
     if (!this.canWrite(context)) {
       return {
-        message: `${context.transport} is configured as read-only for this user. Allowed commands: help, status, watch, unwatch.`,
+        message: this.readOnlyMessage(context),
       };
     }
 
@@ -791,7 +871,7 @@ export class BotCommandService {
   ): Promise<BotCommandResponse> {
     if (!this.canWrite(context)) {
       return {
-        message: `${context.transport} is configured as read-only for this user. Allowed commands: help, status, watch, unwatch.`,
+        message: this.readOnlyMessage(context),
       };
     }
 
@@ -815,7 +895,7 @@ export class BotCommandService {
   ): Promise<BotCommandResponse> {
     if (!this.canWrite(context)) {
       return {
-        message: `${context.transport} is configured as read-only for this user. Allowed commands: help, status, watch, unwatch.`,
+        message: this.readOnlyMessage(context),
       };
     }
 
@@ -840,7 +920,7 @@ export class BotCommandService {
   ): Promise<BotCommandResponse> {
     if (!this.canWrite(context)) {
       return {
-        message: `${context.transport} is configured as read-only for this user. Allowed commands: help, status, watch, unwatch.`,
+        message: this.readOnlyMessage(context),
       };
     }
     if (!issueId || !suggestionId) {
@@ -864,7 +944,7 @@ export class BotCommandService {
   ): Promise<BotCommandResponse> {
     if (!this.canWrite(context)) {
       return {
-        message: `${context.transport} is configured as read-only for this user. Allowed commands: help, status, watch, unwatch.`,
+        message: this.readOnlyMessage(context),
       };
     }
     if (!issueId || !suggestionId) {

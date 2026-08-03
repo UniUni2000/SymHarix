@@ -101,8 +101,8 @@ function stageProgress(session: SupervisorSessionRecord, issue: RuntimeIssueView
   return {
     plan: session.plan_card ? 100 : 0,
     dispatch: waitingForApproval ? 0 : hasIssue ? 100 : 0,
-    execution: done ? 100 : deliveryBlocked ? 82 : executing ? 42 : 0,
-    review: done ? 100 : issue?.phase === 'REVIEW' || issue?.orchestrator_state === 'review_running' ? 65 : 0,
+    execution: done ? 100 : deliveryBlocked || executing ? 50 : 0,
+    review: done ? 100 : issue?.phase === 'REVIEW' || issue?.orchestrator_state === 'review_running' ? 50 : 0,
   };
 }
 
@@ -150,13 +150,14 @@ function statusLabel(session: SupervisorSessionRecord, issue: RuntimeIssueView |
 }
 
 function confidenceLabel(session: SupervisorSessionRecord, issue: RuntimeIssueView | null): string {
+  const locale = session.supervisor_locale;
   if (session.state === 'awaiting_user_decision' || issue?.governance_status === 'blocked') {
-    return 'Needs Judgment';
+    return textForLocale(locale, '需要判断', 'Needs Judgment');
   }
   if ((session.plan_card?.known_risks ?? []).length > 0) {
-    return 'High Confidence';
+    return textForLocale(locale, '已识别风险', 'Risks Identified');
   }
-  return 'Ready';
+  return textForLocale(locale, '计划就绪', 'Plan Ready');
 }
 
 function outcomeString(session: SupervisorSessionRecord, key: string): string | null {
@@ -192,10 +193,19 @@ function complexityLabel(session: SupervisorSessionRecord, issue: RuntimeIssueVi
   if (issue?.complexity) {
     return issue.complexity;
   }
+  if (session.plan_card?.estimated_complexity) {
+    return session.plan_card.estimated_complexity;
+  }
   if (session.plan_card?.materialization_mode === 'root_with_split_queue' || (issue?.governance_child_queue ?? []).length > 0) {
     return 'L4';
   }
   return 'L2';
+}
+
+function stageStateLabel(value: number, active: boolean, locale: RuntimeLocale | null | undefined): string {
+  if (value >= 100) return textForLocale(locale, '完成', 'Done');
+  if (active) return textForLocale(locale, '进行中', 'Active');
+  return textForLocale(locale, '未开始', 'Pending');
 }
 
 function riskSummary(value: string, locale: RuntimeLocale | null | undefined): string {
@@ -423,7 +433,7 @@ export function buildSupervisorSessionVisualCardSvg(session: SupervisorSessionRe
   );
   const progressValue = stageProgress(session, issue);
   const childCount = Math.max(0, issue?.governance_child_queue?.length ?? 0);
-  const splitCount = Math.max(3, childCount);
+  const splitCount = childCount || plan?.steps?.length || plan?.in_scope.length || 1;
   const complexity = complexityLabel(session, issue);
   const complexityText = deliveryBlocked
     ? textForLocale(locale, '证据已满足，交付动作需要处理。', 'Evidence is satisfied; delivery needs attention.')
@@ -583,19 +593,19 @@ export function buildSupervisorSessionVisualCardSvg(session: SupervisorSessionRe
         <circle cx="0" cy="102" r="24" fill="${planTone.fill}" stroke="${planTone.stroke}" stroke-width="4"/>
         <g transform="translate(-28 74)">${phaseGlyph(progressValue.plan >= 100, progressValue.plan > 0 && progressValue.plan < 100)}</g>
         <text x="0" y="151" text-anchor="middle" fill="${planTone.text}" font-size="22" font-weight="650">${escapeSvg(textForLocale(locale, '计划', 'Plan'))}</text>
-        <text x="0" y="176" text-anchor="middle" fill="${planTone.text}" font-size="18" font-weight="620">${progressValue.plan}%</text>
+        <text x="0" y="176" text-anchor="middle" fill="${planTone.text}" font-size="18" font-weight="620">${escapeSvg(stageStateLabel(progressValue.plan, progressValue.plan > 0 && progressValue.plan < 100, locale))}</text>
       </g>
       <g transform="translate(484 0)">
         <circle cx="0" cy="102" r="24" fill="${dispatchTone.fill}" stroke="${dispatchTone.stroke}" stroke-width="4"/>
         <g transform="translate(-28 74)">${phaseGlyph(progressValue.dispatch >= 100, dispatchActive && progressValue.dispatch < 100)}</g>
         <text x="0" y="151" text-anchor="middle" fill="${dispatchTone.text}" font-size="22" font-weight="650">${escapeSvg(middlePhaseLabel)}</text>
-        <text x="0" y="176" text-anchor="middle" fill="${dispatchTone.text}" font-size="18" font-weight="620">${progressValue.dispatch}%</text>
+        <text x="0" y="176" text-anchor="middle" fill="${dispatchTone.text}" font-size="18" font-weight="620">${escapeSvg(stageStateLabel(progressValue.dispatch, dispatchActive && progressValue.dispatch < 100, locale))}</text>
       </g>
       <g transform="translate(842 0)">
         <circle cx="0" cy="102" r="24" fill="${executionTone.fill}" stroke="${executionTone.stroke}" stroke-width="4"/>
         <g transform="translate(-28 74)">${phaseGlyph(progressValue.execution >= 100, executionActive && progressValue.execution < 100)}</g>
         <text x="0" y="151" text-anchor="middle" fill="${executionTone.text}" font-size="22" font-weight="650">${escapeSvg(finalPhaseLabel)}</text>
-        <text x="0" y="176" text-anchor="middle" fill="${executionTone.text}" font-size="18" font-weight="620">${progressValue.execution}%</text>
+        <text x="0" y="176" text-anchor="middle" fill="${executionTone.text}" font-size="18" font-weight="620">${escapeSvg(stageStateLabel(progressValue.execution, executionActive && progressValue.execution < 100, locale))}</text>
       </g>
     </g>
   </svg>`;

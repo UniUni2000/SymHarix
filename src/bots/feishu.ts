@@ -500,7 +500,7 @@ export class FeishuNotifier implements BotTransportNotifier {
     form.set('image_type', 'message');
     form.set(
       'image',
-      new Blob([bytes], { type: contentType || 'image/png' }),
+      new Blob([new Uint8Array(bytes).buffer as ArrayBuffer], { type: contentType || 'image/png' }),
       filename || 'symharix-card.png',
     );
 

@@ -192,6 +192,13 @@ function createRuntimeControlPlane(): RuntimeControlPlane & {
       issue_id: id,
       issue_identifier: 'INT-1',
     }),
+    overrideCostBudget: async (id: string) => ({
+      accepted: true,
+      status: 'queued',
+      message: `Budget approved for ${id}`,
+      issue_id: id,
+      issue_identifier: 'INT-1',
+    }),
     closeIssue: async (id: string, request = {}) => {
       closeIssueCalls.push({
         id,
@@ -292,6 +299,15 @@ describe('BotCommandService', () => {
       raw_text: '/clear',
     });
 
+    expect(parseTextCommand('/whoami')).toEqual({
+      command: 'whoami',
+      raw_text: '/whoami',
+    });
+    expect(parseTextCommand('/id')).toEqual({
+      command: 'whoami',
+      raw_text: '/id',
+    });
+
     expect(parseTextCommand('/watch off INT-1').command).toBe('unwatch');
     expect(parseTextCommand('/watch verbose INT-1')).toEqual({
       command: 'watch',
@@ -304,6 +320,11 @@ describe('BotCommandService', () => {
       command: 'override',
       issue_id: 'INT-1',
       raw_text: '/override INT-1',
+    });
+    expect(parseTextCommand('/budget INT-1')).toEqual({
+      command: 'approve_budget',
+      issue_id: 'INT-1',
+      raw_text: '/budget INT-1',
     });
 
     expect(parseTextCommand('/rewrite INT-1')).toEqual({
@@ -438,6 +459,8 @@ describe('BotCommandService', () => {
 
     const override = await service.executeText(context, '/override INT-1');
     expect(override.message).toContain('override approved');
+    const budget = await service.executeText(context, '/budget INT-1');
+    expect(budget.message).toContain('Budget approved');
 
     const rewrite = await service.executeText(context, '/rewrite INT-1');
     expect(rewrite.message).toContain('rewrite applied');
@@ -667,6 +690,32 @@ describe('BotCommandService', () => {
     );
 
     expect(response.message).toContain('read-only');
+
+    subscriptions.dispose();
+  });
+
+  test('reports the detected identity without write access', async () => {
+    const runtime = createRuntimeControlPlane();
+    const subscriptions = new BotSubscriptionService(runtime, {});
+    const service = new BotCommandService(runtime, subscriptions, () => false);
+
+    const response = await service.executeText(
+      {
+        transport: 'feishu',
+        recipient: {
+          transport: 'feishu',
+          conversation_id: 'chat-feishu',
+        },
+        identity: {
+          user_id: 'ou_test_operator',
+          display_name: 'Viewer',
+        },
+      },
+      '/whoami',
+    );
+
+    expect(response.message).toContain('Detected user id: ou_test_operator');
+    expect(response.message).toContain('Operator access: read-only');
 
     subscriptions.dispose();
   });

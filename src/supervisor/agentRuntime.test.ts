@@ -419,7 +419,7 @@ describe('SupervisorAgentRuntimeService', () => {
       if (/teach me how/i.test(text)) {
         return {
           type: 'tool_call',
-          tool: 'read_repo_with_claude',
+          tool: 'read_repo',
           args: {
             question: text,
           },
@@ -601,7 +601,7 @@ describe('SupervisorAgentRuntimeService', () => {
       transport: 'telegram',
       conversation_id: 'chat-1',
     });
-    expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name)).toEqual(['read_repo_with_claude']);
+    expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name)).toEqual(['read_repo']);
   });
 
   test('turns a follow-up approval of the last issue recommendation into a create confirmation', async () => {
@@ -1231,7 +1231,7 @@ describe('SupervisorAgentRuntimeService', () => {
       transport: 'telegram',
       conversation_id: 'chat-1',
     });
-    expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name)).toContain('read_repo_with_claude');
+    expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name)).toContain('read_repo');
   });
 
   test('formats issue recommendations returned from read-only repo analysis', async () => {
@@ -1368,6 +1368,26 @@ describe('SupervisorAgentRuntimeService', () => {
       conversation_id: 'chat-1',
     });
     expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name)).toEqual(['retry_issue']);
+  });
+
+  test('routes natural-language cost approval to the budget tool and requires confirmation', async () => {
+    const h = createHarness();
+    const budgetIssue = h.runtime.getIssue('INT-158');
+    expect(budgetIssue).not.toBeNull();
+    budgetIssue!.orchestrator_state = 'halted';
+    budgetIssue!.delivery_code = 'cost_budget_exceeded';
+    budgetIssue!.actions.can_override_cost_budget = true;
+
+    const response = await h.service.respond({
+      context: h.context,
+      text: '批准 INT-158 的成本预算并继续',
+    });
+
+    expect(response.actions?.[0]?.callback_data).toBe('pending|confirm');
+    expect(h.pendingActions.findOpenByConversation({
+      transport: 'telegram',
+      conversation_id: 'chat-1',
+    })?.tool_name).toBe('approve_cost_budget');
   });
 
   test('lets the LLM tool router resolve a contextual card request from the latest created issue', async () => {
@@ -1591,7 +1611,7 @@ describe('SupervisorAgentRuntimeService', () => {
       }
       return {
         type: 'tool_call',
-        tool: 'read_repo_with_claude',
+        tool: 'read_repo',
         args: { question: input.text },
         reason: 'The user asked about repository README content.',
       };
@@ -1617,7 +1637,7 @@ describe('SupervisorAgentRuntimeService', () => {
       transport: 'telegram',
       conversation_id: 'chat-1',
     });
-    expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name)).toEqual(['read_repo_with_claude']);
+    expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name)).toEqual(['read_repo']);
   });
 
   test('lets the supervisor tool router choose control-plane tools for repo-looking natural language', async () => {
@@ -1660,7 +1680,7 @@ describe('SupervisorAgentRuntimeService', () => {
     expect(h.toolCalls.findByRun(run!.id).map((call) => call.tool_name)).toEqual(['list_issues']);
   });
 
-  test('reads an explicitly named non-default repository without changing the default project', async () => {
+  test('normalizes the legacy repo-read tool while reading a named non-default repository', async () => {
     const projectResolver = {
       listConfiguredProjectSlugs: () => ['slug-test3', 'slug-test4'],
       listConfiguredRoutes: () => [
@@ -1810,7 +1830,7 @@ describe('SupervisorAgentRuntimeService', () => {
       conversation_id: 'chat-1',
     });
     expect(secondRun?.repo_ref).toBe('UniUni2000/test4');
-    expect(h.toolCalls.findByRun(secondRun!.id).map((call) => call.tool_name)).toEqual(['read_repo_with_claude']);
+    expect(h.toolCalls.findByRun(secondRun!.id).map((call) => call.tool_name)).toEqual(['read_repo']);
     expect(h.toolCalls.findByRun(secondRun!.id)[0]?.args).toMatchObject({
       repo_ref: 'UniUni2000/test4',
       project_slug: 'slug-test4',
@@ -1858,7 +1878,7 @@ describe('SupervisorAgentRuntimeService', () => {
     } as any;
     const h = createHarness(async () => ({
       type: 'tool_call',
-      tool: 'read_repo_with_claude',
+      tool: 'read_repo',
       args: { question: 'test2 仓库是干啥的呢？', repo_ref: 'test2' },
       reason: 'The user asked about repo purpose.',
     }), {
@@ -2441,7 +2461,7 @@ describe('SupervisorAgentRuntimeService', () => {
       transport: 'telegram',
       conversation_id: 'chat-1',
     });
-    const readCall = h.toolCalls.findByRun(run!.id).find((call) => call.tool_name === 'read_repo_with_claude');
+    const readCall = h.toolCalls.findByRun(run!.id).find((call) => call.tool_name === 'read_repo');
     expect(readCall?.status).toBe('failed');
     expect(readCall?.result_summary).toContain('ECONNRESET');
   });

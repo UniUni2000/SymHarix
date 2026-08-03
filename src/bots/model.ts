@@ -132,7 +132,7 @@ function buildPromptText(params: BotAssistantModelRequest): string {
     'Allowed JSON shapes:',
     '{"intent":{"kind":"list_issues","active_only":false,"state_filter":null,"repo_ref":null}}',
     '{"intent":{"kind":"list_repositories"}}',
-    '{"intent":{"kind":"read_repo_with_claude","question":"...","repo_ref":"test2"}}',
+    '{"intent":{"kind":"read_repo","question":"...","repo_ref":"test2"}}',
     '{"intent":{"kind":"create_issue","title":"...","description":"...","project_slug":"..."}}',
     '{"intent":{"kind":"status","issue_id":"INT-31"}}',
     '{"intent":{"kind":"show_issue_card","issue_id":"INT-31"}}',
@@ -140,6 +140,7 @@ function buildPromptText(params: BotAssistantModelRequest): string {
     '{"intent":{"kind":"unwatch","issue_id":"INT-31"}}',
     '{"intent":{"kind":"stop","issue_id":"INT-31"}}',
     '{"intent":{"kind":"retry","issue_id":"INT-31"}}',
+    '{"intent":{"kind":"approve_budget","issue_id":"INT-31"}}',
     '{"intent":{"kind":"close_issue","issue_id":"INT-31"}}',
     '{"intent":{"kind":"supersede_issue","issue_id":"INT-31","successor_issue_id":"INT-32","reason":"..."}}',
     '{"intent":{"kind":"override","issue_id":"INT-31"}}',
@@ -159,9 +160,10 @@ function buildPromptText(params: BotAssistantModelRequest): string {
     '- Do not invent project slugs, repo names, issue ids, states, PR numbers, or failures.',
     '- If the user asks to switch/change the active/default repo, return switch_repository with a repo_ref from runtime_context.available_projects; repo_ref can be a project slug, owner/repo, or repo name.',
     '- If the user asks about issue lists, recent issues, issue progress, or available repositories, choose a tool intent such as list_issues or list_repositories instead of answering from memory.',
-    '- If the user asks about repository files/content/README/code, choose read_repo_with_claude. Include repo_ref when they name a non-default repo, but do not switch the default repo unless they ask to switch.',
-    '- Use runtime_context.recent_messages to resolve short follow-ups. Example: after "test3 仓库主要讲了啥", "test4 呢?" means read_repo_with_claude for test4 with the same question shape.',
+    '- If the user asks about repository files/content/README/code, choose read_repo. Include repo_ref when they name a non-default repo, but do not switch the default repo unless they ask to switch.',
+    '- Use runtime_context.recent_messages to resolve short follow-ups. Example: after "test3 仓库主要讲了啥", "test4 呢?" means read_repo for test4 with the same question shape.',
     '- For write/control actions, identify the action only. The caller will ask for confirmation.',
+    '- If the user explicitly asks to approve/override a cost or token budget for a blocked issue, return approve_budget. Do not confuse this with override, which is only for governance blocks.',
     '- For read questions, prefer answer_question with a concise grounded answer.',
     '- If the user asks for a card, issue card, 单子卡片, 这个单子, 这张卡片, current card, or wants to view/open a card, return show_issue_card.',
     '- Resolve pronouns like this/that/it/这个/这张/刚才那个 from runtime_context.focus_issue when available.',
@@ -428,7 +430,12 @@ abstract class BaseHttpBotAssistantModel implements BotAssistantModel {
 
   constructor(
     protected readonly provider: 'anthropic' | 'openai',
-    config: Required<Pick<BotAssistantModelConfig, 'model' | 'apiKey' | 'baseUrl'>> & Pick<BotAssistantModelConfig, 'timeoutMs'>,
+    config: {
+      model: string;
+      apiKey: string;
+      baseUrl: string;
+      timeoutMs?: number;
+    },
     protected readonly transport: BotAssistantHttpTransport,
   ) {
     this.model = config.model;
@@ -660,6 +667,8 @@ export function createBotAssistantModel(
 
 export function createBotAssistantModelFromEnv(fetchImpl: typeof fetch = fetch): BotAssistantModel {
   const transportMode = normalizeConfigValue(readSymHarixEnv('SYMPHONY_BOT_LLM_HTTP_TRANSPORT'))?.toLowerCase() ?? 'fetch';
+  const provider = readSymHarixEnv('SYMPHONY_BOT_LLM_PROVIDER') ?? null;
+  const isAnthropic = normalizeProvider(provider) === 'anthropic';
   const fetchTransport = new FetchBotAssistantHttpTransport(fetchImpl);
   const curlTransport = new CurlBotAssistantHttpTransport();
   const transportOptions: BotAssistantModelOptions =
@@ -670,10 +679,12 @@ export function createBotAssistantModelFromEnv(fetchImpl: typeof fetch = fetch):
         : { primaryTransport: fetchTransport, fallbackTransport: null };
 
   return createBotAssistantModel({
-    provider: readSymHarixEnv('SYMPHONY_BOT_LLM_PROVIDER') ?? null,
-    model: readSymHarixEnv('SYMPHONY_BOT_LLM_MODEL') ?? null,
-    apiKey: readSymHarixEnv('SYMPHONY_BOT_LLM_API_KEY') ?? null,
-    baseUrl: readSymHarixEnv('SYMPHONY_BOT_LLM_BASE_URL') ?? null,
+    provider,
+    // A Claude chat model can safely reuse the code runtime credentials. This
+    // keeps the guided setup from asking operators to store one key twice.
+    model: readSymHarixEnv('SYMPHONY_BOT_LLM_MODEL') ?? (isAnthropic ? process.env.ANTHROPIC_MODEL ?? null : null),
+    apiKey: readSymHarixEnv('SYMPHONY_BOT_LLM_API_KEY') ?? (isAnthropic ? process.env.ANTHROPIC_API_KEY ?? null : null),
+    baseUrl: readSymHarixEnv('SYMPHONY_BOT_LLM_BASE_URL') ?? (isAnthropic ? process.env.ANTHROPIC_BASE_URL ?? null : null),
     timeoutMs: parsePositiveInteger(readSymHarixEnv('SYMPHONY_BOT_LLM_TIMEOUT_MS')),
   }, fetchImpl, transportOptions);
 }

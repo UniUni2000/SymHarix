@@ -1,9 +1,14 @@
 import type { CreateIssueRequest, RuntimeControlPlane, RuntimeStreamEvent } from '../runtime/types';
+import type {
+  SupervisorPlanVersionRecord,
+  SupervisorSessionRecord,
+} from '../database/types';
 
 export type BotTransport = 'telegram' | 'discord' | 'feishu';
 export type BotWatchPreset = 'default' | 'verbose' | 'failures' | 'status';
 export type BotCommandName =
   | 'help'
+  | 'whoami'
   | 'clear'
   | 'status'
   | 'new'
@@ -12,6 +17,7 @@ export type BotCommandName =
   | 'unwatch'
   | 'stop'
   | 'retry'
+  | 'approve_budget'
   | 'close_issue'
   | 'supersede_issue'
   | 'override'
@@ -145,6 +151,7 @@ export interface BotTransportManifest {
   outbound_enabled: boolean;
   watch_supported: boolean;
   write_requires_operator: boolean;
+  operator_configured?: boolean;
   inbound_path: string;
   proactive_followups_supported?: boolean;
   inline_actions_supported?: boolean;
@@ -245,7 +252,34 @@ export interface BotGateway {
     status: number;
     body: Record<string, unknown>;
   }>;
+  listSupervisorPlans?(): SupervisorRuntimePlanView[];
+  getSupervisorPlan?(sessionId: string): SupervisorRuntimePlanView | null;
+  actOnSupervisorPlan?(input: {
+    sessionId: string;
+    action: 'approve' | 'alternate' | 'cancel' | 'rollback';
+    expectedPlanVersion: number;
+    targetPlanVersion?: number | null;
+  }): Promise<BotCommandResponse>;
+  reviseSupervisorPlan?(input: {
+    sessionId: string;
+    instruction: string;
+    expectedPlanVersion: number;
+  }): Promise<BotCommandResponse>;
   dispose?(): void;
+}
+
+export interface SupervisorRuntimePlanView {
+  session: SupervisorSessionRecord;
+  versions: SupervisorPlanVersionRecord[];
+  version_diffs: Array<{
+    from_version: number | null;
+    to_version: number;
+    changed_fields: string[];
+    scope_added: string[];
+    scope_removed: string[];
+    acceptance_added: string[];
+    acceptance_removed: string[];
+  }>;
 }
 
 export interface RuntimeBackedBotComponent {
@@ -292,7 +326,7 @@ export type SupervisorIntakeSource =
 export type BotAssistantIntentKind =
   | 'list_issues'
   | 'list_repositories'
-  | 'read_repo_with_claude'
+  | 'read_repo'
   | 'create_issue'
   | 'status'
   | 'show_issue_card'
@@ -300,6 +334,7 @@ export type BotAssistantIntentKind =
   | 'unwatch'
   | 'stop'
   | 'retry'
+  | 'approve_budget'
   | 'close_issue'
   | 'supersede_issue'
   | 'override'
@@ -326,7 +361,7 @@ export type BotAssistantIntent =
       kind: 'list_repositories';
     }
   | {
-      kind: 'read_repo_with_claude';
+      kind: 'read_repo';
       question: string | null;
       repo_ref?: string | null;
       project_slug?: string | null;
@@ -338,7 +373,7 @@ export type BotAssistantIntent =
       project_slug: string | null;
     }
   | {
-      kind: 'status' | 'watch' | 'unwatch' | 'stop' | 'retry' | 'close_issue' | 'override' | 'rewrite' | 'split';
+      kind: 'status' | 'watch' | 'unwatch' | 'stop' | 'retry' | 'approve_budget' | 'close_issue' | 'override' | 'rewrite' | 'split';
       issue_id: string | null;
       watch_preset?: BotWatchPreset | null;
       reason?: string | null;
@@ -446,7 +481,7 @@ export interface BotRepoUnderstandingView {
     risks: string[];
   };
   evidence_paths: string[];
-  source: 'cache' | 'claude_code' | 'fallback';
+  source: 'cache' | 'opencode' | 'claude_code' | 'fallback';
 }
 
 export interface BotIssueContextView {

@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import type {
   BotConversationPreferenceRepository,
-  RepoClaudeConversationRepository,
+  RepoAgentConversationRepository,
   SupervisorPendingActionRepository,
   SupervisorRunEventRepository,
   SupervisorRunRepository,
@@ -36,6 +36,7 @@ export const SUPERVISOR_ORCHESTRATOR_TOOL_NAMES = [
   'watch_issue',
   'unwatch_issue',
   'retry_issue',
+  'approve_cost_budget',
   'stop_issue',
   'switch_repository',
   'set_default_project',
@@ -60,7 +61,7 @@ export interface SupervisorOrchestratorBrokerOptions {
   events: SupervisorRunEventRepository;
   toolCalls: SupervisorToolCallRepository;
   pendingActions: SupervisorPendingActionRepository;
-  repoConversations?: RepoClaudeConversationRepository | null;
+  repoConversations?: RepoAgentConversationRepository | null;
   actionPolicy?: SupervisorActionPolicy;
   supervisorAgentService?: SupervisorAgentService | null;
 }

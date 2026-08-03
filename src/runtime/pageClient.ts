@@ -6,7 +6,8 @@ export const runtimePageClient = `
     selectedIssue: null,
     historyView: null,
     timeline: [],
-    runtimeToken: window.localStorage.getItem('symphony.runtime.writeToken') || '',
+    plans: [],
+    selectedPlanId: null,
     filter: '',
     pending: {
       create: false,
@@ -17,6 +18,7 @@ export const runtimePageClient = `
     panels: {
       accessOpen: false,
       createOpen: false,
+      plannerOpen: false,
     },
     stream: null,
   };
@@ -27,6 +29,7 @@ export const runtimePageClient = `
   const metricNeedsDecision = document.getElementById('metric-needs-decision');
   const metricRunning = document.getElementById('metric-running');
   const metricFailed = document.getElementById('metric-failed');
+  const metricDailyBudget = document.getElementById('metric-daily-budget');
   const queueList = document.getElementById('queue-list');
   const focusCard = document.getElementById('focus-card');
   const timelineList = document.getElementById('timeline-list');
@@ -45,9 +48,12 @@ export const runtimePageClient = `
   const refreshButton = document.getElementById('refresh-button');
   const openAccessButton = document.getElementById('open-access-button');
   const openCreateButton = document.getElementById('open-create-button');
+  const openPlannerButton = document.getElementById('open-planner-button');
   const accessDrawer = document.getElementById('access-drawer');
   const createDrawer = document.getElementById('create-drawer');
-  runtimeTokenInput.value = state.runtimeToken;
+  const plannerDrawer = document.getElementById('planner-drawer');
+  const plannerList = document.getElementById('planner-list');
+  const plannerDetail = document.getElementById('planner-detail');
 
   function escapeHtml(value) {
     return String(value == null ? '' : value)
@@ -86,15 +92,14 @@ export const runtimePageClient = `
 
   function buildRuntimeHeaders(inputHeaders) {
     const headers = new Headers(inputHeaders || {});
-    if (state.runtimeToken) {
-      headers.set('x-symphony-runtime-token', state.runtimeToken);
-    }
+    headers.set('x-symharix-runtime-csrf', '1');
     return headers;
   }
 
   async function fetchJson(url, options) {
     const response = await fetch(url, {
       ...(options || {}),
+      credentials: 'same-origin',
       headers: buildRuntimeHeaders(options && options.headers),
     });
     const payload = await response.json();
@@ -342,6 +347,9 @@ export const runtimePageClient = `
     }
     if (issue.actions && issue.actions.can_retry) {
       pushRemote('retry', 'Retry', 'secondary', false);
+    }
+    if (issue.actions && issue.actions.can_override_cost_budget) {
+      pushRemote('cost_override', 'Approve budget', 'danger', false);
     }
     if (issue.actions && issue.actions.can_rewrite_governance) {
       pushRemote('rewrite', 'Rewrite gate', 'secondary', false);
@@ -597,6 +605,12 @@ export const runtimePageClient = `
     metricNeedsDecision.textContent = String(issues.filter((issue) => buildIssueModel(issue).kind === 'needs_decision').length);
     metricRunning.textContent = String(issues.filter((issue) => isRunningIssue(issue)).length);
     metricFailed.textContent = String(issues.filter((issue) => buildIssueModel(issue).kind === 'delivery_failed' || normalizeText(issue.orchestrator_state).toLowerCase().includes('failed')).length);
+    const dailyBudget = state.overview && state.overview.cost ? state.overview.cost.daily : null;
+    metricDailyBudget.textContent = dailyBudget
+      ? (dailyBudget.usd_enforced
+          ? '$' + Number((dailyBudget.cost_usd || 0) + (dailyBudget.cost_usd_reserved || 0)).toFixed(2) + ' / $' + Number(dailyBudget.usd_limit).toFixed(2)
+          : Math.round(Number(dailyBudget.token_utilization || 0) * 100) + '% tokens')
+      : '—';
     statusSummary.textContent = buildOverviewSummary();
   }
 
@@ -611,11 +625,9 @@ export const runtimePageClient = `
 
     accessBadge.className = 'badge ' + (access.viewer_role === 'operator' ? 'accent' : 'warn');
     accessBadge.textContent = access.viewer_role === 'operator' ? 'Operator' : 'Viewer';
-    accessCopy.textContent = access.mode === 'open'
-      ? 'Mutating actions are open on this runtime.'
-      : access.viewer_role === 'operator'
-        ? 'Write token accepted. Control actions are enabled.'
-        : 'Read-only mode. Save a valid token to enable create, stop, retry, and governance actions.';
+    accessCopy.textContent = access.viewer_role === 'operator'
+      ? 'Authenticated operator session. Control actions are enabled.'
+      : 'Authenticated viewer session. Runtime data is read-only.';
   }
 
   function renderQueue() {
@@ -694,6 +706,15 @@ export const runtimePageClient = `
     const queuedChildSummary = buildQueuedChildSummary(issue);
     const showQueueHandoff = issue.governance_thread_state === 'waiting_on_child' || issue.governance_thread_state === 'child_failed';
     const supervisorSummary = buildSupervisorSessionSummary(issue);
+    const costSummary = issue.cost && Array.isArray(issue.cost.scopes)
+      ? issue.cost.scopes.map((scope) => {
+          const tokenText = String(scope.tokens_used + scope.tokens_reserved) + ' / ' + String(scope.token_limit) + ' tokens';
+          const usdText = scope.usd_enforced
+            ? ' · $' + Number((scope.cost_usd || 0) + (scope.cost_usd_reserved || 0)).toFixed(2) + ' / $' + Number(scope.usd_limit).toFixed(2)
+            : ' · USD pricing not configured';
+          return scope.label + ': ' + tokenText + usdText;
+        }).join(' | ')
+      : 'No cost ledger is available for this issue.';
     const actionButtons = [
       renderActionButton(recommendation, pendingAction),
       ...secondaryActions.map((action) => renderActionButton(action, pendingAction)),
@@ -885,6 +906,7 @@ export const runtimePageClient = `
       buildSummaryCard('Session state', issue.supervisor_session_state || 'n/a', JSON.stringify({
         supervisor_session_state: issue.supervisor_session_state || null,
       }, null, 2)),
+      buildSummaryCard('Cost budget', costSummary, issue.cost ? JSON.stringify(issue.cost, null, 2) : null),
       buildSummaryCard('Root-thread pause', pauseReason, JSON.stringify({
         governance_pause_reason: issue.governance_pause_reason || null,
         governance_thread_state: issue.governance_thread_state || null,
@@ -935,11 +957,102 @@ export const runtimePageClient = `
     createButton.textContent = state.pending.create ? 'Creating issue...' : (canCreate ? 'Create issue' : 'Read-only');
   }
 
+  function selectedPlanView() {
+    return state.plans.find((item) => item && item.session && item.session.id === state.selectedPlanId) || null;
+  }
+
+  function renderPlanner() {
+    if (!state.plans.length) {
+      plannerList.innerHTML = '<div class="empty-state">No plan sessions yet.</div>';
+      plannerDetail.innerHTML = '<div class="empty-state">Create a plan from Telegram, Feishu, or chat first.</div>';
+      return;
+    }
+    if (!state.selectedPlanId || !selectedPlanView()) {
+      state.selectedPlanId = state.plans[0].session.id;
+    }
+    plannerList.innerHTML = state.plans.map((item) => {
+      const session = item.session;
+      const plan = session.plan_card || {};
+      const active = session.id === state.selectedPlanId ? ' active' : '';
+      return '<button type="button" class="queue-card' + active + '" data-plan-id="' + escapeHtml(session.id) + '">' +
+        '<div class="badge-row">' + formatBadge(session.state, session.active_decision_kind ? 'warn' : 'neutral') + formatBadge('v' + session.plan_version, 'info') + '</div>' +
+        '<div class="queue-card-title">' + escapeHtml(plan.title || 'Untitled plan') + '</div>' +
+        '<p class="queue-card-copy">' + escapeHtml(session.repo_ref || plan.project_slug || 'Repository not selected') + '</p>' +
+        '</button>';
+    }).join('');
+    plannerList.querySelectorAll('[data-plan-id]').forEach((button) => {
+      button.addEventListener('click', () => {
+        state.selectedPlanId = button.getAttribute('data-plan-id');
+        renderPlanner();
+      });
+    });
+
+    const view = selectedPlanView();
+    const session = view.session;
+    const plan = session.plan_card || {};
+    const steps = Array.isArray(plan.steps) ? plan.steps : [];
+    const versions = Array.isArray(view.versions) ? view.versions : [];
+    const versionDiffs = Array.isArray(view.version_diffs) ? view.version_diffs : [];
+    const canWrite = Boolean(state.manifest && state.manifest.access && state.manifest.access.can_create_issue);
+    plannerDetail.innerHTML = [
+      '<div class="badge-row">',
+      formatBadge(session.state, session.active_decision_kind ? 'warn' : 'neutral'),
+      formatBadge('Plan v' + session.plan_version, 'info'),
+      plan.estimated_complexity ? formatBadge(plan.estimated_complexity, 'neutral') : '',
+      plan.estimated_token_budget ? formatBadge(Math.round(plan.estimated_token_budget / 1000) + 'k est. tokens', 'neutral') : '',
+      plan.estimated_cost_usd != null ? formatBadge('$' + Number(plan.estimated_cost_usd).toFixed(2) + ' est.', 'neutral') : '',
+      plan.planning_diagnostics && plan.planning_diagnostics.degraded ? formatBadge('Planner degraded', 'warn') : '',
+      '</div>',
+      '<h3 class="drawer-title">' + escapeHtml(plan.title || 'Untitled plan') + '</h3>',
+      '<p class="drawer-copy">' + escapeHtml(plan.user_goal || '') + '</p>',
+      '<div class="summary-grid">',
+      '<div class="summary-card"><strong>Scope</strong><p>' + escapeHtml((plan.in_scope || []).join(' · ') || 'Not defined') + '</p></div>',
+      '<div class="summary-card"><strong>Acceptance</strong><p>' + escapeHtml((plan.acceptance || []).join(' · ') || 'Not defined') + '</p></div>',
+      '<div class="summary-card"><strong>Affected paths</strong><p>' + escapeHtml((plan.affected_paths || []).join(' · ') || 'Confirm during step 1') + '</p></div>',
+      '<div class="summary-card"><strong>Tests</strong><p>' + escapeHtml((plan.test_commands || []).join(' · ') || 'Repository defaults') + '</p></div>',
+      '</div>',
+      '<div class="planner-steps">' + steps.map((step) => '<div class="summary-card"><strong>' + escapeHtml(step.id + ' · ' + step.title) + '</strong><p>' + escapeHtml(step.description) + '</p><small>Depends on: ' + escapeHtml((step.depends_on || []).join(', ') || 'none') + '</small></div>').join('') + '</div>',
+      '<form id="planner-revision-form" class="drawer-form">',
+      '<label class="form-label" for="planner-revision-input">Revise this plan</label>',
+      '<textarea id="planner-revision-input" class="form-textarea" placeholder="Describe the scope, acceptance, repository, or strategy change" required></textarea>',
+      '<div class="drawer-actions">',
+      '<button class="action-button primary" type="submit"' + (canWrite ? '' : ' disabled') + '>Create revised version</button>',
+      '<button class="action-button success" type="button" data-plan-action="approve"' + (canWrite ? '' : ' disabled') + '>Approve current version</button>',
+      '<button class="action-button secondary" type="button" data-plan-action="alternate"' + (canWrite ? '' : ' disabled') + '>Generate alternate</button>',
+      '<button class="action-button danger" type="button" data-plan-action="cancel"' + (canWrite ? '' : ' disabled') + '>Cancel plan</button>',
+      '</div></form>',
+      '<div class="planner-versions"><h4>Immutable versions</h4>',
+      versions.map((version) => {
+        const diff = versionDiffs.find((item) => item.to_version === version.plan_version);
+        const detail = diff && diff.changed_fields.length ? ' · changed: ' + diff.changed_fields.join(', ') : '';
+        return '<div class="summary-card"><button type="button" class="action-button secondary" data-rollback-version="' + version.plan_version + '"' + (canWrite || version.plan_version === session.plan_version ? '' : ' disabled') + '>v' + version.plan_version + ' · ' + escapeHtml(version.change_kind) + (version.plan_version === session.plan_version ? ' (current)' : ' — restore') + '</button><p>' + escapeHtml((version.change_summary || '') + detail) + '</p></div>';
+      }).join(''),
+      '</div>',
+    ].join('');
+    const revisionForm = document.getElementById('planner-revision-form');
+    revisionForm && revisionForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const instruction = String(document.getElementById('planner-revision-input').value || '').trim();
+      if (instruction) void revisePlan(session.id, session.plan_version, instruction);
+    });
+    plannerDetail.querySelectorAll('[data-plan-action]').forEach((button) => {
+      button.addEventListener('click', () => void postPlanAction(session.id, session.plan_version, button.getAttribute('data-plan-action')));
+    });
+    plannerDetail.querySelectorAll('[data-rollback-version]').forEach((button) => {
+      const version = Number(button.getAttribute('data-rollback-version'));
+      if (version !== session.plan_version) {
+        button.addEventListener('click', () => void postPlanAction(session.id, session.plan_version, 'rollback', version));
+      }
+    });
+  }
+
   function renderDrawers() {
     accessDrawer.classList.toggle('open', state.panels.accessOpen);
     createDrawer.classList.toggle('open', state.panels.createOpen);
+    plannerDrawer.classList.toggle('open', state.panels.plannerOpen);
     accessDrawer.setAttribute('aria-hidden', state.panels.accessOpen ? 'false' : 'true');
     createDrawer.setAttribute('aria-hidden', state.panels.createOpen ? 'false' : 'true');
+    plannerDrawer.setAttribute('aria-hidden', state.panels.plannerOpen ? 'false' : 'true');
   }
 
   function renderAll() {
@@ -947,6 +1060,7 @@ export const runtimePageClient = `
     renderAccess();
     renderQueue();
     renderCreateState();
+    renderPlanner();
     renderFocusCard();
     renderTimeline();
     renderHistory();
@@ -961,6 +1075,10 @@ export const runtimePageClient = `
   async function loadOverview() {
     state.overview = await fetchJson('/api/v1/runtime/overview');
     reconcileSelection();
+  }
+
+  async function loadPlans() {
+    state.plans = await fetchJson('/api/v1/runtime/plans');
   }
 
   async function loadIssue(issueId) {
@@ -980,6 +1098,7 @@ export const runtimePageClient = `
     await Promise.all([
       loadManifest(),
       loadOverview(),
+      loadPlans(),
     ]);
     if (state.selectedIssueId) {
       await Promise.all([
@@ -1009,6 +1128,8 @@ export const runtimePageClient = `
     try {
       const actionPath = action === 'override'
         ? '/api/v1/runtime/issues/' + encodeURIComponent(issueId) + '/governance/override'
+        : action === 'cost_override'
+          ? '/api/v1/runtime/issues/' + encodeURIComponent(issueId) + '/cost/override'
         : action === 'rewrite'
           ? '/api/v1/runtime/issues/' + encodeURIComponent(issueId) + '/governance/rewrite'
           : action === 'split'
@@ -1027,6 +1148,36 @@ export const runtimePageClient = `
       state.pending.actionSuggestionId = null;
       state.pending.action = null;
       renderAll();
+    }
+  }
+
+  async function postPlanAction(sessionId, version, action, targetVersion) {
+    try {
+      const result = await fetchJson('/api/v1/runtime/plans/' + encodeURIComponent(sessionId) + '/actions/' + action, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expected_plan_version: version, target_plan_version: targetVersion || null }),
+      });
+      setFlash(result.message || 'Plan action completed.');
+      await Promise.all([loadPlans(), loadOverview()]);
+      renderAll();
+    } catch (error) {
+      setFlash(error.message);
+    }
+  }
+
+  async function revisePlan(sessionId, version, instruction) {
+    try {
+      const result = await fetchJson('/api/v1/runtime/plans/' + encodeURIComponent(sessionId), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expected_plan_version: version, instruction: instruction }),
+      });
+      setFlash(result.message || 'Revised plan version created.');
+      await loadPlans();
+      renderAll();
+    } catch (error) {
+      setFlash(error.message);
     }
   }
 
@@ -1060,6 +1211,9 @@ export const runtimePageClient = `
     if (kind === 'create') {
       state.panels.createOpen = true;
     }
+    if (kind === 'planner') {
+      state.panels.plannerOpen = true;
+    }
     renderDrawers();
   }
 
@@ -1069,6 +1223,9 @@ export const runtimePageClient = `
     }
     if (kind === 'create') {
       state.panels.createOpen = false;
+    }
+    if (kind === 'planner') {
+      state.panels.plannerOpen = false;
     }
     renderDrawers();
   }
@@ -1157,6 +1314,10 @@ export const runtimePageClient = `
     openDrawer('create');
   });
 
+  openPlannerButton.addEventListener('click', () => {
+    openDrawer('planner');
+  });
+
   document.querySelectorAll('[data-close-drawer]').forEach((element) => {
     element.addEventListener('click', () => {
       const kind = element.getAttribute('data-close-drawer');
@@ -1168,29 +1329,37 @@ export const runtimePageClient = `
 
   accessForm.addEventListener('submit', async (event) => {
     event.preventDefault();
-    state.runtimeToken = String(runtimeTokenInput.value || '').trim();
-    if (state.runtimeToken) {
-      window.localStorage.setItem('symphony.runtime.writeToken', state.runtimeToken);
-    } else {
-      window.localStorage.removeItem('symphony.runtime.writeToken');
-    }
-    await refreshSelectedIssue();
-    if (!state.runtimeToken) {
-      setFlash('Runtime token cleared. Read-only mode active.');
+    const token = String(runtimeTokenInput.value || '').trim();
+    if (!token) {
+      setFlash('Enter a viewer or operator token.');
       return;
     }
+    const response = await fetch('/api/v1/runtime/auth/token', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: token }),
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || !payload || !payload.success) {
+      setFlash(payload && payload.error ? payload.error : 'Runtime token was rejected.');
+      runtimeTokenInput.select();
+      return;
+    }
+    runtimeTokenInput.value = '';
+    await refreshSelectedIssue();
     const role = state.manifest && state.manifest.access ? state.manifest.access.viewer_role : 'viewer';
     setFlash(role === 'operator'
-      ? 'Write token accepted. Operator controls enabled.'
-      : 'Token saved, but this runtime is still read-only.');
+      ? 'Secure operator session started.'
+      : 'Secure viewer session started.');
   });
 
   clearTokenButton.addEventListener('click', async () => {
-    state.runtimeToken = '';
-    runtimeTokenInput.value = '';
-    window.localStorage.removeItem('symphony.runtime.writeToken');
-    await refreshSelectedIssue();
-    setFlash('Runtime token cleared. Read-only mode active.');
+    await fetch('/api/v1/runtime/auth/logout', {
+      method: 'POST',
+      credentials: 'same-origin',
+    });
+    window.location.replace('/runtime');
   });
 
   createForm.addEventListener('submit', async (event) => {
@@ -1233,8 +1402,14 @@ export const runtimePageClient = `
   Promise.all([
     loadManifest(),
     loadOverview(),
+    loadPlans(),
   ])
     .then(async () => {
+      const requestedPlan = new URLSearchParams(window.location.search).get('session');
+      if (requestedPlan && state.plans.some((item) => item.session && item.session.id === requestedPlan)) {
+        state.selectedPlanId = requestedPlan;
+        state.panels.plannerOpen = true;
+      }
       if (state.selectedIssueId) {
         await Promise.all([
           loadIssue(state.selectedIssueId),
