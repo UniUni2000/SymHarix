@@ -1114,6 +1114,7 @@ function buildDoctorInput(env: EnvValues, workflowPath = WORKFLOW_PATH): Configu
     runtimeBaseUrl: envValue(env, 'SYMHARIX_OPENCODE_BASE_URL'),
     usesOpenCodeAuth: envValue(env, 'SYMHARIX_OPENCODE_USE_AUTH') === '1',
     telegramToken: envValue(env, 'SYMHARIX_TELEGRAM_BOT_TOKEN'),
+    telegramPublicBaseUrl: envValue(env, 'SYMHARIX_PUBLIC_BASE_URL'),
     feishuAppId: envValue(env, 'SYMHARIX_FEISHU_APP_ID'),
     feishuAppSecret: envValue(env, 'SYMHARIX_FEISHU_APP_SECRET'),
   };

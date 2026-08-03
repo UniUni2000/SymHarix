@@ -19,6 +19,7 @@ import {
 } from '../config/installationPaths';
 import {
   buildTelegramStartupSummary,
+  buildStartLocalRuntimeReadHeaders,
   applyStartLocalBotSurfaceIsolation,
   applyProxyEnv,
   disableProxyEnv,
@@ -263,13 +264,19 @@ type TelegramManifestSnapshot = {
   health?: string | null;
   webhook_url?: string | null;
   webhook_last_error_message?: string | null;
+  webhook_error_recent?: boolean;
   webhook_pending_update_count?: number | null;
   public_base_url?: string | null;
 };
 
-async function readTelegramManifestSnapshot(port: number): Promise<TelegramManifestSnapshot | null> {
+async function readTelegramManifestSnapshot(
+  port: number,
+  env: Record<string, string | undefined>,
+): Promise<TelegramManifestSnapshot | null> {
   const manifestUrl = `http://127.0.0.1:${port}/api/v1/bots/manifest`;
-  const response = await fetch(manifestUrl);
+  const response = await fetch(manifestUrl, {
+    headers: buildStartLocalRuntimeReadHeaders(env),
+  });
   if (!response.ok) {
     throw new Error(`manifest returned ${response.status}`);
   }
@@ -444,10 +451,11 @@ async function printTelegramStartupSummary(
   port: number,
   expectedPublicBaseUrl: string | null,
   attempts: number,
+  env: Record<string, string | undefined>,
 ): Promise<void> {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      const telegram = await readTelegramManifestSnapshot(port);
+      const telegram = await readTelegramManifestSnapshot(port, env);
       if (telegram && shouldEmitTelegramStartupSummary(telegram, expectedPublicBaseUrl)) {
         console.log(`[symharix] ${buildTelegramStartupSummary(telegram, expectedPublicBaseUrl)}`);
         return;
@@ -726,6 +734,7 @@ async function main(): Promise<void> {
           requestedPort,
           expectedPublicBaseUrl,
           resolveTelegramStartupSummaryAttempts(childEnv),
+          childEnv,
         );
       } else {
         if (expectedPublicBaseUrl) {
@@ -766,6 +775,11 @@ async function main(): Promise<void> {
       ['SYMPHONY_TUNNEL_WATCHDOG_DEGRADED_POLLS', 'SYMPHONY_TELEGRAM_TUNNEL_WATCHDOG_DEGRADED_POLLS'],
       2,
     );
+    const initialMissingPollThreshold = resolvePositiveIntegerEnvAny(
+      childEnv,
+      ['SYMPHONY_TUNNEL_WATCHDOG_INITIAL_POLLS', 'SYMPHONY_TELEGRAM_TUNNEL_WATCHDOG_INITIAL_POLLS'],
+      18,
+    );
     let degradedPolls = 0;
 
     tunnelWatchdog = setInterval(() => {
@@ -775,13 +789,22 @@ async function main(): Promise<void> {
       void (async () => {
         const expectedPublicBaseUrl = readSymHarixEnvTrimmed('SYMPHONY_PUBLIC_BASE_URL', childEnv);
         if (!expectedPublicBaseUrl) {
-          degradedPolls = 0;
+          const telegram = await readTelegramManifestSnapshot(requestedPort, childEnv);
+          if (telegram?.webhook_url) {
+            degradedPolls = 0;
+            return;
+          }
+          degradedPolls += 1;
+          if (degradedPolls >= initialMissingPollThreshold) {
+            degradedPolls = 0;
+            await restartServiceWithFreshTunnel('initial telegram webhook is not registered');
+          }
           return;
         }
 
         let recoveryReason: string | null = null;
         if (botSurface === 'telegram') {
-          const telegram = await readTelegramManifestSnapshot(requestedPort);
+          const telegram = await readTelegramManifestSnapshot(requestedPort, childEnv);
           recoveryReason = telegram
             ? getStartLocalTunnelRecoveryReason(telegram, expectedPublicBaseUrl)
             : null;
@@ -800,7 +823,10 @@ async function main(): Promise<void> {
         }
 
         degradedPolls += 1;
-        if (degradedPolls < degradedPollThreshold) {
+        const requiredPolls = recoveryReason === 'telegram webhook is not registered'
+          ? initialMissingPollThreshold
+          : degradedPollThreshold;
+        if (degradedPolls < requiredPolls) {
           return;
         }
 
@@ -831,6 +857,7 @@ async function main(): Promise<void> {
       requestedPort,
       expectedPublicBaseUrl,
       resolveTelegramStartupSummaryAttempts(childEnv),
+      childEnv,
     );
   } else if (botSurface === 'feishu' && tunnelHandle && expectedPublicBaseUrl) {
     void (async () => {

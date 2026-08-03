@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   applyStartLocalBotSurfaceIsolation,
+  buildStartLocalRuntimeReadHeaders,
   buildTelegramStartupSummary,
   getStartLocalTunnelProbeRecoveryReason,
   getStartLocalTunnelRegistrationWaitReason,
@@ -66,6 +67,17 @@ describe('startLocalTunnel', () => {
       SYMHARIX_TELEGRAM_BOT_TOKEN: 'telegram-token',
       SYMHARIX_PUBLIC_BASE_URL: '',
     })).toBe(true);
+  });
+
+  test('authenticates local manifest probes with viewer token and falls back to operator token', () => {
+    expect(buildStartLocalRuntimeReadHeaders({
+      SYMHARIX_RUNTIME_VIEWER_TOKEN: 'viewer-secret',
+      SYMHARIX_RUNTIME_WRITE_TOKEN: 'operator-secret',
+    })).toEqual({ Authorization: 'Bearer viewer-secret' });
+    expect(buildStartLocalRuntimeReadHeaders({
+      SYMHARIX_RUNTIME_WRITE_TOKEN: 'operator-secret',
+    })).toEqual({ Authorization: 'Bearer operator-secret' });
+    expect(buildStartLocalRuntimeReadHeaders({})).toBeUndefined();
   });
 
   test('provisions a runtime tunnel for Feishu AppLink web URL mode by default', () => {
@@ -264,6 +276,24 @@ describe('startLocalTunnel', () => {
     }, 'https://fresh.trycloudflare.com')).toBe(
       'telegram webhook degraded: Wrong response from the webhook: 530 <none>',
     );
+  });
+
+  test('requests recovery when a temporary tunnel has no registered webhook', () => {
+    expect(getStartLocalTunnelRecoveryReason({
+      health: 'unconfigured',
+      webhook_url: null,
+      public_base_url: 'https://fresh.trycloudflare.com',
+    }, 'https://fresh.trycloudflare.com')).toBe('telegram webhook is not registered');
+  });
+
+  test('ignores an old recoverable Telegram error after a successful fresh diagnostic', () => {
+    expect(getStartLocalTunnelRecoveryReason({
+      health: 'healthy',
+      webhook_url: 'https://fresh.trycloudflare.com/api/v1/bots/telegram/webhook',
+      webhook_last_error_message: 'Wrong response from the webhook: 530 <none>',
+      webhook_error_recent: false,
+      public_base_url: 'https://fresh.trycloudflare.com',
+    }, 'https://fresh.trycloudflare.com')).toBeNull();
   });
 
   test('does not request local tunnel recovery for a stable non-tunnel public URL', () => {

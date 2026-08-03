@@ -24,6 +24,7 @@ export interface ConfigurationDoctorInput {
   runtimeBaseUrl?: string;
   usesOpenCodeAuth: boolean;
   telegramToken?: string;
+  telegramPublicBaseUrl?: string;
   feishuAppId?: string;
   feishuAppSecret?: string;
 }
@@ -275,13 +276,71 @@ async function probeTelegram(
   try {
     const response = await fetchImpl(`https://api.telegram.org/bot${input.telegramToken}/getMe`, { signal });
     const payload = await readJson(response);
-    return response.ok && payload?.ok === true
-      ? {
-          label: 'Telegram',
-          status: 'pass',
-          detail: `Bot token 有效${payload.result?.username ? `，机器人 @${payload.result.username}` : ''}。`,
-        }
-      : { label: 'Telegram', status: 'fail', detail: `Telegram 返回 HTTP ${response.status}；请从 @BotFather 重新复制或轮换 token。` };
+    if (!response.ok || payload?.ok !== true) {
+      return { label: 'Telegram', status: 'fail', detail: `Telegram 返回 HTTP ${response.status}；请从 @BotFather 重新复制或轮换 token。` };
+    }
+
+    const infoResponse = await fetchImpl(
+      `https://api.telegram.org/bot${input.telegramToken}/getWebhookInfo`,
+      { signal },
+    );
+    const infoPayload = await readJson(infoResponse);
+    if (!infoResponse.ok || infoPayload?.ok !== true) {
+      return {
+        label: 'Telegram',
+        status: 'fail',
+        detail: `Bot token 有效，但 getWebhookInfo 返回 HTTP ${infoResponse.status}。`,
+      };
+    }
+
+    const username = payload.result?.username ? `@${payload.result.username}` : 'Telegram Bot';
+    const webhook = infoPayload.result ?? {};
+    const webhookUrl = typeof webhook.url === 'string' ? webhook.url.trim() : '';
+    const publicBaseUrl = input.telegramPublicBaseUrl?.trim().replace(/\/+$/, '') || '';
+    const fixedPublicBaseUrl = publicBaseUrl && !/\.trycloudflare\.com$/i.test(publicBaseUrl)
+      ? publicBaseUrl
+      : '';
+    const expectedWebhookUrl = fixedPublicBaseUrl
+      ? `${fixedPublicBaseUrl}/api/v1/bots/telegram/webhook`
+      : '';
+    if (expectedWebhookUrl && webhookUrl !== expectedWebhookUrl) {
+      return {
+        label: 'Telegram',
+        status: 'fail',
+        detail: `${username} token 有效，但 webhook=${webhookUrl || '(none)'}，预期为 ${expectedWebhookUrl}；重启 symharix start telegram 触发修复。`,
+      };
+    }
+    if (!webhookUrl) {
+      return {
+        label: 'Telegram',
+        status: 'pass',
+        detail: `${username} token 有效；当前未注册 webhook，启动 symharix start telegram 后会自动注册。`,
+      };
+    }
+
+    const pending = Number(webhook.pending_update_count ?? 0);
+    const lastErrorMessage = typeof webhook.last_error_message === 'string'
+      ? webhook.last_error_message.trim()
+      : '';
+    const lastErrorSeconds = Number(webhook.last_error_date ?? 0);
+    const recentError = Boolean(
+      lastErrorMessage
+      && (!Number.isFinite(lastErrorSeconds)
+        || lastErrorSeconds <= 0
+        || Date.now() - lastErrorSeconds * 1000 <= 15 * 60 * 1000),
+    );
+    if (recentError || (Number.isFinite(pending) && pending >= 5)) {
+      return {
+        label: 'Telegram',
+        status: 'fail',
+        detail: `${username} webhook 已注册但状态异常：pending=${Number.isFinite(pending) ? pending : 'unknown'}${lastErrorMessage ? `；${lastErrorMessage}` : ''}。`,
+      };
+    }
+    return {
+      label: 'Telegram',
+      status: 'pass',
+      detail: `${username} webhook 健康；pending=${Number.isFinite(pending) ? pending : 0}；url=${webhookUrl}。`,
+    };
   } catch (error) {
     return safeFailure('Telegram', error);
   }

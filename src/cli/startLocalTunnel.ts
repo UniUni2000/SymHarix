@@ -95,6 +95,7 @@ export function getStartLocalTunnelRecoveryReason(telegram: {
   health?: string | null;
   webhook_url?: string | null;
   webhook_last_error_message?: string | null;
+  webhook_error_recent?: boolean;
   public_base_url?: string | null;
   webhook_pending_update_count?: number | null;
 }, expectedPublicBaseUrl?: string | null): string | null {
@@ -104,6 +105,9 @@ export function getStartLocalTunnelRecoveryReason(telegram: {
   }
 
   const webhookUrl = normalizeEnvValue(telegram.webhook_url ?? undefined);
+  if (!webhookUrl) {
+    return 'telegram webhook is not registered';
+  }
   if (webhookUrl && !webhookUrl.startsWith(`${expectedBaseUrl}/`)) {
     return `stale webhook_url=${webhookUrl} expected_base=${expectedBaseUrl}`;
   }
@@ -114,7 +118,7 @@ export function getStartLocalTunnelRecoveryReason(telegram: {
   }
 
   const error = normalizeEnvValue(telegram.webhook_last_error_message ?? undefined);
-  if (isRecoverableTunnelWebhookError(error)) {
+  if (telegram.webhook_error_recent !== false && isRecoverableTunnelWebhookError(error)) {
     return `telegram webhook degraded: ${error}`;
   }
 
@@ -128,6 +132,14 @@ export function getStartLocalTunnelRecoveryReason(telegram: {
   }
 
   return null;
+}
+
+export function buildStartLocalRuntimeReadHeaders(
+  env: Record<string, string | undefined>,
+): Record<string, string> | undefined {
+  const token = readSymHarixEnvTrimmed('SYMPHONY_RUNTIME_VIEWER_TOKEN', env)
+    || readSymHarixEnvTrimmed('SYMPHONY_RUNTIME_WRITE_TOKEN', env);
+  return token ? { Authorization: `Bearer ${token}` } : undefined;
 }
 
 export function getStartLocalTunnelProbeRecoveryReason(params: {

@@ -110,8 +110,21 @@ export function validateConfigurationField(field: string, rawValue: string): Con
     case 'SYMHARIX_RUNTIME_WRITE_TOKEN':
     case 'SYMHARIX_RUNTIME_VIEWER_TOKEN':
     case 'SYMHARIX_RUNTIME_SESSION_SECRET':
-    case 'SYMHARIX_TELEGRAM_WEBHOOK_SECRET':
       return validateSecret(field, value, { minLength: 32 });
+    case 'SYMHARIX_TELEGRAM_WEBHOOK_SECRET': {
+      const issues = validateSecret(field, value, { minLength: 32 });
+      if (value && !/^[A-Za-z0-9_-]+$/.test(value)) {
+        issues.push(issue(
+          field,
+          'error',
+          'Telegram webhook secret 只能包含字母、数字、下划线和连字符。',
+        ));
+      }
+      if (value.length > 256) {
+        issues.push(issue(field, 'error', 'Telegram webhook secret 不能超过 256 个字符。'));
+      }
+      return issues;
+    }
     case 'SYMHARIX_TELEGRAM_BOT_TOKEN':
       return value && !/^\d{6,14}:[A-Za-z0-9_-]{20,}$/.test(value)
         ? [issue(field, 'error', 'Telegram bot token 格式应为“数字:长字符串”；请从官方 @BotFather 重新复制。')]
@@ -260,6 +273,15 @@ export function validateConfigurationFormats(env: EnvValues): ConfigurationForma
       'SYMHARIX_COST_INPUT_USD_PER_MILLION',
       'warning',
       '美元护栏只有同时配置 input/output 每百万 token 价格才会启用；当前只配置了一项。',
+    ));
+  }
+  const telegramToken = valueOf(env, 'SYMHARIX_TELEGRAM_BOT_TOKEN');
+  const telegramWebhookSecret = valueOf(env, 'SYMHARIX_TELEGRAM_WEBHOOK_SECRET');
+  if (telegramToken && !telegramWebhookSecret) {
+    issues.push(issue(
+      'SYMHARIX_TELEGRAM_WEBHOOK_SECRET',
+      'error',
+      '启用 Telegram 时必须配置 webhook secret；运行 symharix config telegram 自动生成。',
     ));
   }
   return issues;
