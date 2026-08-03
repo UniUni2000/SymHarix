@@ -426,7 +426,7 @@ describe('DefaultSupervisorAgentService', () => {
     for (const key of supervisorAgentEnvKeys) {
       delete process.env[key];
     }
-    process.env.SYMPHONY_SUPERVISOR_READONLY_ADVISOR_COMMAND = 'node scripts/claude-adapter.cjs';
+    process.env.SYMPHONY_SUPERVISOR_READONLY_ADVISOR_COMMAND = 'node scripts/opencode-adapter.cjs';
 
     const agent = createSupervisorAgentFromEnv(
       {

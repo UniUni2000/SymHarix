@@ -1,13 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import type { BotCommandContext } from '../bots/types';
 import {
-  SUPERVISOR_CLAUDE_ALLOWED_TOOLS,
-  SupervisorClaudeRuntimeService,
-  buildSupervisorMcpConfig,
-  buildSupervisorClaudeSystemPrompt,
-} from './claudeRuntime';
+  SUPERVISOR_OPENCODE_ALLOWED_TOOLS,
+  SupervisorOpenCodeRuntimeService,
+  buildSupervisorOpenCodeMcpConfig,
+  buildSupervisorOpenCodeSystemPrompt,
+} from './openCodeRuntime';
 
-describe('SupervisorClaudeRuntimeService', () => {
+describe('SupervisorOpenCodeRuntimeService', () => {
   const context: BotCommandContext = {
     transport: 'telegram',
     recipient: {
@@ -20,10 +20,10 @@ describe('SupervisorClaudeRuntimeService', () => {
     },
   };
 
-  test('reuses a read-only Claude Code session per Telegram conversation and repo', async () => {
+  test('reuses a read-only OpenCode session per Telegram conversation and repo', async () => {
     const launches: string[] = [];
     const turns: string[] = [];
-    const service = new SupervisorClaudeRuntimeService({
+    const service = new SupervisorOpenCodeRuntimeService({
       resolveWorkspace: async () => ({
         repoRef: 'UniUni2000/test2',
         localPath: '/tmp/source-cache/test2',
@@ -56,24 +56,24 @@ describe('SupervisorClaudeRuntimeService', () => {
   });
 
   test('allows read-only repo tools and supervisor context MCP tools but not repo mutation tools', () => {
-    expect(SUPERVISOR_CLAUDE_ALLOWED_TOOLS).toContain('Read');
-    expect(SUPERVISOR_CLAUDE_ALLOWED_TOOLS).toContain('Grep');
-    expect(SUPERVISOR_CLAUDE_ALLOWED_TOOLS).toContain('Glob');
-    expect(SUPERVISOR_CLAUDE_ALLOWED_TOOLS).toContain('LS');
-    expect(SUPERVISOR_CLAUDE_ALLOWED_TOOLS).toContain('mcp__supervisor-context__recommend_repo_issue');
-    expect(SUPERVISOR_CLAUDE_ALLOWED_TOOLS).toContain('mcp__supervisor-orchestrator__list_orchestrator_capabilities');
-    expect(SUPERVISOR_CLAUDE_ALLOWED_TOOLS).toContain('mcp__supervisor-orchestrator__show_issue_card');
-    expect(SUPERVISOR_CLAUDE_ALLOWED_TOOLS).toContain('mcp__supervisor-orchestrator__create_issue');
-    expect(SUPERVISOR_CLAUDE_ALLOWED_TOOLS).toContain('mcp__supervisor-orchestrator__switch_repository');
-    expect(SUPERVISOR_CLAUDE_ALLOWED_TOOLS).toContain('mcp__supervisor-orchestrator__watch_issue');
-    expect(SUPERVISOR_CLAUDE_ALLOWED_TOOLS).toContain('mcp__supervisor-orchestrator__unwatch_issue');
-    expect(SUPERVISOR_CLAUDE_ALLOWED_TOOLS).not.toContain('Bash');
-    expect(SUPERVISOR_CLAUDE_ALLOWED_TOOLS).not.toContain('Write');
-    expect(SUPERVISOR_CLAUDE_ALLOWED_TOOLS).not.toContain('Edit');
+    expect(SUPERVISOR_OPENCODE_ALLOWED_TOOLS).toContain('Read');
+    expect(SUPERVISOR_OPENCODE_ALLOWED_TOOLS).toContain('Grep');
+    expect(SUPERVISOR_OPENCODE_ALLOWED_TOOLS).toContain('Glob');
+    expect(SUPERVISOR_OPENCODE_ALLOWED_TOOLS).toContain('LS');
+    expect(SUPERVISOR_OPENCODE_ALLOWED_TOOLS).toContain('mcp__supervisor-context__recommend_repo_issue');
+    expect(SUPERVISOR_OPENCODE_ALLOWED_TOOLS).toContain('mcp__supervisor-orchestrator__list_orchestrator_capabilities');
+    expect(SUPERVISOR_OPENCODE_ALLOWED_TOOLS).toContain('mcp__supervisor-orchestrator__show_issue_card');
+    expect(SUPERVISOR_OPENCODE_ALLOWED_TOOLS).toContain('mcp__supervisor-orchestrator__create_issue');
+    expect(SUPERVISOR_OPENCODE_ALLOWED_TOOLS).toContain('mcp__supervisor-orchestrator__switch_repository');
+    expect(SUPERVISOR_OPENCODE_ALLOWED_TOOLS).toContain('mcp__supervisor-orchestrator__watch_issue');
+    expect(SUPERVISOR_OPENCODE_ALLOWED_TOOLS).toContain('mcp__supervisor-orchestrator__unwatch_issue');
+    expect(SUPERVISOR_OPENCODE_ALLOWED_TOOLS).not.toContain('Bash');
+    expect(SUPERVISOR_OPENCODE_ALLOWED_TOOLS).not.toContain('Write');
+    expect(SUPERVISOR_OPENCODE_ALLOWED_TOOLS).not.toContain('Edit');
   });
 
   test('describes orchestrator tools as the only business action surface', () => {
-    const prompt = buildSupervisorClaudeSystemPrompt();
+    const prompt = buildSupervisorOpenCodeSystemPrompt();
 
     expect(prompt).toContain('Telegram text is user-facing');
     expect(prompt).toContain('Output Language block');
@@ -91,7 +91,7 @@ describe('SupervisorClaudeRuntimeService', () => {
 
   test('adds a strict English output-language block for English Telegram turns', async () => {
     const turns: string[] = [];
-    const service = new SupervisorClaudeRuntimeService({
+    const service = new SupervisorOpenCodeRuntimeService({
       resolveWorkspace: async () => ({
         repoRef: 'DingfangHu/my-symphony-test',
         localPath: '/tmp/source-cache/my-symphony-test',
@@ -115,7 +115,7 @@ describe('SupervisorClaudeRuntimeService', () => {
   });
 
   test('frames the supervisor as a repo steward that improves vague issue ideas', () => {
-    const prompt = buildSupervisorClaudeSystemPrompt();
+    const prompt = buildSupervisorOpenCodeSystemPrompt();
 
     expect(prompt).toContain('repository steward');
     expect(prompt).toContain('long-term repository health');
@@ -129,9 +129,9 @@ describe('SupervisorClaudeRuntimeService', () => {
     expect(prompt).toContain('high-leverage repo recommendation');
   });
 
-  test('includes an intent routing guide so Claude can choose the right context and business tools', async () => {
+  test('includes an intent routing guide so OpenCode can choose the right context and business tools', async () => {
     const turns: string[] = [];
-    const service = new SupervisorClaudeRuntimeService({
+    const service = new SupervisorOpenCodeRuntimeService({
       resolveWorkspace: async () => ({
         repoRef: 'UniUni2000/test2',
         localPath: '/tmp/source-cache/test2',
@@ -163,7 +163,7 @@ describe('SupervisorClaudeRuntimeService', () => {
   });
 
   test('builds MCP server entrypoints from the orchestrator project root, not the target repo cwd', () => {
-    const config = JSON.parse(buildSupervisorMcpConfig(
+    const config = JSON.parse(buildSupervisorOpenCodeMcpConfig(
       {
         transport: 'telegram',
         conversationId: 'chat-1',
@@ -190,5 +190,30 @@ describe('SupervisorClaudeRuntimeService', () => {
       SYMPHONY_SUPERVISOR_ORCHESTRATOR_REPO_REF:
         'jasperLiuzhipei/symphony-e2e-sandbox',
     });
+  });
+
+  test('builds packaged MCP server entrypoints from the immutable application root', () => {
+    const config = JSON.parse(buildSupervisorOpenCodeMcpConfig(
+      {
+        transport: 'telegram',
+        conversationId: 'chat-1',
+        repoRef: null,
+        localPath: '/tmp/source-cache/repo',
+      },
+      null,
+      null,
+      'token-1',
+      '/Users/example/.symharix',
+      { SYMHARIX_APP_ROOT: '/Applications/SymHarix' },
+    ));
+
+    expect(config.mcpServers['supervisor-context'].args).toEqual([
+      'run',
+      '/Applications/SymHarix/src/supervisor/contextMcpServer.ts',
+    ]);
+    expect(config.mcpServers['supervisor-orchestrator'].args).toEqual([
+      'run',
+      '/Applications/SymHarix/src/supervisor/orchestratorMcpServer.ts',
+    ]);
   });
 });

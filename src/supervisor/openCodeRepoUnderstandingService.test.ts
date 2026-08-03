@@ -1,11 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import {
   buildRepoUnderstandingPrompt,
-  DefaultClaudeRepoUnderstandingService,
-} from './claudeRepoUnderstandingService';
+  DefaultOpenCodeRepoUnderstandingService,
+} from './openCodeRepoUnderstandingService';
 import type { SupervisorRepoUnderstandingSnapshot } from './repoUnderstanding';
 
-function validClaudeOutput(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function validOpenCodeOutput(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     summary: 'Repo coordinates Telegram supervisor work.',
     project_purpose: 'Turns Telegram conversations into supervised repo work.',
@@ -20,7 +20,7 @@ function validClaudeOutput(overrides: Record<string, unknown> = {}): Record<stri
   };
 }
 
-describe('DefaultClaudeRepoUnderstandingService', () => {
+describe('DefaultOpenCodeRepoUnderstandingService', () => {
   test('uses cached ready understanding for same repo commit and does not call runner', async () => {
     let runnerCalls = 0;
     const cached: SupervisorRepoUnderstandingSnapshot = {
@@ -39,7 +39,7 @@ describe('DefaultClaudeRepoUnderstandingService', () => {
       evidence_paths: ['src/bots/assistant.ts'],
       source: 'cache',
     };
-    const service = new DefaultClaudeRepoUnderstandingService({
+    const service = new DefaultOpenCodeRepoUnderstandingService({
       findCached: async ({ repoRef, commitSha }) => {
         expect(repoRef).toBe('acme/demo-app');
         expect(commitSha).toBe('abc123');
@@ -47,7 +47,7 @@ describe('DefaultClaudeRepoUnderstandingService', () => {
       },
       save: async () => undefined,
       resolveCommit: async () => 'abc123',
-      runClaude: async () => {
+      runOpenCode: async () => {
         runnerCalls += 1;
         return '{}';
       },
@@ -63,19 +63,19 @@ describe('DefaultClaudeRepoUnderstandingService', () => {
     expect(runnerCalls).toBe(0);
   });
 
-  test('builds read-only prompt and normalizes Claude JSON output', async () => {
+  test('builds read-only prompt and normalizes OpenCode JSON output', async () => {
     let prompt = '';
     let saved: (SupervisorRepoUnderstandingSnapshot & { localPath: string | null }) | null = null;
-    const service = new DefaultClaudeRepoUnderstandingService({
+    const service = new DefaultOpenCodeRepoUnderstandingService({
       findCached: async () => null,
       save: async (snapshot) => {
         saved = snapshot;
       },
       resolveCommit: async () => 'abc123',
-      runClaude: async (input) => {
+      runOpenCode: async (input) => {
         prompt = input.prompt;
         expect(input.localPath).toBe('/tmp/demo-app');
-        return JSON.stringify(validClaudeOutput({
+        return JSON.stringify(validOpenCodeOutput({
           summary: ' Repo coordinates Telegram supervisor work. ',
           tech_stack: ['Bun', 'TypeScript', '', 42],
           key_paths: ['src/bots/assistant.ts', 'src/supervisor/sessionService.ts'],
@@ -115,7 +115,7 @@ describe('DefaultClaudeRepoUnderstandingService', () => {
     expect(result.understanding.tech_stack).toEqual(['Bun', 'TypeScript']);
     expect(result.understanding.key_paths).toContain('src/bots/assistant.ts');
     expect(result.evidence_paths).toContain('src/bots/assistant.ts');
-    expect(result.source).toBe('claude_code');
+    expect(result.source).toBe('opencode');
     expect(saved).toEqual({ ...result, localPath: '/tmp/demo-app' });
   });
 
@@ -123,7 +123,7 @@ describe('DefaultClaudeRepoUnderstandingService', () => {
     let resolveCommitCalls = 0;
     let runnerCalls = 0;
     let saveCalls = 0;
-    const service = new DefaultClaudeRepoUnderstandingService({
+    const service = new DefaultOpenCodeRepoUnderstandingService({
       findCached: async () => null,
       save: async () => {
         saveCalls += 1;
@@ -132,7 +132,7 @@ describe('DefaultClaudeRepoUnderstandingService', () => {
         resolveCommitCalls += 1;
         return 'abc123';
       },
-      runClaude: async () => {
+      runOpenCode: async () => {
         runnerCalls += 1;
         return '{}';
       },
@@ -153,13 +153,13 @@ describe('DefaultClaudeRepoUnderstandingService', () => {
   });
 
   test('can parse a JSON object embedded in prose', async () => {
-    const service = new DefaultClaudeRepoUnderstandingService({
+    const service = new DefaultOpenCodeRepoUnderstandingService({
       findCached: async () => null,
       save: async () => undefined,
       resolveCommit: async () => 'abc123',
-      runClaude: async () => [
+      runOpenCode: async () => [
         'Here is the result:',
-        JSON.stringify(validClaudeOutput({
+        JSON.stringify(validOpenCodeOutput({
           summary: 'Embedded JSON summary.',
           project_purpose: 'Advise the supervisor.',
           tech_stack: ['Bun'],
@@ -182,15 +182,15 @@ describe('DefaultClaudeRepoUnderstandingService', () => {
     expect(result.understanding.artifact_opportunities).toEqual(['Mini App detail view.']);
   });
 
-  test('malformed Claude output returns fallback and does not save', async () => {
+  test('malformed OpenCode output returns fallback and does not save', async () => {
     let saveCalls = 0;
-    const service = new DefaultClaudeRepoUnderstandingService({
+    const service = new DefaultOpenCodeRepoUnderstandingService({
       findCached: async () => null,
       save: async () => {
         saveCalls += 1;
       },
       resolveCommit: async () => 'abc123',
-      runClaude: async () => 'I inspected it, but there is no JSON here.',
+      runOpenCode: async () => 'I inspected it, but there is no JSON here.',
     });
 
     const result = await service.understand({
@@ -201,20 +201,20 @@ describe('DefaultClaudeRepoUnderstandingService', () => {
 
     expect(result.commit_sha).toBe('abc123');
     expect(result.source).toBe('fallback');
-    expect(result.summary).toContain('Claude repo understanding output was unusable');
-    expect(result.understanding.risks.join(' ')).toContain('invalid/unparseable Claude repo understanding output');
+    expect(result.summary).toContain('OpenCode repo understanding output was unusable');
+    expect(result.understanding.risks.join(' ')).toContain('invalid/unparseable OpenCode repo understanding output');
     expect(saveCalls).toBe(0);
   });
 
-  test('missing required Claude fields returns fallback and does not save', async () => {
+  test('missing required OpenCode fields returns fallback and does not save', async () => {
     let saveCalls = 0;
-    const service = new DefaultClaudeRepoUnderstandingService({
+    const service = new DefaultOpenCodeRepoUnderstandingService({
       findCached: async () => null,
       save: async () => {
         saveCalls += 1;
       },
       resolveCommit: async () => 'abc123',
-      runClaude: async () => JSON.stringify({}),
+      runOpenCode: async () => JSON.stringify({}),
     });
 
     const result = await service.understand({
@@ -225,14 +225,14 @@ describe('DefaultClaudeRepoUnderstandingService', () => {
 
     expect(result.commit_sha).toBe('abc123');
     expect(result.source).toBe('fallback');
-    expect(result.summary).toContain('Claude repo understanding output was unusable');
+    expect(result.summary).toContain('OpenCode repo understanding output was unusable');
     expect(saveCalls).toBe(0);
   });
 
-  test('unknown commit skips cache lookup and save while still returning valid Claude output', async () => {
+  test('unknown commit skips cache lookup and save while still returning valid OpenCode output', async () => {
     let findCachedCalls = 0;
     let saveCalls = 0;
-    const service = new DefaultClaudeRepoUnderstandingService({
+    const service = new DefaultOpenCodeRepoUnderstandingService({
       findCached: async () => {
         findCachedCalls += 1;
         return null;
@@ -241,7 +241,7 @@ describe('DefaultClaudeRepoUnderstandingService', () => {
         saveCalls += 1;
       },
       resolveCommit: async () => 'unknown',
-      runClaude: async () => JSON.stringify(validClaudeOutput({
+      runOpenCode: async () => JSON.stringify(validOpenCodeOutput({
         summary: 'Fresh unknown-commit summary.',
       })),
     });
@@ -253,24 +253,24 @@ describe('DefaultClaudeRepoUnderstandingService', () => {
     });
 
     expect(result.commit_sha).toBe('unknown');
-    expect(result.source).toBe('claude_code');
+    expect(result.source).toBe('opencode');
     expect(result.summary).toBe('Fresh unknown-commit summary.');
     expect(findCachedCalls).toBe(0);
     expect(saveCalls).toBe(0);
   });
 
-  test('cache-only lookup returns fallback without running Claude when no cached row exists', async () => {
+  test('cache-only lookup returns fallback without running OpenCode when no cached row exists', async () => {
     let runnerCalls = 0;
     let saveCalls = 0;
-    const service = new DefaultClaudeRepoUnderstandingService({
+    const service = new DefaultOpenCodeRepoUnderstandingService({
       findCached: async () => null,
       save: async () => {
         saveCalls += 1;
       },
       resolveCommit: async () => 'abc123',
-      runClaude: async () => {
+      runOpenCode: async () => {
         runnerCalls += 1;
-        return JSON.stringify(validClaudeOutput());
+        return JSON.stringify(validOpenCodeOutput());
       },
     });
 
@@ -289,13 +289,13 @@ describe('DefaultClaudeRepoUnderstandingService', () => {
   });
 
   test('continues scanning when prose contains an invalid balanced object before real JSON', async () => {
-    const service = new DefaultClaudeRepoUnderstandingService({
+    const service = new DefaultOpenCodeRepoUnderstandingService({
       findCached: async () => null,
       save: async () => undefined,
       resolveCommit: async () => 'abc123',
-      runClaude: async () => [
+      runOpenCode: async () => [
         'Ignore this leading placeholder: {placeholder}',
-        JSON.stringify(validClaudeOutput({
+        JSON.stringify(validOpenCodeOutput({
           summary: 'Second object is the real JSON.',
         })),
       ].join('\n'),
@@ -307,18 +307,18 @@ describe('DefaultClaudeRepoUnderstandingService', () => {
       forceRefresh: true,
     });
 
-    expect(result.source).toBe('claude_code');
+    expect(result.source).toBe('opencode');
     expect(result.summary).toBe('Second object is the real JSON.');
   });
 
   test('continues scanning when prose contains schema-invalid JSON before real JSON', async () => {
-    const service = new DefaultClaudeRepoUnderstandingService({
+    const service = new DefaultOpenCodeRepoUnderstandingService({
       findCached: async () => null,
       save: async () => undefined,
       resolveCommit: async () => 'abc123',
-      runClaude: async () => [
+      runOpenCode: async () => [
         'Example: {}',
-        JSON.stringify(validClaudeOutput({
+        JSON.stringify(validOpenCodeOutput({
           summary: 'Schema-valid object is selected.',
           project_purpose: 'Real repo understanding payload.',
         })),
@@ -331,19 +331,19 @@ describe('DefaultClaudeRepoUnderstandingService', () => {
       forceRefresh: true,
     });
 
-    expect(result.source).toBe('claude_code');
+    expect(result.source).toBe('opencode');
     expect(result.summary).toBe('Schema-valid object is selected.');
     expect(result.understanding.project_purpose).toBe('Real repo understanding payload.');
   });
 
   test('braces inside JSON strings do not break embedded JSON extraction', async () => {
-    const service = new DefaultClaudeRepoUnderstandingService({
+    const service = new DefaultOpenCodeRepoUnderstandingService({
       findCached: async () => null,
       save: async () => undefined,
       resolveCommit: async () => 'abc123',
-      runClaude: async () => [
+      runOpenCode: async () => [
         'Result:',
-        JSON.stringify(validClaudeOutput({
+        JSON.stringify(validOpenCodeOutput({
           summary: 'Handles braces in strings.',
           architecture_notes: ['Template strings may contain {repoRef} or nested-looking } braces.'],
         })),
@@ -356,7 +356,7 @@ describe('DefaultClaudeRepoUnderstandingService', () => {
       forceRefresh: true,
     });
 
-    expect(result.source).toBe('claude_code');
+    expect(result.source).toBe('opencode');
     expect(result.summary).toBe('Handles braces in strings.');
     expect(result.understanding.architecture_notes).toEqual([
       'Template strings may contain {repoRef} or nested-looking } braces.',

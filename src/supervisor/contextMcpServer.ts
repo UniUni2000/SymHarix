@@ -22,7 +22,7 @@ const TOOL_DESCRIPTIONS: Record<SupervisorContextToolName, string> = {
   get_repo_route: 'Resolve the configured project-to-repository route.',
   prepare_repo_source: 'Prepare or inspect the read-only repo source cache for the active route.',
   get_repo_profile: 'Read a shallow repository profile from README, manifests, and top-level paths.',
-  get_repo_understanding: 'Read cached Claude Code repository understanding by commit.',
+  get_repo_understanding: 'Read cached OpenCode repository understanding by commit.',
   search_supervisor_memory: 'Search prior supervisor memory for repo-specific lessons and execution patterns.',
   get_plan_session: 'Read the active supervisor Plan Card/session for this conversation.',
   get_governance_signals: 'Read governance harness, constitution, decision, conflict, and debt signals.',

@@ -76,14 +76,14 @@ function createRuntimeControlPlane(): RuntimeControlPlane & {
   };
 }
 
-describe('BotAssistantService top-level Supervisor Claude runtime', () => {
+describe('BotAssistantService top-level Supervisor OpenCode runtime', () => {
   let db: Database;
 
   afterEach(() => {
     db?.close();
   });
 
-  test('asks Supervisor Claude before falling back to legacy Telegram natural-language routing', async () => {
+  test('asks Supervisor OpenCode before falling back to legacy Telegram natural-language routing', async () => {
     const runtime = createRuntimeControlPlane();
     const commandService = new BotCommandService(runtime, new BotSubscriptionService(runtime, {}), () => true);
     const context: BotCommandContext = {
@@ -128,7 +128,7 @@ describe('BotAssistantService top-level Supervisor Claude runtime', () => {
     expect(response.message).toContain('runtime / repo source / supervisor memory');
   });
 
-  test('turns Supervisor Claude issue recommendations into pending create-issue confirmations', async () => {
+  test('turns Supervisor OpenCode issue recommendations into pending create-issue confirmations', async () => {
     db = new Database(':memory:');
     initializeSchema(db);
 
@@ -214,7 +214,7 @@ describe('BotAssistantService top-level Supervisor Claude runtime', () => {
     subscriptions.dispose();
   });
 
-  test('remembers the created issue as conversation focus after confirming a Supervisor Claude recommendation', async () => {
+  test('remembers the created issue as conversation focus after confirming a Supervisor OpenCode recommendation', async () => {
     db = new Database(':memory:');
     initializeSchema(db);
 
@@ -330,7 +330,7 @@ describe('BotAssistantService top-level Supervisor Claude runtime', () => {
       recipient: { transport: 'telegram', conversation_id: 'chat-card' },
       identity: { user_id: 'user-1', display_name: 'Alice' },
     };
-    const supervisorClaudeCalls: string[] = [];
+    const supervisorOpenCodeCalls: string[] = [];
     const supervisorRuntimeCalls: string[] = [];
     const assistant = new BotAssistantService(
       runtime,
@@ -364,8 +364,8 @@ describe('BotAssistantService top-level Supervisor Claude runtime', () => {
       },
       {
         respond: async (request) => {
-          supervisorClaudeCalls.push(request.text);
-          throw new Error('legacy Supervisor Claude runtime should not be reached');
+          supervisorOpenCodeCalls.push(request.text);
+          throw new Error('legacy Supervisor OpenCode runtime should not be reached');
         },
       },
     );
@@ -375,12 +375,12 @@ describe('BotAssistantService top-level Supervisor Claude runtime', () => {
     expect(response.message).toBe('Issue Card · INT-163');
     expect(response.media_key).toBe('issue-card|INT-163');
     expect(supervisorRuntimeCalls).toEqual(['卡片发我']);
-    expect(supervisorClaudeCalls).toEqual([]);
+    expect(supervisorOpenCodeCalls).toEqual([]);
 
     subscriptions.dispose();
   });
 
-  test('does not trust bare Supervisor Claude text for explicit issue card requests', async () => {
+  test('does not trust bare Supervisor OpenCode text for explicit issue card requests', async () => {
     const runtime = createRuntimeControlPlane();
     const subscriptions = new BotSubscriptionService(runtime, {});
     const commandService = new BotCommandService(runtime, subscriptions, () => true);
@@ -445,7 +445,7 @@ describe('BotAssistantService top-level Supervisor Claude runtime', () => {
     subscriptions.dispose();
   });
 
-  test('routes destructive issue cleanup requests to confirmation before Supervisor Claude can disclaim tool access', async () => {
+  test('routes destructive issue cleanup requests to confirmation before Supervisor OpenCode can disclaim tool access', async () => {
     db = new Database(':memory:');
     initializeSchema(db);
 
@@ -458,7 +458,7 @@ describe('BotAssistantService top-level Supervisor Claude runtime', () => {
       recipient: { transport: 'telegram', conversation_id: 'chat-close-issue' },
       identity: { user_id: 'user-1', display_name: 'Alice' },
     };
-    const supervisorClaudeCalls: string[] = [];
+    const supervisorOpenCodeCalls: string[] = [];
     const assistant = new BotAssistantService(
       runtime,
       commandService,
@@ -482,7 +482,7 @@ describe('BotAssistantService top-level Supervisor Claude runtime', () => {
       null,
       {
         respond: async (request) => {
-          supervisorClaudeCalls.push(request.text);
+          supervisorOpenCodeCalls.push(request.text);
           return {
             message: '我是只读 brain，无法直接调用 `close_issue` 关闭 INT-164。需要你通过 Linear Web/Desktop 将 INT-164 状态改为 Canceled。',
           };
@@ -496,7 +496,7 @@ describe('BotAssistantService top-level Supervisor Claude runtime', () => {
     expect(response.message).toContain('Issue: INT-164');
     expect(response.message).toContain('Reply with: 确认 / 取消');
     expect(response.actions?.map((action) => action.label)).toEqual(['确认执行', '取消']);
-    expect(supervisorClaudeCalls).toEqual([]);
+    expect(supervisorOpenCodeCalls).toEqual([]);
 
     const pendingAction = pending.findLatestByConversation({
       transport: 'telegram',
@@ -511,7 +511,7 @@ describe('BotAssistantService top-level Supervisor Claude runtime', () => {
     subscriptions.dispose();
   });
 
-  test('does not trust bare Supervisor Claude text for control actions that require orchestrator tools', async () => {
+  test('does not trust bare Supervisor OpenCode text for control actions that require orchestrator tools', async () => {
     const runtime = createRuntimeControlPlane();
     const subscriptions = new BotSubscriptionService(runtime, {});
     const commandService = new BotCommandService(runtime, subscriptions, () => true);
@@ -566,7 +566,7 @@ describe('BotAssistantService top-level Supervisor Claude runtime', () => {
     subscriptions.dispose();
   });
 
-  test('does not expose stale read-only brain capability disclaimers from Supervisor Claude', async () => {
+  test('does not expose stale read-only brain capability disclaimers from Supervisor OpenCode', async () => {
     const runtime = createRuntimeControlPlane();
     const subscriptions = new BotSubscriptionService(runtime, {});
     const commandService = new BotCommandService(runtime, subscriptions, () => true);
@@ -607,7 +607,7 @@ describe('BotAssistantService top-level Supervisor Claude runtime', () => {
       {
         respond: async () => ({
           message: [
-            '作为只读 Claude Code brain，我能做：',
+            '作为只读 OpenCode brain，我能做：',
             '',
             '**不能做**',
             '- 创建/关闭/重试 Linear issue',
@@ -621,14 +621,14 @@ describe('BotAssistantService top-level Supervisor Claude runtime', () => {
 
     expect(response.message).toContain('SymHarix Runtime Operator Copilot');
     expect(response.message).toContain('创建新的 issue');
-    expect(response.message).not.toContain('只读 Claude Code brain');
+    expect(response.message).not.toContain('只读 OpenCode brain');
     expect(response.message).not.toContain('不能做');
     expect(supervisorRuntimeCalls).toEqual(['你能做什么']);
 
     subscriptions.dispose();
   });
 
-  test('does not let a bare Supervisor Claude diagnosis replace a retry review action', async () => {
+  test('does not let a bare Supervisor OpenCode diagnosis replace a retry review action', async () => {
     const runtime = createRuntimeControlPlane();
     const subscriptions = new BotSubscriptionService(runtime, {});
     const commandService = new BotCommandService(runtime, subscriptions, () => true);
@@ -683,7 +683,7 @@ describe('BotAssistantService top-level Supervisor Claude runtime', () => {
     subscriptions.dispose();
   });
 
-  test('does not trust bare Supervisor Claude text for review/status questions that need runtime evidence', async () => {
+  test('does not trust bare Supervisor OpenCode text for review/status questions that need runtime evidence', async () => {
     const runtime = createRuntimeControlPlane();
     const subscriptions = new BotSubscriptionService(runtime, {});
     const commandService = new BotCommandService(runtime, subscriptions, () => true);
@@ -738,7 +738,7 @@ describe('BotAssistantService top-level Supervisor Claude runtime', () => {
     subscriptions.dispose();
   });
 
-  test('renders Supervisor Claude structured answers as user-facing Telegram text', async () => {
+  test('renders Supervisor OpenCode structured answers as user-facing Telegram text', async () => {
     const runtime = createRuntimeControlPlane();
     const commandService = new BotCommandService(runtime, new BotSubscriptionService(runtime, {}), () => true);
     const context: BotCommandContext = {

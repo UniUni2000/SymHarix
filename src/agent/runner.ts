@@ -5,6 +5,7 @@
 
 import { EventEmitter } from 'events';
 import * as cp from 'child_process';
+import { existsSync } from 'node:fs';
 import * as path from 'path';
 import { readSymHarixEnv } from '../config/env';
 import {
@@ -33,6 +34,21 @@ interface CodexMessage {
 interface ResolvedCommandSpec {
   executable: string;
   args: string[];
+}
+
+export function resolveAgentScriptPath(
+  script: string,
+  projectRoot: string,
+  env: NodeJS.ProcessEnv = process.env,
+  fileExists: (target: string) => boolean = existsSync,
+): string {
+  if (path.isAbsolute(script)) return script;
+  const applicationRoot = env.SYMHARIX_APP_ROOT?.trim();
+  if (applicationRoot) {
+    const applicationScript = path.resolve(applicationRoot, script);
+    if (fileExists(applicationScript)) return applicationScript;
+  }
+  return path.resolve(projectRoot, script);
 }
 
 /**
@@ -136,9 +152,7 @@ export class AgentRunner extends EventEmitter {
     // Resolve relative script paths against projectRoot for node / python commands
     if ((executable === 'node' || executable === 'python' || executable === 'python3') && args.length > 0) {
       const script = args[0];
-      const resolvedScript = path.isAbsolute(script)
-        ? script
-        : path.resolve(this.options.projectRoot, script);
+      const resolvedScript = resolveAgentScriptPath(script, this.options.projectRoot);
       return {
         executable,
         args: [resolvedScript, ...args.slice(1)],
@@ -558,7 +572,7 @@ export class AgentRunner extends EventEmitter {
     // Start async stdout reader
     (async () => {
       try {
-        for await (const chunk of child.stdout) {
+        for await (const chunk of child.stdout as unknown as AsyncIterable<Uint8Array>) {
           const lines = Buffer.from(chunk).toString().split('\n');
           for (const line of lines) {
             if (line.trim()) {
@@ -576,7 +590,7 @@ export class AgentRunner extends EventEmitter {
     // Start async stderr reader
     (async () => {
       try {
-        for await (const chunk of child.stderr) {
+        for await (const chunk of child.stderr as unknown as AsyncIterable<Uint8Array>) {
           const lines = Buffer.from(chunk).toString().split('\n');
           for (const line of lines) {
             if (line.trim()) {
@@ -736,7 +750,11 @@ export class AgentRunner extends EventEmitter {
    * Initialize session handshake
    * Section 10.2: Session Startup Handshake
    */
-  async initializeSession(child: cp.ChildProcess, workspacePath: string): Promise<{ threadId: string }> {
+  async initializeSession(
+    child: cp.ChildProcess,
+    workspacePath: string,
+    role?: 'plan' | 'dev' | 'review',
+  ): Promise<{ threadId: string }> {
     const readTimeout = this.options.readTimeoutMs;
     const initializeId = this.messageCounter++;
     const threadStartId = this.messageCounter++;
@@ -769,6 +787,7 @@ export class AgentRunner extends EventEmitter {
                 ...(this.options.tools?.length ? { tools: this.options.tools } : {}),
                 ...(this.options.allowedTools?.length ? { allowedTools: this.options.allowedTools } : {}),
                 ...(this.options.systemPrompt ? { systemPrompt: this.options.systemPrompt } : {}),
+                ...(role ? { role } : {}),
               }
             };
             child.stdin?.write(JSON.stringify(threadStartMsg) + '\n');
@@ -988,7 +1007,7 @@ export class AgentRunner extends EventEmitter {
           const extractedTokens = this.extractTokens(msg);
           if (extractedTokens) {
             tokens = extractedTokens;
-            // Don't count here - we count once per turn completion in claude-adapter
+            // Don't count here - the runtime adapter reports one total per completed turn
             // to avoid double-counting when multiple messages contain tokens
           }
 

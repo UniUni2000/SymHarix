@@ -113,7 +113,7 @@ export const SUPERVISOR_CLAUDE_ALLOWED_TOOLS = [
 
 export function buildSupervisorClaudeSystemPrompt(): string {
   return [
-    'You are the top-level Supervisor Claude Code runtime for Telegram.',
+    'You are the top-level Supervisor OpenCode runtime for Telegram.',
     'You are the repository steward for the active repo: an assistant brain, not a parser or a thin status formatter. Decide which context sources to inspect before answering.',
     'Optimize for long-term repository health and user trust, not just command completion.',
     'Act as a governance advisor: notice missing tests, weak acceptance criteria, oversized work, risky cleanup, unclear delivery evidence, stale cards, and blocked runtime states.',
@@ -125,7 +125,7 @@ export function buildSupervisorClaudeSystemPrompt(): string {
     'Repository access is read-only. Never edit files, run installs, create commits, or mutate a checkout.',
     'Do not call yourself a read-only brain. Your repository/file access is read-only, but your assistant role includes orchestrator business tools.',
     'Use supervisor-context tools for facts. Use supervisor-orchestrator tools for business actions, card delivery, approval state, and issue/orchestrator control.',
-    'Business actions such as create, switch repository, watch, unwatch, retry, stop, close, supersede, override, rewrite, and split must stay behind supervisor-orchestrator tools and confirmation policy.',
+    'Business actions such as create, switch repository, watch, unwatch, retry, approve cost budget, stop, close, supersede, override, rewrite, and split must stay behind supervisor-orchestrator tools and confirmation policy.',
     'For capability questions, call list_orchestrator_capabilities when available and explain that you can create, switch repositories, retry, stop, close, supersede, watch, show cards, and inspect issues through supervisor-orchestrator tools. Never list those orchestrator actions under "cannot do".',
     'When the user asks for a card, call show_issue_card or show_plan_card. Do not describe an internal card protocol.',
     'When the user asks you to create/propose/open an issue, gather needed evidence, then call create_issue. The broker will produce the real confirmation UI when required.',
@@ -142,8 +142,13 @@ export function buildSupervisorClaudeSystemPrompt(): string {
   ].join('\n');
 }
 
-function supervisorMcpScriptPath(projectRoot: string, fileName: string): string {
-  return path.join(path.resolve(projectRoot), 'src', 'supervisor', fileName);
+function supervisorMcpScriptPath(
+  projectRoot: string,
+  fileName: string,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const applicationRoot = env.SYMHARIX_APP_ROOT?.trim() || projectRoot;
+  return path.join(path.resolve(applicationRoot), 'src', 'supervisor', fileName);
 }
 
 export function buildSupervisorMcpConfig(
@@ -152,9 +157,10 @@ export function buildSupervisorMcpConfig(
   orchestratorEndpoint: string | null,
   contextToken: string,
   projectRoot: string = process.cwd(),
+  env: Record<string, string | undefined> = process.env,
 ): string {
-  const contextServerPath = supervisorMcpScriptPath(projectRoot, 'contextMcpServer.ts');
-  const orchestratorServerPath = supervisorMcpScriptPath(projectRoot, 'orchestratorMcpServer.ts');
+  const contextServerPath = supervisorMcpScriptPath(projectRoot, 'contextMcpServer.ts', env);
+  const orchestratorServerPath = supervisorMcpScriptPath(projectRoot, 'orchestratorMcpServer.ts', env);
   return JSON.stringify({
     mcpServers: {
       'supervisor-context': {
@@ -192,7 +198,7 @@ function contextSourceMap(): string {
     '- get_issue/get_issue_history/get_issue_timeline: detailed issue state, replay digest, and recent runtime events.',
     '- get_conversation_state: default project, focused issue, focused repo, pending actions, and recent supervisor runs.',
     '- get_repo_route/prepare_repo_source: project-to-repo routing and read-only source cache preparation.',
-    '- get_repo_profile/get_repo_understanding: shallow repo index and cached Claude Code repo understanding.',
+    '- get_repo_profile/get_repo_understanding: shallow repo index and cached OpenCode repository understanding.',
     '- search_supervisor_memory: prior execution patterns, failures, and repo-specific lessons.',
     '- get_plan_session: active Plan Card/session state for this Telegram conversation.',
     '- get_governance_signals: harness, constitution, decision/conflict/debt signals.',
@@ -204,14 +210,15 @@ function contextSourceMap(): string {
     '- list_issues/diagnose_issue: read issue/orchestrator state and evidence.',
     '- show_issue_card/show_plan_card: deliver the real Telegram card UI.',
     '- watch_issue/unwatch_issue/retry_issue/stop_issue/set_default_project: low-risk writes, direct only when policy validates the target.',
-    '- create_issue/close_issue/supersede_issue/governance tools: confirmation-gated writes.',
+    '- approve_cost_budget/create_issue/close_issue/supersede_issue/governance tools: confirmation-gated writes.',
     '',
     'Intent routing guide:',
     '- repo direction / next issue: use prepare_repo_source, get_repo_profile, get_repo_understanding, search_supervisor_memory, get_governance_signals, recommend_repo_issue, and runtime context before recommending.',
     '- vague issue request: gather repo evidence, improve the title/goal/scope/acceptance criteria/risks/repository fit, ask one focused question only if needed, then call create_issue when the user wants to proceed.',
     '- card / UI request: use get_conversation_state to find focus when needed, then call show_issue_card or show_plan_card.',
     '- issue status / blocked / retry request: use diagnose_issue and issue timeline/runtime evidence; call retry_issue only when policy and can_retry allow it.',
-    '- pending approval question: use get_pending_action and answer directly; confirm/cancel text is handled outside Claude.',
+    '- cost/token budget approval: call approve_cost_budget only for the named or focused issue when the runtime says a cost-budget override is available; do not use override_governance for cost.',
+    '- pending approval question: use get_pending_action and answer directly; confirm/cancel text is handled outside OpenCode.',
     '- capability confusion: call list_orchestrator_capabilities before saying what you can or cannot do.',
   ].join('\n');
 }
@@ -334,7 +341,7 @@ export class SupervisorClaudeRuntimeService {
 
   private async createDefaultSession(workspace: SupervisorClaudeWorkspace): Promise<SupervisorClaudeSession> {
     const runner = new AgentRunner({
-      codexCommand: this.options.command ?? 'node scripts/claude-adapter.cjs',
+      codexCommand: this.options.command ?? 'node scripts/opencode-adapter.cjs',
       approvalPolicy: 'on-request',
       threadSandbox: 'workspace-read',
       turnSandboxPolicy: JSON.stringify({ type: 'read-only', allowExternalResearch: false }),
@@ -373,7 +380,7 @@ class AgentRunnerSupervisorClaudeSession implements SupervisorClaudeSession {
       this.child,
       this.threadId,
       prompt,
-      'Telegram Supervisor Claude Runtime',
+      'Telegram Supervisor OpenCode Runtime',
       this.cwd,
       () => undefined,
       async (request) => {
@@ -384,7 +391,7 @@ class AgentRunnerSupervisorClaudeSession implements SupervisorClaudeSession {
           return {
             response: {
               behavior: 'deny',
-              message: 'Repository mutation is disabled in top-level Supervisor Claude runtime.',
+              message: 'Repository mutation is disabled in the top-level Supervisor OpenCode runtime.',
               ...(toolUseID ? { toolUseID } : {}),
             },
           };
@@ -408,3 +415,20 @@ class AgentRunnerSupervisorClaudeSession implements SupervisorClaudeSession {
     this.runner.stopSession(this.child);
   }
 }
+
+/**
+ * Canonical OpenCode names. Claude-prefixed exports remain available because
+ * persisted tests and third-party integrations may still import them.
+ */
+export type SupervisorOpenCodeWorkspace = SupervisorClaudeWorkspace;
+export type SupervisorOpenCodeSession = SupervisorClaudeSession;
+export type SupervisorOpenCodeRuntimeServiceOptions = SupervisorClaudeRuntimeServiceOptions;
+export type SupervisorOpenCodeRuntimeHandle = SupervisorClaudeRuntimeHandle;
+export type SupervisorOpenCodeRuntimeRespondRequest = SupervisorClaudeRuntimeRespondRequest;
+export {
+  SupervisorClaudeRuntimeService as SupervisorOpenCodeRuntimeService,
+  buildSupervisorClaudeSystemPrompt as buildSupervisorOpenCodeSystemPrompt,
+  buildSupervisorMcpConfig as buildSupervisorOpenCodeMcpConfig,
+};
+export const SUPERVISOR_OPENCODE_BUILTIN_TOOLS = SUPERVISOR_CLAUDE_BUILTIN_TOOLS;
+export const SUPERVISOR_OPENCODE_ALLOWED_TOOLS = SUPERVISOR_CLAUDE_ALLOWED_TOOLS;

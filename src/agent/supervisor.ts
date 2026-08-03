@@ -179,7 +179,7 @@ function buildDefaultContinueMessage(
     return `Continue reviewing ${issue.identifier}. Focus on the highest-signal correctness risks, missing tests, and merge blockers. Stop once the review outcome is complete and ready for orchestrator post-processing.`;
   }
 
-  return `Continue working on ${issue.identifier}. Use the repo and native Claude tools to make the next concrete step. When implementation and verification are complete, clearly state that development is complete and ready for orchestrator post-processing.`;
+  return `Continue working on ${issue.identifier}. Use the repository and OpenCode tools to make the next concrete step. When implementation and verification are complete, clearly state that development is complete and ready for orchestrator post-processing.`;
 }
 
 function reviewReportHasDecision(reviewReport: string | null | undefined): boolean {
@@ -409,7 +409,7 @@ export class AnthropicSupervisorService implements SupervisorService {
                 type: 'text',
                 text: [
                   'You are the supervisor LLM for SymHarix.',
-                  'Your role is to act like the human user of Claude Code and decide the next user message after a completed turn.',
+                  'Your role is to supervise the OpenCode coding agent and decide the next user message after a completed turn.',
                   'Return JSON only.',
                   'Allowed JSON:',
                   '{"kind":"continue","message":"..."}',
@@ -418,9 +418,9 @@ export class AnthropicSupervisorService implements SupervisorService {
                   'Rules:',
                   '- Prefer continue unless the task is truly ready for orchestrator post-processing.',
                   '- If turnNumber is already equal to maxTurns, continue is no longer valid. You must choose finish or abort.',
-                  '- finish means Claude has done enough and the orchestrator should run its existing dev/review hooks.',
+                  '- finish means the coding agent has done enough and the orchestrator should run its existing dev/review hooks.',
                   '- abort means an irrecoverable blocker or a clear policy/safety stop.',
-                  '- Do not delegate GitHub review/comment/merge/issue-closing/tracker-state-changing work to Claude; those remain owned by the orchestrator.',
+                  '- Do not delegate GitHub review/comment/merge/issue-closing/tracker-state-changing work to the coding agent; those remain owned by the orchestrator.',
                   '',
                   'Context:',
                   stringifyForPrompt({
@@ -526,7 +526,7 @@ export class AnthropicSupervisorService implements SupervisorService {
                   type: 'text',
                   text: [
                     'You are the supervisor LLM for SymHarix.',
-                    'A running Claude Code session requested permission to use a tool.',
+                    'A running OpenCode session requested permission to use a tool.',
                     'Return JSON only.',
                     'Allowed JSON:',
                     '{"behavior":"allow","updatedInput":{}}',
@@ -604,7 +604,7 @@ export class AnthropicSupervisorService implements SupervisorService {
                 type: 'text',
                 text: [
                   'You are the supervisor LLM for SymHarix.',
-                  'A running Claude Code session requested user input via an elicitation request.',
+                  'A running OpenCode session requested user input via an elicitation request.',
                   'Return JSON only.',
                   'Allowed JSON:',
                   '{"action":"accept","content":{}}',

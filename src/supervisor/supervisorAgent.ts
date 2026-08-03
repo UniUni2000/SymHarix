@@ -6,10 +6,10 @@ import type {
   SupervisorRepoUnderstandingSnapshot,
 } from './repoUnderstanding';
 import {
-  createReadOnlyClaudeSupervisorAdvisorFromEnv,
-  type SupervisorReadOnlyClaudeAdvisorBackend,
-  type SupervisorReadOnlyClaudeConversationDiagnostics,
-} from './readOnlyClaudeAdvisor';
+  createReadOnlyOpenCodeSupervisorAdvisorFromEnv,
+  type SupervisorReadOnlyOpenCodeAdvisorBackend,
+  type SupervisorReadOnlyOpenCodeConversationDiagnostics,
+} from './readOnlyOpenCodeAdvisor';
 import type {
   SupervisorRepoSourceResolver,
   SupervisorRepoSourceSnapshot,
@@ -50,6 +50,8 @@ export interface SupervisorAgentInput {
   runtimeContext: SupervisorAgentRuntimeContext;
   controlPlaneSnapshot?: SupervisorControlPlaneSnapshot | null;
   route?: ResolvedRepositoryRoute | null;
+  forceReadOnlyOpenCode?: boolean;
+  /** @deprecated Use forceReadOnlyOpenCode. */
   forceReadOnlyClaude?: boolean;
 }
 
@@ -116,7 +118,7 @@ export interface SupervisorAgentService {
     conversationId: string;
     repoRef: string | null;
   }): Promise<number>;
-  getRepoConversationDiagnostics?(): SupervisorReadOnlyClaudeConversationDiagnostics[];
+  getRepoConversationDiagnostics?(): SupervisorReadOnlyOpenCodeConversationDiagnostics[];
   disposeRepoConversations?(): Promise<void> | void;
 }
 
@@ -135,7 +137,9 @@ export interface DefaultSupervisorAgentServiceOptions {
   resolveRepoProfile: RepoProfileService['resolve'];
   resolveRepoUnderstanding?: SupervisorRepoUnderstandingService['understand'];
   resolveRepoSource?: SupervisorRepoSourceResolver['resolve'];
-  adviseWithReadOnlyClaude?: SupervisorReadOnlyClaudeAdvisorBackend;
+  adviseWithReadOnlyOpenCode?: SupervisorReadOnlyOpenCodeAdvisorBackend;
+  /** @deprecated Use adviseWithReadOnlyOpenCode. */
+  adviseWithReadOnlyClaude?: SupervisorReadOnlyOpenCodeAdvisorBackend;
   hasActiveRepoConversation?: NonNullable<SupervisorAgentService['hasActiveRepoConversation']>;
   clearRepoConversation?: NonNullable<SupervisorAgentService['clearRepoConversation']>;
   getRepoConversationDiagnostics?: NonNullable<SupervisorAgentService['getRepoConversationDiagnostics']>;
@@ -196,7 +200,7 @@ function outputLanguageBlock(locale: RuntimeLocale): string {
   ].join('\n');
 }
 
-export function shouldUseReadOnlyClaudeForText(value: string): boolean {
+export function shouldUseReadOnlyOpenCodeForText(value: string): boolean {
   if (isSupervisorControlPlaneQuestion(value)) {
     return false;
   }
@@ -224,6 +228,9 @@ export function shouldUseReadOnlyClaudeForText(value: string): boolean {
   return englishTriggers.some((pattern) => pattern.test(normalized))
     || chineseTriggers.some((pattern) => pattern.test(value));
 }
+
+/** @deprecated Use shouldUseReadOnlyOpenCodeForText. */
+export const shouldUseReadOnlyClaudeForText = shouldUseReadOnlyOpenCodeForText;
 
 function isRepoPurposeQuestion(value: string): boolean {
   const normalized = value.toLowerCase();
@@ -482,7 +489,7 @@ export class DefaultSupervisorAgentService implements SupervisorAgentService {
     return this.options.clearRepoConversation?.(params) ?? Promise.resolve(0);
   }
 
-  getRepoConversationDiagnostics(): SupervisorReadOnlyClaudeConversationDiagnostics[] {
+  getRepoConversationDiagnostics(): SupervisorReadOnlyOpenCodeConversationDiagnostics[] {
     return this.options.getRepoConversationDiagnostics?.() ?? [];
   }
 
@@ -498,14 +505,14 @@ export class DefaultSupervisorAgentService implements SupervisorAgentService {
     const locale = inferRuntimeLocaleFromText(normalizedUserText);
 
     const resolvedRepoRef = input.repoRef ?? input.defaultRepoRef;
-    const needsReadOnlyClaude = Boolean(input.forceReadOnlyClaude)
-      || shouldUseReadOnlyClaudeForText(normalizedUserText);
+    const needsReadOnlyOpenCode = Boolean(input.forceReadOnlyOpenCode ?? input.forceReadOnlyClaude)
+      || shouldUseReadOnlyOpenCodeForText(normalizedUserText);
     const allowExternalResearch = shouldAllowExternalResearch(normalizedUserText);
     let resolvedLocalPath = input.localPath;
     let repoSource: SupervisorRepoSourceSnapshot | null = null;
 
     if (
-      needsReadOnlyClaude &&
+      needsReadOnlyOpenCode &&
       input.route &&
       this.options.resolveRepoSource
     ) {
@@ -522,21 +529,23 @@ export class DefaultSupervisorAgentService implements SupervisorAgentService {
         })
       : null;
 
-    if (needsReadOnlyClaude && isRepoPurposeQuestion(normalizedUserText)) {
+    if (needsReadOnlyOpenCode && isRepoPurposeQuestion(normalizedUserText)) {
       const fallback = repoProfileFallbackAnswer(resolvedRepoRef, repoProfile, locale);
       if (fallback) {
         return fallback;
       }
     }
 
+    const readOnlyOpenCodeAdvisor =
+      this.options.adviseWithReadOnlyOpenCode ?? this.options.adviseWithReadOnlyClaude;
     const repoUnderstanding = resolvedRepoRef && this.options.resolveRepoUnderstanding
       ? await this.options.resolveRepoUnderstanding({
           repoRef: resolvedRepoRef,
           localPath: resolvedLocalPath,
           forceRefresh: false,
-          cacheOnly: needsReadOnlyClaude && this.options.adviseWithReadOnlyClaude
+          cacheOnly: needsReadOnlyOpenCode && readOnlyOpenCodeAdvisor
             ? true
-            : !needsReadOnlyClaude,
+            : !needsReadOnlyOpenCode,
         }).catch(() => null)
       : null;
 
@@ -563,11 +572,11 @@ export class DefaultSupervisorAgentService implements SupervisorAgentService {
       }),
     };
 
-    const usedReadOnlyAdvisor = Boolean(needsReadOnlyClaude && this.options.adviseWithReadOnlyClaude);
+    const usedReadOnlyAdvisor = Boolean(needsReadOnlyOpenCode && readOnlyOpenCodeAdvisor);
     let rawResult: SupervisorAgentBackendResult;
     try {
       rawResult = usedReadOnlyAdvisor
-        ? await this.options.adviseWithReadOnlyClaude(normalizedInput)
+        ? await readOnlyOpenCodeAdvisor!(normalizedInput)
         : await this.options.analyze(normalizedInput);
     } catch (error) {
       if (usedReadOnlyAdvisor) {
@@ -655,8 +664,8 @@ export function createSupervisorAgentFromEnv(
   repoUnderstandingService: SupervisorRepoUnderstandingService | null = null,
   repoSourceResolver: SupervisorRepoSourceResolver | null = null,
 ): SupervisorAgentService | null {
-  const readOnlyAdvisor = repoSourceResolver
-    ? createReadOnlyClaudeSupervisorAdvisorFromEnv()
+  const readOnlyOpenCodeAdvisor = repoSourceResolver
+    ? createReadOnlyOpenCodeSupervisorAdvisorFromEnv()
     : null;
   const provider = normalizeConfigValue(readSymHarixEnv('SYMPHONY_SUPERVISOR_AGENT_PROVIDER'))
     ?? normalizeConfigValue(readSymHarixEnv('SYMPHONY_SUPERVISOR_CC_PROVIDER'))
@@ -687,18 +696,18 @@ export function createSupervisorAgentFromEnv(
     ?? 45_000;
 
   if (!normalizedProvider || !model || !apiKey || !baseUrl) {
-    if (!readOnlyAdvisor) {
+    if (!readOnlyOpenCodeAdvisor) {
       return null;
     }
     return new DefaultSupervisorAgentService({
       resolveRepoProfile: repoProfileService.resolve.bind(repoProfileService),
       resolveRepoUnderstanding: repoUnderstandingService?.understand.bind(repoUnderstandingService),
       resolveRepoSource: repoSourceResolver?.resolve.bind(repoSourceResolver),
-      adviseWithReadOnlyClaude: readOnlyAdvisor.advise.bind(readOnlyAdvisor),
-      hasActiveRepoConversation: readOnlyAdvisor.hasActiveConversation.bind(readOnlyAdvisor),
-      clearRepoConversation: readOnlyAdvisor.clearConversation.bind(readOnlyAdvisor),
-      getRepoConversationDiagnostics: readOnlyAdvisor.getDiagnostics.bind(readOnlyAdvisor),
-      disposeRepoConversations: readOnlyAdvisor.dispose.bind(readOnlyAdvisor),
+      adviseWithReadOnlyOpenCode: readOnlyOpenCodeAdvisor.advise.bind(readOnlyOpenCodeAdvisor),
+      hasActiveRepoConversation: readOnlyOpenCodeAdvisor.hasActiveConversation.bind(readOnlyOpenCodeAdvisor),
+      clearRepoConversation: readOnlyOpenCodeAdvisor.clearConversation.bind(readOnlyOpenCodeAdvisor),
+      getRepoConversationDiagnostics: readOnlyOpenCodeAdvisor.getDiagnostics.bind(readOnlyOpenCodeAdvisor),
+      disposeRepoConversations: readOnlyOpenCodeAdvisor.dispose.bind(readOnlyOpenCodeAdvisor),
       analyze: async () => null,
     });
   }
@@ -711,11 +720,11 @@ export function createSupervisorAgentFromEnv(
     resolveRepoProfile: repoProfileService.resolve.bind(repoProfileService),
     resolveRepoUnderstanding: repoUnderstandingService?.understand.bind(repoUnderstandingService),
     resolveRepoSource: repoSourceResolver?.resolve.bind(repoSourceResolver),
-    adviseWithReadOnlyClaude: readOnlyAdvisor?.advise.bind(readOnlyAdvisor),
-    hasActiveRepoConversation: readOnlyAdvisor?.hasActiveConversation.bind(readOnlyAdvisor),
-    clearRepoConversation: readOnlyAdvisor?.clearConversation.bind(readOnlyAdvisor),
-    getRepoConversationDiagnostics: readOnlyAdvisor?.getDiagnostics.bind(readOnlyAdvisor),
-    disposeRepoConversations: readOnlyAdvisor?.dispose.bind(readOnlyAdvisor),
+    adviseWithReadOnlyOpenCode: readOnlyOpenCodeAdvisor?.advise.bind(readOnlyOpenCodeAdvisor),
+    hasActiveRepoConversation: readOnlyOpenCodeAdvisor?.hasActiveConversation.bind(readOnlyOpenCodeAdvisor),
+    clearRepoConversation: readOnlyOpenCodeAdvisor?.clearConversation.bind(readOnlyOpenCodeAdvisor),
+    getRepoConversationDiagnostics: readOnlyOpenCodeAdvisor?.getDiagnostics.bind(readOnlyOpenCodeAdvisor),
+    disposeRepoConversations: readOnlyOpenCodeAdvisor?.dispose.bind(readOnlyOpenCodeAdvisor),
     analyze: async (input) => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);

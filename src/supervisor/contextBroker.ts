@@ -150,7 +150,7 @@ export class SupervisorContextBroker {
       { name: 'repo_route', description: 'Configured project-to-repository route.' },
       { name: 'repo_source', description: 'Prepared read-only source cache status and commit.' },
       { name: 'repo_profile', description: 'Fast shallow repository profile from README, manifests, and top-level paths.' },
-      { name: 'repo_understanding', description: 'Cached Claude Code repository understanding by commit.' },
+      { name: 'repo_understanding', description: 'Cached OpenCode repository understanding by commit.' },
       { name: 'supervisor_memory', description: 'Relevant prior execution failures, patterns, and repo-specific lessons.' },
       { name: 'plan_session', description: 'Active supervisor Plan Card and materialization state for this Telegram conversation.' },
       { name: 'governance_signals', description: 'Harness, constitution, decision memory, conflict memory, and debt signals.' },

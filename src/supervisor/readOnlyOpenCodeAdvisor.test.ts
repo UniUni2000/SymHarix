@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  buildReadOnlyClaudeAdvisorPrompt,
-  respondToReadOnlyClaudeRuntimeRequest,
-  SupervisorReadOnlyClaudeConversationManager,
-} from './readOnlyClaudeAdvisor';
+  buildReadOnlyOpenCodeAdvisorPrompt,
+  respondToReadOnlyOpenCodeRuntimeRequest,
+  SupervisorReadOnlyOpenCodeConversationManager,
+} from './readOnlyOpenCodeAdvisor';
 import type { SupervisorAgentNormalizedInput } from './supervisorAgent';
 import type { PendingRuntimeRequest } from '../types';
 
@@ -42,11 +42,11 @@ function makeInput(overrides: Partial<SupervisorAgentNormalizedInput> = {}): Sup
   };
 }
 
-describe('buildReadOnlyClaudeAdvisorPrompt', () => {
+describe('buildReadOnlyOpenCodeAdvisorPrompt', () => {
   test('disallows external web tools unless the user explicitly asks for research', () => {
-    const prompt = buildReadOnlyClaudeAdvisorPrompt(makeInput());
+    const prompt = buildReadOnlyOpenCodeAdvisorPrompt(makeInput());
 
-    expect(prompt).toContain('read-only Claude Code brain');
+    expect(prompt).toContain('read-only OpenCode brain');
     expect(prompt).toContain('must not edit files');
     expect(prompt).toContain('Bash, Write, and Edit are disabled');
     expect(prompt).toContain('do not use WebFetch or WebSearch');
@@ -55,7 +55,7 @@ describe('buildReadOnlyClaudeAdvisorPrompt', () => {
   });
 
   test('allows external web tools for explicit latest information requests', () => {
-    const prompt = buildReadOnlyClaudeAdvisorPrompt(makeInput({
+    const prompt = buildReadOnlyOpenCodeAdvisorPrompt(makeInput({
       normalizedUserText: '结合最新官方文档看看这个 API',
       allowExternalResearch: true,
     }));
@@ -64,7 +64,7 @@ describe('buildReadOnlyClaudeAdvisorPrompt', () => {
   });
 
   test('includes read-only control-plane issue runtime context for comprehensive advisor answers', () => {
-    const prompt = buildReadOnlyClaudeAdvisorPrompt(makeInput({
+    const prompt = buildReadOnlyOpenCodeAdvisorPrompt(makeInput({
       normalizedUserText: 'INT-157 卡在哪里，预计什么时候完成？',
       controlPlaneSnapshot: {
         overview: {
@@ -105,7 +105,7 @@ describe('buildReadOnlyClaudeAdvisorPrompt', () => {
   });
 });
 
-describe('respondToReadOnlyClaudeRuntimeRequest', () => {
+describe('respondToReadOnlyOpenCodeRuntimeRequest', () => {
   function approval(toolName: string): PendingRuntimeRequest {
     return {
       kind: 'approval',
@@ -127,33 +127,33 @@ describe('respondToReadOnlyClaudeRuntimeRequest', () => {
   }
 
   test('allows repository read tools and denies mutating tools', () => {
-    expect(respondToReadOnlyClaudeRuntimeRequest(approval('Read'), false).response).toMatchObject({
+    expect(respondToReadOnlyOpenCodeRuntimeRequest(approval('Read'), false).response).toMatchObject({
       behavior: 'allow',
       toolUseID: 'tool-Read',
       updatedInput: { path: 'README.md' },
     });
-    expect(respondToReadOnlyClaudeRuntimeRequest(approval('Bash'), true).response).toMatchObject({
+    expect(respondToReadOnlyOpenCodeRuntimeRequest(approval('Bash'), true).response).toMatchObject({
       behavior: 'deny',
       toolUseID: 'tool-Bash',
     });
   });
 
   test('allows external web tools only for explicit research requests', () => {
-    expect(respondToReadOnlyClaudeRuntimeRequest(approval('WebSearch'), false).response).toMatchObject({
+    expect(respondToReadOnlyOpenCodeRuntimeRequest(approval('WebSearch'), false).response).toMatchObject({
       behavior: 'deny',
     });
-    expect(respondToReadOnlyClaudeRuntimeRequest(approval('WebSearch'), true).response).toMatchObject({
+    expect(respondToReadOnlyOpenCodeRuntimeRequest(approval('WebSearch'), true).response).toMatchObject({
       behavior: 'allow',
       toolUseID: 'tool-WebSearch',
     });
   });
 });
 
-describe('SupervisorReadOnlyClaudeConversationManager', () => {
-  test('reuses one Claude Code session for follow-up turns in the same Telegram chat and repo', async () => {
+describe('SupervisorReadOnlyOpenCodeConversationManager', () => {
+  test('reuses one OpenCode session for follow-up turns in the same Telegram chat and repo', async () => {
     const createdSessions: string[] = [];
     const prompts: string[] = [];
-    const manager = new SupervisorReadOnlyClaudeConversationManager({
+    const manager = new SupervisorReadOnlyOpenCodeConversationManager({
       createSession: async (input) => {
         createdSessions.push(`${input.runtimeContext.transport}:${input.runtimeContext.conversationId}:${input.repoRef}`);
         return {
@@ -186,9 +186,9 @@ describe('SupervisorReadOnlyClaudeConversationManager', () => {
     })).toBe(true);
   });
 
-  test('keeps separate Claude Code memory when the Telegram chat switches repos', async () => {
+  test('keeps separate OpenCode memory when the Telegram chat switches repos', async () => {
     const createdSessions: string[] = [];
-    const manager = new SupervisorReadOnlyClaudeConversationManager({
+    const manager = new SupervisorReadOnlyOpenCodeConversationManager({
       createSession: async (input) => {
         createdSessions.push(`${input.runtimeContext.conversationId}:${input.repoRef}`);
         return {
@@ -226,7 +226,7 @@ describe('SupervisorReadOnlyClaudeConversationManager', () => {
 
   test('clears a Telegram chat repo conversation without deleting source cache state', async () => {
     const disposed: string[] = [];
-    const manager = new SupervisorReadOnlyClaudeConversationManager({
+    const manager = new SupervisorReadOnlyOpenCodeConversationManager({
       createSession: async (input) => ({
         run: async () => '{"mode":"repo_answer","answer":"ok"}',
         dispose: async () => {

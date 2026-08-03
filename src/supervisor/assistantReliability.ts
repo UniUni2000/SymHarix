@@ -228,7 +228,7 @@ export function formatUnsupportedToolRecovery(locale: RuntimeLocale | null | und
 }
 
 export function formatToolFailureRecovery(toolName: string, locale: RuntimeLocale | null | undefined = null): string {
-  if (toolName === 'read_repo_with_claude') {
+  if (toolName === 'read_repo' || toolName === 'read_repo_with_claude') {
     return [
       textForLocale(locale, '仓库只读分析暂时失败，但我没有改动任何东西。', 'Repository read-only analysis failed for now, but I did not change anything.'),
       textForLocale(locale, '你可以先查 active issues、问某个 INT-xxx 的状态，或者稍后再让我读仓库。', 'You can check active issues, ask about a specific INT-xxx issue, or ask me to read the repository again later.'),

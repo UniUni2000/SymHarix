@@ -128,7 +128,7 @@ class DevHook:
         """
         Run the DEV phase (hybrid mode - orchestrator handles agent):
         1. Verify local state
-        2. (orchestrator already ran Claude Code agent)
+        2. (orchestrator already ran the OpenCode agent)
         3. Create/update PR
         4. Move local state to IN_REVIEW
         """
@@ -172,7 +172,7 @@ class DevHook:
         return True
 
     def _run_agent(self) -> bool:
-        """Run Claude Code agent in the workspace."""
+        """Run the pinned OpenCode agent in the workspace."""
         workspace_path = self.store.symphony_dir.path.parent
 
         # Get issue info for prompt
@@ -190,14 +190,34 @@ Implement the required changes. When complete:
 2. Write handover details to .symphony/HANDOVER.md
 3. Do not commit files under .symphony/
 4. Commit only product code changes
-5. Push to the branch {self.branch}
+5. Do not commit or push; the SymHarix delivery state machine owns Git delivery
 """
 
-        # Run Claude Code adapter
-        # Use absolute path since adapter is in project root, not workspace
+        # Resolve the checksum-verified OpenCode binary managed by SymHarix.
         import os
         project_root = os.environ.get("SYMPHONY_PROJECT_ROOT", str(Path(__file__).parent.parent.parent))
-        cmd = ["node", f"{project_root}/scripts/claude-adapter.cjs", "--prompt", prompt]
+        runtime = subprocess.run(
+            ["node", f"{project_root}/scripts/opencode-runtime.cjs", "path"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if runtime.returncode != 0 or not runtime.stdout.strip():
+            print(f"[DEV] OpenCode runtime unavailable: {runtime.stderr.strip()}")
+            return False
+        cmd = [
+            runtime.stdout.strip(),
+            "run",
+            "--format",
+            "default",
+            "--dir",
+            str(workspace_path),
+        ]
+        model = os.environ.get("SYMHARIX_OPENCODE_MODEL") or os.environ.get("SYMPHONY_OPENCODE_MODEL")
+        if model:
+            cmd.extend(["--model", model])
+        cmd.extend(["--", prompt])
         try:
             result = subprocess.run(
                 cmd,
