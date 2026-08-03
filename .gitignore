@@ -1,5 +1,6 @@
 # Dependencies
 node_modules/
+.venv/
 bun_modules/
 /package-lock.json
 

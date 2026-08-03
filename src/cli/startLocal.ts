@@ -14,6 +14,10 @@ import {
 import { loadWorkflow, resolveWorkflowPath } from '../workflow/loader';
 import { buildServiceConfig } from '../config/loader';
 import {
+  resolveSymHarixApplicationRoot,
+  resolveSymHarixHome,
+} from '../config/installationPaths';
+import {
   buildTelegramStartupSummary,
   applyStartLocalBotSurfaceIsolation,
   applyProxyEnv,
@@ -30,7 +34,10 @@ import {
   type StartLocalBotSurface,
 } from './startLocalTunnel';
 
-const projectRoot = path.resolve(__dirname, '../..');
+const sourceRoot = path.resolve(__dirname, '../..');
+const applicationRoot = resolveSymHarixApplicationRoot(sourceRoot);
+const projectRoot = resolveSymHarixHome(applicationRoot);
+const envPath = path.join(projectRoot, '.env');
 syncSymHarixEnvAliases(process.env);
 
 function parseStartLocalArgs(args: string[]): {
@@ -92,13 +99,12 @@ function stopExistingSymHarixnessIfNeeded(port: number): void {
   }
 
   console.log(`[symharix] start:local detected an existing listener on port ${port}; stopping prior local instance...`);
-  try {
-    execSync(`${process.execPath} --env-file=.env run src/cli/index.ts --kill`, {
-      cwd: projectRoot,
-      stdio: 'inherit',
-      env: process.env,
-    });
-  } catch {
+  const stopped = spawnSync(
+    process.execPath,
+    [`--env-file=${envPath}`, 'run', path.join(applicationRoot, 'src', 'cli', 'index.ts'), '--kill'],
+    { cwd: projectRoot, stdio: 'inherit', env: process.env },
+  );
+  if (stopped.error || stopped.status !== 0) {
     // Let the normal startup path surface any remaining port conflict with the real error.
   }
 }
@@ -655,7 +661,7 @@ async function main(): Promise<void> {
   const spawnServiceChild = (): void => {
     child = spawn(
       process.execPath,
-      ['--env-file=.env', 'run', 'src/cli/index.ts', ...args],
+      [`--env-file=${envPath}`, 'run', path.join(applicationRoot, 'src', 'cli', 'index.ts'), ...args],
       {
         cwd: projectRoot,
         env: childEnv,

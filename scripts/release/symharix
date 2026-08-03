@@ -1,0 +1,15 @@
+#!/usr/bin/env sh
+set -eu
+
+SYMHARIX_LAUNCHER=$0
+while [ -L "$SYMHARIX_LAUNCHER" ]; do
+  SYMHARIX_LINK=$(readlink "$SYMHARIX_LAUNCHER")
+  case "$SYMHARIX_LINK" in
+    /*) SYMHARIX_LAUNCHER=$SYMHARIX_LINK ;;
+    *) SYMHARIX_LAUNCHER=$(dirname -- "$SYMHARIX_LAUNCHER")/$SYMHARIX_LINK ;;
+  esac
+done
+SYMHARIX_PACKAGE_ROOT=$(CDPATH= cd -- "$(dirname -- "$SYMHARIX_LAUNCHER")/.." && pwd)
+export SYMHARIX_APP_ROOT="$SYMHARIX_PACKAGE_ROOT"
+export PATH="$SYMHARIX_PACKAGE_ROOT/bin${PATH:+:$PATH}"
+exec "$SYMHARIX_PACKAGE_ROOT/bin/bun" run "$SYMHARIX_PACKAGE_ROOT/src/cli/distribution.ts" "$@"
