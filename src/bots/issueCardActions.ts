@@ -53,9 +53,12 @@ function primaryIssueCardAction(issue: RuntimeIssueView, locale: RuntimeLocale):
     };
   }
   if (issue.actions.can_retry) {
+    const spendsBudgetAgain = issue.delivery_code === 'turn_token_ceiling_reached';
     return {
-      label: textForLocale(locale, '重试', 'Retry'),
-      style: 'success',
+      label: spendsBudgetAgain
+        ? textForLocale(locale, '重新消耗预算并重试', 'Retry (spends budget)')
+        : textForLocale(locale, '重试', 'Retry'),
+      style: spendsBudgetAgain ? 'danger' : 'success',
       callback_data: `rt|${issue.identifier}|retry`,
     };
   }

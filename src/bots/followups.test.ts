@@ -1554,6 +1554,55 @@ describe('BotFollowupService', () => {
     db.close();
   });
 
+  test('warns that a token-ceiling retry requires an explicit request and spends budget again', async () => {
+    const db = new Database(':memory:');
+    initializeSchema(db);
+    const runtime = createRuntimeControlPlane();
+    const ordinaryIssue = runtime.getIssue('issue-1');
+    if (!ordinaryIssue) {
+      throw new Error('Expected issue-1 to exist');
+    }
+    ordinaryIssue.title = '实现 weather_agent.py';
+    ordinaryIssue.tracker_state = 'In Progress';
+    ordinaryIssue.orchestrator_state = 'halted';
+    ordinaryIssue.delivery_state = 'delivery_failed';
+    ordinaryIssue.delivery_code = 'turn_token_ceiling_reached';
+    ordinaryIssue.delivery_summary = 'OpenCode turn token ceiling reached (106209 >= 100000).';
+    ordinaryIssue.governance_status = null;
+    ordinaryIssue.governance_decision = null;
+    ordinaryIssue.governance_summary = null;
+    ordinaryIssue.active_governance_suggestions = [];
+    ordinaryIssue.actions = {
+      can_stop: false,
+      can_retry: true,
+      can_override_governance: false,
+      can_rewrite_governance: false,
+      can_split_governance: false,
+      can_open_pr: false,
+    };
+
+    const notifier = new MemoryNotifier();
+    const followups = new BotIssueFollowupRepository(db);
+    const messageStates = new BotFollowupMessageStateRepository(db);
+    const service = new BotFollowupService(runtime, {
+      telegram: notifier,
+    }, followups, messageStates, {
+      telegramOperationsChatId: 'chat-ops',
+      bootstrapCurrentGovernanceCards: false,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const deliveryMessage = notifier.messages.find((entry) => (
+      !entry.message.photo && entry.message.text?.includes('turn_token_ceiling_reached')
+    ));
+    expect(deliveryMessage?.message.text).toContain('自动重试已停止');
+    expect(deliveryMessage?.message.text).toContain('手工重试会重新调用模型并再次消耗预算');
+
+    service.dispose();
+    db.close();
+  });
+
   test('persists lifecycle dedupe across service restarts and records outbound delivery audits', async () => {
     const db = new Database(':memory:');
     initializeSchema(db);
